@@ -1,0 +1,90 @@
+import { create } from "zustand";
+import { immer } from "zustand/middleware/immer";
+import { createSelectors } from "@/lib/create-selectors";
+
+interface Buffer {
+  path: string;
+  originalContent: string;
+  dirty: boolean;
+  language: string;
+}
+
+interface EditorState {
+  buffers: Record<string, Buffer>;
+  activeBufferPath: string | null;
+}
+
+interface EditorActions {
+  actions: {
+    openBuffer: (path: string, content: string) => void;
+    setDirty: (path: string, dirty: boolean) => void;
+    markSaved: (path: string, content: string) => void;
+    closeBuffer: (path: string) => void;
+    setActive: (path: string) => void;
+  };
+}
+
+function detectLanguage(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
+    rs: "rust", py: "python", go: "go", rb: "ruby", java: "java",
+    json: "json", toml: "toml", yaml: "yaml", yml: "yaml",
+    md: "markdown", html: "html", css: "css", scss: "scss",
+    sh: "shell", zsh: "shell", bash: "shell",
+    sql: "sql", xml: "xml", svg: "xml",
+    c: "c", cpp: "cpp", h: "c", hpp: "cpp",
+    swift: "swift", kt: "kotlin",
+  };
+  return map[ext] ?? "plaintext";
+}
+
+export const useEditorStore = createSelectors(
+  create<EditorState & EditorActions>()(
+    immer((set) => ({
+      buffers: {},
+      activeBufferPath: null,
+      actions: {
+        openBuffer: (path, content) =>
+          set((s) => {
+            if (!s.buffers[path]) {
+              s.buffers[path] = {
+                path,
+                originalContent: content,
+                dirty: false,
+                language: detectLanguage(path),
+              };
+            }
+            s.activeBufferPath = path;
+          }),
+        setDirty: (path, dirty) =>
+          set((s) => {
+            const buf = s.buffers[path];
+            if (buf && buf.dirty !== dirty) {
+              buf.dirty = dirty;
+            }
+          }),
+        markSaved: (path, content) =>
+          set((s) => {
+            const buf = s.buffers[path];
+            if (buf) {
+              buf.originalContent = content;
+              buf.dirty = false;
+            }
+          }),
+        closeBuffer: (path) =>
+          set((s) => {
+            delete s.buffers[path];
+            if (s.activeBufferPath === path) {
+              const keys = Object.keys(s.buffers);
+              s.activeBufferPath = keys.length > 0 ? keys[keys.length - 1] : null;
+            }
+          }),
+        setActive: (path) =>
+          set((s) => {
+            s.activeBufferPath = path;
+          }),
+      },
+    }))
+  )
+);

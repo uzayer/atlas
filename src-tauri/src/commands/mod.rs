@@ -1,0 +1,12 @@
+pub mod analysis;
+pub mod canvas;
+pub mod chat;
+pub mod claude;
+pub mod fs;
+pub mod git;
+pub mod github;
+pub mod knowledge;
+pub mod log;
+pub mod research;
+pub mod search;
+pub mod terminal;

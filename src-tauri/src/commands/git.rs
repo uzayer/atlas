@@ -1,0 +1,404 @@
+use serde::{Deserialize, Serialize};
+use std::process::Command;
+
+#[derive(Debug, Serialize)]
+pub struct GitStatus {
+    pub is_repo: bool,
+    pub branch: String,
+    pub files: Vec<GitFileStatus>,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitFileStatus {
+    pub path: String,
+    pub status: String,
+    pub staged: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitLogEntry {
+    pub hash: String,
+    pub short_hash: String,
+    pub message: String,
+    pub author: String,
+    pub email: String,
+    pub date: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GitBranch {
+    pub name: String,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitRef {
+    pub name: String, // short ref name, e.g. "main", "feature/x", "v1.2"
+    pub sha: String,
+    pub kind: String, // "branch" | "remote" | "tag"
+    pub is_current: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitRefs {
+    pub head: Option<String>,
+    pub head_ref: Option<String>,
+    pub refs: Vec<GitRef>,
+}
+
+#[tauri::command]
+pub async fn git_status(path: String) -> Result<GitStatus, String> {
+    tokio::task::spawn_blocking(move || git_status_sync(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn git_status_sync(path: &str) -> Result<GitStatus, String> {
+    let check = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !check.status.success() {
+        return Ok(GitStatus {
+            is_repo: false,
+            branch: String::new(),
+            files: vec![],
+            ahead: 0,
+            behind: 0,
+        });
+    }
+
+    let branch_out = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+
+    let status_out = Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let status_str = String::from_utf8_lossy(&status_out.stdout);
+
+    let files: Vec<GitFileStatus> = status_str
+        .lines()
+        .filter(|l| l.len() >= 3)
+        .map(|line| {
+            let index = line.chars().nth(0).unwrap_or(' ');
+            let worktree = line.chars().nth(1).unwrap_or(' ');
+            let file_path = line[3..].to_string();
+
+            let (status, staged) = if index != ' ' && index != '?' {
+                (index.to_string(), true)
+            } else if worktree == '?' {
+                ("?".to_string(), false)
+            } else {
+                (worktree.to_string(), false)
+            };
+
+            GitFileStatus { path: file_path, status, staged }
+        })
+        .collect();
+
+    let ab_out = Command::new("git")
+        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+        .current_dir(path)
+        .output();
+
+    let (ahead, behind) = if let Ok(out) = ab_out {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<&str> = s.trim().split('\t').collect();
+        if parts.len() == 2 {
+            (parts[0].parse().unwrap_or(0), parts[1].parse().unwrap_or(0))
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    Ok(GitStatus { is_repo: true, branch, files, ahead, behind })
+}
+
+#[tauri::command]
+pub async fn git_log(
+    path: String,
+    limit: Option<u32>,
+    all: Option<bool>,
+) -> Result<Vec<GitLogEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        let n = limit.unwrap_or(50).to_string();
+        let mut args: Vec<String> = vec![
+            "log".into(),
+            format!("-{}", n),
+            "--topo-order".into(),
+            "--decorate=short".into(),
+            // Fields, separated by \x1f, terminated by \x1e to handle multi-line author etc.
+            "--pretty=format:%H%x1f%h%x1f%s%x1f%an%x1f%ae%x1f%cr%x1f%P%x1f%D%x1e".into(),
+        ];
+        if all.unwrap_or(true) {
+            args.push("--all".into());
+        }
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+
+        let log_str = String::from_utf8_lossy(&output.stdout);
+        let entries = log_str
+            .split('\x1e')
+            .map(|s| s.trim_start_matches('\n'))
+            .filter(|s| !s.is_empty())
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split('\x1f').collect();
+                if parts.len() < 8 {
+                    return None;
+                }
+                let parents: Vec<String> = parts[6]
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                let refs: Vec<String> = parts[7]
+                    .split(',')
+                    .map(|r| r.trim().to_string())
+                    .filter(|r| !r.is_empty())
+                    .collect();
+                Some(GitLogEntry {
+                    hash: parts[0].to_string(),
+                    short_hash: parts[1].to_string(),
+                    message: parts[2].to_string(),
+                    author: parts[3].to_string(),
+                    email: parts[4].to_string(),
+                    date: parts[5].to_string(),
+                    parents,
+                    refs,
+                })
+            })
+            .collect();
+        Ok(entries)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_refs(path: String) -> Result<GitRefs, String> {
+    tokio::task::spawn_blocking(move || {
+        let head_sha = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&path)
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+        let head_ref = Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(&path)
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+
+        // refname:short \x1f objectname \x1f refname (full)  per ref
+        let out = Command::new("git")
+            .args([
+                "for-each-ref",
+                "--format=%(refname:short)\x1f%(objectname)\x1f%(refname)",
+                "refs/heads",
+                "refs/remotes",
+                "refs/tags",
+            ])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let txt = String::from_utf8_lossy(&out.stdout);
+        let mut refs: Vec<GitRef> = Vec::new();
+        for line in txt.lines() {
+            let parts: Vec<&str> = line.split('\x1f').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let name = parts[0].to_string();
+            let sha = parts[1].to_string();
+            let full = parts[2];
+            let kind = if full.starts_with("refs/tags/") {
+                "tag"
+            } else if full.starts_with("refs/remotes/") {
+                "remote"
+            } else {
+                "branch"
+            }
+            .to_string();
+            let is_current = head_ref.as_deref() == Some(&name);
+            refs.push(GitRef { name, sha, kind, is_current });
+        }
+        Ok(GitRefs { head: head_sha, head_ref, refs })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_graph_signature(path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&path)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let refs_out = Command::new("git")
+            .args([
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+            ])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let refs_text = String::from_utf8_lossy(&refs_out.stdout).to_string();
+        let mut lines: Vec<String> = refs_text
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        lines.sort();
+        let joined = lines.join("\n");
+        // Cheap stable signature — full sha is overkill; we just hash a small djb2.
+        let mut h: u64 = 5381;
+        for b in head.bytes().chain(joined.bytes()) {
+            h = h.wrapping_mul(33) ^ (b as u64);
+        }
+        Ok(format!("{}-{:016x}", head, h))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn git_diff_all(path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git")
+            .args(["diff", "HEAD"])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_diff_file(path: String, file: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git")
+            .args(["diff", "HEAD", "--", &file])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_stage(path: String, files: Vec<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut args = vec!["add".to_string()];
+        args.extend(files);
+        Command::new("git").args(&args).current_dir(&path).output().map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_unstage(path: String, files: Vec<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let mut args = vec!["restore".to_string(), "--staged".to_string()];
+        args.extend(files);
+        Command::new("git").args(&args).current_dir(&path).output().map_err(|e| e.to_string())?;
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_commit(path: String, message: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git")
+            .args(["commit", "-m", &message])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        }
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_list_branches(path: String) -> Result<Vec<GitBranch>, String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git")
+            .args(["branch", "--format=%(refname:short)\x1f%(HEAD)"])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let branches = stdout
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let parts: Vec<&str> = line.split('\x1f').collect();
+                GitBranch {
+                    name: parts.first().unwrap_or(&"").to_string(),
+                    is_current: parts.get(1).map_or(false, |h| h.trim() == "*"),
+                }
+            })
+            .collect();
+        Ok(branches)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_checkout(path: String, branch: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git").args(["checkout", &branch]).current_dir(&path).output().map_err(|e| e.to_string())?;
+        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).to_string()); }
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_create_branch(path: String, name: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git").args(["checkout", "-b", &name]).current_dir(&path).output().map_err(|e| e.to_string())?;
+        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).to_string()); }
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_delete_branch(path: String, name: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git").args(["branch", "-d", &name]).current_dir(&path).output().map_err(|e| e.to_string())?;
+        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).to_string()); }
+        Ok(())
+    }).await.map_err(|e| e.to_string())?
+}
