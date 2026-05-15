@@ -37,6 +37,16 @@ export interface ChatSession {
   streamId?: string;
   useClaude: boolean;
   claudePermissionMode: ClaudePermissionMode;
+  /** ACP agent process bound to this tab (lazily set on first prompt). */
+  acpAgentId?: string;
+  /** ACP session id bound to this tab (lazily set on first prompt). */
+  acpSessionId?: string;
+  /** Currently selected ACP session mode (default / acceptEdits / plan / …). */
+  acpCurrentMode?: string;
+  /** Currently selected ACP model id (default / sonnet / haiku / …). */
+  acpCurrentModel?: string;
+  /** Available slash commands as reported by the agent for this session. */
+  availableCommands?: unknown[];
 }
 
 export interface ChatMessage {

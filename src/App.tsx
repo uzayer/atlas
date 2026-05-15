@@ -6,6 +6,8 @@ import { SearchOverlay } from "@/components/search-overlay";
 import { useHotkeys } from "@/hooks/use-hotkey";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useChatStore } from "@/features/chat/stores/chat-store";
+import { listenAcp, resetDefaultAgent } from "@/features/chat/lib/acp-api";
 import { Toaster } from "sonner";
 
 export function App() {
@@ -84,6 +86,39 @@ export function App() {
     }
   };
   const currentProject = useProjectStore.use.currentProject();
+
+  // Global ACP event bus. One listener per app instance routes notifications
+  // into the chat-store by acpSessionId, queues permission requests for the
+  // PermissionModal to render, and resets the lazy agent handle on disconnect.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    listenAcp((env) => {
+      if (cancelled) return;
+      const actions = useChatStore.getState().actions;
+      if (env.kind === "session_update") {
+        actions.applyAcpEvent(env);
+      } else if (env.kind === "permission_request") {
+        actions.pushPermission({
+          agentId: env.agent_id,
+          acpSessionId: env.session_id,
+          requestId: env.request_id,
+          toolCall: env.tool_call,
+          options: env.options,
+        });
+      } else if (env.kind === "agent_disconnected") {
+        actions.clearPermissionsForAgent(env.agent_id);
+        resetDefaultAgent();
+      }
+    }).then((un) => {
+      if (cancelled) un();
+      else unlisten = un;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Auto-save editor state when tabs change
   const saveTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);

@@ -9,6 +9,7 @@ import type {
   ClaudePermissionMode,
 } from "@/types/agent";
 import { CLAUDE_PERMISSION_MODES } from "@/types/agent";
+import type { AcpEventEnvelope, PendingPermission } from "@/types/acp";
 
 interface ProviderConfig {
   provider: "anthropic" | "openai" | "google";
@@ -19,6 +20,11 @@ interface ProviderConfig {
 
 interface ChatState {
   sessions: Record<string, ChatSession>;
+  /**
+   * Pending ACP permission requests, keyed by acpSessionId. Each list is
+   * FIFO — the modal renders the head. Cleared on respond / agent_disconnect.
+   */
+  pendingPermissions: Record<string, PendingPermission[]>;
   /**
    * Per-tab queue of pending user messages. Filled when the user types while
    * the agent is still streaming; auto-drained when the stream finishes.
@@ -97,7 +103,84 @@ interface ChatActions {
       claudeSessionId: string,
       streamId: string | undefined
     ) => void;
+    // ── ACP bindings ────────────────────────────────────────────────────
+    setAcpBinding: (
+      tabId: string,
+      agentId: string,
+      acpSessionId: string
+    ) => void;
+    /**
+     * Apply one `atlas:acp` event to whichever chat tab owns its acpSessionId.
+     * Phase-1 handles `agent_message_chunk` (text) and `tool_call`; everything
+     * else is silently ignored until phase-2 widgets land.
+     */
+    applyAcpEvent: (env: AcpEventEnvelope) => void;
+    pushPermission: (req: PendingPermission) => void;
+    popPermission: (acpSessionId: string, requestId: string) => void;
+    clearPermissionsForAgent: (agentId: string) => void;
   };
+}
+
+function findTabByAcpSession(
+  sessions: Record<string, ChatSession>,
+  acpSessionId: string
+): string | null {
+  for (const [tid, s] of Object.entries(sessions)) {
+    if (s.acpSessionId === acpSessionId) return tid;
+  }
+  return null;
+}
+
+/**
+ * The canonical Claude Code agent sometimes ships `input` as a stringified JSON
+ * blob, sometimes as a real object. Normalise to a plain record.
+ */
+function parseToolInput(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+      return { raw };
+    } catch {
+      return { raw };
+    }
+  }
+  return {};
+}
+
+/**
+ * ACP tool_call_update `content` is `Vec<ToolCallContent>` — text chunks,
+ * diffs, terminals. Format it as a single readable string for the existing
+ * ToolCallCard "result" display. Returns null when there's nothing to add.
+ */
+function formatToolContent(content: unknown): string | null {
+  if (content == null) return null;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((item) => formatToolContent(item))
+      .filter((s): s is string => s !== null && s.length > 0);
+    return parts.length > 0 ? parts.join("\n") : null;
+  }
+  if (typeof content === "object") {
+    const o = content as Record<string, unknown>;
+    if (typeof o.content === "object" || typeof o.content === "string") {
+      const inner = formatToolContent(o.content);
+      if (inner !== null) return inner;
+    }
+    if (typeof o.text === "string") return o.text;
+    if (typeof o.output === "string") return o.output;
+    if (typeof o.path === "string" && (o.oldText || o.newText)) {
+      // Best-effort diff summary.
+      return `${o.path}`;
+    }
+  }
+  return null;
 }
 
 const initialProviderConfig: ProviderConfig = {
@@ -111,6 +194,7 @@ export const useChatStore = createSelectors(
   create<ChatState & ChatActions>()(
     immer((set) => ({
       sessions: {},
+      pendingPermissions: {},
       queues: {},
       runningArchive: {},
       activeSessionId: null,
@@ -419,6 +503,151 @@ export const useChatStore = createSelectors(
           set((s) => {
             const a = s.runningArchive[claudeSessionId];
             if (a) a.streamId = streamId;
+          }),
+        setAcpBinding: (tabId, agentId, acpSessionId) =>
+          set((s) => {
+            const session = s.sessions[tabId];
+            if (!session) return;
+            session.acpAgentId = agentId;
+            session.acpSessionId = acpSessionId;
+          }),
+        pushPermission: (req) =>
+          set((s) => {
+            const list = s.pendingPermissions[req.acpSessionId] ?? [];
+            s.pendingPermissions[req.acpSessionId] = [...list, req];
+          }),
+        popPermission: (acpSessionId, requestId) =>
+          set((s) => {
+            const list = s.pendingPermissions[acpSessionId];
+            if (!list) return;
+            const next = list.filter((r) => r.requestId !== requestId);
+            if (next.length === 0) delete s.pendingPermissions[acpSessionId];
+            else s.pendingPermissions[acpSessionId] = next;
+          }),
+        clearPermissionsForAgent: (agentId) =>
+          set((s) => {
+            for (const sid of Object.keys(s.pendingPermissions)) {
+              const list = s.pendingPermissions[sid].filter(
+                (r) => r.agentId !== agentId
+              );
+              if (list.length === 0) delete s.pendingPermissions[sid];
+              else s.pendingPermissions[sid] = list;
+            }
+          }),
+        applyAcpEvent: (env) =>
+          set((s) => {
+            if (env.kind !== "session_update") return;
+            const tid = findTabByAcpSession(s.sessions, env.session_id);
+            if (!tid) return;
+            const session = s.sessions[tid];
+            const update = env.update;
+
+            switch (update.sessionUpdate) {
+              case "agent_message_chunk": {
+                const block = update.content;
+                if (
+                  block &&
+                  typeof block === "object" &&
+                  "type" in block &&
+                  block.type === "text" &&
+                  "text" in block &&
+                  typeof block.text === "string"
+                ) {
+                  // Append chunk to the trailing assistant message.
+                  for (let i = session.messages.length - 1; i >= 0; i--) {
+                    if (session.messages[i].role === "assistant") {
+                      session.messages[i].content += block.text;
+                      session.updatedAt = new Date().toISOString();
+                      return;
+                    }
+                  }
+                }
+                return;
+              }
+              case "tool_call": {
+                for (let i = session.messages.length - 1; i >= 0; i--) {
+                  if (session.messages[i].role === "assistant") {
+                    session.messages[i].toolCalls.push({
+                      id: update.toolCallId,
+                      toolName: update.title ?? update.kind ?? "tool",
+                      arguments: parseToolInput(update.input),
+                      result: null,
+                      status:
+                        update.status === "completed"
+                          ? "completed"
+                          : update.status === "failed"
+                            ? "failed"
+                            : "running",
+                      duration: null,
+                    });
+                    session.updatedAt = new Date().toISOString();
+                    return;
+                  }
+                }
+                return;
+              }
+              case "tool_call_update": {
+                for (let i = session.messages.length - 1; i >= 0; i--) {
+                  if (session.messages[i].role === "assistant") {
+                    const tc = session.messages[i].toolCalls.find(
+                      (t) => t.id === update.toolCallId
+                    );
+                    if (!tc) return;
+                    if (typeof update.status === "string") {
+                      tc.status =
+                        update.status === "completed"
+                          ? "completed"
+                          : update.status === "failed"
+                            ? "failed"
+                            : update.status === "in_progress"
+                              ? "running"
+                              : tc.status;
+                    }
+                    const formatted = formatToolContent(update.content);
+                    if (formatted !== null) {
+                      tc.result = tc.result
+                        ? tc.result + formatted
+                        : formatted;
+                    }
+                    session.updatedAt = new Date().toISOString();
+                    return;
+                  }
+                }
+                return;
+              }
+              case "plan": {
+                // Attach plan to the trailing assistant message. Entries map
+                // 1:1 to our internal PlanStep shape.
+                for (let i = session.messages.length - 1; i >= 0; i--) {
+                  if (session.messages[i].role === "assistant") {
+                    session.messages[i].plan = update.entries.map(
+                      (e, idx) => ({
+                        id: `plan-${idx}`,
+                        description: e.content,
+                        status: e.status,
+                      })
+                    );
+                    session.updatedAt = new Date().toISOString();
+                    return;
+                  }
+                }
+                return;
+              }
+              case "available_commands_update": {
+                session.availableCommands = update.availableCommands;
+                return;
+              }
+              case "current_mode_update": {
+                session.acpCurrentMode = update.currentModeId;
+                return;
+              }
+              case "current_model_update": {
+                session.acpCurrentModel = update.currentModelId;
+                return;
+              }
+              default:
+                return;
+            }
           }),
       },
     }))

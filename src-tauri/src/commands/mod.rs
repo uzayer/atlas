@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod analysis;
 pub mod canvas;
 pub mod chat;

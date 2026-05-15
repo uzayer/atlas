@@ -1,9 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
+// Legacy Claude Code helpers. The interactive subprocess path (run / stream /
+// stop / check / version) was replaced by the ACP integration in
+// `lib/acp-api.ts`. What remains here reads existing JSONL session history
+// from `~/.claude/projects/` — both the legacy CLI and the canonical ACP
+// agent (`@zed-industries/claude-code-acp`, which uses the same Claude Agent
+// SDK) write to that directory, so the history-browser surface still works
+// against ACP-produced sessions.
 
-export interface ClaudeResponse {
-  output: string;
-  exit_code: number;
-}
+import { invoke } from "@tauri-apps/api/core";
 
 export interface ClaudeSessionMeta {
   id: string;
@@ -24,54 +27,6 @@ export interface ChatMessageDump {
   content: string;
   timestamp: string | null;
   tool_calls: ToolCallDump[];
-}
-
-export async function runClaudeCode(
-  prompt: string,
-  cwd?: string,
-  model?: string
-): Promise<ClaudeResponse> {
-  return invoke<ClaudeResponse>("claude_run", {
-    prompt,
-    cwd: cwd ?? null,
-    model: model ?? null,
-  });
-}
-
-export async function checkClaudeCli(): Promise<boolean> {
-  try {
-    return await invoke<boolean>("claude_check");
-  } catch {
-    return false;
-  }
-}
-
-export async function getClaudeVersion(): Promise<string> {
-  try {
-    return await invoke<string>("claude_version");
-  } catch {
-    return "not installed";
-  }
-}
-
-export function stopClaude(sessionId: string): Promise<void> {
-  return invoke<void>("claude_stop", { sessionId });
-}
-
-export function streamClaude(params: {
-  sessionId: string;
-  prompt: string;
-  cwd: string | null;
-  resumeSessionId?: string;
-  permissionMode?: string;
-}): Promise<void> {
-  return invoke<void>("claude_stream", {
-    sessionId: params.sessionId,
-    prompt: params.prompt,
-    cwd: params.cwd,
-    resumeSessionId: params.resumeSessionId ?? null,
-    permissionMode: params.permissionMode ?? null,
-  });
 }
 
 export function listClaudeSessions(cwd: string): Promise<ClaudeSessionMeta[]> {

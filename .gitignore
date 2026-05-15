@@ -25,3 +25,4 @@ src-tauri/target/
 
 # Claude
 .claude/
+third-party/

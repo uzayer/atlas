@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
 import { sendChatMessage } from "../lib/chat-api";
-import { streamClaude, stopClaude } from "../lib/claude-api";
-import { listen } from "@tauri-apps/api/event";
+import { acp, ensureDefaultAgent } from "../lib/acp-api";
 import { MessageInput } from "./message-input";
 import { SessionSidebar } from "./session-sidebar";
 import { MessagesList } from "./messages-list";
 import { BashHistoryPanel } from "./bash-history-panel";
 import { ChatSearchPalette } from "./chat-search-palette";
+import { PermissionModal } from "./permission-modal";
 import { Sparkles, Key, User, TerminalSquare, ListFilter, Search } from "lucide-react";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
@@ -102,9 +102,9 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   const needsApiKey = !providerConfig.apiKey && !session.useClaude;
 
   const handleStop = () => {
-    const sid = useChatStore.getState().sessions[tabId]?.streamId;
-    if (!sid) return;
-    stopClaude(sid).catch(() => {});
+    const s = useChatStore.getState().sessions[tabId];
+    if (!s?.acpAgentId || !s.acpSessionId) return;
+    acp.cancelTurn(s.acpAgentId, s.acpSessionId).catch(() => {});
   };
 
   const handleSend = async (content: string) => {
@@ -126,176 +126,55 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       updateSessionStatus(tabId, "running");
       addMessage(tabId, "assistant", "");
 
-      // Per-send unique id. Used as the Rust `session_id` (so the PID
-      // registry is keyed per-stream, not per-tab) and as the listener
-      // filter (so concurrent streams don't cross-contaminate).
-      const streamId = `${tabId}-${Date.now().toString(36)}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
-      useChatStore.getState().actions.setSessionStreamId(tabId, streamId);
-
-      let accumulatedText = "";
-      // The Claude session id this stream belongs to; we learn it from the
-      // first "session" event.
-      let boundSid: string | null = null;
-
-      // Find which tab (if any) currently holds this streamId. If the user
-      // navigated away, the session was archived (carrying streamId with it).
-      const findTabForStream = (): string | null => {
-        const store = useChatStore.getState();
-        for (const [tid, s] of Object.entries(store.sessions)) {
-          if (s.streamId === streamId) return tid;
-        }
-        return null;
-      };
-
-      const writeAssistant = (content: string) => {
-        const store = useChatStore.getState();
-        const tid = findTabForStream();
-        if (tid) {
-          store.actions.updateLastAssistantMessage(tid, content);
-        } else if (boundSid) {
-          store.actions.updateArchivedAssistant(boundSid, content);
-        }
-      };
-      const writeToolCall = (name: string, input: Record<string, unknown>) => {
-        const store = useChatStore.getState();
-        const tid = findTabForStream();
-        if (tid) {
-          store.actions.appendToolCall(tid, name, input);
-        } else if (boundSid) {
-          store.actions.appendArchivedToolCall(boundSid, name, input);
-        }
-      };
-      const writeStatus = (status: typeof session.status) => {
-        const store = useChatStore.getState();
-        const tid = findTabForStream();
-        if (tid) {
-          store.actions.updateSessionStatus(tid, status);
-        } else if (boundSid) {
-          store.actions.setArchivedStatus(boundSid, status);
-        }
-      };
-
-      let pendingFlush: number | null = null;
-      const scheduleFlush = () => {
-        if (pendingFlush !== null) return;
-        pendingFlush = requestAnimationFrame(() => {
-          pendingFlush = null;
-          writeAssistant(accumulatedText);
-        });
-      };
-
-      const unlisten = await listen<{
-        session_id: string;
-        event_type: string;
-        content: string;
-      }>("claude-stream", (event) => {
-        if (event.payload.session_id !== streamId) return;
-
-        switch (event.payload.event_type) {
-          case "session": {
-            // First time we learn the real Claude session id for this stream.
-            boundSid = event.payload.content;
-            const tid = findTabForStream();
-            if (tid) {
-              useChatStore
-                .getState()
-                .actions.setClaudeSessionId(tid, boundSid);
-            }
-            break;
-          }
-          case "text":
-            accumulatedText += event.payload.content;
-            scheduleFlush();
-            break;
-          case "tool_use":
-            try {
-              const tool = JSON.parse(event.payload.content);
-              let parsedInput: Record<string, unknown> = {};
-              if (tool.input && typeof tool.input === "object") {
-                parsedInput = tool.input as Record<string, unknown>;
-              } else if (typeof tool.input === "string") {
-                try {
-                  parsedInput = JSON.parse(tool.input);
-                } catch {
-                  parsedInput = { raw: tool.input };
-                }
-              }
-              writeToolCall(tool.name, parsedInput);
-            } catch {
-              // pass
-            }
-            break;
-          case "tool_result":
-            // tool_result content is folded into structured toolCalls; we don't inline it.
-            break;
-          case "error":
-            accumulatedText += `\n⚠️ ${event.payload.content}`;
-            scheduleFlush();
-            logEvent({
-              source: "agent",
-              kind: "stream-error",
-              summary: event.payload.content.slice(0, 160),
-              payload: { tabId },
-            });
-            break;
-          case "done": {
-            if (pendingFlush !== null) {
-              cancelAnimationFrame(pendingFlush);
-              pendingFlush = null;
-            }
-            const exitCode = parseInt(event.payload.content) || 0;
-            writeAssistant(
-              accumulatedText.trim() ? accumulatedText : "(completed with no output)"
-            );
-            writeStatus(exitCode === 0 ? "idle" : "error");
-            const tidDone = findTabForStream();
-            if (tidDone) {
-              useChatStore.getState().actions.setSessionStreamId(tidDone, undefined);
-            } else if (boundSid) {
-              // Backgrounded thread finished — disk JSONL is now authoritative.
-              useChatStore.getState().actions.dropArchive(boundSid);
-            }
-            logEvent({
-              source: "agent",
-              kind: exitCode === 0 ? "stream-done" : "stream-failed",
-              summary:
-                accumulatedText.trim()
-                  ? accumulatedText.replace(/\s+/g, " ").slice(0, 120)
-                  : "(no output)",
-              payload: {
-                tabId,
-                exitCode,
-                claudeSessionId: useChatStore.getState().sessions[tabId]?.claudeSessionId,
-              },
-            });
-            unlisten();
-            break;
-          }
-        }
-      });
+      const store = useChatStore.getState();
+      const project = useProjectStore.getState().currentProject;
+      const cwd = project?.path ?? "";
 
       try {
-        const project = useProjectStore.getState().currentProject;
-        await streamClaude({
-          sessionId: streamId,
-          prompt: actualContent,
-          cwd: project?.path ?? null,
-          resumeSessionId: useChatStore.getState().sessions[tabId]?.claudeSessionId,
-          permissionMode: useChatStore.getState().sessions[tabId]?.claudePermissionMode,
+        // Lazily ensure (a) one shared ACP agent process and (b) one ACP
+        // session per chat tab. After phase-1 these become user-controllable
+        // via the agents panel.
+        let s = store.sessions[tabId];
+        if (!s.acpAgentId || !s.acpSessionId) {
+          const agent = await ensureDefaultAgent();
+          const sess = await acp.newSession(agent.agent_id, cwd || "/");
+          store.actions.setAcpBinding(tabId, agent.agent_id, sess.session_id);
+          s = useChatStore.getState().sessions[tabId];
+        }
+
+        const stopReason = await acp.sendPrompt(
+          s.acpAgentId!,
+          s.acpSessionId!,
+          actualContent
+        );
+
+        const status: typeof session.status =
+          stopReason === "end_turn" || stopReason === "cancelled" ? "idle" : "error";
+        useChatStore.getState().actions.updateSessionStatus(tabId, status);
+
+        logEvent({
+          source: "agent",
+          kind: status === "idle" ? "stream-done" : "stream-failed",
+          summary: `stop_reason=${stopReason}`,
+          payload: {
+            tabId,
+            stopReason,
+            acpSessionId: s.acpSessionId,
+          },
         });
       } catch (err) {
-        const tidErr = findTabForStream();
-        if (tidErr) {
-          useChatStore.getState().actions.updateLastAssistantMessage(
-            tidErr,
-            `Claude Code error: ${err instanceof Error ? err.message : String(err)}`
-          );
-          useChatStore.getState().actions.updateSessionStatus(tidErr, "error");
-          useChatStore.getState().actions.setSessionStreamId(tidErr, undefined);
-        }
-        unlisten();
+        const msg = err instanceof Error ? err.message : String(err);
+        useChatStore.getState().actions.updateLastAssistantMessage(
+          tabId,
+          `ACP error: ${msg}`
+        );
+        useChatStore.getState().actions.updateSessionStatus(tabId, "error");
+        logEvent({
+          source: "agent",
+          kind: "stream-error",
+          summary: msg.slice(0, 160),
+          payload: { tabId },
+        });
       }
       return;
     }
@@ -395,6 +274,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
 
   return (
     <div ref={rootRef} className="h-full flex">
+      <PermissionModal tabId={tabId} />
       <SessionSidebar tabId={tabId} />
 
       <div className="flex-1 flex flex-col min-w-0">
