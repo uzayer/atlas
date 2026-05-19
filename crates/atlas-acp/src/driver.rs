@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use agent_client_protocol::schema::{
     InitializeRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification,
+    RequestPermissionResponse, SessionId, SessionNotification,
 };
-use agent_client_protocol::{AcpAgent, Agent, ConnectionTo, LineDirection};
+use agent_client_protocol::{Agent, ConnectionTo};
+use agent_client_protocol_tokio::{AcpAgent, LineDirection};
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -14,13 +15,20 @@ use crate::error::{AcpError, Result};
 use crate::events::{AcpEvent, EventSink};
 use crate::registry::AgentId;
 
+/// One outstanding permission request waiting on the UI.
+pub struct PendingPermissionEntry {
+    pub session_id: SessionId,
+    pub sender: oneshot::Sender<RequestPermissionOutcome>,
+}
+
 /// Permissions awaiting a client decision.
 ///
 /// The notification handler stashes a [`oneshot::Sender`] under a fresh
 /// `request_id`; the Tauri layer resolves it via `acp_respond_permission` once
-/// the user clicks a button.
-pub type PendingPermissions =
-    DashMap<Uuid, oneshot::Sender<RequestPermissionOutcome>>;
+/// the user clicks a button. Tracks `session_id` so `cancel_turn` can drop
+/// the right ones (per ACP spec, any pending permission for a cancelled turn
+/// MUST resolve as `Cancelled`).
+pub type PendingPermissions = DashMap<Uuid, PendingPermissionEntry>;
 
 /// Resources owned by a single spawned ACP agent. Held inside the
 /// [`crate::registry::AgentRegistry`] under an [`AgentId`].
@@ -128,7 +136,13 @@ async fn run_driver(
             async move |request: RequestPermissionRequest, responder, _connection| {
                 let request_id = Uuid::new_v4();
                 let (tx, rx) = oneshot::channel::<RequestPermissionOutcome>();
-                pending_for_handler.insert(request_id, tx);
+                pending_for_handler.insert(
+                    request_id,
+                    PendingPermissionEntry {
+                        session_id: request.session_id.clone(),
+                        sender: tx,
+                    },
+                );
 
                 sink_perm.emit(
                     agent_id,
@@ -141,7 +155,8 @@ async fn run_driver(
                 );
 
                 let outcome = rx.await.unwrap_or_else(|_| {
-                    // Sender dropped (registry kill, app shutdown, etc.) — treat as cancel.
+                    // Sender dropped (registry kill, app shutdown, cancel_turn) —
+                    // ACP spec: treat as Cancelled.
                     RequestPermissionOutcome::Cancelled
                 });
                 pending_for_handler.remove(&request_id);
@@ -177,13 +192,3 @@ async fn run_driver(
     Ok(())
 }
 
-/// Auto-select the first available permission option. Used by the
-/// `bypassPermissions` mode and as a safety fallback when the UI hasn't been
-/// wired up yet. Phase-2 will replace this with a real user-driven response.
-pub fn auto_select_first_option(req: &RequestPermissionRequest) -> RequestPermissionOutcome {
-    if let Some(opt) = req.options.first() {
-        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(opt.option_id.clone()))
-    } else {
-        RequestPermissionOutcome::Cancelled
-    }
-}

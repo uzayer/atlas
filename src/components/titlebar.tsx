@@ -179,9 +179,15 @@ function LeftPanelToggle() {
 
 function NotificationButton() {
   const [open, setOpen] = useState(false);
-  const sessions = useChatStore.use.sessions();
-  const runningCount = Object.values(sessions).filter((s) => s.status === "running").length;
-  const errorCount = Object.values(sessions).filter((s) => s.status === "error").length;
+  // Narrow selectors return primitives — Object.is equality means this
+  // component only re-renders when the actual counts flip, not on every
+  // streaming chunk.
+  const runningCount = useChatStore(
+    (s) => Object.values(s.sessions).filter((x) => x.status === "running").length
+  );
+  const errorCount = useChatStore(
+    (s) => Object.values(s.sessions).filter((x) => x.status === "error").length
+  );
   const badgeCount = runningCount + errorCount;
 
   return (

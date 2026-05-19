@@ -1,7 +1,7 @@
-pub mod acp;
+pub mod agents;
 pub mod analysis;
+pub mod fileindex;
 pub mod canvas;
-pub mod chat;
 pub mod claude;
 pub mod fs;
 pub mod git;
@@ -10,4 +10,5 @@ pub mod knowledge;
 pub mod log;
 pub mod research;
 pub mod search;
+pub mod sessions_watch;
 pub mod terminal;

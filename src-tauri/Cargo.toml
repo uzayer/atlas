@@ -11,7 +11,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# Devtools intentionally NOT enabled here. Release builds ship without
+# right-click → Inspect Element / Cmd+Option+I; `tauri dev` still auto-
+# enables devtools because the Tauri runtime turns them on for debug
+# builds regardless of this feature. Add `devtools` back here only if you
+# need to debug a production-only issue and accept the binary-size and
+# attack-surface cost.
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
@@ -36,3 +42,8 @@ atlas-acp = { path = "../crates/atlas-acp" }
 dirs = "6"
 reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3"
+ignore = "0.4"
+notify = "8"
+notify-debouncer-full = "0.6"
+nucleo-matcher = "0.3"
+parking_lot = "0.12"

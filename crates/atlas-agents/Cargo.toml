@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+atlas-acp = { path = "../atlas-acp" }
+agent-client-protocol = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
 anyhow = "1"
 thiserror = "2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-futures = "0.3"
-tokio-stream = "0.1"
+dashmap = "6"
+parking_lot = "0.12"
+tracing = "0.1"
+dirs = "6"

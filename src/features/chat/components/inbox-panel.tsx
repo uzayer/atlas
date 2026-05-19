@@ -11,7 +11,7 @@ interface InboxItem {
   lastMessageRole: "user" | "assistant" | null;
   lastMessageContent: string;
   lastUpdated: string;
-  claudeSessionId?: string;
+  acpSessionId?: string;
 }
 
 function statusIcon(status: InboxItem["status"]) {
@@ -52,7 +52,7 @@ export function InboxPanel({ onClose }: { onClose: () => void }) {
           lastMessageRole: last ? (last.role as "user" | "assistant") : null,
           lastMessageContent: last?.content ?? "",
           lastUpdated: s.updatedAt,
-          claudeSessionId: s.claudeSessionId,
+          acpSessionId: s.acpSessionId,
         };
       })
       .sort((a, b) => (b.lastUpdated > a.lastUpdated ? 1 : -1));

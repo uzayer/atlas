@@ -12,15 +12,40 @@ import {
   Loader2,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "../stores/chat-store";
 import {
   listClaudeSessions,
-  readClaudeSession,
   deleteClaudeSession,
 } from "../lib/claude-api";
+import { agents, ensureDefaultAgent, getDefaultAgentSync } from "../lib/agents-api";
+import type { SessionMessage } from "@/types/agents";
+
+// Module-level click-token table per target tab id. Each call to
+// `handleOpenAgent` bumps the token for its target; in-flight async work
+// for older tokens bails before mutating state or hitting the agent. Prevents
+// rapid sidebar clicks from stacking N concurrent `loadSession` calls on the
+// same agent process (which froze the app at 5-6 clicks).
+const loadTokens: Record<string, number> = {};
+
+// Map an atlas-agents `SessionMessage` (rich Rust state) onto the wire
+// shape `replaceMessages` expects. Used to hydrate the chat-store from a
+// `agents.snapshot()` payload.
+function snapshotMessageToWire(m: SessionMessage) {
+  return {
+    role: m.role === "system" ? ("system" as const) : m.role,
+    content: m.content,
+    timestamp: m.timestamp,
+    toolCalls: m.tool_calls.map((tc) => ({
+      toolName: tc.tool_name,
+      arguments: (tc.arguments ?? {}) as Record<string, unknown>,
+    })),
+  };
+}
 
 function timeAgo(iso: string | null): string {
   if (!iso) return "";
@@ -40,7 +65,7 @@ function timeAgo(iso: string | null): string {
 type FilterKind = "all" | "agent" | "chat";
 
 interface SidebarItem {
-  id: string; // claudeSessionId for agent, tabId for chat
+  id: string; // acpSessionId for agent rows, tabId for chat rows
   kind: "agent" | "chat";
   title: string;
   subtitle: string | null;
@@ -61,126 +86,229 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   const project = useProjectStore.use.currentProject();
   const cwd = project?.path ?? "";
 
-  const sessions = useChatStore.use.sessions();
-  const activeSession = sessions[tabId];
-  const activeClaudeId = activeSession?.claudeSessionId;
+  // Stable signature string of the slim per-tab fields the sidebar reads.
+  // Returning a primitive means zustand's default Object.is equality short-
+  // circuits cleanly — the sidebar only re-runs its render when one of the
+  // tracked fields actually changes, NOT on every streaming chunk (those
+  // mutate `messages[].content` and don't touch any field in the signature).
+  //
+  // The earlier `useShallow(... -> Record<TabId, { nested }> ...)` version
+  // looked sensible but blew up: useShallow only does one-level shallow eq,
+  // and the inner objects were freshly allocated per call → never equal →
+  // infinite-loop re-render via useSyncExternalStore.
+  const sessionsSignature = useChatStore((s) => {
+    const keys = Object.keys(s.sessions).sort();
+    let sig = "";
+    for (const k of keys) {
+      const x = s.sessions[k];
+      sig +=
+        k +
+        "|" +
+        x.title +
+        "|" +
+        x.status +
+        "|" +
+        (x.acpAgentId ?? "") +
+        "|" +
+        (x.acpSessionId ?? "") +
+        "|" +
+        x.updatedAt +
+        "|" +
+        (x.firstUserContent ?? "") +
+        "|" +
+        (x.userMessageCount ?? 0) +
+        "|" +
+        (x.messages.length > 0 ? 1 : 0) +
+        "\n";
+    }
+    return sig;
+  });
+  const tabSummaries = useMemo(() => {
+    // Pull current state non-reactively. The signature above is what gates
+    // recomputation; `getState()` here just gives us the rich object form.
+    const sessions = useChatStore.getState().sessions;
+    const out: Record<
+      string,
+      {
+        id: string;
+        title: string;
+        status: string;
+        acpAgentId: string | undefined;
+        acpSessionId: string | undefined;
+        updatedAt: string;
+        firstUserContent: string;
+        userMessageCount: number;
+        hasAnyMessage: boolean;
+      }
+    > = {};
+    for (const [tid, sess] of Object.entries(sessions)) {
+      out[tid] = {
+        id: sess.id,
+        title: sess.title,
+        status: sess.status,
+        acpAgentId: sess.acpAgentId,
+        acpSessionId: sess.acpSessionId,
+        updatedAt: sess.updatedAt,
+        firstUserContent: sess.firstUserContent ?? "",
+        userMessageCount: sess.userMessageCount ?? 0,
+        hasAnyMessage: sess.messages.length > 0,
+      };
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionsSignature]);
+  const activeSession = tabSummaries[tabId];
+  const activeAcpId = activeSession?.acpSessionId;
 
-  const { replaceMessages, setClaudeSessionId, clearSession, setSessionTitle } =
-    useChatStore.use.actions();
+  const {
+    replaceMessages,
+    setAcpBinding,
+    clearSession,
+    setSessionTitle,
+    setTranscriptLoading,
+    createSession,
+  } = useChatStore.use.actions();
 
   const chatSidebar = useLayoutStore.use.chatSidebar();
-  const { toggleChatSidebar, setChatSidebarWidth } = useLayoutStore.use.actions();
+  const {
+    toggleChatSidebar,
+    setChatSidebarWidth,
+    addTab,
+    setActiveTab,
+  } = useLayoutStore.use.actions();
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<FilterKind>("all");
 
   const queryKey = ["claude-sessions", cwd] as const;
 
-  const runningArchive = useChatStore.use.runningArchive();
-  // Refresh more frequently while any chat is actively streaming so the new
-  // session's row appears (Claude Code writes the JSONL a tick after start).
-  // Includes parked / archived sessions that are still running in background.
-  const hasRunning = useMemo(
-    () =>
-      Object.values(sessions).some((s) => s.status === "running") ||
-      Object.values(runningArchive).some((s) => s.status === "running"),
-    [sessions, runningArchive]
-  );
+  // Polling-free listing. The Rust-side watcher (started below) emits
+  // `atlas:sessions-changed` whenever the project's JSONL directory mutates,
+  // so we refetch on event rather than every 1.5–5s. The cost of the disk
+  // walk only pays off when something actually changed.
   const { data: agentList = [], isLoading } = useQuery({
     queryKey,
     queryFn: () => listClaudeSessions(cwd),
     enabled: cwd.length > 0,
-    staleTime: hasRunning ? 1_500 : 5_000,
-    refetchInterval: hasRunning ? 1_500 : false,
+    staleTime: 30_000,
+    refetchInterval: false,
   });
 
+  // Start (or replace) the Rust file watcher for this cwd. The single
+  // `atlas:sessions-changed` listener below dispatches against `queryKey`
+  // closed over the current cwd, so the listener doesn't have to be
+  // reattached on every cwd change.
   useEffect(() => {
-    const unlistenPromise = listen<{ event_type: string }>("claude-stream", (e) => {
-      // `session` fires on the first event of each stream — refresh now so
-      // a brand-new conversation pops into the sidebar with its running
-      // spinner instead of waiting for the next 5s poll. `done` refreshes
-      // again so titles / counts settle.
-      if (e.payload.event_type === "session" || e.payload.event_type === "done") {
+    if (!cwd) return;
+    let cancelled = false;
+    invoke("sessions_watch_open", { cwd }).catch((err) => {
+      if (!cancelled) console.warn("sessions watcher failed to start:", err);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd]);
+
+  useEffect(() => {
+    const unlistenPromise = listen<{ cwd: string }>(
+      "atlas:sessions-changed",
+      (e) => {
+        if (e.payload.cwd !== cwd) return;
         queryClient.invalidateQueries({ queryKey });
       }
-    });
+    );
     const onFocus = () => queryClient.invalidateQueries({ queryKey });
     window.addEventListener("focus", onFocus);
     return () => {
       unlistenPromise.then((u) => u());
       window.removeEventListener("focus", onFocus);
     };
-  }, [queryClient, queryKey]);
+  }, [queryClient, queryKey, cwd]);
 
-  // Build the unified item list.
+  // Build the unified item list. Two sources, merged by session id:
+  //   1. disk JSONL rows (agentList, from list_claude_sessions polling)
+  //   2. live in-store sessions (chat-store, mutated optimistically)
+  //
+  // We MERGE rather than concat-and-dedup. When both sources have the same id
+  // the live row's title wins because the chat-store updates synchronously
+  // and is the source of truth for whatever's currently happening; the disk
+  // row contributes `filePath` (needed by handleOpenAgent to reload by id)
+  // and serves as the fallback `preview` for older sessions that aren't in
+  // the live store at all.
+  //
+  // Net effect: the row's title NEVER flips during the window where a disk
+  // row arrives mid-stream — it's always the live `session.title` for as
+  // long as the session is in the chat-store.
   const items = useMemo<SidebarItem[]>(() => {
-    const agents: SidebarItem[] = agentList.map((s) => ({
-      id: s.id,
-      kind: "agent",
-      title: s.preview,
-      subtitle: null,
-      lastUpdated: s.last_modified,
-      messageCount: s.message_count,
-      filePath: s.file_path,
-    }));
+    const liveAgents = Object.values(tabSummaries).filter(
+      (s) =>
+        s.acpSessionId ||
+        s.status === "running" ||
+        s.userMessageCount > 0
+    );
+    const liveById = new Map(
+      liveAgents.map((s) => {
+        const id = s.acpSessionId ?? `live-${s.id}`;
+        return [id, s] as const;
+      })
+    );
+    const diskById = new Map(agentList.map((d) => [d.id, d] as const));
 
-    // Optimistic entries — agent sessions that are currently active in this
-    // window but haven't appeared on disk yet (or haven't been polled in).
-    // Surface them immediately so the live spinner is visible. We collect
-    // from both the tab-bound sessions AND the background archive (parked
-    // sessions that are still streaming after the user navigated away).
-    const liveAgents = [
-      ...Object.values(sessions).filter((s) => s.useClaude),
-      ...Object.values(runningArchive),
-    ];
-    for (const s of liveAgents) {
-      if (!s.claudeSessionId) continue;
-      if (agents.some((a) => a.id === s.claudeSessionId)) continue;
-      const firstUser = s.messages.find((m) => m.role === "user")?.content ?? "";
-      agents.unshift({
-        id: s.claudeSessionId,
-        kind: "agent",
-        title: s.title || firstUser.slice(0, 80) || "New session",
+    const allIds = new Set<string>([
+      ...liveById.keys(),
+      ...diskById.keys(),
+    ]);
+
+    const agents: SidebarItem[] = Array.from(allIds, (id) => {
+      const live = liveById.get(id);
+      const disk = diskById.get(id);
+      const firstUser = live?.firstUserContent ?? "";
+      const diskPreview =
+        disk?.preview && disk.preview !== "(no user message)"
+          ? disk.preview
+          : "";
+      const title =
+        (live?.title && live.title !== "New Chat" ? live.title : "") ||
+        firstUser.slice(0, 80) ||
+        diskPreview ||
+        live?.title ||
+        "New session";
+      const lastUpdated =
+        live?.status === "running"
+          ? (live.updatedAt ?? disk?.last_modified ?? null)
+          : (disk?.last_modified ?? live?.updatedAt ?? null);
+      return {
+        id,
+        kind: "agent" as const,
+        title,
         subtitle: null,
-        lastUpdated: s.updatedAt,
-        messageCount: s.messages.filter((m) => m.role === "user").length,
-        // filePath omitted — disk row will replace this once the JSONL is found.
-      });
-    }
+        lastUpdated,
+        messageCount: live
+          ? live.userMessageCount
+          : (disk?.message_count ?? 0),
+        filePath: disk?.file_path,
+      };
+    });
 
-    const chats: SidebarItem[] = Object.values(sessions)
-      .filter((s) => !s.useClaude && s.messages.length > 0)
-      .map((s) => ({
-        id: s.id,
-        kind: "chat",
-        title: s.title || "Untitled chat",
-        subtitle: null,
-        lastUpdated: s.updatedAt,
-        messageCount: s.messages.length,
-        tabId: s.id,
-      }));
-
-    return [...agents, ...chats].sort((a, b) =>
+    return agents.sort((a, b) =>
       (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? "")
     );
-  }, [agentList, sessions, runningArchive]);
+  }, [agentList, tabSummaries]);
 
   // Sessions currently running (used to show a spinner on the matching row).
-  // Includes both tab-bound sessions and parked-in-background sessions.
+  // Keys MUST match the `id`s used when constructing `items` above, otherwise
+  // the spinner never lights up. Once an agent session is bound we key by
+  // `acpSessionId`; while it's still spawning we use the synthetic
+  // `live-${tabId}` placeholder.
   const runningKeys = useMemo(() => {
     const set = new Set<string>();
-    for (const s of Object.values(sessions)) {
+    for (const s of Object.values(tabSummaries)) {
       if (s.status !== "running") continue;
-      if (s.useClaude && s.claudeSessionId) set.add(`agent:${s.claudeSessionId}`);
-      if (!s.useClaude) set.add(`chat:${s.id}`);
-    }
-    for (const s of Object.values(runningArchive)) {
-      if (s.status === "running" && s.claudeSessionId) {
-        set.add(`agent:${s.claudeSessionId}`);
-      }
+      const liveId = s.acpSessionId ?? `live-${s.id}`;
+      set.add(`agent:${liveId}`);
     }
     return set;
-  }, [sessions, runningArchive]);
+  }, [tabSummaries]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -192,51 +320,165 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     });
   }, [items, filter, search]);
 
-  const { archiveCurrent, restoreArchive } = useChatStore.use.actions();
-
   const handleNewChat = () => {
-    // Park the current running thread (if any) so it keeps streaming in the
-    // background; clear the tab for a fresh chat.
-    archiveCurrent(tabId);
+    // ACP sessions are owned by the agent process; clearing the tab just
+    // resets local state. The underlying ACP session stays addressable via
+    // its session_id and will surface as a disk-backed row once its JSONL
+    // is written.
     clearSession(tabId);
   };
 
-  const handleOpenAgent = async (item: SidebarItem) => {
-    if (item.id === activeClaudeId) return;
-
-    // Park the currently-bound running thread (if any) so we don't kill its
-    // stream by clobbering the tab.
-    archiveCurrent(tabId);
-
-    // If the target session is currently running in the background archive,
-    // restore it (no disk read needed) — keeps everything live.
-    if (runningArchive[item.id]) {
-      restoreArchive(tabId, item.id);
-      return;
-    }
-
-    // Otherwise it's a historical session on disk — load it as before.
+  const handleOpenAgent = (item: SidebarItem) => {
     if (!item.filePath) return;
-    try {
-      const messages = await readClaudeSession(item.filePath);
-      clearSession(tabId);
-      replaceMessages(
-        tabId,
-        messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-          timestamp: m.timestamp ?? undefined,
-          toolCalls: (m.tool_calls ?? []).map((tc) => ({
-            toolName: tc.tool_name,
-            arguments: tc.input as Record<string, unknown>,
-          })),
-        }))
-      );
-      setClaudeSessionId(tabId, item.id);
-      setSessionTitle(tabId, item.title.slice(0, 40));
-    } catch (err) {
-      console.error("Failed to open session:", err);
+
+    const storeSnapshot = useChatStore.getState().sessions;
+
+    // De-dup #1: if THIS tab is already pointing at the same session id,
+    // it's a no-op (covers re-clicks + clicks-while-loading).
+    if (storeSnapshot[tabId]?.acpSessionId === item.id) return;
+
+    // De-dup #2: if ANOTHER open tab is already bound to this session id,
+    // just focus that tab instead of opening a new one. Keeps tabs from
+    // multiplying when the user re-clicks a row they already have open.
+    for (const [tid, s] of Object.entries(storeSnapshot)) {
+      if (s.acpSessionId === item.id) {
+        setActiveTab(tid);
+        return;
+      }
     }
+
+    // Decide target tab. If the current tab's session is mid-flight
+    // (status === "running"), we MUST NOT overwrite it — the agent is
+    // still streaming back into that session and the user needs to see
+    // it keep running. Open the clicked history in a new chat tab
+    // instead. Otherwise replace in-place (idle tab is fair game).
+    const currentRunning = storeSnapshot[tabId]?.status === "running";
+    const targetTabId = currentRunning
+      ? `chat-${Date.now().toString(36)}-${Math.random()
+          .toString(36)
+          .slice(2, 6)}`
+      : tabId;
+
+    if (currentRunning) {
+      addTab({
+        id: targetTabId,
+        type: "chat",
+        title: item.title.slice(0, 40) || "Chat",
+        closable: true,
+        dirty: false,
+        data: {},
+      });
+      // Pre-create the chat-store session before the ChatPanel mounts so
+      // the optimistic binding below has something to attach to.
+      createSession(targetTabId);
+      setActiveTab(targetTabId);
+    }
+
+    const project = useProjectStore.getState().currentProject;
+    const cwd = project?.path ?? "/";
+
+    // OPTIMISTIC SYNCHRONOUS UI: clear + retitle + bind the historical
+    // session id IMMEDIATELY when the default agent is already cached
+    // (App.tsx pre-spawns it at startup, so it almost always is).
+    clearSession(targetTabId);
+    setSessionTitle(targetTabId, item.title.slice(0, 40));
+    const cachedAgent = getDefaultAgentSync();
+    if (cachedAgent) {
+      setAcpBinding(targetTabId, cachedAgent.agent_id, item.id);
+    }
+    // Always flag loading at this point — the chat panel renders a spinner
+    // instead of the welcome state until the snapshot lands. On a Rust-cache
+    // hit the snapshot returns in ~1ms so the spinner is barely visible; on
+    // a miss it covers the JSONL replay window.
+    setTranscriptLoading(targetTabId, true);
+
+    // Click-token cancellation: each click bumps the token for this tab.
+    // Every subsequent await re-checks the token and bails if a newer click
+    // has taken over — prevents 5-6 rapid clicks from piling up 5-6 in-flight
+    // `loadSession` calls against the same agent.
+    const myToken = (loadTokens[targetTabId] ?? 0) + 1;
+    loadTokens[targetTabId] = myToken;
+    const isStale = () => loadTokens[targetTabId] !== myToken;
+
+    void (async () => {
+      // Yield once so multiple clicks in the same event-loop tick collapse:
+      // every click after this microtask resumes with a stale token and
+      // bails before doing any IPC.
+      await Promise.resolve();
+      if (isStale()) return;
+
+      let agent;
+      try {
+        agent = await ensureDefaultAgent();
+      } catch (err) {
+        if (!isStale()) {
+          setTranscriptLoading(targetTabId, false);
+          toast.error(
+            `Agent not available: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+        return;
+      }
+      if (isStale()) return;
+
+      // atlas-agents owns the cache. `loadSession` is idempotent: the second
+      // visit to the same session is a `DashMap::get` away from instant —
+      // no JSONL replay, no ACP round-trip. First visit replays the JSONL
+      // into a `SessionState` inside the manager and tells the agent to
+      // resume; that state stays loaded for the rest of the process.
+      let key;
+      try {
+        key = await agents.loadSession(agent.agent_id, item.id, cwd);
+      } catch (err) {
+        if (isStale()) return;
+        console.warn("loadSession failed, falling back to new session:", err);
+        toast.message(
+          "Couldn't resume the old session — continuing in a new one.",
+          {
+            description:
+              err instanceof Error
+                ? err.message.slice(0, 120)
+                : String(err).slice(0, 120),
+          }
+        );
+        try {
+          const newKey = await agents.newSession(agent.agent_id, cwd);
+          if (isStale()) return;
+          setAcpBinding(targetTabId, agent.agent_id, newKey.session_id);
+          setTranscriptLoading(targetTabId, false);
+        } catch (newErr) {
+          if (!isStale()) {
+            setTranscriptLoading(targetTabId, false);
+            toast.error(
+              `Couldn't open agent session: ${newErr instanceof Error ? newErr.message : String(newErr)}`
+            );
+          }
+        }
+        return;
+      }
+      if (isStale()) return;
+
+      // Pull the rich state Rust holds for this session and hydrate the
+      // chat-store from it. On a cache hit this is ~1ms; on a miss it
+      // already has the JSONL-replayed messages baked in.
+      let snapshot;
+      try {
+        snapshot = await agents.snapshot(key);
+      } catch (err) {
+        if (!isStale()) {
+          setTranscriptLoading(targetTabId, false);
+          toast.error(
+            `Couldn't load session: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+        return;
+      }
+      if (isStale()) return;
+
+      replaceMessages(targetTabId, snapshot.messages.map(snapshotMessageToWire));
+      setAcpBinding(targetTabId, agent.agent_id, item.id);
+      setTranscriptLoading(targetTabId, false);
+    })();
   };
 
   const handleDeleteAgent = async (e: React.MouseEvent, item: SidebarItem) => {
@@ -244,7 +486,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     if (!item.filePath) return;
     try {
       await deleteClaudeSession(item.filePath);
-      if (activeClaudeId === item.id) clearSession(tabId);
+      if (activeAcpId === item.id) clearSession(tabId);
       queryClient.invalidateQueries({ queryKey });
     } catch (err) {
       console.error("Failed to delete session:", err);
@@ -282,8 +524,8 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   }
 
   const isActiveItem = (item: SidebarItem) => {
-    if (item.kind === "agent") return item.id === activeClaudeId;
-    return item.id === tabId && !activeSession?.useClaude;
+    if (item.kind === "agent") return item.id === activeAcpId;
+    return item.id === tabId;
   };
 
   const showEmpty = !isLoading && filtered.length === 0;

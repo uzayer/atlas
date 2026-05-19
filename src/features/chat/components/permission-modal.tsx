@@ -1,7 +1,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { Shield, AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+import { toast } from "sonner";
 import { useChatStore } from "../stores/chat-store";
-import { acp } from "../lib/acp-api";
+import { agents } from "../lib/agents-api";
 import { cn } from "@/lib/utils";
 import type { PermissionOptionRef, PendingPermission } from "@/types/acp";
 
@@ -24,22 +25,27 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
 
   if (!current) return null;
 
-  const resolve = (decision: "selected", optId: string) => {
-    acp
-      .respondPermission(current.agentId, current.requestId, {
-        kind: decision,
-        0: optId,
-      })
-      .catch(() => {})
+  const resolve = (optId: string) => {
+    agents
+      .respondPermission(
+        current.agentId,
+        current.acpSessionId,
+        current.requestId,
+        { kind: "selected", option_id: optId }
+      )
+      .catch((e) => toast.error(`Permission send failed: ${e}`))
       .finally(() => popPermission(current.acpSessionId, current.requestId));
   };
 
   const cancel = () => {
-    acp
-      .respondPermission(current.agentId, current.requestId, {
-        kind: "cancelled",
-      })
-      .catch(() => {})
+    agents
+      .respondPermission(
+        current.agentId,
+        current.acpSessionId,
+        current.requestId,
+        { kind: "cancelled" }
+      )
+      .catch((e) => toast.error(`Permission cancel failed: ${e}`))
       .finally(() => popPermission(current.acpSessionId, current.requestId));
   };
 
@@ -85,9 +91,9 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
           <div className="flex flex-col gap-1.5 px-4 py-3">
             {current.options.map((opt) => (
               <PermissionButton
-                key={opt.option_id}
+                key={opt.optionId}
                 option={opt}
-                onSelect={() => resolve("selected", opt.option_id)}
+                onSelect={() => resolve(opt.optionId)}
               />
             ))}
           </div>

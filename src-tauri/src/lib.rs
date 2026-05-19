@@ -1,6 +1,9 @@
 mod commands;
 
 use atlas_acp::AgentRegistry;
+use commands::claude::ClaudeSessionIndex;
+use commands::fileindex::FileIndexState;
+use commands::sessions_watch::SessionsWatchState;
 use commands::terminal::TerminalState;
 use tauri::Manager;
 
@@ -15,6 +18,7 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 255)));
             }
+            commands::agents::install_manager(&app.handle());
             Ok(())
         })
         .plugin(tauri_plugin_fs::init())
@@ -29,8 +33,10 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .manage(TerminalState::new())
         .manage(AgentRegistry::new())
+        .manage(FileIndexState::new())
+        .manage(SessionsWatchState::new())
+        .manage(ClaudeSessionIndex::new())
         .invoke_handler(tauri::generate_handler![
-            commands::chat::chat_send,
             commands::terminal::terminal_create,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,
@@ -86,14 +92,25 @@ pub fn run() {
             commands::log::append_pinned_log,
             commands::log::clear_pinned_log,
             commands::log::rewrite_pinned_log,
-            commands::acp::acp_known_specs,
-            commands::acp::acp_list_agents,
-            commands::acp::acp_spawn_agent,
-            commands::acp::acp_kill_agent,
-            commands::acp::acp_new_session,
-            commands::acp::acp_send_prompt,
-            commands::acp::acp_cancel_turn,
-            commands::acp::acp_respond_permission,
+            commands::agents::agents_list_plugins,
+            commands::agents::agents_list_running,
+            commands::agents::agents_spawn,
+            commands::agents::agents_kill,
+            commands::agents::agents_new_session,
+            commands::agents::agents_load_session,
+            commands::agents::agents_snapshot,
+            commands::agents::agents_send,
+            commands::agents::agents_cancel,
+            commands::agents::agents_set_mode,
+            commands::agents::agents_set_model,
+            commands::agents::agents_respond_permission,
+            commands::fileindex::fileindex_open_project,
+            commands::fileindex::fileindex_close_project,
+            commands::fileindex::fileindex_search,
+            commands::fileindex::fileindex_status,
+            commands::sessions_watch::sessions_watch_open,
+            commands::sessions_watch::sessions_watch_close,
+            commands::sessions_watch::sessions_watch_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas");

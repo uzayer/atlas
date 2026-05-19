@@ -31,7 +31,7 @@ export type StopReason =
   | "cancelled";
 
 export type PermissionDecision =
-  | { kind: "selected"; 0: string } // selected(option_id)
+  | { kind: "selected"; option_id: string }
   | { kind: "cancelled" };
 
 // `SessionUpdate` in the schema is a discriminated union by `sessionUpdate`.
@@ -49,6 +49,25 @@ export interface PlanEntry {
   status: "pending" | "in_progress" | "completed";
 }
 
+// Wire schema uses camelCase via serde rename_all. Field names below MUST
+// match the agent-client-protocol-schema crate (see tool_call.rs).
+export type ToolKind =
+  | "read"
+  | "edit"
+  | "delete"
+  | "move"
+  | "search"
+  | "execute"
+  | "think"
+  | "fetch"
+  | "switch_mode"
+  | "other";
+
+export interface ToolLocation {
+  path: string;
+  line?: number;
+}
+
 export type SessionUpdate =
   | { sessionUpdate: "agent_message_chunk"; content: ContentBlock }
   | { sessionUpdate: "agent_thought_chunk"; content: ContentBlock }
@@ -56,16 +75,22 @@ export type SessionUpdate =
       sessionUpdate: "tool_call";
       toolCallId: string;
       title?: string;
-      kind?: string;
+      kind?: ToolKind;
       status?: string;
-      input?: unknown;
-      locations?: unknown[];
+      rawInput?: unknown;
+      rawOutput?: unknown;
+      locations?: ToolLocation[];
       content?: unknown;
     }
   | {
       sessionUpdate: "tool_call_update";
       toolCallId: string;
+      title?: string;
+      kind?: ToolKind;
       status?: string;
+      rawInput?: unknown;
+      rawOutput?: unknown;
+      locations?: ToolLocation[];
       content?: unknown;
     }
   | { sessionUpdate: "plan"; entries: PlanEntry[] }
@@ -73,8 +98,10 @@ export type SessionUpdate =
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
   | { sessionUpdate: "current_model_update"; currentModelId: string };
 
+// IMPORTANT: ACP schema uses #[serde(rename_all = "camelCase")] — wire field
+// names are camelCase (optionId), NOT snake_case. Don't `option_id` here.
 export interface PermissionOptionRef {
-  option_id: string;
+  optionId: string;
   name: string;
   kind: string;
 }

@@ -146,7 +146,13 @@ export const useLayoutStore = createSelectors(
           }),
         addTab: (tab) =>
           set((s) => {
-            const allowMultiple = tab.type === "editor" || tab.type === "diff";
+            // chat: each session is its own tab (multiple parallel agent
+            // chats supported). editor / diff: one per filePath. Everything
+            // else: at most one instance.
+            const allowMultiple =
+              tab.type === "editor" ||
+              tab.type === "diff" ||
+              tab.type === "chat";
 
             let targetId = tab.id;
             if (!allowMultiple) {

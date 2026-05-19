@@ -84,6 +84,61 @@
   }
 }
 
+/* ── Chat input — CodeMirror host + mention chips ────────────────────────────
+   The chat composer mounts a CodeMirror EditorView inside `.atlas-chat-cm-host`.
+   These rules size the host, hide CM's default editor chrome that doesn't make
+   sense for a chat input, and render mention chips as atomic pills.
+*/
+.atlas-chat-cm-host {
+  width: 100%;
+}
+.atlas-chat-cm-host .cm-editor {
+  border: none;
+  background: transparent;
+}
+.atlas-chat-cm-host .cm-gutters {
+  display: none;
+}
+.atlas-chat-cm-host .cm-line {
+  padding: 0;
+}
+
+.atlas-mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  margin: 0 1px;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-family: inherit;
+  line-height: 1;
+  vertical-align: baseline;
+  user-select: none;
+  white-space: nowrap;
+  max-width: 320px;
+}
+.atlas-mention-chip__icon {
+  font-size: 10px;
+  opacity: 0.75;
+  flex-shrink: 0;
+}
+.atlas-mention-chip__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atlas-mention-chip[data-mention-kind="file"]         { color: var(--accent-primary); }
+.atlas-mention-chip[data-mention-kind="symbol"]       { color: var(--status-success); }
+.atlas-mention-chip[data-mention-kind="knowledge"]    { color: var(--accent-primary); }
+.atlas-mention-chip[data-mention-kind="paper"]        { color: var(--status-warning); }
+.atlas-mention-chip[data-mention-kind="branch"]       { color: var(--text-secondary); }
+.atlas-mention-chip[data-mention-kind="past_message"] { color: var(--text-secondary); }
+
 @layer base {
   *,
   ::after,
@@ -183,6 +238,69 @@
   /* CSS containment for panel boundaries — isolate layout/paint recalculations */
   [data-panel] {
     contain: layout style paint;
+  }
+
+  /* CodeMirror — authoritative color overrides for production builds.
+     `EditorView.theme(...)` injects styles via @codemirror/view's StyleModule
+     at runtime, which works reliably in `vite dev` (single instance, served
+     unbundled) but loses the race in `vite build` once Rollup splits the
+     lazy-loaded lang packages into separate chunks: lang chunks transitively
+     import @codemirror/view, and even with `resolve.dedupe` Tauri's WKWebView
+     can mount the theme stylesheet against a different `StyleModule` than
+     the EditorView constructor uses. Net effect: the theme is silently a
+     no-op, text inherits CodeMirror's defaults (often invisible on AMOLED
+     black) while gutters render with their base styles.
+
+     These rules sit at the same specificity as the runtime injection so they
+     always win when the runtime fails, and harmlessly co-exist when it
+     succeeds. Match colors with `atlasTheme` in editor-panel.tsx. */
+  .cm-editor {
+    background-color: #000;
+    color: #b3b3b3;
+    /* `font-size` + `line-height` live on the editor so both .cm-content
+       and .cm-gutters measure the SAME row height — CodeMirror reads the
+       computed line-height off the content via ResizeObserver to position
+       the gutter elements; forcing different metrics on `.cm-content`
+       alone desyncs the gutter, leaving line numbers stranded at the top
+       while text sits further down. Keep them at the editor root. */
+    font-family: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+    font-size: 14px;
+    line-height: 18px;
+  }
+  .cm-content {
+    color: #b3b3b3;
+    caret-color: #b3b3b3;
+  }
+  .cm-gutters {
+    background-color: #000;
+    color: #222;
+    border: none;
+  }
+  .cm-activeLineGutter {
+    color: #777;
+    background-color: transparent;
+  }
+  .cm-activeLine {
+    background-color: rgba(255, 255, 255, 0.04);
+  }
+  .cm-selectionBackground,
+  .cm-focused .cm-selectionBackground,
+  .cm-content ::selection {
+    background-color: #303030 !important;
+  }
+  .cm-cursor,
+  .cm-dropCursor {
+    border-left-color: #b3b3b3;
+    border-left-width: 2px;
+  }
+  .cm-matchingBracket {
+    background-color: #2d2d2d;
+    outline: 1px solid #3d3d3d;
+  }
+  .cm-foldPlaceholder {
+    background-color: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    color: #555;
   }
 
   /* xterm.js — force monospace font in production. The DOM renderer normally

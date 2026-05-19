@@ -9,13 +9,26 @@ import type {
   ClaudePermissionMode,
 } from "@/types/agent";
 import { CLAUDE_PERMISSION_MODES } from "@/types/agent";
-import type { AcpEventEnvelope, PendingPermission } from "@/types/acp";
+import type { PendingPermission } from "@/types/acp";
+import type { AgentDelta, ToolCall as AgentToolCall } from "@/types/agents";
 
-interface ProviderConfig {
-  provider: "anthropic" | "openai" | "google";
-  model: string;
-  apiKey: string;
-  system: string;
+/** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
+function toChatToolCall(tc: AgentToolCall): ChatMessage["toolCalls"][number] {
+  return {
+    id: tc.id,
+    toolName: tc.tool_name,
+    arguments: (tc.arguments ?? {}) as Record<string, unknown>,
+    result: tc.result,
+    status:
+      tc.status === "pending"
+        ? "pending"
+        : tc.status === "running"
+          ? "running"
+          : tc.status === "failed"
+            ? "failed"
+            : "completed",
+    duration: null,
+  };
 }
 
 interface ChatState {
@@ -30,15 +43,7 @@ interface ChatState {
    * the agent is still streaming; auto-drained when the stream finishes.
    */
   queues: Record<string, string[]>;
-  /**
-   * Sessions that were displaced from a tab because the user navigated to a
-   * different history item while the stream was still running. Keyed by the
-   * Claude Code session id so the stream listener can keep updating them in
-   * the background; restored back into a tab when the user revisits them.
-   */
-  runningArchive: Record<string, ChatSession>;
   activeSessionId: string | null;
-  providerConfig: ProviderConfig;
 }
 
 interface ChatActions {
@@ -58,10 +63,9 @@ interface ChatActions {
     updateLastAssistantMessage: (sessionId: string, content: string) => void;
     updateSessionStatus: (sessionId: string, status: AgentStatus) => void;
     setSessionTitle: (sessionId: string, title: string) => void;
+    setTranscriptLoading: (sessionId: string, loading: boolean) => void;
     clearSession: (sessionId: string) => void;
     removeSession: (sessionId: string) => void;
-    setClaudeSessionId: (sessionId: string, claudeId: string | undefined) => void;
-    toggleUseClaude: (sessionId: string) => void;
     cycleClaudePermissionMode: (sessionId: string) => void;
     setClaudePermissionMode: (
       sessionId: string,
@@ -76,33 +80,11 @@ interface ChatActions {
         toolCalls?: Array<{ toolName: string; arguments: Record<string, unknown> }>;
       }>
     ) => void;
-    setProvider: (provider: ProviderConfig["provider"]) => void;
-    setModel: (model: string) => void;
-    setApiKey: (key: string) => void;
-    setSystem: (system: string) => void;
     enqueueMessage: (sessionId: string, text: string) => void;
     removeQueueItem: (sessionId: string, index: number) => void;
     editQueueItem: (sessionId: string, index: number, text: string) => void;
     shiftQueue: (sessionId: string) => string | null;
     clearQueue: (sessionId: string) => void;
-    // Background archive — keeps in-flight Claude sessions alive when a tab
-    // navigates away to view a different historical thread.
-    archiveCurrent: (tabId: string) => string | null;
-    restoreArchive: (tabId: string, claudeSessionId: string) => boolean;
-    dropArchive: (claudeSessionId: string) => void;
-    updateArchivedAssistant: (claudeSessionId: string, content: string) => void;
-    appendArchivedToolCall: (
-      claudeSessionId: string,
-      toolName: string,
-      input: Record<string, unknown>
-    ) => void;
-    setArchivedStatus: (claudeSessionId: string, status: AgentStatus) => void;
-    setArchivedTitle: (claudeSessionId: string, title: string) => void;
-    setSessionStreamId: (sessionId: string, streamId: string | undefined) => void;
-    setArchivedStreamId: (
-      claudeSessionId: string,
-      streamId: string | undefined
-    ) => void;
     // ── ACP bindings ────────────────────────────────────────────────────
     setAcpBinding: (
       tabId: string,
@@ -114,7 +96,21 @@ interface ChatActions {
      * Phase-1 handles `agent_message_chunk` (text) and `tool_call`; everything
      * else is silently ignored until phase-2 widgets land.
      */
-    applyAcpEvent: (env: AcpEventEnvelope) => void;
+    /**
+     * Apply an `atlas:agents` SessionDelta from the Rust-side manager. This
+     * is the single bridge between the Rust SessionState and the chat-store —
+     * status/turn lifecycle, text/thinking chunks, tool-call upserts, plan
+     * updates, mode/model changes, available_commands. Permission requests
+     * flow through `pushPermission` from the App.tsx listener.
+     */
+    applyAgentDelta: (env: AgentDelta) => void;
+    /**
+     * RAF-coalesced fast path for streaming text. Called by the global ACP
+     * listener once per animation frame instead of per chunk.
+     */
+    appendAssistantText: (acpSessionId: string, text: string) => void;
+    /** RAF-coalesced fast path for `agent_thought_chunk`. */
+    appendAssistantThought: (acpSessionId: string, text: string) => void;
     pushPermission: (req: PendingPermission) => void;
     popPermission: (acpSessionId: string, requestId: string) => void;
     clearPermissionsForAgent: (agentId: string) => void;
@@ -131,64 +127,64 @@ function findTabByAcpSession(
   return null;
 }
 
-/**
- * The canonical Claude Code agent sometimes ships `input` as a stringified JSON
- * blob, sometimes as a real object. Normalise to a plain record.
- */
-function parseToolInput(raw: unknown): Record<string, unknown> {
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-    return raw as Record<string, unknown>;
-  }
-  if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-      return { raw };
-    } catch {
-      return { raw };
-    }
-  }
-  return {};
+let messageCounter = 0;
+function nextMessageId(): string {
+  messageCounter += 1;
+  return `msg-${Date.now()}-${messageCounter.toString(36)}`;
 }
 
-/**
- * ACP tool_call_update `content` is `Vec<ToolCallContent>` — text chunks,
- * diffs, terminals. Format it as a single readable string for the existing
- * ToolCallCard "result" display. Returns null when there's nothing to add.
- */
-function formatToolContent(content: unknown): string | null {
-  if (content == null) return null;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const parts = content
-      .map((item) => formatToolContent(item))
-      .filter((s): s is string => s !== null && s.length > 0);
-    return parts.length > 0 ? parts.join("\n") : null;
-  }
-  if (typeof content === "object") {
-    const o = content as Record<string, unknown>;
-    if (typeof o.content === "object" || typeof o.content === "string") {
-      const inner = formatToolContent(o.content);
-      if (inner !== null) return inner;
-    }
-    if (typeof o.text === "string") return o.text;
-    if (typeof o.output === "string") return o.output;
-    if (typeof o.path === "string" && (o.oldText || o.newText)) {
-      // Best-effort diff summary.
-      return `${o.path}`;
-    }
+function makeAssistantTextMessage(content: string): ChatMessage {
+  return {
+    id: nextMessageId(),
+    role: "assistant",
+    content,
+    toolCalls: [],
+    fileChanges: [],
+    plan: null,
+    timestamp: new Date().toISOString(),
+    mode: "text",
+  };
+}
+
+function makeAssistantThinkingMessage(thinking: string): ChatMessage {
+  return {
+    id: nextMessageId(),
+    role: "assistant",
+    content: "",
+    toolCalls: [],
+    fileChanges: [],
+    plan: null,
+    timestamp: new Date().toISOString(),
+    mode: "thinking",
+    thinking,
+  };
+}
+
+function makeAssistantToolMessage(toolCall: ChatMessage["toolCalls"][number]): ChatMessage {
+  return {
+    id: nextMessageId(),
+    role: "assistant",
+    content: "",
+    toolCalls: [toolCall],
+    fileChanges: [],
+    plan: null,
+    timestamp: new Date().toISOString(),
+    mode: "tool",
+  };
+}
+
+/** Find the message + tool call entry across all messages by toolCallId. */
+function findToolCall(
+  session: ChatSession,
+  toolCallId: string
+): { msg: ChatMessage; tc: ChatMessage["toolCalls"][number] } | null {
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const m = session.messages[i];
+    const tc = m.toolCalls.find((t) => t.id === toolCallId);
+    if (tc) return { msg: m, tc };
   }
   return null;
 }
-
-const initialProviderConfig: ProviderConfig = {
-  provider: "anthropic",
-  model: "claude-sonnet-4-6-20250514",
-  apiKey: "",
-  system: "You are Atlas, an AI assistant integrated into a second-brain IDE. Be concise and helpful.",
-};
 
 export const useChatStore = createSelectors(
   create<ChatState & ChatActions>()(
@@ -196,9 +192,7 @@ export const useChatStore = createSelectors(
       sessions: {},
       pendingPermissions: {},
       queues: {},
-      runningArchive: {},
       activeSessionId: null,
-      providerConfig: initialProviderConfig,
       actions: {
         createSession: (tabId) =>
           set((s) => {
@@ -208,14 +202,12 @@ export const useChatStore = createSelectors(
               title: "New Chat",
               messages: [],
               agentType: "claude-code",
-              model: s.providerConfig.model,
+              model: "",
               status: "idle",
               workingDirectory: "",
               tasks: [],
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
-              claudeSessionId: undefined,
-              useClaude: true,
               claudePermissionMode: "default",
             };
             s.activeSessionId = tabId;
@@ -239,6 +231,10 @@ export const useChatStore = createSelectors(
             };
             session.messages.push(msg);
             session.updatedAt = new Date().toISOString();
+            if (role === "user") {
+              if (!session.firstUserContent) session.firstUserContent = content;
+              session.userMessageCount = (session.userMessageCount ?? 0) + 1;
+            }
           }),
         appendToolCall: (sessionId, toolName, input) =>
           set((s) => {
@@ -279,6 +275,11 @@ export const useChatStore = createSelectors(
             const session = s.sessions[sessionId];
             if (session) session.title = title;
           }),
+        setTranscriptLoading: (sessionId, loading) =>
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.transcriptLoading = loading;
+          }),
         clearSession: (sessionId) =>
           set((s) => {
             const session = s.sessions[sessionId];
@@ -286,15 +287,13 @@ export const useChatStore = createSelectors(
               session.messages = [];
               session.tasks = [];
               session.status = "idle";
-              session.claudeSessionId = undefined;
+              session.acpAgentId = undefined;
+              session.acpSessionId = undefined;
               session.title = "New Chat";
+              session.firstUserContent = undefined;
+              session.userMessageCount = 0;
             }
             delete s.queues[sessionId];
-          }),
-        setClaudeSessionId: (sessionId, claudeId) =>
-          set((s) => {
-            const session = s.sessions[sessionId];
-            if (session) session.claudeSessionId = claudeId;
           }),
         cycleClaudePermissionMode: (sessionId) =>
           set((s) => {
@@ -310,21 +309,6 @@ export const useChatStore = createSelectors(
           set((s) => {
             const session = s.sessions[sessionId];
             if (session) session.claudePermissionMode = mode;
-          }),
-        toggleUseClaude: (sessionId) =>
-          set((s) => {
-            const session = s.sessions[sessionId];
-            if (!session) return;
-            // Each mode owns its own thread — toggling resets to a fresh chat
-            // so we don't carry agent-streamed messages into the general view
-            // (or vice-versa) and the UI starts clean.
-            session.useClaude = !session.useClaude;
-            session.messages = [];
-            session.tasks = [];
-            session.status = "idle";
-            session.claudeSessionId = undefined;
-            session.title = "New Chat";
-            delete s.queues[sessionId];
           }),
         replaceMessages: (sessionId, messages) =>
           set((s) => {
@@ -346,7 +330,19 @@ export const useChatStore = createSelectors(
               plan: null,
               timestamp: m.timestamp ?? new Date().toISOString(),
             }));
-            session.updatedAt = new Date().toISOString();
+            // Recompute the cached preview/count from the loaded transcript
+            // so the sidebar doesn't have to scan messages on every chunk.
+            session.firstUserContent =
+              messages.find((m) => m.role === "user")?.content;
+            session.userMessageCount = messages.reduce(
+              (n, m) => n + (m.role === "user" ? 1 : 0),
+              0
+            );
+            // Intentionally NOT touching `updatedAt`. This action is called
+            // when loading a historical transcript from disk into a tab —
+            // viewing isn't activity, so it shouldn't bump the sort order
+            // in the sidebar. Real activity (addMessage, applyAcpEvent's
+            // streaming chunks, etc.) bumps it elsewhere.
           }),
         removeSession: (sessionId) =>
           set((s) => {
@@ -355,22 +351,6 @@ export const useChatStore = createSelectors(
               const keys = Object.keys(s.sessions);
               s.activeSessionId = keys.length > 0 ? keys[0] : null;
             }
-          }),
-        setProvider: (provider) =>
-          set((s) => {
-            s.providerConfig.provider = provider;
-          }),
-        setModel: (model) =>
-          set((s) => {
-            s.providerConfig.model = model;
-          }),
-        setApiKey: (key) =>
-          set((s) => {
-            s.providerConfig.apiKey = key;
-          }),
-        setSystem: (system) =>
-          set((s) => {
-            s.providerConfig.system = system;
           }),
         enqueueMessage: (sessionId, text) =>
           set((s) => {
@@ -410,99 +390,46 @@ export const useChatStore = createSelectors(
             delete s.queues[sessionId];
           }),
 
-        // ── Background archive ────────────────────────────────────────────
-        archiveCurrent: (tabId) => {
-          let archivedSid: string | null = null;
+        appendAssistantText: (acpSessionId, text) =>
           set((s) => {
-            const cur = s.sessions[tabId];
-            if (!cur || !cur.useClaude || !cur.claudeSessionId) return;
-            // Park a deep-ish copy so the stream listener can keep updating
-            // it independently of whatever the tab is now showing.
-            s.runningArchive[cur.claudeSessionId] = {
-              ...cur,
-              messages: cur.messages.map((m) => ({
-                ...m,
-                toolCalls: m.toolCalls.map((tc) => ({ ...tc })),
-                fileChanges: [...m.fileChanges],
-              })),
-            };
-            archivedSid = cur.claudeSessionId;
-          });
-          return archivedSid;
-        },
-        restoreArchive: (tabId, claudeSessionId) => {
-          let ok = false;
-          set((s) => {
-            const archived = s.runningArchive[claudeSessionId];
-            if (!archived) return;
-            const cur = s.sessions[tabId];
-            if (!cur) return;
-            // Preserve per-tab UI prefs that don't belong to the thread.
-            s.sessions[tabId] = {
-              ...archived,
-              id: tabId,
-              useClaude: cur.useClaude,
-              claudePermissionMode: cur.claudePermissionMode,
-            } as ChatSession;
-            delete s.runningArchive[claudeSessionId];
-            ok = true;
-          });
-          return ok;
-        },
-        dropArchive: (claudeSessionId) =>
-          set((s) => {
-            delete s.runningArchive[claudeSessionId];
-          }),
-        updateArchivedAssistant: (claudeSessionId, content) =>
-          set((s) => {
-            const a = s.runningArchive[claudeSessionId];
-            if (!a) return;
-            for (let i = a.messages.length - 1; i >= 0; i--) {
-              if (a.messages[i].role === "assistant") {
-                a.messages[i].content = content;
-                a.updatedAt = new Date().toISOString();
-                return;
-              }
+            if (!text) return;
+            const tid = findTabByAcpSession(s.sessions, acpSessionId);
+            if (!tid) return;
+            const session = s.sessions[tid];
+            const last = session.messages[session.messages.length - 1];
+            // Append into the trailing text-mode message; otherwise start a
+            // new one so a preceding tool/thinking block isn't merged with
+            // unrelated narration.
+            //
+            // NOTE: deliberately not bumping `updatedAt` here. Streaming
+            // chunks fire dozens of times per second; touching `updatedAt`
+            // each time used to invalidate the sidebar's `hasRunning`/sort
+            // memos and re-render every top-level chat consumer per chunk.
+            // The sidebar sort still updates correctly via `addMessage`
+            // (user send) and the turn-end status flip.
+            if (
+              last &&
+              last.role === "assistant" &&
+              (last.mode === "text" || last.mode === undefined) &&
+              last.toolCalls.length === 0
+            ) {
+              last.content += text;
+              return;
             }
+            session.messages.push(makeAssistantTextMessage(text));
           }),
-        appendArchivedToolCall: (claudeSessionId, toolName, input) =>
+        appendAssistantThought: (acpSessionId, text) =>
           set((s) => {
-            const a = s.runningArchive[claudeSessionId];
-            if (!a) return;
-            for (let i = a.messages.length - 1; i >= 0; i--) {
-              if (a.messages[i].role === "assistant") {
-                a.messages[i].toolCalls.push({
-                  id: `tc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  toolName,
-                  arguments: input,
-                  result: null,
-                  status: "completed",
-                  duration: null,
-                });
-                a.updatedAt = new Date().toISOString();
-                return;
-              }
+            if (!text) return;
+            const tid = findTabByAcpSession(s.sessions, acpSessionId);
+            if (!tid) return;
+            const session = s.sessions[tid];
+            const last = session.messages[session.messages.length - 1];
+            if (last && last.role === "assistant" && last.mode === "thinking") {
+              last.thinking = (last.thinking ?? "") + text;
+              return;
             }
-          }),
-        setArchivedStatus: (claudeSessionId, status) =>
-          set((s) => {
-            const a = s.runningArchive[claudeSessionId];
-            if (a) a.status = status;
-          }),
-        setArchivedTitle: (claudeSessionId, title) =>
-          set((s) => {
-            const a = s.runningArchive[claudeSessionId];
-            if (a) a.title = title;
-          }),
-        setSessionStreamId: (sessionId, streamId) =>
-          set((s) => {
-            const session = s.sessions[sessionId];
-            if (session) session.streamId = streamId;
-          }),
-        setArchivedStreamId: (claudeSessionId, streamId) =>
-          set((s) => {
-            const a = s.runningArchive[claudeSessionId];
-            if (a) a.streamId = streamId;
+            session.messages.push(makeAssistantThinkingMessage(text));
           }),
         setAcpBinding: (tabId, agentId, acpSessionId) =>
           set((s) => {
@@ -534,115 +461,156 @@ export const useChatStore = createSelectors(
               else s.pendingPermissions[sid] = list;
             }
           }),
-        applyAcpEvent: (env) =>
+        applyAgentDelta: (env) =>
           set((s) => {
-            if (env.kind !== "session_update") return;
             const tid = findTabByAcpSession(s.sessions, env.session_id);
             if (!tid) return;
             const session = s.sessions[tid];
-            const update = env.update;
-
-            switch (update.sessionUpdate) {
-              case "agent_message_chunk": {
-                const block = update.content;
+            switch (env.kind) {
+              case "status": {
+                session.status =
+                  env.status === "idle"
+                    ? "idle"
+                    : env.status === "running"
+                      ? "running"
+                      : env.status === "waiting"
+                        ? "waiting"
+                        : "error";
+                return;
+              }
+              case "turn_finished": {
+                // Empty-turn detection: if no assistant content arrived
+                // between the last user message and turn-end, insert a
+                // placeholder so the UI doesn't show a vanishing spinner.
+                let lastUserIdx = -1;
+                for (let i = session.messages.length - 1; i >= 0; i--) {
+                  if (session.messages[i].role === "user") {
+                    lastUserIdx = i;
+                    break;
+                  }
+                }
+                const responded = session.messages
+                  .slice(lastUserIdx + 1)
+                  .some(
+                    (m) =>
+                      m.role === "assistant" &&
+                      ((m.content && m.content.length > 0) ||
+                        m.toolCalls.length > 0 ||
+                        (m.thinking && m.thinking.length > 0))
+                  );
+                if (!responded && env.stop_reason !== "cancelled") {
+                  const label =
+                    env.stop_reason === "end_turn"
+                      ? "(no response — the agent ended its turn without output)"
+                      : `(no response — stop_reason: ${env.stop_reason})`;
+                  session.messages.push(makeAssistantTextMessage(label));
+                }
+                session.status =
+                  env.stop_reason === "end_turn" ||
+                  env.stop_reason === "cancelled"
+                    ? "idle"
+                    : "error";
+                return;
+              }
+              case "turn_failed": {
+                session.messages.push(
+                  makeAssistantTextMessage(`ACP error: ${env.error}`)
+                );
+                session.status = "error";
+                return;
+              }
+              case "text_chunk": {
+                // Rust pre-decides "new message vs append" — every text_chunk
+                // refers to the trailing text-mode assistant message. We just
+                // append; MessageAppended events handle the "new message"
+                // case ahead of this.
+                const last = session.messages[session.messages.length - 1];
                 if (
-                  block &&
-                  typeof block === "object" &&
-                  "type" in block &&
-                  block.type === "text" &&
-                  "text" in block &&
-                  typeof block.text === "string"
+                  last &&
+                  last.role === "assistant" &&
+                  (last.mode === "text" || last.mode === undefined) &&
+                  last.toolCalls.length === 0
                 ) {
-                  // Append chunk to the trailing assistant message.
-                  for (let i = session.messages.length - 1; i >= 0; i--) {
-                    if (session.messages[i].role === "assistant") {
-                      session.messages[i].content += block.text;
-                      session.updatedAt = new Date().toISOString();
-                      return;
-                    }
-                  }
+                  last.content += env.delta;
+                } else {
+                  session.messages.push(makeAssistantTextMessage(env.delta));
                 }
                 return;
               }
-              case "tool_call": {
-                for (let i = session.messages.length - 1; i >= 0; i--) {
-                  if (session.messages[i].role === "assistant") {
-                    session.messages[i].toolCalls.push({
-                      id: update.toolCallId,
-                      toolName: update.title ?? update.kind ?? "tool",
-                      arguments: parseToolInput(update.input),
-                      result: null,
-                      status:
-                        update.status === "completed"
-                          ? "completed"
-                          : update.status === "failed"
-                            ? "failed"
-                            : "running",
-                      duration: null,
-                    });
-                    session.updatedAt = new Date().toISOString();
-                    return;
-                  }
+              case "thinking_chunk": {
+                const last = session.messages[session.messages.length - 1];
+                if (last && last.role === "assistant" && last.mode === "thinking") {
+                  last.thinking = (last.thinking ?? "") + env.delta;
+                } else {
+                  session.messages.push(makeAssistantThinkingMessage(env.delta));
                 }
                 return;
               }
-              case "tool_call_update": {
-                for (let i = session.messages.length - 1; i >= 0; i--) {
-                  if (session.messages[i].role === "assistant") {
-                    const tc = session.messages[i].toolCalls.find(
-                      (t) => t.id === update.toolCallId
-                    );
-                    if (!tc) return;
-                    if (typeof update.status === "string") {
-                      tc.status =
-                        update.status === "completed"
-                          ? "completed"
-                          : update.status === "failed"
-                            ? "failed"
-                            : update.status === "in_progress"
-                              ? "running"
-                              : tc.status;
-                    }
-                    const formatted = formatToolContent(update.content);
-                    if (formatted !== null) {
-                      tc.result = tc.result
-                        ? tc.result + formatted
-                        : formatted;
-                    }
-                    session.updatedAt = new Date().toISOString();
-                    return;
-                  }
-                }
-                return;
-              }
-              case "plan": {
-                // Attach plan to the trailing assistant message. Entries map
-                // 1:1 to our internal PlanStep shape.
-                for (let i = session.messages.length - 1; i >= 0; i--) {
-                  if (session.messages[i].role === "assistant") {
-                    session.messages[i].plan = update.entries.map(
-                      (e, idx) => ({
+              case "message_appended": {
+                // Convert the Rust-shaped message into a ChatMessage and push.
+                // Rust already decided this is a new message; the frontend
+                // mirrors without re-deciding.
+                const m = env.message;
+                session.messages.push({
+                  id: m.id,
+                  role: m.role,
+                  content: m.content,
+                  thinking: m.thinking ?? "",
+                  toolCalls: m.tool_calls.map(toChatToolCall),
+                  fileChanges: [],
+                  plan: m.plan
+                    ? m.plan.map((e, idx) => ({
                         id: `plan-${idx}`,
                         description: e.content,
-                        status: e.status,
-                      })
-                    );
-                    session.updatedAt = new Date().toISOString();
-                    return;
-                  }
+                        status:
+                          (e.status as "pending" | "in_progress" | "completed") ??
+                          "pending",
+                      }))
+                    : null,
+                  timestamp: m.timestamp,
+                  mode: m.mode,
+                });
+                return;
+              }
+              case "tool_call_upserted": {
+                const found = findToolCall(session, env.tool_call.id);
+                if (found) {
+                  Object.assign(found.tc, toChatToolCall(env.tool_call));
+                  return;
+                }
+                session.messages.push(
+                  makeAssistantToolMessage(toChatToolCall(env.tool_call))
+                );
+                return;
+              }
+              case "plan_updated": {
+                const last = session.messages[session.messages.length - 1];
+                const planSteps = env.plan.map((e, idx) => ({
+                  id: `plan-${idx}`,
+                  description: e.content,
+                  status:
+                    (e.status as "pending" | "in_progress" | "completed") ??
+                    "pending",
+                }));
+                if (last && last.role === "assistant") {
+                  last.plan = planSteps;
+                } else {
+                  const fresh = makeAssistantTextMessage("");
+                  fresh.plan = planSteps;
+                  session.messages.push(fresh);
                 }
                 return;
               }
-              case "available_commands_update": {
-                session.availableCommands = update.availableCommands;
+              case "available_commands": {
+                session.availableCommands = env.commands;
                 return;
               }
-              case "current_mode_update": {
-                session.acpCurrentMode = update.currentModeId;
+              case "mode_changed": {
+                session.acpCurrentMode = env.mode_id;
                 return;
               }
-              case "current_model_update": {
-                session.acpCurrentModel = update.currentModelId;
+              case "model_changed": {
+                session.acpCurrentModel = env.model_id;
                 return;
               }
               default:

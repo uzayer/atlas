@@ -7,12 +7,45 @@ import { useHotkeys } from "@/hooks/use-hotkey";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
-import { listenAcp, resetDefaultAgent } from "@/features/chat/lib/acp-api";
+import {
+  ensureDefaultAgent,
+  listenAgents,
+  resetDefaultAgent,
+} from "@/features/chat/lib/agents-api";
+import type { PendingPermission } from "@/types/acp";
+import { FilePicker } from "@/features/file-picker/components/file-picker";
+import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { Toaster } from "sonner";
+
+// `requestIdleCallback` isn't in lib.dom yet in all TS configurations and
+// isn't implemented on Safari/WebKit (which Tauri uses on macOS). Fall back
+// to a generous setTimeout — the exact value doesn't matter as long as it's
+// after first paint.
+type IdleHandle = number;
+function scheduleIdle(fn: () => void): IdleHandle {
+  const w = window as unknown as {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+  };
+  if (typeof w.requestIdleCallback === "function") {
+    return w.requestIdleCallback(fn, { timeout: 2000 });
+  }
+  return window.setTimeout(fn, 300) as unknown as IdleHandle;
+}
+function cancelIdle(handle: IdleHandle): void {
+  const w = window as unknown as {
+    cancelIdleCallback?: (h: number) => void;
+  };
+  if (typeof w.cancelIdleCallback === "function") {
+    w.cancelIdleCallback(handle);
+    return;
+  }
+  window.clearTimeout(handle);
+}
 
 export function App() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
   const {
     toggleLeftPanel,
     toggleRightPanel,
@@ -87,35 +120,99 @@ export function App() {
   };
   const currentProject = useProjectStore.use.currentProject();
 
-  // Global ACP event bus. One listener per app instance routes notifications
-  // into the chat-store by acpSessionId, queues permission requests for the
-  // PermissionModal to render, and resets the lazy agent handle on disconnect.
+  // Global agent event bus. One listener routes atlas-agents SessionDelta
+  // events into the chat-store, queues permission requests for the
+  // PermissionModal, and resets the lazy agent handle on disconnect.
+  //
+  // text_chunk / thinking_chunk arrive at the rate the agent streams (many
+  // per second). Coalesce per requestAnimationFrame so the re-render rate
+  // caps at ~60 Hz instead of paying an Immer + subscriber notification per
+  // chunk.
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    listenAcp((env) => {
+
+    const pendingText = new Map<string, string>(); // session_id → buffered narration
+    const pendingThought = new Map<string, string>(); // session_id → buffered thinking
+    let rafId: number | null = null;
+    const flush = () => {
+      rafId = null;
+      const actions = useChatStore.getState().actions;
+      for (const [sid, text] of pendingText) {
+        actions.appendAssistantText(sid, text);
+      }
+      pendingText.clear();
+      for (const [sid, text] of pendingThought) {
+        actions.appendAssistantThought(sid, text);
+      }
+      pendingThought.clear();
+    };
+    const schedule = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(flush);
+    };
+
+    listenAgents((env) => {
       if (cancelled) return;
       const actions = useChatStore.getState().actions;
-      if (env.kind === "session_update") {
-        actions.applyAcpEvent(env);
-      } else if (env.kind === "permission_request") {
-        actions.pushPermission({
-          agentId: env.agent_id,
-          acpSessionId: env.session_id,
-          requestId: env.request_id,
-          toolCall: env.tool_call,
-          options: env.options,
-        });
-      } else if (env.kind === "agent_disconnected") {
-        actions.clearPermissionsForAgent(env.agent_id);
-        resetDefaultAgent();
+      switch (env.kind) {
+        case "text_chunk":
+          pendingText.set(
+            env.session_id,
+            (pendingText.get(env.session_id) ?? "") + env.delta
+          );
+          schedule();
+          return;
+        case "thinking_chunk":
+          pendingThought.set(
+            env.session_id,
+            (pendingThought.get(env.session_id) ?? "") + env.delta
+          );
+          schedule();
+          return;
+        case "permission_request":
+          actions.pushPermission({
+            agentId: env.agent_id,
+            acpSessionId: env.session_id,
+            requestId: env.request_id,
+            toolCall: env.tool_call as PendingPermission["toolCall"],
+            options: env.options as PendingPermission["options"],
+          });
+          return;
+        case "permission_resolved":
+          actions.popPermission(env.session_id, env.request_id);
+          return;
+        case "agent_disconnected":
+          actions.clearPermissionsForAgent(env.agent_id);
+          resetDefaultAgent();
+          return;
+        default:
+          actions.applyAgentDelta(env);
+          return;
       }
     }).then((un) => {
       if (cancelled) un();
       else unlisten = un;
     });
+
+    // Pre-spawn the default agent so the first user prompt doesn't pay
+    // npx/node cold-start (10–30s). Deferred past first paint via
+    // `requestIdleCallback` — `npx -y @zed-industries/claude-code-acp` on a
+    // fresh install fetches the package from npm and starts Node, which can
+    // hold the tokio runtime busy for several seconds. Doing it eagerly
+    // here would race with React's mount work and contribute to the
+    // beachball during cold-start.
+    const idleHandle = scheduleIdle(() => {
+      if (cancelled) return;
+      ensureDefaultAgent().catch((e) => {
+        console.warn("Agent pre-spawn failed (will retry on first send):", e);
+      });
+    });
+
     return () => {
       cancelled = true;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      cancelIdle(idleHandle);
       unlisten?.();
     };
   }, []);
@@ -130,6 +227,19 @@ export function App() {
     }, 1000);
     return () => clearTimeout(saveTimerRef.current);
   }, [tabs.length, activeTabId, currentProject]);
+
+  // FileIndex lifecycle: open the backend file index on project change,
+  // close on project clear. The backend handles fs-watch and incremental
+  // updates from that point — Cmd+P queries against the live index.
+  useEffect(() => {
+    if (!currentProject) {
+      fileIndex.closeProject().catch(() => {});
+      return;
+    }
+    fileIndex
+      .openProject(currentProject.path)
+      .catch((e) => console.warn("fileindex open failed:", e));
+  }, [currentProject?.path]);
 
   useHotkeys([
     {
@@ -154,6 +264,10 @@ export function App() {
     {
       combo: { key: "k", meta: true },
       action: () => setCommandPaletteOpen(true),
+    },
+    {
+      combo: { key: "p", meta: true },
+      action: () => setFilePickerOpen(true),
     },
     {
       combo: { key: "f", meta: true, shift: true },
@@ -252,6 +366,7 @@ export function App() {
         onOpenChange={setCommandPaletteOpen}
       />
       <SearchOverlay open={searchOpen} onOpenChange={setSearchOpen} />
+      <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />
       <Toaster
         position="bottom-right"
         toastOptions={{

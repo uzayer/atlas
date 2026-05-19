@@ -12,6 +12,8 @@ import {
   Check,
   CornerUpLeft,
   Bookmark,
+  Brain,
+  ChevronRight,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -44,10 +46,24 @@ export const MessageItem = memo(function MessageItem({
   message,
   streaming = false,
   dividerAbove = false,
+  compact = false,
+  isLastInGroup = true,
 }: {
   message: ChatMessage;
   streaming?: boolean;
   dividerAbove?: boolean;
+  /**
+   * When true, suppress the avatar + role/timestamp header so consecutive
+   * messages from the same role render as one continuous turn — matches
+   * Zed's grouped tool-call view.
+   */
+  compact?: boolean;
+  /**
+   * True when this is the final message of a consecutive same-role run.
+   * Only the last message in the group renders the Reply/Save/Copy row so
+   * the action affordances don't repeat after every text/tool sub-block.
+   */
+  isLastInGroup?: boolean;
 }) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
@@ -55,16 +71,18 @@ export const MessageItem = memo(function MessageItem({
   return (
     <div
       className={cn(
-        "group px-6 py-6",
+        "group px-6",
+        compact ? "pt-1 pb-2" : "py-6",
         isUser && "bg-[var(--bg-primary)]",
         dividerAbove && "border-t border-dashed border-[var(--border-default)]"
       )}
     >
       <div className="flex gap-4 max-w-[760px] mx-auto">
-        {/* Avatar — circular */}
+        {/* Avatar — circular. Hidden in compact mode (preserve indentation). */}
         <div
           className={cn(
             "w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5",
+            compact && "invisible",
             isUser
               ? "bg-[var(--accent-primary-muted)]"
               : "bg-[var(--bg-elevated)] border border-[var(--border-default)]"
@@ -79,24 +97,37 @@ export const MessageItem = memo(function MessageItem({
 
         {/* Content */}
         <div className="flex-1 min-w-0 space-y-3">
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">
-              {isUser ? "You" : isAssistant ? "Assistant" : message.role}
-            </span>
-            <span className="text-[10px] text-[var(--text-tertiary)] font-mono">
-              {new Date(message.timestamp).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
-            </span>
-          </div>
-
-          {/* Thinking indicator: streaming + nothing emitted yet (no text, no tool calls) */}
-          {streaming && !message.content && message.toolCalls.length === 0 && (
-            <div className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
-              <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
-              <span>Thinking…</span>
+          {!compact && (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">
+                {isUser ? "You" : isAssistant ? "Assistant" : message.role}
+              </span>
+              <span className="text-[10px] text-[var(--text-tertiary)] font-mono">
+                {new Date(message.timestamp).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </span>
             </div>
+          )}
+
+          {/* Thinking indicator: streaming + nothing emitted yet (no text, no
+              tool calls, no thoughts) */}
+          {streaming &&
+            !message.content &&
+            message.toolCalls.length === 0 &&
+            !message.thinking && (
+              <div className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
+                <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
+                <span>Thinking…</span>
+              </div>
+            )}
+
+          {/* Thinking accordion — collapsible, default closed once stream
+              settles; auto-open while actively streaming so the user sees
+              progress. */}
+          {message.mode === "thinking" && message.thinking && (
+            <ThinkingAccordion thinking={message.thinking} streaming={streaming} />
           )}
 
           {/* Markdown text — render plain pre while streaming for speed; markdown once settled */}
@@ -132,8 +163,9 @@ export const MessageItem = memo(function MessageItem({
             <PlanCard steps={message.plan} />
           )}
 
-          {/* Action row — visible on hover */}
-          {!streaming && message.content && (
+          {/* Action row — only on the last message of a same-role group so
+              Reply/Save/Copy doesn't repeat between every grouped sub-block. */}
+          {!streaming && message.content && isLastInGroup && (
             <MessageActions message={message} />
           )}
         </div>
@@ -228,6 +260,50 @@ function ActionButton({
   );
 }
 
+function ThinkingAccordion({
+  thinking,
+  streaming,
+}: {
+  thinking: string;
+  streaming: boolean;
+}) {
+  // Auto-open while streaming so the live thought shows; collapse by default
+  // once the message is settled. Uses native <details> for zero-dep
+  // semantics + a11y; styled to match the AMOLED palette.
+  const [open, setOpen] = useState(streaming);
+
+  return (
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      className="group rounded-md border border-[var(--border-default)] bg-[var(--bg-secondary)]"
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          size={12}
+          className={cn(
+            "transition-transform text-[var(--text-tertiary)]",
+            open && "rotate-90"
+          )}
+        />
+        {streaming ? (
+          <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
+        ) : (
+          <Brain size={12} className="text-[var(--text-tertiary)]" />
+        )}
+        <span className="font-mono">
+          {streaming ? "Thinking…" : "Thought process"}
+        </span>
+      </summary>
+      <div className="border-t border-[var(--border-default)] px-3 py-2">
+        <pre className="whitespace-pre-wrap break-words font-sans text-[12px] leading-relaxed text-[var(--text-tertiary)] select-text">
+          {thinking}
+        </pre>
+      </div>
+    </details>
+  );
+}
+
 function ToolCallCard({ toolCall }: { toolCall: ChatMessage["toolCalls"][number] }) {
   const [copied, setCopied] = useState(false);
 
@@ -278,26 +354,43 @@ function ToolCallCard({ toolCall }: { toolCall: ChatMessage["toolCalls"][number]
     if (filePath) openFileInEditor(filePath);
   };
 
+  const showError = toolCall.status === "failed" && toolCall.result;
+
   return (
     <div
-      onClick={handleRowClick}
       className={cn(
-        "rounded-md border border-[var(--border-default)] bg-[var(--bg-secondary)]",
-        "flex items-center gap-2 px-3 py-1.5",
-        filePath && "cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
+        "rounded-md border bg-[var(--bg-secondary)] overflow-hidden",
+        showError
+          ? "border-[var(--status-error)]/40"
+          : "border-[var(--border-default)]"
       )}
     >
-      <span className="shrink-0">{statusIcon}</span>
-      <span className="text-[11px] font-mono text-[var(--text-secondary)] flex-1 min-w-0 truncate">
-        {title}
-      </span>
-      <button
-        onClick={handleCopy}
-        className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors shrink-0"
-        title="Copy Command + Output"
+      <div
+        onClick={handleRowClick}
+        className={cn(
+          "flex items-center gap-2 px-3 py-1.5",
+          filePath && "cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
+        )}
       >
-        {copied ? <Check size={11} /> : <Copy size={11} />}
-      </button>
+        <span className="shrink-0">{statusIcon}</span>
+        <span className="text-[11px] font-mono text-[var(--text-secondary)] flex-1 min-w-0 truncate">
+          {title}
+        </span>
+        <button
+          onClick={handleCopy}
+          className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors shrink-0"
+          title="Copy Command + Output"
+        >
+          {copied ? <Check size={11} /> : <Copy size={11} />}
+        </button>
+      </div>
+      {showError && (
+        <div className="border-t border-[var(--status-error)]/30 bg-[var(--status-error)]/5 px-3 py-1.5">
+          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-[var(--status-error)] select-text">
+            {toolCall.result}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }

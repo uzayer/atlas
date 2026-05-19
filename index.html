@@ -5,10 +5,194 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Atlas</title>
-    <style>html,body,#root{background:#000;margin:0;padding:0;height:100%;width:100%;overflow:hidden;color-scheme:dark}</style>
+    <style>
+      html, body, #root {
+        background: #000;
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+        color-scheme: dark;
+      }
+
+      /* ── Boot skeleton ────────────────────────────────────────────────
+         Painted by the WebView BEFORE the JS bundle finishes downloading +
+         parsing. Mirrors the default Atlas layout (titlebar + 220px chat
+         sidebar + chat content + bottom input bar) so cold-start feels like
+         the app is already there instead of flashing a black rectangle and
+         then snapping into place.
+
+         CSS-only, no JS. Replaced atomically when ReactDOM.createRoot
+         commits its first render — React replaces #root's children, the
+         skeleton vanishes, the real UI takes over. Tokens here are
+         hard-coded near the Atlas palette since globals.css isn't loaded
+         yet at this point either.
+      */
+      .atlas-boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        background: #050505;
+        color: rgba(255, 255, 255, 0.3);
+        font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+        font-size: 11px;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      /* Titlebar strip — accounts for macOS traffic-light inset on the left
+         so the strip looks balanced even before the real titlebar mounts. */
+      .atlas-boot-titlebar {
+        height: 29px;
+        flex-shrink: 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        background: #0a0a0a;
+      }
+
+      .atlas-boot-body {
+        flex: 1;
+        display: flex;
+        min-height: 0;
+      }
+
+      /* Chat sidebar — 220px to match `chatSidebar.width` default. */
+      .atlas-boot-sidebar {
+        width: 220px;
+        flex-shrink: 0;
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
+        background: #080808;
+        padding: 8px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .atlas-boot-search {
+        height: 24px;
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .atlas-boot-row {
+        height: 14px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .atlas-boot-row.atlas-boot-row-tall {
+        height: 24px;
+      }
+      .atlas-boot-row.atlas-boot-row-narrow { width: 55%; }
+      .atlas-boot-row.atlas-boot-row-mid    { width: 75%; }
+      .atlas-boot-row.atlas-boot-row-wide   { width: 90%; }
+
+      /* Center pane — chat messages stack + input bar. */
+      .atlas-boot-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .atlas-boot-content {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
+        padding: 32px 96px;
+        overflow: hidden;
+      }
+      .atlas-boot-msg {
+        max-width: 760px;
+        margin: 0 auto;
+        width: 100%;
+        display: flex;
+        gap: 16px;
+      }
+      .atlas-boot-avatar {
+        width: 32px;
+        height: 32px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.04);
+        flex-shrink: 0;
+      }
+      .atlas-boot-bubble {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding-top: 4px;
+      }
+      .atlas-boot-bubble > div {
+        height: 12px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      /* Input bar at the bottom. */
+      .atlas-boot-input {
+        margin: 0 auto 16px;
+        width: calc(100% - 32px);
+        max-width: 760px;
+        height: 86px;
+        border-radius: 14px;
+        background: #0c0c0c;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        flex-shrink: 0;
+      }
+
+      /* Soft pulse across all placeholder surfaces — lets the user see the
+         layout is "alive" without a spinner. Tuned dim and slow so it
+         doesn't visually compete with the real UI when it lands. */
+      .atlas-boot-search,
+      .atlas-boot-row,
+      .atlas-boot-avatar,
+      .atlas-boot-bubble > div {
+        animation: atlas-boot-pulse 1.6s ease-in-out infinite;
+      }
+      @keyframes atlas-boot-pulse {
+        0%, 100% { opacity: 0.5; }
+        50%      { opacity: 1; }
+      }
+    </style>
   </head>
   <body style="background:#000">
-    <div id="root"></div>
+    <div id="root">
+      <div class="atlas-boot" aria-hidden="true">
+        <div class="atlas-boot-titlebar"></div>
+        <div class="atlas-boot-body">
+          <div class="atlas-boot-sidebar">
+            <div class="atlas-boot-search"></div>
+            <div class="atlas-boot-row atlas-boot-row-tall atlas-boot-row-wide"></div>
+            <div class="atlas-boot-row atlas-boot-row-tall atlas-boot-row-mid"></div>
+            <div class="atlas-boot-row atlas-boot-row-tall atlas-boot-row-narrow"></div>
+            <div class="atlas-boot-row atlas-boot-row-tall atlas-boot-row-wide"></div>
+            <div class="atlas-boot-row atlas-boot-row-tall atlas-boot-row-mid"></div>
+            <div class="atlas-boot-row atlas-boot-row-tall atlas-boot-row-narrow"></div>
+          </div>
+          <div class="atlas-boot-main">
+            <div class="atlas-boot-content">
+              <div class="atlas-boot-msg">
+                <div class="atlas-boot-avatar"></div>
+                <div class="atlas-boot-bubble">
+                  <div style="width:70%"></div>
+                  <div style="width:90%"></div>
+                  <div style="width:55%"></div>
+                </div>
+              </div>
+              <div class="atlas-boot-msg">
+                <div class="atlas-boot-avatar"></div>
+                <div class="atlas-boot-bubble">
+                  <div style="width:85%"></div>
+                  <div style="width:60%"></div>
+                  <div style="width:75%"></div>
+                  <div style="width:40%"></div>
+                </div>
+              </div>
+            </div>
+            <div class="atlas-boot-input"></div>
+          </div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

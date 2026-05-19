@@ -51,15 +51,23 @@ export function AnalysisPanel() {
       .map(([file, count]) => ({ file, count }));
   }, [symbols]);
 
-  // Dependency map — files that share symbol names (imports/references approximation)
+  // Dependency map — files that share symbol names (imports/references approximation).
+  //
+  // Uses Map (not a plain object record) on purpose: symbols are user-source
+  // identifiers, and names like `constructor`, `toString`, `__proto__`, `push`
+  // collide with Object.prototype members when used as record keys —
+  // `symbolFiles["constructor"]` returns the Object constructor function,
+  // `.push` is undefined on it, and the whole panel crashes. Map has no
+  // prototype-chain hazard.
   const dependencyEdges = useMemo(() => {
-    const symbolFiles: Record<string, string[]> = {};
+    const symbolFiles = new Map<string, string[]>();
     for (const s of symbols) {
-      if (!symbolFiles[s.name]) symbolFiles[s.name] = [];
-      symbolFiles[s.name].push(s.file_path);
+      const bucket = symbolFiles.get(s.name);
+      if (bucket) bucket.push(s.file_path);
+      else symbolFiles.set(s.name, [s.file_path]);
     }
     const edges: Array<{ from: string; to: string; symbol: string }> = [];
-    for (const [name, files] of Object.entries(symbolFiles)) {
+    for (const [name, files] of symbolFiles) {
       if (files.length > 1) {
         for (let i = 1; i < files.length && edges.length < 30; i++) {
           edges.push({ from: files[0], to: files[i], symbol: name });
