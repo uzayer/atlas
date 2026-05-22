@@ -21,18 +21,34 @@ interface RecentProject {
 }
 
 /**
+ * App-wide preferences surfaced in Settings → General. Mirrors
+ * `src-tauri/src/state/app_state.rs:AppSettings`. Defaults declared on
+ * both sides; if you add a field, default it both places.
+ */
+export interface AppSettings {
+  /** Auto-add `.atlas/` to each opened git project's `.gitignore`. */
+  autoAddAtlasGitignore: boolean;
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  autoAddAtlasGitignore: true,
+};
+
+/**
  * Wire shape returned by the Rust `bootstrap_app_state` command. Mirrors
  * `src-tauri/src/state/app_state.rs:AppState` field-for-field.
  */
 export interface AppStateWire {
   currentProject: Project | null;
   recentProjects: RecentProject[];
+  settings?: AppSettings;
   version: number;
 }
 
 interface ProjectState {
   currentProject: Project | null;
   recentProjects: RecentProject[];
+  settings: AppSettings;
   /** True until the Rust-side bootstrap returns. UI gates on this to keep
    *  the boot skeleton up rather than flashing an empty WelcomeScreen. */
   hydrated: boolean;
@@ -40,6 +56,7 @@ interface ProjectState {
     openProject: (path: string) => Promise<void>;
     closeProject: () => void;
     removeRecent: (path: string) => void;
+    updateSettings: (partial: Partial<AppSettings>) => void;
     /** One-shot hydration from Rust. Called once on app boot. */
     hydrate: (payload: AppStateWire) => void;
   };
@@ -56,6 +73,7 @@ function scheduleSave(state: ProjectState) {
     const payload: AppStateWire = {
       currentProject: state.currentProject,
       recentProjects: state.recentProjects,
+      settings: state.settings,
       version: 1,
     };
     invoke("save_app_state", { payload }).catch((e) =>
@@ -64,10 +82,23 @@ function scheduleSave(state: ProjectState) {
   }, 500);
 }
 
+/**
+ * Fire-and-forget: ensure the project's `.gitignore` contains `.atlas/`,
+ * gated on the user setting. Idempotent + silent — failures are logged
+ * but never bubble up to the UI.
+ */
+function maybeEnsureAtlasGitignore(path: string, settings: AppSettings): void {
+  if (!settings.autoAddAtlasGitignore) return;
+  invoke("ensure_atlas_gitignore", { projectPath: path }).catch((e) =>
+    console.warn("ensure_atlas_gitignore failed:", e),
+  );
+}
+
 export const useProjectStore = createSelectors(
   create<ProjectState>()((set, get) => ({
     currentProject: null,
     recentProjects: [],
+    settings: DEFAULT_SETTINGS,
     hydrated: false,
     actions: {
       openProject: async (path: string) => {
@@ -81,6 +112,9 @@ export const useProjectStore = createSelectors(
           ].slice(0, 5),
         }));
         scheduleSave(get());
+
+        // Idempotent + setting-gated. Safe to fire on every open.
+        maybeEnsureAtlasGitignore(path, get().settings);
 
         logEvent({
           source: "project",
@@ -115,6 +149,10 @@ export const useProjectStore = createSelectors(
         }));
         scheduleSave(get());
       },
+      updateSettings: (partial: Partial<AppSettings>) => {
+        set((s) => ({ settings: { ...s.settings, ...partial } }));
+        scheduleSave(get());
+      },
       hydrate: (payload: AppStateWire) => {
         // New windows always start fresh — same special case the previous
         // `onRehydrateStorage` handled. `?new` query param signals this.
@@ -123,9 +161,17 @@ export const useProjectStore = createSelectors(
           new URLSearchParams(window.location.search).has("new");
 
         const current = isNewWindow ? null : payload.currentProject;
+        // Merge with defaults so older state.json files (written before
+        // a new setting existed) get the modern default rather than
+        // `undefined` for newer fields.
+        const settings: AppSettings = {
+          ...DEFAULT_SETTINGS,
+          ...(payload.settings ?? {}),
+        };
         set({
           currentProject: current,
           recentProjects: payload.recentProjects ?? [],
+          settings,
           hydrated: true,
         });
 
@@ -137,6 +183,7 @@ export const useProjectStore = createSelectors(
         // `git log --all` is the slowest of the bunch.
         if (current) {
           const path = current.path;
+          maybeEnsureAtlasGitignore(path, settings);
           useExplorerStore.getState().actions.openFolder(path).catch(() => {});
           useLayoutStore.getState().actions.loadEditorState(path).catch(() => {});
           useAnalysisStore.getState().actions.analyzeProject(path).catch(() => {});

@@ -6,6 +6,9 @@ import { composePrompt, type MentionData } from "../lib/mentions";
 import { MessageInput } from "./message-input";
 import { SessionSidebar } from "./session-sidebar";
 import { PermissionModal } from "./permission-modal";
+import { ClaudeSetupBanner } from "@/features/claude-setup/components/claude-setup-banner";
+import { ClaudeLoginDialog } from "@/features/claude-setup/components/claude-login-dialog";
+import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 
 // Both panels are modal-style and never visible on first paint. Lazy so
 // they don't add to the initial chunk.
@@ -23,7 +26,8 @@ const ChatSearchPalette = lazy(() =>
 const MessagesList = lazy(() =>
   import("./messages-list").then((m) => ({ default: m.MessagesList }))
 );
-import { Sparkles, User, TerminalSquare, ListFilter, Search, Loader2 } from "lucide-react";
+import type { MessagesListHandle } from "./messages-list";
+import { Sparkles, User, TerminalSquare, ListFilter, Search, Loader2, ChevronDown } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
@@ -51,6 +55,13 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   const [bashPanelOpen, setBashPanelOpen] = useState(false);
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  // Scroll-to-bottom state is owned here so the floating button can live
+  // next to the Claude-setup pill above the input (instead of inside
+  // MessagesList). MessagesList publishes the "scrolled up" bit via
+  // `onShowJumpChange` and exposes `scrollToBottom` via its ref.
+  const messagesListRef = useRef<MessagesListHandle>(null);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
 
   const acpSessionId = session?.acpSessionId ?? "";
 
@@ -365,24 +376,28 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         ) : (
           <Suspense fallback={<LoadingTranscriptState />}>
             <MessagesList
+              ref={messagesListRef}
               tabId={tabId}
               acpSessionId={acpSessionId}
               messages={session.messages}
               roleFilter={roleFilter}
               isStreaming={session.status === "running"}
+              onShowJumpChange={setShowJumpToBottom}
             />
           </Suspense>
         )}
 
         <div className="relative">
-          {/* (The bottom fade lives inside MessagesList and is tied to the
-              same showJumpToBottom state as the floating "scroll to bottom"
-              button — no separate always-on fade here.) */}
-          <MessageInput
+          {/* Bottom fade lives in MessagesList; the centered floating
+              row (setup pill + scroll-to-bottom) lives inside
+              ChatComposer below. */}
+          <ChatComposer
             tabId={tabId}
             onSend={handleSend}
             onStop={handleStop}
             running={session.status === "running"}
+            showJumpToBottom={showJumpToBottom}
+            onScrollToBottom={() => messagesListRef.current?.scrollToBottom()}
           />
         </div>
       </div>
@@ -426,6 +441,93 @@ function LoadingTranscriptState() {
         <span>Loading transcript…</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * Composer wrapper: the setup banner + login dialog + the real `MessageInput`.
+ * Subscribes to the Claude-Code setup phase from `useClaudeSetupStore` and
+ * hard-disables the input when Claude isn't installed/authed so we don't
+ * surface confusing failures from inside the ACP spawn path.
+ */
+function ChatComposer({
+  tabId,
+  onSend,
+  onStop,
+  running,
+  showJumpToBottom,
+  onScrollToBottom,
+}: {
+  tabId: string;
+  onSend: (message: string, mentions: MentionData[]) => void;
+  onStop: () => void;
+  running: boolean;
+  showJumpToBottom: boolean;
+  onScrollToBottom: () => void;
+}) {
+  const phase = useClaudeSetupStore.use.phase();
+  const disabled = phase !== "ready";
+  const disabledReason =
+    phase === "not-installed"
+      ? "Install Claude Code to start chatting"
+      : phase === "not-authed"
+        ? "Sign in to Claude Code to start chatting"
+        : phase === "installing"
+          ? "Installing Claude Code…"
+          : phase === "authing"
+            ? "Finishing sign-in…"
+            : undefined;
+
+  const setupVisible = phase !== "ready";
+  const showRow = setupVisible || showJumpToBottom;
+
+  return (
+    <>
+      <div className="relative">
+        {/* Floating row above the composer. Pills are conditionally
+            rendered (each gets its own slide-up + fade-in animation
+            via `.atlas-pill-in`); when the row is empty it doesn't
+            paint at all so it never blocks pointer events. */}
+        {showRow && (
+          <div className="pointer-events-none absolute bottom-full inset-x-0 mb-2 z-20 flex justify-center">
+            <div className="pointer-events-auto flex items-center gap-2">
+              {setupVisible && (
+                <span key={`setup-${phase}`} className="atlas-pill-in">
+                  <ClaudeSetupBanner />
+                </span>
+              )}
+              {showJumpToBottom && (
+                <button
+                  key="jump-to-bottom"
+                  onClick={onScrollToBottom}
+                  title="Jump to latest"
+                  style={{ backdropFilter: "blur(4px)" }}
+                  className={cn(
+                    "atlas-pill-in inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full",
+                    "border border-[var(--border-default)] bg-[var(--bg-elevated)]",
+                    "text-[11px] leading-none font-medium text-[var(--text-secondary)]",
+                    "shadow-[0_2px_8px_rgba(0,0,0,0.35)] cursor-pointer transition-colors",
+                    "hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]",
+                  )}
+                >
+                  <ChevronDown size={11} />
+                  <span>Scroll to bottom</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        <MessageInput
+          tabId={tabId}
+          onSend={onSend}
+          onStop={onStop}
+          running={running}
+          disabled={disabled}
+          disabledReason={disabledReason}
+        />
+      </div>
+      <ClaudeLoginDialog />
+    </>
   );
 }
 

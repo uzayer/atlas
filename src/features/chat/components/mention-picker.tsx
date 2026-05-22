@@ -22,6 +22,16 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import {
+  BookOpen,
+  FileText,
+  Folder,
+  FolderGit2,
+  GitBranch,
+  Hash,
+  MessageSquare,
+  Newspaper,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 import {
@@ -394,8 +404,8 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
                             : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
                         )}
                       >
-                        <span className="opacity-75 w-4 text-center">
-                          {categoryGlyph(row.cat.kind)}
+                        <span className="opacity-75 w-4 flex items-center justify-center">
+                          <CategoryIcon kind={row.cat.kind} />
                         </span>
                         <span>{row.cat.label}</span>
                       </button>
@@ -422,7 +432,9 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
                         )}
                         title={row.session.filePath}
                       >
-                        <span className="opacity-75 w-4 text-center">📂</span>
+                        <span className="opacity-75 w-4 flex items-center justify-center">
+                          <MessageSquare size={11} />
+                        </span>
                         <span className="truncate flex-1 min-w-0">
                           {row.session.title}
                         </span>
@@ -453,8 +465,8 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
                       )}
                       title={mentionTitle(m)}
                     >
-                      <span className="opacity-75 w-4 text-center">
-                        {categoryGlyph(m.kind)}
+                      <span className="opacity-75 w-4 flex items-center justify-center">
+                        <CategoryIcon kind={m.kind} />
                       </span>
                       <span className="truncate min-w-0 flex-shrink-0">
                         {primaryLabel(m)}
@@ -525,16 +537,17 @@ function dirOf(rel: string): string {
   return idx > 0 ? rel.slice(0, idx) : "";
 }
 
-function categoryGlyph(kind: MentionKind): string {
+function CategoryIcon({ kind }: { kind: MentionKind }) {
+  const size = 11;
   switch (kind) {
-    case "file":         return "📄";
-    case "folder":       return "📁";
-    case "symbol":       return "⌬";
-    case "knowledge":    return "✦";
-    case "repo":         return "⎇";
-    case "paper":        return "📑";
-    case "branch":       return "⎇";
-    case "past_message": return "✉";
+    case "file":         return <FileText size={size} />;
+    case "folder":       return <Folder size={size} />;
+    case "symbol":       return <Hash size={size} />;
+    case "knowledge":    return <BookOpen size={size} />;
+    case "repo":         return <FolderGit2 size={size} />;
+    case "paper":        return <Newspaper size={size} />;
+    case "branch":       return <GitBranch size={size} />;
+    case "past_message": return <MessageSquare size={size} />;
   }
 }
 

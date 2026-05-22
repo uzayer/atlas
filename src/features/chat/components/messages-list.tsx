@@ -1,13 +1,14 @@
 import {
+  forwardRef,
   useRef,
   useState,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useCallback,
   useLayoutEffect,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDown } from "lucide-react";
 import type { ChatMessage } from "@/types/agent";
 import { MessageItem } from "./message-item";
 import { cn } from "@/lib/utils";
@@ -18,19 +19,33 @@ interface MessagesListProps {
   messages: ChatMessage[];
   roleFilter: "all" | "user" | "assistant";
   isStreaming: boolean;
+  /** Bubble up the "scrolled-up" state so the parent can render a
+   *  centered scroll-to-bottom button alongside the Claude-setup pill. */
+  onShowJumpChange?: (visible: boolean) => void;
+}
+
+/** Imperative handle exposed via `ref` — parent calls `scrollToBottom`
+ *  when the user clicks the floating button it now owns. */
+export interface MessagesListHandle {
+  scrollToBottom: () => void;
 }
 
 // Persist scroll position per (tab, on-disk-session) across remounts.
 const scrollPositionCache = new Map<string, number>();
 const NEAR_BOTTOM_PX = 100;
 
-export function MessagesList({
-  tabId,
-  acpSessionId,
-  messages,
-  roleFilter,
-  isStreaming,
-}: MessagesListProps) {
+export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
+  function MessagesList(
+    {
+      tabId,
+      acpSessionId,
+      messages,
+      roleFilter,
+      isStreaming,
+      onShowJumpChange,
+    },
+    ref,
+  ) {
   const streamingId =
     isStreaming && messages.length > 0 && messages[messages.length - 1].role === "assistant"
       ? messages[messages.length - 1].id
@@ -82,7 +97,10 @@ export function MessagesList({
     }
   }, [cacheKey]);
 
-  // Save scroll continuously + on unmount.
+  // Save scroll continuously + on unmount. Publishes the "scrolled up"
+  // bit to the parent via `onShowJumpChange` so the chat composer can
+  // render the scroll-to-bottom pill centered alongside the Claude
+  // setup pill (the parent owns the floating row above the input now).
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   useEffect(() => {
     const el = parentRef.current;
@@ -100,6 +118,19 @@ export function MessagesList({
     };
   }, [cacheKey]);
 
+  useEffect(() => {
+    onShowJumpChange?.(showJumpToBottom);
+  }, [showJumpToBottom, onShowJumpChange]);
+
+  // When this list unmounts (tab close, project change), make sure the
+  // parent's "scrolled up" bit doesn't get stuck at `true`.
+  useEffect(() => {
+    return () => {
+      onShowJumpChange?.(false);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auto-follow new messages only when already near bottom.
   const prevLenRef = useRef(filtered.length);
   useEffect(() => {
@@ -114,10 +145,46 @@ export function MessagesList({
     }
   }, [filtered.length, virtualizer]);
 
+  // Auto-follow STREAMING content. The effect above only fires when a new
+  // message is appended; during a streaming turn the agent mutates the
+  // trailing message's `content` / `thinking` / `toolCalls` without
+  // changing `filtered.length`, so we'd be left behind. Depend on those
+  // three signals explicitly. Still gated on near-bottom so users who
+  // scrolled up to read aren't yanked back down.
+  const trailing = filtered[filtered.length - 1];
+  const trailingContentLen = trailing?.content.length ?? 0;
+  const trailingThinkingLen = trailing?.thinking?.length ?? 0;
+  const trailingToolCount = trailing?.toolCalls.length ?? 0;
+  useEffect(() => {
+    if (!isStreaming) return;
+    if (filtered.length === 0) return;
+    const el = parentRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distance <= NEAR_BOTTOM_PX) {
+      virtualizer.scrollToIndex(filtered.length - 1, { align: "end" });
+    }
+  }, [
+    isStreaming,
+    trailingContentLen,
+    trailingThinkingLen,
+    trailingToolCount,
+    filtered.length,
+    virtualizer,
+  ]);
+
   const scrollToBottom = useCallback(() => {
     if (filtered.length === 0) return;
     virtualizer.scrollToIndex(filtered.length - 1, { align: "end" });
   }, [filtered.length, virtualizer]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      scrollToBottom,
+    }),
+    [scrollToBottom],
+  );
 
   const jumpToMessage = useCallback(
     (originalIndex: number) => {
@@ -202,9 +269,10 @@ export function MessagesList({
         )}
       </div>
 
-      {/* Bottom fade + scroll-to-bottom button. Both are gated on the same
-          showJumpToBottom flag and crossfade together so the fade never
-          lingers without the affordance, and there's no abrupt pop-in. */}
+      {/* Bottom fade — visual cue that there's more content below the
+          fold. Gated on the same `showJumpToBottom` bit we publish to
+          the parent so the fade and the (now parent-owned) scroll
+          button crossfade together. */}
       <div
         aria-hidden
         className={cn(
@@ -216,26 +284,7 @@ export function MessagesList({
             "linear-gradient(to bottom, transparent, var(--bg-surface))",
         }}
       />
-      <button
-        onClick={scrollToBottom}
-        tabIndex={showJumpToBottom ? 0 : -1}
-        aria-hidden={!showJumpToBottom}
-        className={cn(
-          "absolute bottom-1 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3 h-7 rounded-full border border-[var(--border-default)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] shadow-[0_6px_16px_rgba(0,0,0,0.5)] cursor-pointer transition-[opacity,transform,background-color,color] duration-200",
-          showJumpToBottom
-            ? "opacity-100 translate-y-0 pointer-events-auto"
-            : "opacity-0 translate-y-1 pointer-events-none"
-        )}
-        title="Jump to latest"
-        style={{ backdropFilter: "blur(4px)" }}
-      >
-        <ChevronDownIcon />
-        Scroll to bottom
-      </button>
     </div>
   );
-}
+});
 
-function ChevronDownIcon() {
-  return <ArrowDown size={11} />;
-}
