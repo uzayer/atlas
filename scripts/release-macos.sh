@@ -113,11 +113,11 @@ if [[ "${UNIVERSAL}" == "1" ]]; then
   # target before tauri intercepts.
   log "Universal build — arm64 first"
   rm -rf "src-tauri/target/aarch64-apple-darwin/release/bundle"
-  bun run tauri build -- --target aarch64-apple-darwin
+  bun run tauri build --target aarch64-apple-darwin
 
   log "Universal build — x86_64 next"
   rm -rf "src-tauri/target/x86_64-apple-darwin/release/bundle"
-  bun run tauri build -- --target x86_64-apple-darwin
+  bun run tauri build --target x86_64-apple-darwin
 
   log "lipo'ing into a fat .app"
   ARM_APP="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Atlas.app"
@@ -177,7 +177,7 @@ else
   # notarized, stapled .app from Tauri; the DMG is then built manually
   # with hdiutil — same path the UNIVERSAL=1 branch uses.
   log "Building Atlas for ${TARGET} (.app only — Tauri's DMG packager is skipped)"
-  bun run tauri build -- --target "${TARGET}" --bundles app
+  bun run tauri build --target "${TARGET}" --bundles app
 
   APP_PATH="${BUNDLE_ROOT}/macos/Atlas.app"
   if [[ ! -d "${APP_PATH}" ]]; then

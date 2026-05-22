@@ -27,7 +27,31 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 255)));
+                // Transparent NSWindow + NSVisualEffectView blur. Combined
+                // with `macos-private-api`, this propagates a transparent
+                // background to the WKWebView's content NSView, so the
+                // brief gap between window-shown and first React paint
+                // shows a dark macOS material instead of the WebKit
+                // default white. Mirrors Athas's
+                // `src-tauri/src/commands/ui/window.rs:157-176` pattern.
+                let _ = window
+                    .set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+
+                #[cfg(target_os = "macos")]
+                {
+                    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                    if let Err(e) = apply_vibrancy(
+                        &window,
+                        NSVisualEffectMaterial::HudWindow,
+                        None,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            target: "atlas::boot",
+                            "apply_vibrancy failed: {e}"
+                        );
+                    }
+                }
             }
             // Pre-load the Rust-owned `AppState` (currentProject + recents)
             // before the webview starts loading — paid in parallel with the

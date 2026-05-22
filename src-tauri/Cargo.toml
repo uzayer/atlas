@@ -1,6 +1,6 @@
 [package]
 name = "atlas"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [lib]
@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 # builds regardless of this feature. Add `devtools` back here only if you
 # need to debug a production-only issue and accept the binary-size and
 # attack-surface cost.
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
 # Plugin selection — only what JS actually invokes is kept. The Atlas
 # Rust command surface does all its own fs/shell/http work via the std,
 # reqwest, etc. directly; the JS side only touches: `dialog` (Open
@@ -54,6 +54,12 @@ parking_lot = "0.12"
 # startup-allocation-heavy hot path. `default-features = false` strips
 # secure-mode + override hooks we don't need.
 mimalloc = { version = "0.1", default-features = false }
+# Window vibrancy / NSVisualEffectView wrapper. Used in `lib.rs::run`'s
+# setup closure to apply a dark macOS blur material as the window's
+# backdrop. Combined with the `macos-private-api` Tauri feature this kills
+# the cold-launch white flash by making the WKWebView transparent over a
+# blurred dark surface from frame one.
+window-vibrancy = "0.6"
 
 # Release profile — Atlas previously shipped with Cargo defaults
 # (lto = false, codegen-units = 16, no strip), which means the bundled .app

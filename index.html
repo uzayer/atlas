@@ -1,13 +1,21 @@
 <!doctype html>
-<html lang="en" style="background:#000;color-scheme:dark">
+<html lang="en" style="background:transparent;color-scheme:dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Atlas</title>
     <style>
+      /* html / body / #root are transparent so the NSVisualEffectView blur
+         applied in `src-tauri/src/lib.rs` is visible during the brief
+         window between the OS showing the window and React's first paint.
+         Without this the WKWebView's default opaque-white background sits
+         on top of our blurred window and we see a white flash.
+         The boot skeleton (`.atlas-boot`) is opaque #050505 and the real
+         app's `AppLayout` is opaque `bg-bg-base`, so the vibrancy is
+         only ever visible for that brief pre-paint moment. */
       html, body, #root {
-        background: #000;
+        background: transparent;
         margin: 0;
         padding: 0;
         height: 100%;

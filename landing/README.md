@@ -85,16 +85,16 @@ Three external links live in `index.html`. Search by tag to find them:
 | X / Twitter       | footer                 | `https://x.com/antarys_ai` |
 | LinkedIn          | footer                 | `https://www.linkedin.com/company/107506241/` |
 | ACP docs          | "Read the ACP docs" button | `https://github.com/zed-industries/agent-client-protocol` |
-| Download for Mac  | nav, hero, CTA-section | `https://github.com/pacifio/atlas/releases/download/alpha-0.1.0/Atlas_0.1.0_aarch64.dmg` |
+| Download for Mac  | nav, hero, CTA-section | `https://github.com/pacifio/atlas/releases/download/alpha-0.1.2/Atlas_0.1.2_aarch64.dmg` |
 
-The download URL is hard-coded to the alpha-0.1.0 GitHub Release asset.
+The download URL is hard-coded to the alpha-0.1.2 GitHub Release asset.
 When you cut a new release, update the version label + URL in three
 places: the nav "Download" button, the hero "Download for Mac" button,
 and the bottom CTA "Download for Mac" button. Easiest:
 
 ```bash
 # replace the URL across all three
-sed -i '' 's|alpha-0.1.0/Atlas_0.1.0_aarch64.dmg|alpha-0.2.0/Atlas_0.2.0_aarch64.dmg|g' landing/index.html
+sed -i '' 's|alpha-0.1.2/Atlas_0.1.2_aarch64.dmg|alpha-0.2.0/Atlas_0.2.0_aarch64.dmg|g' landing/index.html
 # then update the version label in two cta-tiny / hero-meta lines
 sed -i '' 's|v0.1.0|v0.2.0|g' landing/index.html
 ```
