@@ -1,14 +1,25 @@
 mod commands;
+mod logging;
+mod state;
+
+use std::sync::Arc;
 
 use atlas_acp::AgentRegistry;
 use commands::claude::ClaudeSessionIndex;
 use commands::fileindex::FileIndexState;
+use commands::papers::SavedPapersIndex;
 use commands::sessions_watch::SessionsWatchState;
 use commands::terminal::TerminalState;
+use parking_lot::Mutex;
+use state::{AppState, AppStateHandle};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install a tracing subscriber that prints `tracing::info!` etc. to
+    // stderr. Verbosity is controlled by `RUST_LOG`; see `logging.rs`.
+    logging::init();
+
     // Strip CLAUDECODE so child ACP agents (canonical claude-code-acp) don't
     // refuse to start when Atlas was launched from a parent Claude Code shell.
     atlas_acp::sanitize_host_env();
@@ -18,24 +29,23 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 255)));
             }
+            // Pre-load the Rust-owned `AppState` (currentProject + recents)
+            // before the webview starts loading — paid in parallel with the
+            // WebView framework init, ~1ms on warm cache.
+            let app_state: AppStateHandle = Arc::new(Mutex::new(AppState::load(&app.handle())));
+            app.manage(app_state);
             commands::agents::install_manager(&app.handle());
             Ok(())
         })
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
-        .plugin(tauri_plugin_http::init())
         .manage(TerminalState::new())
         .manage(AgentRegistry::new())
         .manage(FileIndexState::new())
         .manage(SessionsWatchState::new())
         .manage(ClaudeSessionIndex::new())
+        .manage(SavedPapersIndex::new())
         .invoke_handler(tauri::generate_handler![
             commands::terminal::terminal_create,
             commands::terminal::terminal_write,
@@ -92,6 +102,8 @@ pub fn run() {
             commands::log::append_pinned_log,
             commands::log::clear_pinned_log,
             commands::log::rewrite_pinned_log,
+            commands::app_state::bootstrap_app_state,
+            commands::app_state::save_app_state,
             commands::agents::agents_list_plugins,
             commands::agents::agents_list_running,
             commands::agents::agents_spawn,
@@ -107,10 +119,12 @@ pub fn run() {
             commands::fileindex::fileindex_open_project,
             commands::fileindex::fileindex_close_project,
             commands::fileindex::fileindex_search,
+            commands::fileindex::fileindex_search_dirs,
             commands::fileindex::fileindex_status,
             commands::sessions_watch::sessions_watch_open,
             commands::sessions_watch::sessions_watch_close,
             commands::sessions_watch::sessions_watch_status,
+            commands::papers::list_saved_papers,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas");

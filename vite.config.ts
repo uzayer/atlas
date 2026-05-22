@@ -33,6 +33,33 @@ export default defineConfig(async () => ({
     ],
   },
   clearScreen: false,
+  // Pre-bundle the heavy dependency graphs into single ESM files served as
+  // one request, instead of letting Vite's dev server stream hundreds of
+  // tiny `node_modules/...` modules over individual HTTP roundtrips. The
+  // single biggest dev-mode startup speedup — `tauri dev` cold launch goes
+  // from "8 s to open devtools" territory down to a couple of seconds
+  // because the WebKit main thread isn't blocked on per-module fetches.
+  // Production builds ignore this; it's purely a dev-mode optimization.
+  optimizeDeps: {
+    include: [
+      "@codemirror/state",
+      "@codemirror/view",
+      "@codemirror/language",
+      "@codemirror/commands",
+      "@codemirror/autocomplete",
+      "@codemirror/search",
+      "@lezer/common",
+      "@lezer/highlight",
+      "@lezer/lr",
+      "react-markdown",
+      "remark-gfm",
+      "rehype-highlight",
+      "@radix-ui/react-dropdown-menu",
+      "@radix-ui/react-popover",
+      "@radix-ui/react-dialog",
+      "@radix-ui/react-context-menu",
+    ],
+  },
   build: {
     // Vendor splitting so the initial chunk only holds what first paint
     // needs (React + the chat panel). Heavy panel-specific vendors live in
@@ -91,6 +118,32 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       ignored: ["**/src-tauri/**"],
+    },
+    // Pre-transform the boot critical-path the moment `tauri dev` starts the
+    // Vite server. Without this, Vite transforms each user-source module on
+    // first request, which on a 2400-module project shows up as a ~1.5 s
+    // "html → main-eval" gap on cold launch. Warmup hits the cache so the
+    // WebView's first request finds the module already transformed.
+    warmup: {
+      clientFiles: [
+        "./src/main.tsx",
+        "./src/App.tsx",
+        "./src/styles/globals.css",
+        "./src/features/layout/components/app-layout.tsx",
+        "./src/features/layout/components/center-panel.tsx",
+        "./src/features/layout/components/left-panel.tsx",
+        "./src/features/layout/components/right-panel.tsx",
+        "./src/features/layout/stores/layout-store.ts",
+        "./src/features/project/stores/project-store.ts",
+        "./src/features/project/components/welcome-screen.tsx",
+        "./src/features/chat/components/chat-panel.tsx",
+        "./src/features/chat/components/message-input.tsx",
+        "./src/features/chat/stores/chat-store.ts",
+        "./src/features/chat/lib/agents-api.ts",
+        "./src/components/titlebar.tsx",
+        "./src/components/command-palette.tsx",
+        "./src/components/atlas-icon.tsx",
+      ],
     },
   },
 }));

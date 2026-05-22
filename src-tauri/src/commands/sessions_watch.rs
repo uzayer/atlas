@@ -51,8 +51,12 @@ pub struct WatchStatus {
 /// Open (or replace) the per-cwd watcher. Idempotent for the same cwd: if
 /// we're already watching this directory we don't recreate the watcher,
 /// which would otherwise drop and rebuild the OS handle for a no-op.
+/// Async + spawn_blocking for the same reason as `fileindex_open_project`:
+/// the `notify` debouncer creation involves FSEvents (macOS) / inotify
+/// (Linux) syscalls and an initial subtree scan, which would otherwise run
+/// on the NSApp main thread and contribute to the project-open beachball.
 #[tauri::command]
-pub fn sessions_watch_open(
+pub async fn sessions_watch_open(
     cwd: String,
     app: AppHandle,
     state: State<'_, SessionsWatchState>,
@@ -75,52 +79,54 @@ pub fn sessions_watch_open(
         return Err("could not resolve ~/.claude/projects".into());
     };
 
-    // Make sure the folder exists before trying to watch it — claude-code
-    // doesn't create the cwd's project dir until the first session writes
-    // a JSONL, so a brand-new project will hit this path empty. Create it
-    // upfront so the watcher has a target.
-    if !folder.exists() {
-        if let Err(e) = std::fs::create_dir_all(&folder) {
-            return Err(format!(
-                "could not create {}: {e}",
-                folder.display()
-            ));
-        }
-    }
-
-    let app_for_watch = app.clone();
-    let cwd_for_watch = cwd.clone();
-    let folder_for_log = folder.clone();
-
-    let mut debouncer = new_debouncer(
-        Duration::from_millis(250),
-        None,
-        move |result: notify_debouncer_full::DebounceEventResult| match result {
-            Ok(_events) => {
-                // Don't try to be precise about what changed — the sidebar
-                // already does the full listing on demand. The event is
-                // purely a "something moved, refetch now" notification.
-                if let Err(e) = app_for_watch.emit(
-                    "atlas:sessions-changed",
-                    serde_json::json!({ "cwd": &cwd_for_watch }),
-                ) {
-                    tracing::warn!(target: "atlas::sessions_watch", "emit failed: {e}");
-                }
-            }
-            Err(errors) => {
-                for e in errors {
-                    tracing::warn!(target: "atlas::sessions_watch", "watch error: {e}");
-                }
-            }
-        },
-    )
-    .map_err(|e| format!("failed to create watcher: {e}"))?;
-
-    debouncer
-        .watch(&folder, RecursiveMode::NonRecursive)
-        .map_err(|e| format!("failed to watch {}: {e}", folder_for_log.display()))?;
-
+    // `create_dir_all` + watcher creation move off the main thread.
+    let folder_for_task = folder.clone();
+    let app_for_task = app.clone();
+    let cwd_for_task = cwd.clone();
     let folder_str = folder.to_string_lossy().into_owned();
+    let debouncer = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        // claude-code doesn't create the cwd's project dir until the first
+        // session writes a JSONL, so a brand-new project hits this path
+        // empty. Create it upfront so the watcher has a target.
+        if !folder_for_task.exists() {
+            std::fs::create_dir_all(&folder_for_task)
+                .map_err(|e| format!("could not create {}: {e}", folder_for_task.display()))?;
+        }
+
+        let app_for_watch = app_for_task.clone();
+        let cwd_for_watch = cwd_for_task.clone();
+        let folder_for_log = folder_for_task.clone();
+
+        let mut debouncer = new_debouncer(
+            Duration::from_millis(250),
+            None,
+            move |result: notify_debouncer_full::DebounceEventResult| match result {
+                Ok(_events) => {
+                    if let Err(e) = app_for_watch.emit(
+                        "atlas:sessions-changed",
+                        serde_json::json!({ "cwd": &cwd_for_watch }),
+                    ) {
+                        tracing::warn!(target: "atlas::sessions_watch", "emit failed: {e}");
+                    }
+                }
+                Err(errors) => {
+                    for e in errors {
+                        tracing::warn!(target: "atlas::sessions_watch", "watch error: {e}");
+                    }
+                }
+            },
+        )
+        .map_err(|e| format!("failed to create watcher: {e}"))?;
+
+        debouncer
+            .watch(&folder_for_task, RecursiveMode::NonRecursive)
+            .map_err(|e| format!("failed to watch {}: {e}", folder_for_log.display()))?;
+
+        Ok(debouncer)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
     *state.current.lock() = Some(WatchHandle {
         cwd: cwd.clone(),
         _debouncer: debouncer,

@@ -58,10 +58,17 @@ impl FileIndexState {
 }
 
 /// Open (or replace) the indexed project. Returns once the initial walk
-/// completes — for very large repos this can take a moment, but everything
-/// after is incremental.
+/// completes — for very large repos this can take a moment (multi-second on
+/// huge monorepos with deep .gitignore trees), but everything after is
+/// incremental.
+///
+/// **Async + `spawn_blocking`**: the recursive walk and the macOS FSEvents
+/// stream creation both block. A sync `#[tauri::command]` would run them on
+/// the NSApp main thread and produce a 2–3 s beachball during project open.
+/// We move the work onto tokio's blocking pool and only write back to the
+/// shared `State` once the heavy lifting is done.
 #[tauri::command]
-pub fn fileindex_open_project(
+pub async fn fileindex_open_project(
     path: String,
     app: AppHandle,
     state: State<'_, FileIndexState>,
@@ -71,40 +78,55 @@ pub fn fileindex_open_project(
         return Err(format!("not a directory: {path}"));
     }
 
-    let files = Arc::new(RwLock::new(walk_project(&root)));
-    let count = files.read().len();
+    // Off the main thread: walk the tree AND build the watcher. Watcher
+    // creation isn't free on macOS — FSEvents does an initial scan of the
+    // path tree before returning a stream handle.
+    let root_for_task = root.clone();
+    let app_for_task = app.clone();
+    let (files, debouncer): (
+        Arc<RwLock<Vec<IndexedFile>>>,
+        notify_debouncer_full::Debouncer<
+            notify::RecommendedWatcher,
+            notify_debouncer_full::RecommendedCache,
+        >,
+    ) = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let walked = walk_project(&root_for_task);
+        let files = Arc::new(RwLock::new(walked));
 
-    // Wire a debounced watcher. notify-debouncer-full batches rapid changes
-    // (e.g. git checkout flipping 1000 files) into a single tick so we don't
-    // thrash the index.
-    let files_for_watch = files.clone();
-    let root_for_watch = root.clone();
-    let app_for_watch = app.clone();
+        let files_for_watch = files.clone();
+        let root_for_watch = root_for_task.clone();
+        let app_for_watch = app_for_task.clone();
 
-    let mut debouncer = new_debouncer(
-        Duration::from_millis(150),
-        None,
-        move |result: notify_debouncer_full::DebounceEventResult| match result {
-            Ok(events) => {
-                apply_events(&root_for_watch, &files_for_watch, events);
-                let _ = app_for_watch.emit(
-                    "atlas:fileindex:updated",
-                    serde_json::json!({ "count": files_for_watch.read().len() }),
-                );
-            }
-            Err(errors) => {
-                for e in errors {
-                    tracing::warn!("file watch error: {e}");
+        let mut debouncer = new_debouncer(
+            Duration::from_millis(150),
+            None,
+            move |result: notify_debouncer_full::DebounceEventResult| match result {
+                Ok(events) => {
+                    apply_events(&root_for_watch, &files_for_watch, events);
+                    let _ = app_for_watch.emit(
+                        "atlas:fileindex:updated",
+                        serde_json::json!({ "count": files_for_watch.read().len() }),
+                    );
                 }
-            }
-        },
-    )
-    .map_err(|e| format!("failed to create watcher: {e}"))?;
+                Err(errors) => {
+                    for e in errors {
+                        tracing::warn!("file watch error: {e}");
+                    }
+                }
+            },
+        )
+        .map_err(|e| format!("failed to create watcher: {e}"))?;
 
-    debouncer
-        .watch(&root, RecursiveMode::Recursive)
-        .map_err(|e| format!("failed to watch {}: {e}", root.display()))?;
+        debouncer
+            .watch(&root_for_task, RecursiveMode::Recursive)
+            .map_err(|e| format!("failed to watch {}: {e}", root_for_task.display()))?;
 
+        Ok((files, debouncer))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let count = files.read().len();
     *state.current.write() = Some(ProjectIndex {
         root,
         files,
@@ -140,6 +162,83 @@ pub fn fileindex_status(state: State<'_, FileIndexState>) -> FileIndexStatus {
             root: None,
         },
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FolderMatch {
+    pub path: String,
+    pub rel: String,
+}
+
+/// Fuzzy-search the project for **directories**. Derived on-demand from the
+/// file index's parent paths — no separate directory walk or watcher. The
+/// derivation is O(files), which is fine for the few-thousand-file
+/// projects Atlas targets; if it ever becomes a hot path, cache the
+/// derived set inside `ProjectIndex`.
+#[tauri::command]
+pub fn fileindex_search_dirs(
+    query: String,
+    limit: usize,
+    state: State<'_, FileIndexState>,
+) -> Vec<FolderMatch> {
+    let snapshot: Option<(Vec<IndexedFile>, PathBuf)> = {
+        let guard = state.current.read();
+        guard.as_ref().map(|p| (p.files.read().clone(), p.root.clone()))
+    };
+    let Some((files, root)) = snapshot else {
+        return Vec::new();
+    };
+
+    // Collect unique parent directories, in first-seen order. We walk each
+    // file's `rel` up to (but not including) the project root.
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut folders: Vec<(String, PathBuf)> = Vec::new();
+    for f in &files {
+        let mut cur = Path::new(&f.rel).parent();
+        while let Some(p) = cur {
+            let rel = p.to_string_lossy();
+            if rel.is_empty() {
+                break;
+            }
+            let rel = rel.into_owned();
+            if seen.insert(rel.clone()) {
+                folders.push((rel, root.join(p)));
+            }
+            cur = p.parent();
+        }
+    }
+
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return folders
+            .into_iter()
+            .take(limit.max(1))
+            .map(|(rel, abs)| FolderMatch {
+                path: abs.to_string_lossy().into_owned(),
+                rel,
+            })
+            .collect();
+    }
+
+    let mut matcher = Matcher::default();
+    let pattern = Pattern::parse(trimmed, CaseMatching::Smart, Normalization::Smart);
+    let mut scored: Vec<(u32, (String, PathBuf))> = folders
+        .into_iter()
+        .filter_map(|(rel, abs)| {
+            pattern
+                .score(nucleo_matcher::Utf32Str::Ascii(rel.as_bytes()), &mut matcher)
+                .map(|score| (score, (rel, abs)))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored
+        .into_iter()
+        .take(limit.max(1))
+        .map(|(_, (rel, abs))| FolderMatch {
+            path: abs.to_string_lossy().into_owned(),
+            rel,
+        })
+        .collect()
 }
 
 /// Fuzzy-search the index. Empty query returns the first `limit` entries —

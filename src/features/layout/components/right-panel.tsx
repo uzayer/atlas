@@ -1,11 +1,37 @@
+import { lazy, Suspense } from "react";
 import { cn } from "@/lib/utils";
 import { useLayoutStore } from "../stores/layout-store";
-import { ExplorePanel } from "@/features/analysis/components/explore-panel";
-import { AnalysisPanel } from "@/features/analysis/components/analysis-panel";
-import { ChangesPanel } from "@/features/git/components/changes-panel";
-import { GithubPanel } from "@/features/github/components/github-panel";
 import { ScrollArea } from "@/ui/scroll-area";
+import { PanelSkeleton } from "@/components/panel-skeleton";
 import { BarChart3, Sparkles, GitCompare, Github } from "lucide-react";
+
+// All four right-panel sub-panels are lazy so they don't run their first
+// invokes / vendor parses during the boot-cascade window. The user lands
+// on a project, sees the tab bar + skeleton instantly, and the data slides
+// in as each chunk + IPC resolves. `ChangesPanel` in particular pulls in
+// `@tanstack/react-virtual` and parses git diff text that can be large on
+// active branches — keeping it lazy stops the right panel from blocking
+// the post-`hydrate` render.
+const ChangesPanel = lazy(() =>
+  import("@/features/git/components/changes-panel").then((m) => ({
+    default: m.ChangesPanel,
+  }))
+);
+const AnalysisPanel = lazy(() =>
+  import("@/features/analysis/components/analysis-panel").then((m) => ({
+    default: m.AnalysisPanel,
+  }))
+);
+const ExplorePanel = lazy(() =>
+  import("@/features/analysis/components/explore-panel").then((m) => ({
+    default: m.ExplorePanel,
+  }))
+);
+const GithubPanel = lazy(() =>
+  import("@/features/github/components/github-panel").then((m) => ({
+    default: m.GithubPanel,
+  }))
+);
 
 const sections = [
   { id: "changes" as const, label: "Changes", icon: GitCompare },
@@ -39,14 +65,30 @@ export function RightPanel() {
       </div>
 
       <div className="flex-1 min-h-0 overflow-auto hide-scrollbar">
-        {activeSection === "changes" && <ChangesPanel />}
-        {activeSection === "explore" && (
-          <ScrollArea className="h-full p-2">
-            <ExplorePanel />
-          </ScrollArea>
-        )}
-        {activeSection === "analysis" && <AnalysisPanel />}
-        {activeSection === "github" && <GithubPanel />}
+        <Suspense
+          fallback={
+            <PanelSkeleton
+              label={
+                activeSection === "changes"
+                  ? "Loading changes…"
+                  : activeSection === "analysis"
+                    ? "Loading analysis…"
+                    : activeSection === "explore"
+                      ? "Loading explore…"
+                      : "Loading…"
+              }
+            />
+          }
+        >
+          {activeSection === "changes" && <ChangesPanel />}
+          {activeSection === "explore" && (
+            <ScrollArea className="h-full p-2">
+              <ExplorePanel />
+            </ScrollArea>
+          )}
+          {activeSection === "analysis" && <AnalysisPanel />}
+          {activeSection === "github" && <GithubPanel />}
+        </Suspense>
       </div>
     </div>
   );

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- ── Hardened Runtime exceptions ─────────────────────────────────────
+         Atlas embeds a WKWebView (CodeMirror, React UI) and spawns
+         subprocesses (npx → claude-code-acp, git, ripgrep). These keys
+         relax the Hardened Runtime just enough for those flows. Anything
+         not listed here remains locked down — keep this file minimal.
+    -->
+
+    <!-- WebKit needs JIT for V8 + arbitrary executable mappings. Without
+         these the WebView crashes on first page load. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- npx/node + the canonical claude-code-acp ship some unsigned
+         dylibs that node loads at runtime. Without disabling library
+         validation those subprocess loads fail and the agent never spawns. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- ACP agents and research providers (arxiv, semantic-scholar) need
+         outbound HTTP. Local Tauri IPC also benefits from network.server. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- File picker / project open / drag-and-drop. The user-selected
+         entitlement is enough — Atlas never reaches outside paths the
+         user explicitly grants access to. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- Lets us pass PATH / HOME / NODE_PATH down to child agent
+         processes — required for `sanitize_host_env()` in atlas-acp to
+         enrich PATH before spawning the claude-code-acp subprocess. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

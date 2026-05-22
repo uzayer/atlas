@@ -6,6 +6,7 @@ import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { InboxPanel } from "@/features/chat/components/inbox-panel";
 import { ChevronDown, Folder, FolderOpen, X, PanelLeft, PanelRight, Plus, Search, Inbox } from "lucide-react";
+import { cn } from "@/lib/utils";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
 
 function useTauriWindow() {
@@ -199,15 +200,17 @@ function NotificationButton() {
         >
           <Inbox size={14} />
           {badgeCount > 0 && (
+            // Presence dot, not a count badge. Positioned just above the
+            // icon's top-right corner so it reads as "there's something
+            // here" without obscuring the inbox glyph. The ring matches the
+            // titlebar background so the dot looks detached on hover too.
             <span
-              className={`absolute top-1 right-1 min-w-[10px] h-[10px] rounded-full text-[8px] font-bold flex items-center justify-center px-1 ${
-                errorCount > 0
-                  ? "bg-[var(--status-error)] text-white"
-                  : "bg-[var(--accent-primary)] text-white"
-              }`}
-            >
-              {badgeCount}
-            </span>
+              className={cn(
+                "absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full ring-1 ring-[#000] pointer-events-none",
+                errorCount > 0 ? "bg-[var(--status-error)]" : "bg-white"
+              )}
+              aria-label={`${badgeCount} active`}
+            />
           )}
         </button>
       </Popover.Trigger>

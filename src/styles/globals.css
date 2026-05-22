@@ -133,8 +133,10 @@
   white-space: nowrap;
 }
 .atlas-mention-chip[data-mention-kind="file"]         { color: var(--accent-primary); }
+.atlas-mention-chip[data-mention-kind="folder"]       { color: var(--accent-primary); }
 .atlas-mention-chip[data-mention-kind="symbol"]       { color: var(--status-success); }
 .atlas-mention-chip[data-mention-kind="knowledge"]    { color: var(--accent-primary); }
+.atlas-mention-chip[data-mention-kind="repo"]         { color: var(--status-success); }
 .atlas-mention-chip[data-mention-kind="paper"]        { color: var(--status-warning); }
 .atlas-mention-chip[data-mention-kind="branch"]       { color: var(--text-secondary); }
 .atlas-mention-chip[data-mention-kind="past_message"] { color: var(--text-secondary); }

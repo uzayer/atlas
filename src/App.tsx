@@ -1,48 +1,90 @@
-import { useState, useEffect, useRef } from "react";
+import { startTransition, useState, useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { AppLayout } from "@/features/layout/components/app-layout";
 import { AppContextMenu } from "@/components/app-context-menu";
 import { CommandPalette } from "@/components/command-palette";
 import { SearchOverlay } from "@/components/search-overlay";
 import { useHotkeys } from "@/hooks/use-hotkey";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
-import { useProjectStore } from "@/features/project/stores/project-store";
+import {
+  useProjectStore,
+  type AppStateWire,
+} from "@/features/project/stores/project-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import {
-  ensureDefaultAgent,
   listenAgents,
   resetDefaultAgent,
 } from "@/features/chat/lib/agents-api";
 import type { PendingPermission } from "@/types/acp";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
+import { useRecentFilesStore } from "@/features/chat/stores/recent-files-store";
 import { Toaster } from "sonner";
 
-// `requestIdleCallback` isn't in lib.dom yet in all TS configurations and
-// isn't implemented on Safari/WebKit (which Tauri uses on macOS). Fall back
-// to a generous setTimeout — the exact value doesn't matter as long as it's
-// after first paint.
-type IdleHandle = number;
-function scheduleIdle(fn: () => void): IdleHandle {
-  const w = window as unknown as {
-    requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-  };
-  if (typeof w.requestIdleCallback === "function") {
-    return w.requestIdleCallback(fn, { timeout: 2000 });
-  }
-  return window.setTimeout(fn, 300) as unknown as IdleHandle;
-}
-function cancelIdle(handle: IdleHandle): void {
-  const w = window as unknown as {
-    cancelIdleCallback?: (h: number) => void;
-  };
-  if (typeof w.cancelIdleCallback === "function") {
-    w.cancelIdleCallback(handle);
-    return;
-  }
-  window.clearTimeout(handle);
-}
-
 export function App() {
+  // Alpha-only: nuke any legacy WebView storage. Nothing in the current
+  // codebase reads from localStorage / sessionStorage — the only entries
+  // are stale dust from previous zustand-persist builds. Wiping on every
+  // boot keeps the WebView storage budget zero. Remove this once we have
+  // real users to worry about.
+  useEffect(() => {
+    try {
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+    } catch {
+      // ignore — some WebView sandboxes refuse storage access
+    }
+  }, []);
+
+  // One-shot bootstrap of the Rust-owned `AppState` (currentProject +
+  // recentProjects). Replaces the zustand `persist` middleware that used
+  // to hydrate from localStorage. The Tauri invoke is async but fast
+  // (~5–20 ms warm); until it resolves the WelcomeScreen and project-aware
+  // panels render their empty/loading states.
+  //
+  // `startTransition` marks the welcome → project layout swap as non-urgent
+  // so React can pause reconciliation between component subtrees and keep
+  // the welcome UI interactive while the project layout mounts.
+  //
+  // Once hydration is done (success or failure) we dispatch `atlas:app-ready`
+  // — the inline script in `index.html` listens for it and removes the
+  // boot skeleton.
+  useEffect(() => {
+    let cancelled = false;
+    const signalReady = () => {
+      const flag = window as unknown as { __atlasAppReady?: boolean };
+      if (flag.__atlasAppReady) return;
+      flag.__atlasAppReady = true;
+      window.dispatchEvent(new CustomEvent("atlas:app-ready"));
+    };
+
+    (async () => {
+      try {
+        const payload = await invoke<AppStateWire>("bootstrap_app_state");
+        if (cancelled) return;
+        startTransition(() => {
+          useProjectStore.getState().actions.hydrate(payload);
+        });
+      } catch (e) {
+        console.warn("bootstrap_app_state failed; starting empty:", e);
+        if (!cancelled) {
+          startTransition(() => {
+            useProjectStore.getState().actions.hydrate({
+              currentProject: null,
+              recentProjects: [],
+              version: 1,
+            });
+          });
+        }
+      } finally {
+        if (!cancelled) signalReady();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
@@ -195,24 +237,17 @@ export function App() {
       else unlisten = un;
     });
 
-    // Pre-spawn the default agent so the first user prompt doesn't pay
-    // npx/node cold-start (10–30s). Deferred past first paint via
-    // `requestIdleCallback` — `npx -y @zed-industries/claude-code-acp` on a
-    // fresh install fetches the package from npm and starts Node, which can
-    // hold the tokio runtime busy for several seconds. Doing it eagerly
-    // here would race with React's mount work and contribute to the
-    // beachball during cold-start.
-    const idleHandle = scheduleIdle(() => {
-      if (cancelled) return;
-      ensureDefaultAgent().catch((e) => {
-        console.warn("Agent pre-spawn failed (will retry on first send):", e);
-      });
-    });
+    // Agent spawn is deferred until the user first focuses the message input
+    // (see `MessageInput`'s focus handler). `npx -y @zed-industries/claude-code-acp`
+    // can take 10–30s on a cold npm cache; doing it at app boot adds visible
+    // latency to first paint and races the project-rehydration cascade. The
+    // user is unlikely to send a prompt within the first few hundred ms of
+    // focusing the composer, so the spawn finishes in the background while
+    // they type.
 
     return () => {
       cancelled = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
-      cancelIdle(idleHandle);
       unlisten?.();
     };
   }, []);
@@ -227,6 +262,31 @@ export function App() {
     }, 1000);
     return () => clearTimeout(saveTimerRef.current);
   }, [tabs.length, activeTabId, currentProject]);
+
+  // Maintain the chat-mention picker's "recent files" queue. Push whenever
+  // an editor/media/unsupported tab appears whose data.filePath we haven't
+  // seen yet in this session. Centralizing here means every call site that
+  // opens a file (FilePicker, explorer, message-item link, analysis,
+  // git diff, …) feeds the recents list without each having to remember to.
+  const seenFileTabsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const projectPath = currentProject?.path ?? "";
+    for (const t of tabs) {
+      if (t.type !== "editor" && t.type !== "media" && t.type !== "unsupported")
+        continue;
+      const absPath = (t.data as Record<string, unknown> | undefined)?.filePath as
+        | string
+        | undefined;
+      if (!absPath) continue;
+      if (seenFileTabsRef.current.has(absPath)) continue;
+      seenFileTabsRef.current.add(absPath);
+      const rel =
+        projectPath && absPath.startsWith(projectPath + "/")
+          ? absPath.slice(projectPath.length + 1)
+          : absPath.split("/").pop() ?? absPath;
+      useRecentFilesStore.getState().actions.push({ absPath, rel });
+    }
+  }, [tabs, currentProject?.path]);
 
   // FileIndex lifecycle: open the backend file index on project change,
   // close on project clear. The backend handles fs-watch and incremental

@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod analysis;
+pub mod app_state;
 pub mod fileindex;
 pub mod canvas;
 pub mod claude;
@@ -8,6 +9,7 @@ pub mod git;
 pub mod github;
 pub mod knowledge;
 pub mod log;
+pub mod papers;
 pub mod research;
 pub mod search;
 pub mod sessions_watch;

@@ -17,17 +17,10 @@
       }
 
       /* ── Boot skeleton ────────────────────────────────────────────────
-         Painted by the WebView BEFORE the JS bundle finishes downloading +
-         parsing. Mirrors the default Atlas layout (titlebar + 220px chat
-         sidebar + chat content + bottom input bar) so cold-start feels like
-         the app is already there instead of flashing a black rectangle and
-         then snapping into place.
-
-         CSS-only, no JS. Replaced atomically when ReactDOM.createRoot
-         commits its first render — React replaces #root's children, the
-         skeleton vanishes, the real UI takes over. Tokens here are
-         hard-coded near the Atlas palette since globals.css isn't loaded
-         yet at this point either.
+         Mirrors the default Atlas layout (titlebar + 220px chat sidebar +
+         chat content + bottom input bar) so cold-start feels like the
+         app is already there. Replaced atomically when ReactDOM.createRoot
+         commits its first render.
       */
       .atlas-boot {
         position: fixed;
@@ -41,23 +34,17 @@
         user-select: none;
         -webkit-user-select: none;
       }
-
-      /* Titlebar strip — accounts for macOS traffic-light inset on the left
-         so the strip looks balanced even before the real titlebar mounts. */
       .atlas-boot-titlebar {
         height: 29px;
         flex-shrink: 0;
         border-bottom: 1px solid rgba(255, 255, 255, 0.05);
         background: #0a0a0a;
       }
-
       .atlas-boot-body {
         flex: 1;
         display: flex;
         min-height: 0;
       }
-
-      /* Chat sidebar — 220px to match `chatSidebar.width` default. */
       .atlas-boot-sidebar {
         width: 220px;
         flex-shrink: 0;
@@ -78,14 +65,10 @@
         border-radius: 4px;
         background: rgba(255, 255, 255, 0.04);
       }
-      .atlas-boot-row.atlas-boot-row-tall {
-        height: 24px;
-      }
+      .atlas-boot-row.atlas-boot-row-tall { height: 24px; }
       .atlas-boot-row.atlas-boot-row-narrow { width: 55%; }
       .atlas-boot-row.atlas-boot-row-mid    { width: 75%; }
       .atlas-boot-row.atlas-boot-row-wide   { width: 90%; }
-
-      /* Center pane — chat messages stack + input bar. */
       .atlas-boot-main {
         flex: 1;
         display: flex;
@@ -126,8 +109,6 @@
         border-radius: 4px;
         background: rgba(255, 255, 255, 0.04);
       }
-
-      /* Input bar at the bottom. */
       .atlas-boot-input {
         margin: 0 auto 16px;
         width: calc(100% - 32px);
@@ -138,10 +119,6 @@
         border: 1px solid rgba(255, 255, 255, 0.05);
         flex-shrink: 0;
       }
-
-      /* Soft pulse across all placeholder surfaces — lets the user see the
-         layout is "alive" without a spinner. Tuned dim and slow so it
-         doesn't visually compete with the real UI when it lands. */
       .atlas-boot-search,
       .atlas-boot-row,
       .atlas-boot-avatar,
@@ -193,6 +170,16 @@
         </div>
       </div>
     </div>
+    <script>
+      // Defer boot-skeleton removal until React dispatches `atlas:app-ready`.
+      // The skeleton stays visible across React's first commit + the Rust
+      // bootstrap IPC so the user never sees an empty white flash between
+      // them.
+      window.addEventListener("atlas:app-ready", function () {
+        var skel = document.querySelector(".atlas-boot");
+        if (skel && skel.parentNode) skel.parentNode.removeChild(skel);
+      }, { once: true });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

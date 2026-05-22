@@ -12,7 +12,18 @@ pub struct SearchResult {
 }
 
 #[tauri::command]
-pub fn search_in_files(
+pub async fn search_in_files(
+    path: String,
+    query: String,
+    max_results: Option<u32>,
+) -> Result<Vec<SearchResult>, String> {
+    // Off main thread — walks the project tree and reads every code file.
+    tokio::task::spawn_blocking(move || search_in_files_sync(path, query, max_results))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn search_in_files_sync(
     path: String,
     query: String,
     max_results: Option<u32>,

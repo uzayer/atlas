@@ -1,6 +1,6 @@
 [package]
 name = "atlas"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [lib]
@@ -18,22 +18,23 @@ tauri-build = { version = "2", features = [] }
 # need to debug a production-only issue and accept the binary-size and
 # attack-surface cost.
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-fs = "2"
+# Plugin selection — only what JS actually invokes is kept. The Atlas
+# Rust command surface does all its own fs/shell/http work via the std,
+# reqwest, etc. directly; the JS side only touches: `dialog` (Open
+# Folder), `opener` (external links), and `window-state` (persists size
+# + position automatically). Dropping the others (fs/shell/clipboard-
+# manager/process/os/http) shaves binary size + dyld load time on cold
+# launches and removes their permissions surface.
 tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
-tauri-plugin-store = "2"
-tauri-plugin-clipboard-manager = "2"
-tauri-plugin-process = "2"
 tauri-plugin-opener = "2"
-tauri-plugin-os = "2"
 tauri-plugin-window-state = "2"
-tauri-plugin-http = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 atlas-agents = { path = "../crates/atlas-agents" }
@@ -47,3 +48,38 @@ notify = "8"
 notify-debouncer-full = "0.6"
 nucleo-matcher = "0.3"
 parking_lot = "0.12"
+# Drop-in replacement for the system allocator. macOS's libmalloc is one of
+# the slowest mainstream mallocs for small-object workloads (heavy locking
+# per free); mimalloc cuts allocation cost by ~30-60% on Tauri's
+# startup-allocation-heavy hot path. `default-features = false` strips
+# secure-mode + override hooks we don't need.
+mimalloc = { version = "0.1", default-features = false }
+
+# Release profile — Atlas previously shipped with Cargo defaults
+# (lto = false, codegen-units = 16, no strip), which means the bundled .app
+# binary was substantially larger and slower than necessary. Matches the
+# profile Athas uses for its 1 s cold launches.
+#
+# Trade-off: `bun run build:app` link time roughly doubles on clean builds
+# (~30 s → ~60–90 s). Dev (`tauri dev`) is unaffected — these are
+# release-only settings.
+[profile.release]
+codegen-units = 1   # Single codegen unit → better cross-function inlining
+lto = "thin"        # ThinLTO: most of LTO's win at a fraction of link time
+strip = "symbols"   # Smaller .app bundle, faster dyld load
+panic = "abort"     # Smaller binary; we don't `catch_unwind` anywhere
+opt-level = 3       # Default for release, restated for clarity
+
+# Dev profile — Atlas's own app crate is small (~170 LOC + a handful of
+# command modules). Keep it at the default `opt-level = 0` so incremental
+# rebuilds stay snappy.
+[profile.dev]
+
+# Optimize ALL transitive dependencies in dev mode at `opt-level = 1`
+# (Tauri, wry, tao, atlas-acp, atlas-agents, atlas-terminal, tokio, serde,
+# reqwest, etc.). First clean build pays a one-time ~3–5 minute cost;
+# subsequent rebuilds only recompile the app crate and are unaffected.
+# Net effect: `npx tauri dev` startup drops noticeably because Tauri's
+# runtime is no longer running unoptimized debug code.
+[profile.dev.package."*"]
+opt-level = 1

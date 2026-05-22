@@ -89,56 +89,88 @@ pub async fn clone_github_repo(
     }).await.map_err(|e| e.to_string())?
 }
 
+// All async + spawn_blocking — see the comment in knowledge.rs for the
+// reason (sync Tauri command handlers run on NSApp main thread).
 #[tauri::command]
-pub fn list_cloned_repos(project_path: String) -> Result<Vec<ClonedRepo>, String> {
-    let repos_dir = Path::new(&project_path).join(".atlas").join("repos");
-    if !repos_dir.exists() {
-        return Ok(vec![]);
-    }
-
-    let mut repos = Vec::new();
-    let read = fs::read_dir(&repos_dir).map_err(|e| e.to_string())?;
-
-    for entry in read.flatten() {
-        let path = entry.path();
-        if !path.is_dir() { continue; }
-
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let has_readme = path.join("README.md").exists() || path.join("readme.md").exists();
-
-        repos.push(ClonedRepo {
-            name,
-            path: path.to_string_lossy().to_string(),
-            has_readme,
-        });
-    }
-
-    repos.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(repos)
-}
-
-#[tauri::command]
-pub fn read_repo_readme(project_path: String, repo_name: String) -> Result<String, String> {
-    let repo_dir = Path::new(&project_path).join(".atlas").join("repos").join(&repo_name);
-
-    // Try common README filenames
-    for name in &["README.md", "readme.md", "Readme.md", "README.rst", "README.txt", "README"] {
-        let path = repo_dir.join(name);
-        if path.exists() {
-            return fs::read_to_string(&path).map_err(|e| e.to_string());
+pub async fn list_cloned_repos(project_path: String) -> Result<Vec<ClonedRepo>, String> {
+    tokio::task::spawn_blocking(move || {
+        let repos_dir = Path::new(&project_path).join(".atlas").join("repos");
+        if !repos_dir.exists() {
+            return Ok(vec![]);
         }
-    }
-
-    Err("No README found".to_string())
+        let mut repos = Vec::new();
+        let read = fs::read_dir(&repos_dir).map_err(|e| e.to_string())?;
+        for entry in read.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let has_readme =
+                path.join("README.md").exists() || path.join("readme.md").exists();
+            repos.push(ClonedRepo {
+                name,
+                path: path.to_string_lossy().to_string(),
+                has_readme,
+            });
+        }
+        repos.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(repos)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn delete_cloned_repo(project_path: String, repo_name: String) -> Result<(), String> {
-    let repo_dir = Path::new(&project_path).join(".atlas").join("repos").join(&repo_name);
-    if repo_dir.exists() {
-        fs::remove_dir_all(&repo_dir).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+pub async fn read_repo_readme(
+    project_path: String,
+    repo_name: String,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let repo_dir = Path::new(&project_path)
+            .join(".atlas")
+            .join("repos")
+            .join(&repo_name);
+        for name in &[
+            "README.md",
+            "readme.md",
+            "Readme.md",
+            "README.rst",
+            "README.txt",
+            "README",
+        ] {
+            let path = repo_dir.join(name);
+            if path.exists() {
+                return fs::read_to_string(&path).map_err(|e| e.to_string());
+            }
+        }
+        Err("No README found".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn delete_cloned_repo(
+    project_path: String,
+    repo_name: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let repo_dir = Path::new(&project_path)
+            .join(".atlas")
+            .join("repos")
+            .join(&repo_name);
+        if repo_dir.exists() {
+            fs::remove_dir_all(&repo_dir).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn urlencoded(s: &str) -> String {

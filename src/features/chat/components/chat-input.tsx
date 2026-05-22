@@ -18,8 +18,9 @@ import {
   useMemo,
   useRef,
 } from "react";
-import { EditorState, type Extension } from "@codemirror/state";
+import { EditorState, Prec, type Extension } from "@codemirror/state";
 import {
+  drawSelection,
   EditorView,
   keymap,
   placeholder as cmPlaceholder,
@@ -139,13 +140,22 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
             },
             ".cm-content": {
               padding: "12px 16px 4px",
-              caretColor: "var(--text-primary)",
+              // Hide the native contenteditable caret — CodeMirror's own
+              // `drawSelection` extension paints the visible cursor. Without
+              // this, WebKit shows BOTH (the native blink + CM's div), which
+              // looks like a double-caret glitch in the composer.
+              caretColor: "transparent",
             },
             ".cm-line": {
               padding: "0",
             },
             "&.cm-focused": {
               outline: "none",
+            },
+            // Style CM's drawn cursor to match the theme.
+            ".cm-cursor, .cm-dropCursor": {
+              borderLeftColor: "var(--text-primary)",
+              borderLeftWidth: "1px",
             },
             ".cm-placeholder": {
               color: "var(--text-tertiary)",
@@ -207,6 +217,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
           doc: initialValue,
           extensions: [
             history(),
+            // CM-managed caret + selection rendering. Pairs with
+            // `caret-color: transparent` on `.cm-content` (see theme) to
+            // eliminate the WebKit double-caret artifact.
+            drawSelection(),
             // The markdown language pack ships an Enter binding that
             // continues `-` / `*` / `1.` bullets on the next line and
             // outdents on an empty marker — exactly the "type `- a` Enter
@@ -230,9 +244,15 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
             }),
             ...mentionExtension,
             mentionTriggerPlugin((t) => onMentionTriggerRef.current?.(t)),
-            // The mention keymap must beat the markdown/default Enter
-            // binding so the picker can claim Enter while open.
-            keymap.of(mentionKeymap(() => keyInterceptorRef.current ?? null)),
+            // Prec.highest puts the mention keymap above lang-markdown's
+            // Enter binding (which would otherwise continue a bullet) and
+            // above the default Enter (which inserts a newline). When the
+            // picker is open the interceptor consumes Up/Down/Enter/Esc/
+            // Backspace; when it's closed the interceptor returns false
+            // and the lower-precedence keymaps run normally.
+            Prec.highest(
+              keymap.of(mentionKeymap(() => keyInterceptorRef.current ?? null))
+            ),
             ...(extensionsKey ?? []),
           ],
         }),

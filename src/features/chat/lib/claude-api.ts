@@ -2,7 +2,7 @@
 // stop / check / version) was replaced by the ACP integration in
 // `lib/acp-api.ts`. What remains here reads existing JSONL session history
 // from `~/.claude/projects/` — both the legacy CLI and the canonical ACP
-// agent (`@zed-industries/claude-code-acp`, which uses the same Claude Agent
+// agent (`@agentclientprotocol/claude-agent-acp`, which uses the same Claude Agent
 // SDK) write to that directory, so the history-browser surface still works
 // against ACP-produced sessions.
 

@@ -43,7 +43,10 @@ impl AgentSpec {
         Self {
             spec_id: "claude-code-ts".into(),
             display_name: "Claude Code (canonical)".into(),
-            command: "npx -y @zed-industries/claude-code-acp".into(),
+            // Upstream rename: `@zed-industries/claude-code-acp` was renamed
+            // to `@agentclientprotocol/claude-agent-acp`. The old name still
+            // resolves but no longer receives updates.
+            command: "npx -y @agentclientprotocol/claude-agent-acp".into(),
         }
     }
 
@@ -359,33 +362,31 @@ pub fn sanitize_host_env() {
 }
 
 fn enrich_path() {
-    let base = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
+    // Split into two passes:
+    //
+    // 1. The cheap, deterministic prepends (~$HOME/.local/bin, .bun, .cargo,
+    //    /opt/homebrew/{bin,sbin}, /usr/local/{bin,sbin}, /usr/{bin,sbin})
+    //    happen synchronously so the very first `acp_spawn_agent` call can
+    //    already resolve `npx`/`node` from a Homebrew install.
+    //
+    // 2. The `~/.nvm/versions/node/*` enumeration is moved to a background
+    //    thread. nvm doesn't symlink to a stable path so the directory walk
+    //    is unavoidable, and it can take ~100ms+ when many node versions are
+    //    installed. The walk runs while React paints the first frame; by the
+    //    time the user focuses the composer and the agent spawn kicks off
+    //    the additional PATH entries are in place. Homebrew/system node is
+    //    the fallback in the brief window before the walk lands.
+    apply_cheap_path_extras();
+    spawn_nvm_path_walk();
+}
 
+fn apply_cheap_path_extras() {
+    let home = std::env::var("HOME").unwrap_or_default();
     let mut extras: Vec<String> = Vec::new();
     if !home.is_empty() {
         extras.push(format!("{home}/.local/bin"));
         extras.push(format!("{home}/.bun/bin"));
         extras.push(format!("{home}/.cargo/bin"));
-        // Walk nvm's versions/node/* and add each version's bin dir. nvm
-        // doesn't symlink to a stable path, so we have to enumerate.
-        let nvm_root = std::path::PathBuf::from(&home)
-            .join(".nvm")
-            .join("versions")
-            .join("node");
-        if let Ok(entries) = std::fs::read_dir(&nvm_root) {
-            let mut versions: Vec<_> = entries
-                .flatten()
-                .map(|e| e.path().join("bin"))
-                .filter(|p| p.is_dir())
-                .collect();
-            // Newest version first (lexicographic — fine for vMAJOR.MINOR.PATCH).
-            versions.sort();
-            versions.reverse();
-            for v in versions {
-                extras.push(v.to_string_lossy().into_owned());
-            }
-        }
     }
     extras.push("/opt/homebrew/bin".into());
     extras.push("/opt/homebrew/sbin".into());
@@ -393,7 +394,43 @@ fn enrich_path() {
     extras.push("/usr/local/sbin".into());
     extras.push("/usr/bin".into());
     extras.push("/bin".into());
+    prepend_to_path(&extras);
+}
 
+fn spawn_nvm_path_walk() {
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => return,
+    };
+    std::thread::spawn(move || {
+        let nvm_root = std::path::PathBuf::from(&home)
+            .join(".nvm")
+            .join("versions")
+            .join("node");
+        let Ok(entries) = std::fs::read_dir(&nvm_root) else {
+            return;
+        };
+        let mut versions: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path().join("bin"))
+            .filter(|p| p.is_dir())
+            .collect();
+        // Newest version first (lexicographic — fine for vMAJOR.MINOR.PATCH).
+        versions.sort();
+        versions.reverse();
+        let extras: Vec<String> = versions
+            .into_iter()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect();
+        if extras.is_empty() {
+            return;
+        }
+        prepend_to_path(&extras);
+    });
+}
+
+fn prepend_to_path(extras: &[String]) {
+    let base = std::env::var("PATH").unwrap_or_default();
     let mut path_parts: Vec<String> = if base.is_empty() {
         Vec::new()
     } else {
@@ -409,6 +446,11 @@ fn enrich_path() {
     }
 
     let new_path = path_parts.join(":");
+    // SAFETY: see `sanitize_host_env` — env mutation is racy in a multithreaded
+    // program. The background thread runs only after `sanitize_host_env` has
+    // returned and Tauri has started; any concurrent child-process spawn will
+    // either see the pre-nvm PATH (Homebrew node, fine) or the post-nvm PATH
+    // (nvm-managed node). Both are valid PATH values.
     unsafe {
         std::env::set_var("PATH", new_path);
     }

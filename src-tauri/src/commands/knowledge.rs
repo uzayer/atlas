@@ -13,9 +13,21 @@ pub struct KnowledgeEntry {
 }
 
 /// List all knowledge entries recursively from .atlas/knowledge/
+///
+/// IMPORTANT: every `#[tauri::command]` in this module is declared `async`
+/// and dispatches its I/O through `tokio::task::spawn_blocking`. Sync
+/// commands run on the NSApp main thread; doing real filesystem work there
+/// freezes the entire app while the syscall blocks. Boot cascade members
+/// (`list_knowledge`, `load_editor_state`) were the chief offenders.
 #[tauri::command]
-pub fn list_knowledge(project_path: String) -> Result<Vec<KnowledgeEntry>, String> {
-    let kb_dir = Path::new(&project_path).join(".atlas").join("knowledge");
+pub async fn list_knowledge(project_path: String) -> Result<Vec<KnowledgeEntry>, String> {
+    tokio::task::spawn_blocking(move || list_knowledge_sync(&project_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn list_knowledge_sync(project_path: &str) -> Result<Vec<KnowledgeEntry>, String> {
+    let kb_dir = Path::new(project_path).join(".atlas").join("knowledge");
     if !kb_dir.exists() {
         return Ok(vec![]);
     }
@@ -85,121 +97,145 @@ fn walk_knowledge(dir: &Path, root: &Path, entries: &mut Vec<KnowledgeEntry>) {
 
 /// Save a knowledge note (supports nested paths like "Adib/note-123")
 #[tauri::command]
-pub fn save_knowledge_note(
+pub async fn save_knowledge_note(
     project_path: String,
     id: String,
     content: String,
 ) -> Result<String, String> {
-    let kb_dir = Path::new(&project_path).join(".atlas").join("knowledge");
-    let filepath = kb_dir.join(format!("{}.md", id));
-    // Create parent dirs for nested paths
-    if let Some(parent) = filepath.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    fs::write(&filepath, &content).map_err(|e| e.to_string())?;
-
-    Ok(filepath.to_string_lossy().to_string())
+    tokio::task::spawn_blocking(move || {
+        let kb_dir = Path::new(&project_path).join(".atlas").join("knowledge");
+        let filepath = kb_dir.join(format!("{}.md", id));
+        if let Some(parent) = filepath.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&filepath, &content).map_err(|e| e.to_string())?;
+        Ok(filepath.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Delete a knowledge note
 #[tauri::command]
-pub fn delete_knowledge_note(
+pub async fn delete_knowledge_note(
     project_path: String,
     id: String,
 ) -> Result<(), String> {
-    let filepath = Path::new(&project_path)
-        .join(".atlas")
-        .join("knowledge")
-        .join(format!("{}.md", id));
-
-    if filepath.exists() {
-        fs::remove_file(&filepath).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let filepath = Path::new(&project_path)
+            .join(".atlas")
+            .join("knowledge")
+            .join(format!("{}.md", id));
+        if filepath.exists() {
+            fs::remove_file(&filepath).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Create a directory inside .atlas/knowledge/
 #[tauri::command]
-pub fn create_knowledge_dir(project_path: String, dir_name: String) -> Result<(), String> {
-    let dir = Path::new(&project_path).join(".atlas").join("knowledge").join(&dir_name);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())
+pub async fn create_knowledge_dir(project_path: String, dir_name: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let dir = Path::new(&project_path)
+            .join(".atlas")
+            .join("knowledge")
+            .join(&dir_name);
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Append an interaction log entry for context building
 #[tauri::command]
-pub fn log_interaction(
+pub async fn log_interaction(
     project_path: String,
-    interaction_type: String, // "chat", "search", "edit", "paper_save", "note_edit"
+    interaction_type: String,
     summary: String,
 ) -> Result<(), String> {
-    let atlas_dir = Path::new(&project_path).join(".atlas");
-    fs::create_dir_all(&atlas_dir).map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let atlas_dir = Path::new(&project_path).join(".atlas");
+        fs::create_dir_all(&atlas_dir).map_err(|e| e.to_string())?;
 
-    let log_path = atlas_dir.join("interactions.jsonl");
-    let entry = serde_json::json!({
-        "type": interaction_type,
-        "summary": summary,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
+        let log_path = atlas_dir.join("interactions.jsonl");
+        let entry = serde_json::json!({
+            "type": interaction_type,
+            "summary": summary,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
 
-    let mut line = serde_json::to_string(&entry).unwrap_or_default();
-    line.push('\n');
+        let mut line = serde_json::to_string(&entry).unwrap_or_default();
+        line.push('\n');
 
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .and_then(|mut f| {
-            use std::io::Write;
-            f.write_all(line.as_bytes())
-        })
-        .map_err(|e| e.to_string())?;
-
-    Ok(())
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(line.as_bytes())
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Get recent interactions for context building
 #[tauri::command]
-pub fn get_recent_interactions(
+pub async fn get_recent_interactions(
     project_path: String,
     limit: Option<u32>,
 ) -> Result<Vec<String>, String> {
-    let log_path = Path::new(&project_path).join(".atlas").join("interactions.jsonl");
-    if !log_path.exists() {
-        return Ok(vec![]);
-    }
-
-    let content = fs::read_to_string(&log_path).map_err(|e| e.to_string())?;
-    let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let n = limit.unwrap_or(20) as usize;
-    let start = if lines.len() > n { lines.len() - n } else { 0 };
-
-    Ok(lines[start..].to_vec())
+    tokio::task::spawn_blocking(move || {
+        let log_path = Path::new(&project_path).join(".atlas").join("interactions.jsonl");
+        if !log_path.exists() {
+            return Ok(vec![]);
+        }
+        let content = fs::read_to_string(&log_path).map_err(|e| e.to_string())?;
+        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let n = limit.unwrap_or(20) as usize;
+        let start = if lines.len() > n { lines.len() - n } else { 0 };
+        Ok(lines[start..].to_vec())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Save editor state (open tabs, active file) per project
 #[tauri::command]
-pub fn save_editor_state(
+pub async fn save_editor_state(
     project_path: String,
     state_json: String,
 ) -> Result<(), String> {
-    let atlas_dir = Path::new(&project_path).join(".atlas");
-    fs::create_dir_all(&atlas_dir).map_err(|e| e.to_string())?;
-
-    let state_path = atlas_dir.join("editor-state.json");
-    fs::write(&state_path, &state_json).map_err(|e| e.to_string())?;
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let atlas_dir = Path::new(&project_path).join(".atlas");
+        fs::create_dir_all(&atlas_dir).map_err(|e| e.to_string())?;
+        let state_path = atlas_dir.join("editor-state.json");
+        fs::write(&state_path, &state_json).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Load editor state for a project
 #[tauri::command]
-pub fn load_editor_state(project_path: String) -> Result<String, String> {
-    let state_path = Path::new(&project_path).join(".atlas").join("editor-state.json");
-    if state_path.exists() {
-        fs::read_to_string(&state_path).map_err(|e| e.to_string())
-    } else {
-        Ok("{}".to_string())
-    }
+pub async fn load_editor_state(project_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let state_path = Path::new(&project_path).join(".atlas").join("editor-state.json");
+        if state_path.exists() {
+            fs::read_to_string(&state_path).map_err(|e| e.to_string())
+        } else {
+            Ok("{}".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Fetch a URL and return text-only sanitized HTML (no media, no external CSS)

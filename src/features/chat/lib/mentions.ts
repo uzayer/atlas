@@ -21,8 +21,10 @@ import type { RawRefs } from "@/features/git/lib/git-graph";
 
 export type MentionKind =
   | "file"
+  | "folder"
   | "symbol"
   | "knowledge"
+  | "repo"
   | "paper"
   | "branch"
   | "past_message";
@@ -31,6 +33,13 @@ export interface MentionFile {
   kind: "file";
   id: string;            // absolute path; also the de-dupe key
   displayName: string;   // relative path
+  absPath: string;
+}
+
+export interface MentionFolder {
+  kind: "folder";
+  id: string;            // absolute path
+  displayName: string;   // relative path (e.g. "src/features/chat")
   absPath: string;
 }
 
@@ -46,10 +55,22 @@ export interface MentionSymbol {
 
 export interface MentionKnowledge {
   kind: "knowledge";
-  id: string;            // entry id (== file_path basename in current impl)
+  id: string;            // entry id — path under `.atlas/knowledge/`, may include "/"
   displayName: string;   // title
   filePath: string;
   source: string;        // "note" | "paper" | "chat" | ...
+  /** Parent folder portion of `id` (e.g. "Adib" for "Adib/weekly-notes").
+   *  Surfaces the user's "spaces" — nested subfolders under
+   *  `.atlas/knowledge/`. Null for top-level entries. */
+  folder: string | null;
+}
+
+export interface MentionRepo {
+  kind: "repo";
+  id: string;            // absolute path to the cloned repo
+  displayName: string;   // repo folder name
+  absPath: string;
+  hasReadme: boolean;
 }
 
 export interface MentionPaper {
@@ -81,8 +102,10 @@ export interface MentionPastMessage {
 
 export type MentionData =
   | MentionFile
+  | MentionFolder
   | MentionSymbol
   | MentionKnowledge
+  | MentionRepo
   | MentionPaper
   | MentionBranch
   | MentionPastMessage;
@@ -99,12 +122,14 @@ export interface MentionCategory {
 }
 
 export const MENTION_CATEGORIES: readonly MentionCategory[] = [
-  { kind: "file",         label: "Files & Folders", aliases: ["file", "f/"],          weight: 1.0  },
-  { kind: "symbol",       label: "Symbols",         aliases: ["symbol", "sym", "s/"], weight: 0.85 },
+  { kind: "file",         label: "Files",           aliases: ["file", "f/"],              weight: 1.0  },
+  { kind: "folder",       label: "Folders",         aliases: ["folder", "dir", "d/"],     weight: 0.95 },
+  { kind: "symbol",       label: "Symbols",         aliases: ["symbol", "sym", "s/"],     weight: 0.85 },
   { kind: "knowledge",    label: "Knowledge",       aliases: ["note", "knowledge", "k/"], weight: 0.85 },
-  { kind: "paper",        label: "Papers",          aliases: ["paper", "p/"],         weight: 0.7  },
-  { kind: "branch",       label: "Branches",        aliases: ["branch", "b/"],        weight: 0.6  },
-  { kind: "past_message", label: "Past Messages",   aliases: ["msg", "message", "m/"], weight: 0.55 },
+  { kind: "repo",         label: "Cloned Repos",    aliases: ["repo", "github", "gh/"],   weight: 0.8  },
+  { kind: "paper",        label: "Papers",          aliases: ["paper", "p/"],             weight: 0.7  },
+  { kind: "branch",       label: "Branches",        aliases: ["branch", "b/"],            weight: 0.6  },
+  { kind: "past_message", label: "Past Messages",   aliases: ["msg", "message", "m/"],    weight: 0.55 },
 ];
 
 export function categoryForKind(kind: MentionKind): MentionCategory {
@@ -162,6 +187,21 @@ const fileProvider: MentionProvider = {
   },
 };
 
+const folderProvider: MentionProvider = {
+  kind: "folder",
+  async search(query, _ctx, signal) {
+    if (signal.aborted) return [];
+    const matches = await fileIndex.searchDirs(query, 30);
+    if (signal.aborted) return [];
+    return matches.map<MentionFolder>((m) => ({
+      kind: "folder",
+      id: m.path,
+      displayName: m.rel,
+      absPath: m.path,
+    }));
+  },
+};
+
 const symbolProvider: MentionProvider = {
   kind: "symbol",
   async search(query, _ctx, _signal) {
@@ -192,17 +232,62 @@ const knowledgeProvider: MentionProvider = {
     const q = query.toLowerCase();
     const out: MentionKnowledge[] = [];
     for (const e of entries) {
-      if (q && !e.title.toLowerCase().includes(q)) continue;
+      // The id may be `Adib/weekly-notes` for nested entries — that's how
+      // the user's mental model of "spaces" maps onto disk. Match against
+      // the folder prefix too so typing `@adib` finds entries grouped
+      // under the "Adib" space.
+      const slash = e.id.lastIndexOf("/");
+      const folder = slash > 0 ? e.id.slice(0, slash) : null;
+      if (
+        q &&
+        !e.title.toLowerCase().includes(q) &&
+        !(folder && folder.toLowerCase().includes(q))
+      ) {
+        continue;
+      }
       out.push({
         kind: "knowledge",
         id: e.id,
         displayName: e.title,
         filePath: e.file_path,
         source: e.source,
+        folder,
       });
       if (out.length >= 30) break;
     }
     return out;
+  },
+};
+
+interface ClonedRepoRow {
+  name: string;
+  path: string;
+  has_readme: boolean;
+}
+const repoProvider: MentionProvider = {
+  kind: "repo",
+  async search(query, ctx, signal) {
+    if (!ctx.projectPath) return [];
+    let repos: ClonedRepoRow[] = [];
+    try {
+      repos = await invoke<ClonedRepoRow[]>("list_cloned_repos", {
+        projectPath: ctx.projectPath,
+      });
+    } catch {
+      return [];
+    }
+    if (signal.aborted) return [];
+    const q = query.toLowerCase();
+    return repos
+      .filter((r) => !q || r.name.toLowerCase().includes(q))
+      .slice(0, 30)
+      .map<MentionRepo>((r) => ({
+        kind: "repo",
+        id: r.path,
+        displayName: r.name,
+        absPath: r.path,
+        hasReadme: r.has_readme,
+      }));
   },
 };
 
@@ -324,10 +409,89 @@ const pastMessageProvider: MentionProvider = {
   },
 };
 
+// Two-level past-message picker support ─────────────────────────────────────
+// The blended picker view shows just the top few user messages across the
+// most recent sessions (kept narrow for speed). When the user locks scope
+// to "Past Messages", we drill into a sessions-list first, then messages
+// inside the chosen session. These helpers back that flow.
+
+export interface PastSessionRef {
+  id: string;
+  title: string;
+  filePath: string;
+  lastModified: string | null;
+  messageCount: number;
+}
+
+export async function listPastSessions(
+  ctx: MentionContext
+): Promise<PastSessionRef[]> {
+  if (!ctx.projectPath) return [];
+  try {
+    const sessions = await listClaudeSessions(ctx.projectPath);
+    return sessions.map((s) => ({
+      id: s.id,
+      title: s.preview && s.preview !== "(no user message)"
+        ? s.preview
+        : "Untitled session",
+      filePath: s.file_path,
+      lastModified: s.last_modified,
+      messageCount: s.message_count,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function listMessagesInPastSession(
+  session: PastSessionRef,
+  query: string,
+  signal: AbortSignal
+): Promise<MentionPastMessage[]> {
+  let dump;
+  try {
+    dump = await readClaudeSession(session.filePath);
+  } catch {
+    return [];
+  }
+  if (signal.aborted) return [];
+  const q = query.toLowerCase();
+  const out: MentionPastMessage[] = [];
+  let idx = 0;
+  for (const m of dump) {
+    if (m.role !== "user") {
+      idx += 1;
+      continue;
+    }
+    const content = m.content.trim();
+    if (!content) {
+      idx += 1;
+      continue;
+    }
+    if (q && !content.toLowerCase().includes(q)) {
+      idx += 1;
+      continue;
+    }
+    out.push({
+      kind: "past_message",
+      id: `${session.id}#${idx}`,
+      displayName: truncate(content.replace(/\s+/g, " "), 60),
+      sessionId: session.id,
+      sessionTitle: session.title,
+      timestamp: m.timestamp,
+      content,
+    });
+    idx += 1;
+  }
+  return out;
+}
+
 export const PROVIDERS: Readonly<Record<MentionKind, MentionProvider>> = {
   file: fileProvider,
+  folder: folderProvider,
   symbol: symbolProvider,
   knowledge: knowledgeProvider,
+  repo: repoProvider,
   paper: paperProvider,
   branch: branchProvider,
   past_message: pastMessageProvider,
@@ -397,10 +561,14 @@ export function toShortForm(m: MentionData): string {
   switch (m.kind) {
     case "file":
       return `@file:${m.displayName}`;
+    case "folder":
+      return `@folder:${m.displayName}`;
     case "symbol":
       return `@symbol:${m.displayName}`;
     case "knowledge":
-      return `@note:${m.displayName}`;
+      return `@note:${m.id}`;
+    case "repo":
+      return `@repo:${m.displayName}`;
     case "paper":
       return `@paper:${m.displayName}`;
     case "branch":
@@ -434,6 +602,31 @@ async function toContextBlock(m: MentionData): Promise<string | null> {
         body = `(failed to read: ${e instanceof Error ? e.message : String(e)})`;
       }
       return `## ${toShortForm(m)}\n\n\`\`\`\n${clipBody(body)}\n\`\`\``;
+    }
+    case "folder": {
+      // No "read folder" command — the agent has tools to list/read paths
+      // itself. Inject the absolute path so the agent knows exactly where
+      // to look, without us inlining the entire subtree contents.
+      return `## ${toShortForm(m)}\n\nDirectory at \`${m.absPath}\`. Use your filesystem tools to explore.`;
+    }
+    case "repo": {
+      // Repos live under `<project>/.atlas/repos/<name>/`. Inline the README
+      // (capped) so the agent has the elevator pitch + structure; the agent
+      // can read more files itself via its tools.
+      let body: string;
+      if (m.hasReadme) {
+        try {
+          body = await invoke<string>("read_repo_readme", {
+            projectPath: projectRootFromRepo(m.absPath),
+            repoName: m.displayName,
+          });
+        } catch {
+          body = "(README present but unreadable)";
+        }
+      } else {
+        body = "(no README in this repo)";
+      }
+      return `## ${toShortForm(m)}\n\nCloned at \`${m.absPath}\`.\n\n${clipBody(body)}`;
     }
     case "knowledge": {
       // Pull the freshest body from the store first (already in memory).
@@ -509,4 +702,15 @@ export async function composePrompt(
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return s.slice(0, n) + "…";
+}
+
+/** Recover the project root from a cloned-repo absolute path. Repos are
+ *  stored at `<project>/.atlas/repos/<name>/`, so we strip those three
+ *  segments off the end. Falls back to the repo path itself if the layout
+ *  ever changes (the Rust command will then return an error and we surface
+ *  it gracefully in toContextBlock). */
+function projectRootFromRepo(repoAbsPath: string): string {
+  const marker = "/.atlas/repos/";
+  const idx = repoAbsPath.indexOf(marker);
+  return idx > 0 ? repoAbsPath.slice(0, idx) : repoAbsPath;
 }

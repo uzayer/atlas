@@ -1,15 +1,30 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
 import { agents, ensureDefaultAgent } from "../lib/agents-api";
 import type { SessionKey } from "@/types/agents";
 import { composePrompt, type MentionData } from "../lib/mentions";
 import { MessageInput } from "./message-input";
 import { SessionSidebar } from "./session-sidebar";
-import { MessagesList } from "./messages-list";
-import { BashHistoryPanel } from "./bash-history-panel";
-import { ChatSearchPalette } from "./chat-search-palette";
 import { PermissionModal } from "./permission-modal";
+
+// Both panels are modal-style and never visible on first paint. Lazy so
+// they don't add to the initial chunk.
+const BashHistoryPanel = lazy(() =>
+  import("./bash-history-panel").then((m) => ({ default: m.BashHistoryPanel }))
+);
+const ChatSearchPalette = lazy(() =>
+  import("./chat-search-palette").then((m) => ({ default: m.ChatSearchPalette }))
+);
+
+// `MessagesList` transitively imports `react-markdown` + `rehype-highlight` +
+// `remark-gfm` (~330 KB raw / 101 KB gzip) via `message-item.tsx`. Lazy so
+// an empty-chat first paint doesn't preload the markdown vendor chunk;
+// loads on demand the first time messages exist for this tab.
+const MessagesList = lazy(() =>
+  import("./messages-list").then((m) => ({ default: m.MessagesList }))
+);
 import { Sparkles, User, TerminalSquare, ListFilter, Search, Loader2 } from "lucide-react";
+import { AtlasIcon } from "@/components/atlas-icon";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -45,16 +60,20 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     }
   }, [tabId, session, createSession]);
 
-  // Eagerly bind an ACP agent + session to this tab the moment the chat
-  // mounts, so by the time the user types and hits Send the binding is
-  // ready and `handleSend` doesn't need to await anything. Skipped when a
-  // session is already bound (e.g. the sidebar resumed a historical thread,
-  // or this is a re-mount of an active tab).
+  // Bind an ACP agent + session to this tab the first time the user focuses
+  // the message input. Listening for `atlas:chat-input-focused` instead of
+  // doing this on mount avoids paying the `npx`/Node spawn cost on app boot —
+  // the spawn is on the order of 1–3s warm and 10–30s on a cold npm cache,
+  // which used to dominate startup time. Skipped when a session is already
+  // bound (sidebar resume, or a tab re-mount).
   useEffect(() => {
     if (!session) return;
     if (session.acpSessionId) return;
     let cancelled = false;
-    (async () => {
+    let pending = false;
+    const ensureBound = async () => {
+      if (cancelled || pending) return;
+      pending = true;
       try {
         const agent = await ensureDefaultAgent();
         if (cancelled) return;
@@ -81,11 +100,20 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             );
         }
       } catch (err) {
-        console.warn("Eager agent session creation failed:", err);
+        console.warn("Agent session creation failed:", err);
+      } finally {
+        pending = false;
       }
-    })();
+    };
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ tabId?: string }>).detail;
+      if (!detail || detail.tabId !== tabId) return;
+      void ensureBound();
+    };
+    window.addEventListener("atlas:chat-input-focused", handler);
     return () => {
       cancelled = true;
+      window.removeEventListener("atlas:chat-input-focused", handler);
     };
   }, [tabId, session?.acpSessionId]);
 
@@ -335,13 +363,15 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             )}
           </div>
         ) : (
-          <MessagesList
-            tabId={tabId}
-            acpSessionId={acpSessionId}
-            messages={session.messages}
-            roleFilter={roleFilter}
-            isStreaming={session.status === "running"}
-          />
+          <Suspense fallback={<LoadingTranscriptState />}>
+            <MessagesList
+              tabId={tabId}
+              acpSessionId={acpSessionId}
+              messages={session.messages}
+              roleFilter={roleFilter}
+              isStreaming={session.status === "running"}
+            />
+          </Suspense>
         )}
 
         <div className="relative">
@@ -358,26 +388,32 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       </div>
 
       {bashPanelOpen && (
-        <BashHistoryPanel
-          messages={session.messages}
-          onJump={(idx) => {
-            if (roleFilter !== "all") setRoleFilter("all");
-            window.dispatchEvent(
-              new CustomEvent("atlas:chat-jump", { detail: { index: idx } })
-            );
-          }}
-          onClose={() => setBashPanelOpen(false)}
-        />
+        <Suspense fallback={null}>
+          <BashHistoryPanel
+            messages={session.messages}
+            onJump={(idx) => {
+              if (roleFilter !== "all") setRoleFilter("all");
+              window.dispatchEvent(
+                new CustomEvent("atlas:chat-jump", { detail: { index: idx } })
+              );
+            }}
+            onClose={() => setBashPanelOpen(false)}
+          />
+        </Suspense>
       )}
 
-      <ChatSearchPalette
-        open={searchPaletteOpen}
-        onOpenChange={setSearchPaletteOpen}
-        messages={session.messages}
-        onJump={(idx) =>
-          window.dispatchEvent(new CustomEvent("atlas:chat-jump", { detail: { index: idx } }))
-        }
-      />
+      {searchPaletteOpen && (
+        <Suspense fallback={null}>
+          <ChatSearchPalette
+            open={searchPaletteOpen}
+            onOpenChange={setSearchPaletteOpen}
+            messages={session.messages}
+            onJump={(idx) =>
+              window.dispatchEvent(new CustomEvent("atlas:chat-jump", { detail: { index: idx } }))
+            }
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
@@ -397,9 +433,7 @@ function WelcomeState() {
   return (
     <div className="h-full flex items-center justify-center">
       <div className="text-center space-y-4 max-w-[400px] px-6">
-        <div className="w-14 h-14 rounded-2xl bg-[var(--accent-primary-muted)] flex items-center justify-center mx-auto">
-          <Sparkles size={28} className="text-[var(--accent-primary)]" />
-        </div>
+        <AtlasIcon size={56} className="mx-auto rounded-2xl" />
         <div>
           <h2 className="text-lg font-semibold text-[var(--text-primary)]">
             Atlas

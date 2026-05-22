@@ -162,15 +162,14 @@ function detectTrigger(view: EditorView): MentionTrigger | null {
 /** A key passes through this when the picker is open. The interceptor is a
  *  mutable ref the parent sets; CodeMirror's keymap looks it up live so we
  *  don't have to reconfigure the view every time the picker opens. */
-export type MentionKeyInterceptor = (
-  key: "Up" | "Down" | "Enter" | "Escape"
-) => boolean;
+export type MentionKey = "Up" | "Down" | "Enter" | "Escape" | "Backspace";
+export type MentionKeyInterceptor = (key: MentionKey) => boolean;
 
 export const mentionKeymap = (
   getInterceptor: () => MentionKeyInterceptor | null
 ) => {
   const tryIntercept =
-    (key: "Up" | "Down" | "Enter" | "Escape") =>
+    (key: MentionKey) =>
     () => {
       const fn = getInterceptor();
       return fn ? fn(key) : false;
@@ -180,6 +179,11 @@ export const mentionKeymap = (
     { key: "ArrowUp", run: tryIntercept("Up") },
     { key: "Enter", run: tryIntercept("Enter") },
     { key: "Escape", run: tryIntercept("Escape") },
+    // Backspace is intercepted so the picker can "go back" one level
+    // (e.g. close a past-session sublist) instead of deleting a character.
+    // The interceptor returns false to let CM's default delete handler run
+    // when there's nothing to back-navigate to.
+    { key: "Backspace", run: tryIntercept("Backspace") },
   ];
 };
 
@@ -270,8 +274,10 @@ class ChipWidget extends WidgetType {
 function kindGlyph(kind: MentionKind): string {
   switch (kind) {
     case "file":         return "📄";
+    case "folder":       return "📁";
     case "symbol":       return "⌬";
     case "knowledge":    return "✦";
+    case "repo":         return "⎇";
     case "paper":        return "📑";
     case "branch":       return "⎇";
     case "past_message": return "✉";
@@ -281,8 +287,10 @@ function kindGlyph(kind: MentionKind): string {
 function chipTitle(m: MentionData): string {
   switch (m.kind) {
     case "file":         return m.absPath;
+    case "folder":       return m.absPath;
     case "symbol":       return `${m.symbolKind} · ${m.filePath}:${m.line}`;
     case "knowledge":    return `${m.source} · ${m.filePath}`;
+    case "repo":         return m.absPath;
     case "paper":        return m.authors.length ? m.authors.join(", ") : "paper";
     case "branch":       return `${m.refKind} · ${m.sha.slice(0, 7)}`;
     case "past_message": return m.sessionTitle;

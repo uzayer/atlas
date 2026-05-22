@@ -1,7 +1,7 @@
 //! Session-history readers against `~/.claude/projects/<encoded-cwd>/*.jsonl`.
 //!
 //! Both the legacy Claude Code CLI (no longer wired into Atlas) and the
-//! canonical ACP agent (`@zed-industries/claude-code-acp`, which sits on top
+//! canonical ACP agent (`@agentclientprotocol/claude-agent-acp`, which sits on top
 //! of the Claude Agent SDK) write their session transcripts here, so the
 //! sidebar's history browser keeps working against the ACP-driven flow.
 //!

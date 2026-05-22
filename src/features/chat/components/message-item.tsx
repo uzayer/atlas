@@ -14,6 +14,7 @@ import {
   Bookmark,
   Brain,
   ChevronRight,
+  Paperclip,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -22,6 +23,26 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { Markdown } from "@/lib/markdown";
 
 const FILE_PATH_KEYS = ["file_path", "path", "filename", "filePath"];
+
+// User prompts composed via the @-mention picker have heavy context blocks
+// appended after a fixed separator (see `composePrompt` in features/chat/lib/mentions.ts).
+// Split here so the thread shows just the prose and tucks the context bodies
+// into a collapsed accordion — keeps the message list scannable.
+const ATLAS_CONTEXT_MARKER = "\n\n---\n# Atlas context\n\n";
+
+function splitAtlasContext(content: string): { prose: string; context: string | null } {
+  const idx = content.indexOf(ATLAS_CONTEXT_MARKER);
+  if (idx === -1) return { prose: content, context: null };
+  const prose = content.slice(0, idx);
+  const context = content.slice(idx + ATLAS_CONTEXT_MARKER.length).replace(/\n+$/, "");
+  return { prose, context: context.length > 0 ? context : null };
+}
+
+function countContextBlocks(context: string): number {
+  // Each block in `composePrompt` starts with a `## ` heading.
+  const matches = context.match(/^## /gm);
+  return matches ? matches.length : 0;
+}
 
 function getFilePathFromInput(input: Record<string, unknown>): string | null {
   for (const k of FILE_PATH_KEYS) {
@@ -67,6 +88,11 @@ export const MessageItem = memo(function MessageItem({
 }) {
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
+
+  // Only user messages carry the @-mention "Atlas context" suffix.
+  const { prose, context } = isUser
+    ? splitAtlasContext(message.content)
+    : { prose: message.content, context: null };
 
   return (
     <div
@@ -131,13 +157,19 @@ export const MessageItem = memo(function MessageItem({
           )}
 
           {/* Markdown text — render plain pre while streaming for speed; markdown once settled */}
-          {message.content && streaming ? (
+          {prose && streaming ? (
             <pre className="text-sm text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words select-text font-sans">
-              {message.content}
+              {prose}
             </pre>
           ) : null}
-          {message.content && !streaming && (
-            <Markdown className="text-sm">{message.content}</Markdown>
+          {prose && !streaming && (
+            <Markdown className="text-sm">{prose}</Markdown>
+          )}
+
+          {/* Heavy @-mention bodies (files / folders / repo READMEs / notes /
+              papers) collapsed by default so the thread stays scannable. */}
+          {context && (
+            <AtlasContextAccordion context={context} />
           )}
 
           {/* Tool calls */}
@@ -257,6 +289,41 @@ function ActionButton({
     >
       {children}
     </button>
+  );
+}
+
+function AtlasContextAccordion({ context }: { context: string }) {
+  const [open, setOpen] = useState(false);
+  const blockCount = countContextBlocks(context);
+
+  return (
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      className="group rounded-md border border-[var(--border-default)] bg-[var(--bg-secondary)]"
+    >
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          size={12}
+          className={cn(
+            "transition-transform text-[var(--text-tertiary)]",
+            open && "rotate-90"
+          )}
+        />
+        <Paperclip size={12} className="text-[var(--text-tertiary)]" />
+        <span className="font-mono">
+          Atlas context
+          {blockCount > 0 && (
+            <span className="text-[var(--text-tertiary)]"> · {blockCount}</span>
+          )}
+        </span>
+      </summary>
+      <div className="border-t border-[var(--border-default)] px-3 py-2">
+        <Markdown className="text-[12px] text-[var(--text-tertiary)]">
+          {context}
+        </Markdown>
+      </div>
+    </details>
   );
 }
 

@@ -1,9 +1,8 @@
 import { lazy, Suspense } from "react";
 import { cn } from "@/lib/utils";
 import { useLayoutStore } from "../stores/layout-store";
-import { GitPanel } from "@/features/git/components/git-panel";
 import { FileTree } from "@/features/explorer/components/file-tree";
-import { KnowledgeList } from "@/features/knowledge/components/knowledge-list";
+import { PanelSkeleton } from "@/components/panel-skeleton";
 import {
   Files,
   Brain,
@@ -16,6 +15,23 @@ import {
 const GitGraphPanel = lazy(() =>
   import("@/features/git/components/git-graph-panel").then((m) => ({
     default: m.GitGraphPanel,
+  }))
+);
+// `KnowledgeList` only mounts when the user clicks the Knowledge section
+// in the sidebar — keeping it lazy spares its store imports + render cost
+// at boot.
+const KnowledgeList = lazy(() =>
+  import("@/features/knowledge/components/knowledge-list").then((m) => ({
+    default: m.KnowledgeList,
+  }))
+);
+// `GitPanel` (bottom of the Files / Knowledge views) fires `git_status`
+// + `git_log` Tauri commands on mount. On a large repo or one with many
+// changes these can take a noticeable beat to come back — keep it lazy
+// so the file tree renders first.
+const GitPanel = lazy(() =>
+  import("@/features/git/components/git-panel").then((m) => ({
+    default: m.GitPanel,
   }))
 );
 
@@ -59,7 +75,11 @@ export function LeftPanel() {
         )}
       >
         {activeSection === "files" && <FileTree />}
-        {activeSection === "knowledge" && <KnowledgeList />}
+        {activeSection === "knowledge" && (
+          <Suspense fallback={<PanelSkeleton label="Loading knowledge…" rows={5} />}>
+            <KnowledgeList />
+          </Suspense>
+        )}
         {activeSection === "git-graph" && (
           <Suspense
             fallback={
@@ -84,7 +104,9 @@ export function LeftPanel() {
             <ChevronDown size={12} className="text-text-tertiary" />
           </div>
           <div className="flex-1 min-h-0 overflow-hidden">
-            <GitPanel />
+            <Suspense fallback={<PanelSkeleton rows={3} />}>
+              <GitPanel />
+            </Suspense>
           </div>
         </div>
       )}

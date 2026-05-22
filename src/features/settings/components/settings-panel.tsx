@@ -8,6 +8,7 @@ import {
   Keyboard,
   Info,
 } from "lucide-react";
+import { AtlasIcon } from "@/components/atlas-icon";
 
 const SECTIONS = [
   { id: "general", label: "General", icon: Settings },
@@ -177,12 +178,10 @@ function AboutSettings() {
       <SectionTitle title="About" subtitle="Atlas IDE" />
       <div className="rounded-lg border border-border-default bg-bg-secondary p-4 space-y-2">
         <div className="flex items-center gap-2">
-          <div className="w-10 h-10 rounded-xl bg-accent-muted flex items-center justify-center">
-            <span className="text-lg font-bold text-accent">A</span>
-          </div>
+          <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.0 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.1 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">

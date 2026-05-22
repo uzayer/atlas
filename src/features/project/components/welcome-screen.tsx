@@ -5,6 +5,7 @@ import {
   X,
   Folder,
 } from "lucide-react";
+import { AtlasIcon } from "@/components/atlas-icon";
 
 export function WelcomeScreen() {
   const recentProjects = useProjectStore.use.recentProjects();
@@ -27,9 +28,7 @@ export function WelcomeScreen() {
       <div className="w-[360px] space-y-8">
         {/* Branding */}
         <div className="text-center space-y-2">
-          <div className="w-16 h-16 rounded-2xl bg-[var(--accent-primary-muted)] flex items-center justify-center mx-auto mb-4">
-            <span className="text-2xl font-bold text-[var(--accent-primary)]">A</span>
-          </div>
+          <AtlasIcon size={64} className="mx-auto mb-4 rounded-2xl" />
           <h1 className="text-xl font-semibold text-[var(--text-primary)]">
             Atlas
           </h1>
