@@ -2,14 +2,21 @@ import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense } fro
 import { cn } from "@/lib/utils";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useLayoutStore, type Tab } from "../stores/layout-store";
-// Core panels — always loaded (used frequently)
+// Chat is the default landing surface — always loaded so the first paint
+// shows the agent UI without a Suspense flash.
 import { ChatPanel } from "@/features/chat/components/chat-panel";
-import { TerminalPanel } from "@/features/terminal/components/terminal-panel";
-import { EditorPanel } from "@/features/editor/components/editor-panel";
-import { BrowserPanel } from "@/features/browser/components/browser-panel";
 import { WelcomeScreen } from "@/features/project/components/welcome-screen";
+import { UnsupportedView } from "@/features/unsupported/components/unsupported-view";
 
-// Lazy-loaded panels — only parsed when first opened
+// Every other tab type is lazy. Editor/Terminal in particular pull in
+// CodeMirror+Lezer (~600 KB) and xterm (~250 KB) respectively — keeping
+// them eager added multi-second parse cost to cold start on machines that
+// don't have them in the OS file cache yet. The Suspense fallback in the
+// tab content area absorbs the brief load.
+const TerminalPanel = lazy(() => import("@/features/terminal/components/terminal-panel").then(m => ({ default: m.TerminalPanel })));
+const EditorPanel = lazy(() => import("@/features/editor/components/editor-panel").then(m => ({ default: m.EditorPanel })));
+const BrowserPanel = lazy(() => import("@/features/browser/components/browser-panel").then(m => ({ default: m.BrowserPanel })));
+const MediaViewer = lazy(() => import("@/features/media/components/media-viewer").then(m => ({ default: m.MediaViewer })));
 const CanvasPanel = lazy(() => import("@/features/canvas/components/canvas-panel").then(m => ({ default: m.CanvasPanel })));
 const KnowledgePanel = lazy(() => import("@/features/knowledge/components/knowledge-panel").then(m => ({ default: m.KnowledgePanel })));
 const ResearchPanel = lazy(() => import("@/features/research/components/research-panel").then(m => ({ default: m.ResearchPanel })));
@@ -17,6 +24,7 @@ const SettingsPanel = lazy(() => import("@/features/settings/components/settings
 const LogPanel = lazy(() => import("@/features/log/components/log-panel").then(m => ({ default: m.LogPanel })));
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
+import { useShallow } from "zustand/react/shallow";
 import {
   MessageSquare,
   Map,
@@ -49,6 +57,8 @@ const tabIcons: Record<TabType, React.ElementType> = {
   diff: GitCompare,
   settings: Settings,
   log: ScrollText,
+  media: Code,
+  unsupported: Code,
 };
 
 export function CenterPanel() {
@@ -76,16 +86,22 @@ export function CenterPanel() {
   }, [tabHistory, tabHistoryIndex, tabs]);
 
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const chatSessions = useChatStore.use.sessions();
 
-  // Memoize running tab IDs to avoid getState() in render loop
-  const runningTabIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const [id, session] of Object.entries(chatSessions)) {
-      if (session.status === "running") ids.add(id);
-    }
-    return ids;
-  }, [chatSessions]);
+  // Running-tab IDs. Pulled as a sorted string via shallow-equal selector so
+  // streaming chunks (which don't change `status`) never invalidate this and
+  // the tab bar doesn't re-render per token.
+  const runningTabIdsArray = useChatStore(
+    useShallow((s) =>
+      Object.entries(s.sessions)
+        .filter(([, sess]) => sess.status === "running")
+        .map(([id]) => id)
+        .sort()
+    )
+  );
+  const runningTabIds = useMemo(
+    () => new Set(runningTabIdsArray),
+    [runningTabIdsArray]
+  );
 
   // Show welcome screen when no project is open
   if (!currentProject) {
@@ -230,37 +246,47 @@ function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
 
   return (
     <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden", position: "relative" }}>
-      {/* Persistent tabs: stay mounted, hidden when inactive */}
-      {persistentTabs.map((tab) => {
-        const isActive = tab.id === activeTab.id;
-        return (
-          <div
-            key={tab.id}
-            style={{
-              display: isActive ? "contents" : "none",
-            }}
-          >
-            {tab.type === "editor" ? (
-              <EditorPanel
-                tabId={tab.id}
-                filePath={tab.data.filePath as string | undefined}
-                containerHeight={height}
-              />
-            ) : tab.type === "browser" ? (
-              <BrowserPanel initialUrl={tab.data.url as string | undefined} />
-            ) : (
-              <TerminalPanel tabId={tab.id} />
-            )}
-          </div>
-        );
-      })}
+      {/* Single Suspense boundary — Editor/Terminal/Browser are all lazy
+          (CodeMirror+Lezer / xterm / WebView pull in significant chunks),
+          and we want one fallback for the whole pane rather than per-tab
+          flicker. */}
+      <Suspense fallback={<PanelLoading />}>
+        {/* Persistent tabs: stay mounted, hidden when inactive */}
+        {persistentTabs.map((tab) => {
+          const isActive = tab.id === activeTab.id;
+          return (
+            <div
+              key={tab.id}
+              style={{
+                display: isActive ? "contents" : "none",
+              }}
+            >
+              {tab.type === "editor" ? (
+                <EditorPanel
+                  tabId={tab.id}
+                  filePath={tab.data.filePath as string | undefined}
+                  containerHeight={height}
+                />
+              ) : tab.type === "browser" ? (
+                <BrowserPanel initialUrl={tab.data.url as string | undefined} />
+              ) : (
+                <TerminalPanel tabId={tab.id} />
+              )}
+            </div>
+          );
+        })}
 
-      {/* Non-persistent tabs: mount/unmount normally, with Suspense for lazy panels */}
-      {activeIsNonPersistent && (
-        <Suspense fallback={<div className="h-full flex items-center justify-center text-text-tertiary text-sm">Loading...</div>}>
-          <TabContent tab={activeTab} />
-        </Suspense>
-      )}
+        {/* Non-persistent tabs: mount/unmount normally */}
+        {activeIsNonPersistent && <TabContent tab={activeTab} />}
+      </Suspense>
+    </div>
+  );
+}
+
+function PanelLoading() {
+  return (
+    <div className="h-full flex items-center justify-center text-text-tertiary text-sm">
+      Loading…
     </div>
   );
 }
@@ -281,6 +307,10 @@ function TabContent({ tab }: { tab: Tab }) {
       return <SettingsPanel />;
     case "log":
       return <LogPanel />;
+    case "media":
+      return <MediaViewer filePath={tab.data.filePath as string} />;
+    case "unsupported":
+      return <UnsupportedView filePath={tab.data.filePath as string} />;
     default:
       return <PlaceholderContent tab={tab} />;
   }

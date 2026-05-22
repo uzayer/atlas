@@ -10,10 +10,11 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import type { ChatMessage } from "@/types/agent";
 import { MessageItem } from "./message-item";
+import { cn } from "@/lib/utils";
 
 interface MessagesListProps {
   tabId: string;
-  claudeSessionId: string;
+  acpSessionId: string;
   messages: ChatMessage[];
   roleFilter: "all" | "user" | "assistant";
   isStreaming: boolean;
@@ -25,7 +26,7 @@ const NEAR_BOTTOM_PX = 100;
 
 export function MessagesList({
   tabId,
-  claudeSessionId,
+  acpSessionId,
   messages,
   roleFilter,
   isStreaming,
@@ -35,23 +36,27 @@ export function MessagesList({
       ? messages[messages.length - 1].id
       : null;
   const parentRef = useRef<HTMLDivElement>(null);
-  const cacheKey = `${tabId}:${claudeSessionId}`;
+  const cacheKey = `${tabId}:${acpSessionId}`;
 
-  // Apply role filter
-  const filtered = useMemo(() => {
-    if (roleFilter === "all") return messages;
-    return messages.filter((m) => m.role === roleFilter);
+  // Apply role filter + map filtered→original indices in one pass. The old
+  // implementation used `messages.findIndex` per filtered message, making
+  // this O(n²) on every streaming chunk (hot path) — at a few thousand
+  // messages it was the single biggest contributor to UI stutter.
+  const { filtered, indexMap } = useMemo(() => {
+    if (roleFilter === "all") {
+      const idx = messages.map((_, i) => i);
+      return { filtered: messages, indexMap: idx };
+    }
+    const filt: ChatMessage[] = [];
+    const idx: number[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role === roleFilter) {
+        filt.push(messages[i]);
+        idx.push(i);
+      }
+    }
+    return { filtered: filt, indexMap: idx };
   }, [messages, roleFilter]);
-
-  // Map filtered indices → original indices for jump-to-message
-  const indexMap = useMemo(() => {
-    const m: number[] = [];
-    filtered.forEach((msg) => {
-      const idx = messages.findIndex((x) => x.id === msg.id);
-      m.push(idx);
-    });
-    return m;
-  }, [filtered, messages]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -174,6 +179,21 @@ export function MessagesList({
                       vItem.index > 0 &&
                       filtered[vItem.index - 1].role !== message.role
                     }
+                    // Suppress avatar + role header for consecutive
+                    // assistant messages — the per-block model emits one
+                    // message per tool/text/thought, and we want them
+                    // grouped under a single ASSISTANT turn header like Zed.
+                    compact={
+                      vItem.index > 0 &&
+                      filtered[vItem.index - 1].role === message.role &&
+                      message.role === "assistant"
+                    }
+                    // Last in a same-role run — show the Reply/Save/Copy row
+                    // here instead of on every member of the group.
+                    isLastInGroup={
+                      vItem.index === filtered.length - 1 ||
+                      filtered[vItem.index + 1].role !== message.role
+                    }
                   />
                 </div>
               );
@@ -182,19 +202,36 @@ export function MessagesList({
         )}
       </div>
 
-      {/* Floating scroll-to-bottom button */}
-      {showJumpToBottom && (
-        <button
-          onClick={scrollToBottom}
-          className="absolute bottom-1 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3 h-7 rounded-full border border-[var(--border-default)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] shadow-[0_6px_16px_rgba(0,0,0,0.5)] transition-colors cursor-pointer"
-          title="Jump to latest"
-          style={{ backdropFilter: "blur(4px)" }}
-        >
-          <ChevronDownIcon />
-          Scroll to bottom
-        </button>
-      )}
-
+      {/* Bottom fade + scroll-to-bottom button. Both are gated on the same
+          showJumpToBottom flag and crossfade together so the fade never
+          lingers without the affordance, and there's no abrupt pop-in. */}
+      <div
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute left-0 right-0 bottom-0 h-16 z-[1] transition-opacity duration-200",
+          showJumpToBottom ? "opacity-100" : "opacity-0"
+        )}
+        style={{
+          background:
+            "linear-gradient(to bottom, transparent, var(--bg-surface))",
+        }}
+      />
+      <button
+        onClick={scrollToBottom}
+        tabIndex={showJumpToBottom ? 0 : -1}
+        aria-hidden={!showJumpToBottom}
+        className={cn(
+          "absolute bottom-1 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3 h-7 rounded-full border border-[var(--border-default)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] shadow-[0_6px_16px_rgba(0,0,0,0.5)] cursor-pointer transition-[opacity,transform,background-color,color] duration-200",
+          showJumpToBottom
+            ? "opacity-100 translate-y-0 pointer-events-auto"
+            : "opacity-0 translate-y-1 pointer-events-none"
+        )}
+        title="Jump to latest"
+        style={{ backdropFilter: "blur(4px)" }}
+      >
+        <ChevronDownIcon />
+        Scroll to bottom
+      </button>
     </div>
   );
 }

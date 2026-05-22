@@ -19,6 +19,8 @@ export const TAB_TYPES = [
   "diff",
   "settings",
   "log",
+  "media",
+  "unsupported",
 ] as const;
 
 export type TabType = (typeof TAB_TYPES)[number];

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { listen } from "@tauri-apps/api/event";
+import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { BarChart3, Zap, Clock } from "lucide-react";
 import { useUsageStore } from "../stores/usage-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
+import { useShallow } from "zustand/react/shallow";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { getClaudeSessionStats } from "@/features/chat/lib/claude-api";
+import { listen } from "@tauri-apps/api/event";
 
 function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
@@ -24,56 +25,70 @@ export function UsageBar() {
 
   const activeTabId = useLayoutStore.use.activeTabId();
   const tabs = useLayoutStore.use.tabs();
-  const sessions = useChatStore.use.sessions();
   const project = useProjectStore.use.currentProject();
 
-  // Detect the active Claude Code session (only when the active tab is a chat in agent mode with a captured session id)
+  // Active chat session (only when the active tab is an agent-mode chat with
+  // a bound ACP session). Pulled via a narrow shallow-equal selector so the
+  // usage bar doesn't re-render on every streaming chunk — only when one of
+  // these three fields actually changes.
   const activeTab = tabs.find((t) => t.id === activeTabId);
-  const chatSession = activeTab?.type === "chat" ? sessions[activeTab.id] : undefined;
-  const claudeSessionId =
-    chatSession?.useClaude && chatSession.claudeSessionId ? chatSession.claudeSessionId : null;
+  const chatSession = useChatStore(
+    useShallow((s) => {
+      if (!activeTab || activeTab.type !== "chat") return null;
+      const sess = s.sessions[activeTab.id];
+      if (!sess) return null;
+      return {
+        acpSessionId: sess.acpSessionId,
+        status: sess.status,
+      };
+    })
+  );
+  const acpSessionId = chatSession?.acpSessionId ?? null;
+  const isStreaming = chatSession?.status === "running";
   const cwd = project?.path ?? "";
 
   const queryClient = useQueryClient();
-  const queryKey = ["claude-session-stats", cwd, claudeSessionId] as const;
+  const queryKey = ["claude-session-stats", cwd, acpSessionId] as const;
 
   const { data: stats } = useQuery({
     queryKey,
-    queryFn: () => getClaudeSessionStats(cwd, claudeSessionId as string),
-    enabled: !!claudeSessionId && cwd.length > 0,
-    staleTime: 2_000,
+    queryFn: () => getClaudeSessionStats(cwd, acpSessionId as string),
+    enabled: !!acpSessionId && cwd.length > 0,
+    staleTime: 30_000,
+    // Polling killed: the Rust file watcher (started by SessionSidebar) emits
+    // `atlas:sessions-changed` whenever any JSONL in the project rewrites,
+    // and the effect below invalidates this query in response. That means
+    // we re-read the stats file exactly when Claude flushes — not every
+    // 1.5s while we're guessing it might have.
+    refetchInterval: false,
+    // Keep the previously-rendered totals visible while a new query (after
+    // a tab switch / session change) is in flight. Without this the bar
+    // briefly blanks every time you click a history row.
+    placeholderData: keepPreviousData,
   });
 
-  // Refresh stats during the stream, throttled, plus an immediate invalidate on done.
+  // Push refresh on file-watch + on turn-end status transitions.
   useEffect(() => {
-    let pendingInvalidate: number | null = null;
-    const schedule = () => {
-      if (pendingInvalidate !== null) return;
-      pendingInvalidate = window.setTimeout(() => {
-        pendingInvalidate = null;
+    if (!acpSessionId) return;
+    const unlistenPromise = listen<{ cwd: string }>(
+      "atlas:sessions-changed",
+      (e) => {
+        if (e.payload.cwd !== cwd) return;
         queryClient.invalidateQueries({ queryKey });
-      }, 1500);
-    };
-    const p = listen<{ event_type: string }>("claude-stream", (e) => {
-      const t = e.payload.event_type;
-      if (t === "done") {
-        if (pendingInvalidate !== null) {
-          window.clearTimeout(pendingInvalidate);
-          pendingInvalidate = null;
-        }
-        queryClient.invalidateQueries({ queryKey });
-      } else if (t === "text" || t === "tool_use" || t === "session") {
-        schedule();
       }
-    });
+    );
     return () => {
-      if (pendingInvalidate !== null) window.clearTimeout(pendingInvalidate);
-      p.then((u) => u());
+      unlistenPromise.then((u) => u());
     };
-  }, [queryClient, queryKey]);
+  }, [acpSessionId, cwd, queryClient, queryKey]);
+  useEffect(() => {
+    if (!acpSessionId) return;
+    if (isStreaming) return;
+    queryClient.invalidateQueries({ queryKey });
+  }, [acpSessionId, isStreaming, queryClient, queryKey]);
 
   const display = useMemo(() => {
-    if (claudeSessionId && stats) {
+    if (acpSessionId && stats) {
       return {
         inputTokens: stats.input_tokens,
         outputTokens: stats.output_tokens,
@@ -96,7 +111,7 @@ export function UsageBar() {
       source: "provider" as const,
     };
   }, [
-    claudeSessionId,
+    acpSessionId,
     stats,
     inputTokensFallback,
     outputTokensFallback,

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
 import { createSelectors } from "@/lib/create-selectors";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { logEvent } from "@/features/log/lib/log";
 
 interface GitFileStatus {
@@ -21,6 +22,42 @@ interface GitLogEntry {
 interface GitBranch {
   name: string;
   is_current: boolean;
+}
+
+/**
+ * Subscribe once (lazily) to the Rust-side `atlas:git-status-fresh` event.
+ * When fresh git status arrives in the background it patches the store, so
+ * any UI that snapshotted the stale cache from the initial `git_status`
+ * invoke gets the corrected data the moment git finishes its real walk.
+ *
+ * Path-gated: if the user switched projects between the initial invoke
+ * and the fresh emit, the emit is ignored to avoid stomping the new
+ * project's status with the old project's data.
+ */
+let gitStatusFreshListenerInit = false;
+function ensureGitStatusFreshListener(): void {
+  if (gitStatusFreshListenerInit) return;
+  gitStatusFreshListenerInit = true;
+  void listen<{
+    path: string;
+    status: {
+      is_repo: boolean;
+      branch: string;
+      files: GitFileStatus[];
+      ahead: number;
+      behind: number;
+    };
+  }>("atlas:git-status-fresh", (e) => {
+    const current = useGitStore.getState().repoPath;
+    if (!current || current !== e.payload.path) return;
+    useGitStore.setState((s) => {
+      s.isRepo = e.payload.status.is_repo;
+      s.branch = e.payload.status.branch;
+      s.files = e.payload.status.files;
+      s.ahead = e.payload.status.ahead;
+      s.behind = e.payload.status.behind;
+    });
+  });
 }
 
 interface GitState {
@@ -66,11 +103,16 @@ export const useGitStore = createSelectors(
       repoPath: null,
       actions: {
         loadStatus: async (path) => {
+          ensureGitStatusFreshListener();
           set((s) => {
             s.loading = true;
             s.repoPath = path;
           });
           try {
+            // Stale-while-revalidate: Rust returns the cached result
+            // immediately and emits `atlas:git-status-fresh` when the
+            // background refresh completes. The listener below patches
+            // the fresh result into the store.
             const status = await invoke<{
               is_repo: boolean;
               branch: string;
@@ -182,7 +224,9 @@ export const useGitStore = createSelectors(
             payload: { message },
           });
           await get().actions.loadStatus(repoPath);
-          await get().actions.loadLog(repoPath);
+          // No `loadLog` here — the store's `log` field is unused by any
+          // panel (git-graph fetches its own via useQuery). Calling it just
+          // wastes a slow `git log --all` subprocess.
         },
       },
     }))

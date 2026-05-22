@@ -32,14 +32,15 @@ export interface ChatSession {
   tasks: AgentTask[];
   createdAt: string;
   updatedAt: string;
-  claudeSessionId?: string;
-  /** Per-send unique id used to disambiguate concurrent streams. */
-  streamId?: string;
-  useClaude: boolean;
   claudePermissionMode: ClaudePermissionMode;
-  /** ACP agent process bound to this tab (lazily set on first prompt). */
+  /** ACP agent process bound to this tab (set eagerly when the tab mounts). */
   acpAgentId?: string;
-  /** ACP session id bound to this tab (lazily set on first prompt). */
+  /**
+   * Session id bound to this tab. This is the SAME identifier the canonical
+   * Claude Code agent writes its JSONL transcript under in
+   * `~/.claude/projects/<encoded-cwd>/<id>.jsonl` — so it's both the ACP
+   * session id and the on-disk session id. One name, one field.
+   */
   acpSessionId?: string;
   /** Currently selected ACP session mode (default / acceptEdits / plan / …). */
   acpCurrentMode?: string;
@@ -47,6 +48,20 @@ export interface ChatSession {
   acpCurrentModel?: string;
   /** Available slash commands as reported by the agent for this session. */
   availableCommands?: unknown[];
+  /**
+   * Cached preview/count fields the sidebar reads. Maintained by the store
+   * on user-message inserts and bulk replace so the sidebar's per-tab
+   * summary doesn't have to scan `messages` on every streaming chunk.
+   */
+  firstUserContent?: string;
+  userMessageCount?: number;
+  /**
+   * True while the tab is asynchronously hydrating a historical transcript
+   * from disk (sidebar click → `readClaudeSession`). The chat panel renders
+   * a "loading transcript" placeholder instead of the welcome state during
+   * this window so navigation never flashes the empty page.
+   */
+  transcriptLoading?: boolean;
 }
 
 export interface ChatMessage {
@@ -57,6 +72,21 @@ export interface ChatMessage {
   fileChanges: FileChange[];
   plan: PlanStep[] | null;
   timestamp: string;
+  /**
+   * Discriminator for ACP-driven assistant messages. Splits one logical "turn"
+   * into a sequence of single-purpose messages so they render in event order
+   * (text, then tool, then text, then thinking, etc.).
+   *
+   * - "text": markdown content
+   * - "tool": one or more tool calls only
+   * - "thinking": collapsible thought chunks
+   *
+   * Undefined for legacy / user / system / chat-API messages — falls back to
+   * the original combined render.
+   */
+  mode?: "text" | "tool" | "thinking";
+  /** Accumulated thinking chunks; only set when mode === "thinking". */
+  thinking?: string;
 }
 
 export interface ToolCallDisplay {

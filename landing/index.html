@@ -1,0 +1,3235 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#000000" />
+<title>Atlas — A planning surface for coding agents</title>
+<meta name="description" content="Atlas is a native macOS editor built for the work around the code — research, planning, knowledge, and the agent threads that turn them into commits. Speaks ACP; ships with Claude Code." />
+
+<!-- Open Graph / Twitter — used by every link-preview-rendering service. -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Atlas" />
+<meta property="og:title" content="Atlas — A planning surface for coding agents" />
+<meta property="og:description" content="Native macOS editor for the work around the code. Research, planning, knowledge, and agent threads in one workspace. ACP-native; ships with Claude Code." />
+<meta property="og:image" content="/og-image.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Atlas — A planning surface for coding agents" />
+<meta name="twitter:description" content="Native macOS editor for the work around the code. ACP-native; ships with Claude Code." />
+<meta name="twitter:image" content="/og-image.png" />
+<meta name="twitter:site" content="@antarys_ai" />
+
+<link rel="icon" type="image/png" href="/antarys-logo.png" />
+<link rel="apple-touch-icon" href="/antarys-logo.png" />
+<link rel="canonical" href="https://atlas.antarys.ai/" />
+
+<link rel="stylesheet" href="atlas.css" />
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  /* ============================================================
+     Atlas landing page — overrides and landing-only styles
+     Inherits tokens + base type from atlas.css
+     ============================================================ */
+
+  html, body { background: #000; }
+  body {
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--text-secondary);
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  ::selection { background: var(--accent-highlight-muted); color: #fff; }
+
+  a { color: inherit; text-decoration: none; }
+
+  /* Layout */
+  .wrap { width: 100%; max-width: 1240px; margin: 0 auto; padding: 0 32px; }
+  .wrap-tight { max-width: 1080px; margin: 0 auto; padding: 0 32px; }
+
+  /* ============================================================
+     NAV — pill-style floating
+     ============================================================ */
+  .nav {
+    position: fixed; top: 16px; left: 0; right: 0;
+    z-index: 50;
+    display: flex; justify-content: center;
+    pointer-events: none;
+  }
+  .nav-pill {
+    pointer-events: auto;
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 5px 5px 5px 14px;
+    background: rgba(10,10,10,0.72);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 999px;
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.04) inset,
+      0 8px 28px -8px rgba(0,0,0,0.6);
+    transition: background 150ms ease, border-color 150ms ease;
+  }
+  .nav.scrolled .nav-pill {
+    background: rgba(10,10,10,0.9);
+    border-color: rgba(255,255,255,0.1);
+  }
+  .nav-brand {
+    display: inline-flex; align-items: center; gap: 5px;
+    color: var(--text-primary);
+    font-weight: 600; font-size: 14.5px;
+    letter-spacing: -0.005em;
+    padding: 4px 8px 4px 0;
+    margin-right: 4px;
+    border-right: 1px solid rgba(255,255,255,0.08);
+    padding-right: 14px;
+  }
+  .nav-brand img {
+    height: 14px;
+    width: auto;
+    display: block;
+  }
+  .nav-brand-mark {
+    width: 18px; height: 18px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .nav-brand-mark svg { width: 18px; height: 18px; }
+  .nav-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    color: rgba(255,255,255,0.7);
+    transition: color 120ms ease, background 120ms ease;
+  }
+  .nav-link svg { width: 13px; height: 13px; }
+  .nav-link:hover { color: var(--text-primary); background: rgba(255,255,255,0.05); }
+  .nav-cta-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 14px;
+    background: #ededed; color: #000;
+    border-radius: 999px;
+    font-size: 13px; font-weight: 500;
+    margin-left: 4px;
+    transition: background 120ms ease;
+  }
+  .nav-cta-btn:hover { background: #fff; }
+  .nav-cta-btn svg { width: 13px; height: 13px; }
+
+  /* Tooltip on nav-link */
+  .nav-link[data-tooltip] { position: relative; }
+  .nav-link[data-tooltip]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    top: calc(100% + 10px);
+    left: 50%;
+    transform: translate(-50%, -4px);
+    white-space: nowrap;
+    padding: 5px 10px;
+    background: #0d0d0d;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+    z-index: 100;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 120ms ease, transform 120ms ease;
+  }
+  .nav-link[data-tooltip]:hover::after {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  /* Brand mark used in footer */
+  .brand {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--text-primary); font-weight: 600; font-size: 14px;
+    letter-spacing: -0.01em;
+  }
+  .brand-mark {
+    width: 20px; height: 20px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .brand-mark svg { width: 20px; height: 20px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 12px;
+    border-radius: 6px;
+    font-size: 13px; font-weight: 500;
+    border: 1px solid transparent;
+    transition: background-color 120ms ease, border-color 120ms ease;
+    cursor: pointer;
+    white-space: nowrap;
+    font-family: inherit;
+  }
+  .btn-primary {
+    background: #ededed; color: #000;
+    border-color: #ededed;
+  }
+  .btn-primary:hover { background: #fff; border-color: #fff; }
+  .btn-secondary {
+    background: transparent; color: var(--text-primary);
+    border-color: var(--border-strong);
+  }
+  .btn-secondary:hover { background: var(--bg-raised); border-color: #4d4d4d; }
+  .btn-ghost {
+    background: transparent; color: var(--text-secondary);
+  }
+  .btn-ghost:hover { color: var(--text-primary); background: var(--bg-raised); }
+  .btn-lg { height: 38px; padding: 0 16px; font-size: 14px; border-radius: 7px; }
+  .btn svg { width: 14px; height: 14px; }
+
+  /* ============================================================
+     HERO
+     ============================================================ */
+  .hero {
+    position: relative;
+    padding: 140px 0 64px;
+    text-align: center;
+    overflow: hidden;
+  }
+  .hero-grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(to right, rgba(255,255,255,0.025) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255,255,255,0.025) 1px, transparent 1px);
+    background-size: 64px 64px;
+    mask-image: radial-gradient(ellipse 60% 50% at 50% 0%, #000 30%, transparent 80%);
+    -webkit-mask-image: radial-gradient(ellipse 60% 50% at 50% 0%, #000 30%, transparent 80%);
+    pointer-events: none;
+  }
+  .hero-glow {
+    position: absolute; left: 50%; top: -200px;
+    width: 800px; height: 500px;
+    transform: translateX(-50%);
+    background: radial-gradient(ellipse at center, rgba(255,255,255,0.04) 0%, transparent 65%);
+    pointer-events: none;
+  }
+  .hero-inner { position: relative; z-index: 1; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 4px 10px 4px 6px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    font-size: 12px; color: var(--text-tertiary);
+    margin-bottom: 28px;
+  }
+  .eyebrow-tag {
+    display: inline-flex; align-items: center;
+    padding: 1px 7px;
+    background: #1e1e1e;
+    color: var(--text-primary);
+    border-radius: 999px;
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .eyebrow-sep { color: var(--border-strong); }
+  .eyebrow a { color: var(--text-secondary); display: inline-flex; align-items: center; gap: 4px; }
+  .eyebrow a:hover { color: var(--text-primary); }
+  .eyebrow svg { width: 11px; height: 11px; }
+
+  h1.hero-title {
+    font-size: clamp(44px, 7.5vw, 88px);
+    line-height: 1.02;
+    letter-spacing: -0.04em;
+    color: var(--text-primary);
+    font-weight: 600;
+    margin: 0 auto 20px;
+    max-width: 14ch;
+    text-wrap: balance;
+  }
+  .hero-sub {
+    font-size: clamp(16px, 1.6vw, 19px);
+    line-height: 1.5;
+    color: var(--text-tertiary);
+    max-width: 56ch;
+    margin: 0 auto 40px;
+    text-wrap: pretty;
+    letter-spacing: -0.005em;
+  }
+  .hero-cta { display: inline-flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .hero-meta {
+    margin-top: 28px;
+    display: flex; justify-content: center; align-items: center; gap: 14px;
+    font-size: 12px; color: var(--text-ghost);
+    font-family: var(--font-mono);
+  }
+  .hero-meta .atlas-dot { width: 5px; height: 5px; }
+  .hero-meta-sep { color: var(--border-strong); }
+
+  /* ============================================================
+     PRODUCT MOCK — recreates the Atlas app shell
+     ============================================================ */
+  .product-section {
+    position: relative;
+    padding: 24px 0 80px;
+  }
+  .product-frame-outer {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 0 20px;
+    position: relative;
+  }
+  .product-frame-outer::before {
+    content: ""; position: absolute;
+    inset: 40px 0 -20px 0;
+    background: radial-gradient(ellipse 70% 40% at 50% 60%, rgba(255,255,255,0.04), transparent 70%);
+    pointer-events: none; z-index: 0;
+  }
+  .product-window {
+    position: relative; z-index: 1;
+    background: #000;
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.04) inset,
+      0 30px 80px -20px rgba(0,0,0,0.8),
+      0 0 0 1px rgba(255,255,255,0.02);
+  }
+  /* Mac titlebar */
+  .pw-titlebar {
+    display: flex; align-items: center;
+    height: 36px; padding: 0 14px;
+    background: #0a0a0a;
+    border-bottom: 1px solid var(--border-default);
+    gap: 8px;
+  }
+  .pw-dots { display: flex; gap: 6px; }
+  .pw-dot { width: 11px; height: 11px; border-radius: 50%; background: #232323; }
+  .pw-titlebar .pw-project {
+    margin-left: 16px;
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-secondary);
+    padding: 3px 8px; border-radius: 5px;
+  }
+  .pw-titlebar .pw-project svg { width: 12px; height: 12px; opacity: 0.5; }
+  .pw-titlebar .pw-spacer { flex: 1; }
+  .pw-titlebar .pw-titleicon {
+    width: 24px; height: 24px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-ghost);
+    border-radius: 4px;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .pw-titlebar .pw-titleicon:hover { color: var(--text-secondary); background: var(--bg-hover); }
+  .pw-titleicon + .pw-titleicon { margin-left: 2px; }
+  .pw-titleicon svg { width: 14px; height: 14px; }
+
+  /* Tab bar */
+  .pw-tabs {
+    display: flex; align-items: center;
+    height: 36px; padding: 0 8px;
+    background: #050505;
+    border-bottom: 1px solid var(--border-default);
+    gap: 2px;
+    font-size: 12px;
+  }
+  .pw-tab {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 26px; padding: 0 10px;
+    border-radius: 5px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+  }
+  .pw-tab svg { width: 12px; height: 12px; }
+  .pw-tab.is-active { background: #171717; color: var(--text-primary); }
+  .pw-tab:hover:not(.is-active) { color: var(--text-secondary); }
+  .pw-tabs-spacer { flex: 1; }
+  .pw-tabs-right {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--text-ghost); font-size: 12px;
+  }
+  .pw-tabs-right .pw-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 8px; border-radius: 5px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    color: var(--text-secondary);
+  }
+  .pw-tabs-right .pw-chip svg { width: 11px; height: 11px; }
+
+  /* Body grid */
+  .pw-body {
+    display: grid;
+    grid-template-columns: 220px 1fr 280px;
+    min-height: 540px;
+  }
+  .pw-sidebar {
+    border-right: 1px solid var(--border-default);
+    background: #030303;
+    padding: 12px;
+    font-size: 12px;
+  }
+  .pw-sb-header {
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--text-ghost);
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 6px 4px 10px;
+  }
+  .pw-sb-search {
+    display: flex; align-items: center; gap: 6px;
+    height: 26px; padding: 0 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    border-radius: 5px;
+    color: var(--text-ghost);
+    margin-bottom: 12px;
+  }
+  .pw-sb-search svg { width: 12px; height: 12px; }
+  .pw-sb-thread {
+    padding: 8px 8px;
+    border-radius: 5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    margin-bottom: 2px;
+  }
+  .pw-sb-thread.is-active { background: var(--bg-active); color: var(--text-primary); }
+  .pw-sb-thread:hover:not(.is-active) { background: var(--bg-hover); }
+  .pw-sb-thread-title {
+    display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .pw-sb-thread-meta {
+    display: flex; justify-content: space-between;
+    margin-top: 4px;
+    font-size: 10px; color: var(--text-ghost);
+    font-family: var(--font-mono);
+  }
+
+  /* Main panel */
+  .pw-main {
+    padding: 28px 36px;
+    background: #000;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    min-width: 0;
+  }
+  .pw-main-scroll {
+    flex: 1;
+    overflow: hidden;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+  .pw-main-scroll h4 {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    margin: 18px 0 8px;
+  }
+  .pw-main-scroll h4:first-child { margin-top: 0; }
+  .pw-main-scroll ul { list-style: none; padding: 0; margin: 0; }
+  .pw-main-scroll li {
+    position: relative;
+    padding-left: 16px;
+    margin-bottom: 4px;
+  }
+  .pw-main-scroll li::before {
+    content: "•";
+    position: absolute; left: 4px;
+    color: var(--text-ghost);
+  }
+  .pw-main-scroll code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg-raised);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--text-primary);
+  }
+  .pw-composer {
+    margin-top: 16px;
+    border: 1px solid var(--border-default);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    padding: 12px 14px;
+  }
+  .pw-composer-input {
+    color: var(--text-ghost);
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .pw-composer-bottom {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px;
+  }
+  .pw-composer-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 5px;
+    color: var(--text-secondary);
+  }
+  .pw-composer-chip.is-mode {
+    color: var(--text-secondary);
+  }
+  .pw-composer-chip .atlas-dot { width: 5px; height: 5px; }
+  .pw-composer-chip svg { width: 11px; height: 11px; }
+  .pw-composer-spacer { flex: 1; }
+  .pw-composer-send {
+    width: 22px; height: 22px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-ghost);
+    border-radius: 4px;
+  }
+  .pw-composer-send svg { width: 12px; height: 12px; }
+
+  /* Right inspector */
+  .pw-inspector {
+    border-left: 1px solid var(--border-default);
+    background: #030303;
+    padding: 14px;
+    overflow: hidden;
+    font-size: 12px;
+  }
+  .pw-tabs-sub {
+    display: flex; gap: 4px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-default);
+    margin-bottom: 14px;
+    font-size: 11px;
+  }
+  .pw-tabs-sub > span {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 6px;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .pw-tabs-sub > span.is-active { color: var(--text-primary); background: var(--bg-raised); }
+  .pw-tabs-sub svg { width: 10px; height: 10px; }
+
+  .pw-insp-section {
+    margin-bottom: 18px;
+  }
+  .pw-insp-head {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-ghost);
+    margin-bottom: 10px;
+  }
+  .pw-insp-head .pw-insp-count {
+    color: var(--text-tertiary);
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .pw-insp-head .pw-insp-icon {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text-tertiary);
+  }
+  .pw-insp-head svg { width: 11px; height: 11px; }
+
+  .heatmap-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 0;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+  }
+  .heatmap-bar {
+    flex: 1;
+    height: 14px;
+    background: linear-gradient(90deg, rgba(244,71,71,0.15), rgba(244,71,71,0.04));
+    border-radius: 2px;
+    position: relative;
+    overflow: hidden;
+  }
+  .heatmap-bar::before {
+    content: ""; position: absolute; inset: 0;
+    background: var(--status-error);
+    opacity: 0.35;
+    width: var(--w, 50%);
+  }
+  .heatmap-num {
+    width: 32px; text-align: right;
+    color: var(--text-secondary);
+  }
+
+  /* Status bar */
+  .pw-statusbar {
+    display: flex; align-items: center;
+    height: 26px; padding: 0 14px;
+    background: #050505;
+    border-top: 1px solid var(--border-default);
+    font-size: 11px;
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+  }
+  .pw-statusbar .left, .pw-statusbar .right {
+    display: flex; align-items: center; gap: 14px;
+  }
+  .pw-statusbar .spacer { flex: 1; }
+  .pw-statusbar svg { width: 11px; height: 11px; }
+
+  /* ============================================================
+     SECTION CHROME
+     ============================================================ */
+  section.scaffold { padding: 100px 0; border-top: 1px solid var(--border-default); }
+  .sec-eyebrow {
+    display: inline-block;
+    font-size: 11px; font-weight: 600;
+    color: var(--text-tertiary);
+    letter-spacing: 0.12em; text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+  .sec-title {
+    color: var(--text-primary);
+    font-size: clamp(28px, 3.6vw, 44px);
+    line-height: 1.08;
+    letter-spacing: -0.03em;
+    font-weight: 600;
+    margin: 0 0 16px;
+    max-width: 22ch;
+    text-wrap: balance;
+  }
+  .sec-sub {
+    font-size: 16px;
+    color: var(--text-tertiary);
+    max-width: 56ch;
+    margin: 0;
+  }
+  .sec-head { margin-bottom: 56px; }
+
+  /* ============================================================
+     PILLARS — "Everything in one window"
+     ============================================================ */
+  .pillars-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    margin-top: 56px;
+  }
+  .pillar {
+    border: 1px solid var(--border-default);
+    border-radius: 10px;
+    background: #050505;
+    overflow: hidden;
+    transition: border-color 150ms ease, background 150ms ease;
+  }
+  .pillar:hover { border-color: var(--border-strong); }
+  .pillar-mock {
+    height: 200px;
+    border-bottom: 1px solid var(--border-default);
+    background: #000;
+    position: relative;
+    overflow: hidden;
+  }
+  .pillar-body {
+    padding: 20px;
+  }
+  .pillar-title {
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 500;
+    margin: 0 0 6px;
+  }
+  .pillar-desc {
+    color: var(--text-tertiary);
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 0;
+  }
+  .pillar-kicker {
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-ghost);
+    margin-bottom: 6px;
+  }
+
+  /* Pillar mock 1: agent chat */
+  .pm-chat {
+    padding: 16px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+  }
+  .pm-msg {
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-secondary);
+  }
+  .pm-msg-user {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 11px;
+    padding: 6px 0;
+  }
+  .pm-stream-line {
+    display: flex; gap: 6px; align-items: baseline;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--text-tertiary);
+    line-height: 1.6;
+  }
+  .pm-stream-line .pm-tok { color: var(--text-primary); }
+  .pm-stream-line .pm-blink {
+    width: 6px; height: 11px;
+    background: var(--text-primary);
+    display: inline-block;
+    animation: blink 1s steps(2) infinite;
+    vertical-align: middle;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* Pillar mock 2: git graph */
+  .pm-git {
+    display: flex; flex-direction: column;
+    padding: 14px 16px;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+  }
+  .pm-git-row {
+    display: grid;
+    grid-template-columns: 14px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    height: 16px;
+    color: var(--text-tertiary);
+  }
+  .pm-git-node {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    border: 1.5px solid;
+    margin: 0 auto;
+  }
+  .pm-git-node-blue { border-color: #5b8def; background: #000; }
+  .pm-git-node-pink { border-color: #d96baf; background: #000; }
+  .pm-git-node-orange { border-color: #d97e35; background: #000; }
+  .pm-git-node-green { background: #4d7c5a; border-color: #4d7c5a; }
+  .pm-git-msg { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pm-git-hash { color: var(--text-ghost); font-size: 9.5px; }
+
+  /* Pillar mock 3: notes / canvas */
+  .pm-canvas {
+    position: relative; height: 100%;
+    background-image:
+      radial-gradient(circle at 1px 1px, rgba(255,255,255,0.04) 1px, transparent 0);
+    background-size: 14px 14px;
+    padding: 14px;
+  }
+  .pm-note {
+    position: absolute;
+    background: #0a0a0a;
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    padding: 8px 10px;
+    width: 130px;
+    font-size: 10.5px;
+    color: var(--text-secondary);
+  }
+  .pm-note-title {
+    color: var(--text-primary);
+    font-size: 11px; font-weight: 500;
+    margin-bottom: 3px;
+  }
+  .pm-note-meta {
+    font-family: var(--font-mono);
+    color: var(--text-ghost);
+    font-size: 9.5px;
+    margin-bottom: 6px;
+  }
+  .pm-note-body { color: var(--text-tertiary); line-height: 1.4; }
+  .pm-note-1 { top: 20px; left: 20px; }
+  .pm-note-2 { top: 70px; left: 110px; width: 140px; }
+  .pm-note-3 { top: 30px; right: 16px; width: 110px; }
+
+  /* ============================================================
+     Showcase rows — alternating two-column product highlights
+     ============================================================ */
+  .showcase-row {
+    padding: 96px 0;
+    border-top: 1px solid var(--border-default);
+  }
+  .showcase-grid {
+    display: grid;
+    grid-template-columns: 1fr 1.2fr;
+    gap: 64px;
+    align-items: center;
+  }
+  .showcase-grid.is-reversed { grid-template-columns: 1.2fr 1fr; }
+  .showcase-grid.is-reversed .showcase-copy { order: 2; }
+  .showcase-grid.is-reversed .showcase-visual { order: 1; }
+  .showcase-copy {
+    max-width: 460px;
+  }
+  .showcase-copy .sec-eyebrow { margin-bottom: 14px; }
+  .showcase-copy h2 {
+    font-size: clamp(28px, 3.4vw, 40px);
+    line-height: 1.1;
+    letter-spacing: -0.03em;
+    color: var(--text-primary);
+    font-weight: 600;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  .showcase-copy p {
+    font-size: 15.5px;
+    color: var(--text-tertiary);
+    line-height: 1.6;
+    margin: 0 0 20px;
+  }
+  .showcase-points {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .showcase-points li {
+    display: flex; gap: 10px;
+    font-size: 13.5px;
+    color: var(--text-tertiary);
+    line-height: 1.55;
+  }
+  .showcase-points li svg {
+    width: 14px; height: 14px;
+    flex-shrink: 0;
+    margin-top: 3px;
+    color: var(--text-secondary);
+  }
+  .showcase-points strong {
+    color: var(--text-primary); font-weight: 500;
+  }
+  .showcase-visual {
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    background: #050505;
+    overflow: hidden;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.04) inset,
+      0 20px 50px -20px rgba(0,0,0,0.6);
+    position: relative;
+  }
+  .sv-header {
+    display: flex; align-items: center; gap: 8px;
+    height: 32px; padding: 0 12px;
+    border-bottom: 1px solid var(--border-default);
+    background: #0a0a0a;
+    font-size: 11px;
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+  }
+  .sv-header .sv-tab-name {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text-secondary);
+  }
+  .sv-header svg { width: 11px; height: 11px; }
+
+  /* ---- Git tree visual ---- */
+  .git-tree {
+    padding: 16px 18px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    min-height: 460px;
+    display: flex; flex-direction: column;
+    gap: 3px;
+  }
+  .gt-row {
+    display: grid;
+    grid-template-columns: 80px 1fr auto auto;
+    align-items: center;
+    gap: 14px;
+    height: 22px;
+    color: var(--text-tertiary);
+    padding: 0 4px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .gt-row:hover { background: var(--bg-raised); }
+  .gt-row.is-selected { background: var(--bg-active); color: var(--text-primary); }
+  .gt-lanes {
+    position: relative;
+    height: 22px;
+  }
+  .gt-lane {
+    position: absolute; top: 0; bottom: 0;
+    width: 1.5px;
+    background: var(--lane-color, #404040);
+  }
+  .gt-node {
+    position: absolute;
+    top: 50%;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background: #000;
+    border: 1.5px solid var(--node-color, #5b8def);
+  }
+  .gt-node.is-filled { background: var(--node-color, #5b8def); }
+  .gt-msg {
+    color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: var(--font-ui);
+    font-size: 12px;
+  }
+  .gt-row.is-selected .gt-msg { color: var(--text-primary); }
+  .gt-author {
+    color: var(--text-ghost);
+    font-size: 11px;
+    font-family: var(--font-ui);
+  }
+  .gt-hash {
+    color: var(--text-ghost);
+    font-size: 11px;
+  }
+  .gt-ref {
+    display: inline-flex; align-items: center;
+    padding: 1px 6px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    font-size: 10px;
+    color: var(--text-secondary);
+    margin-right: 6px;
+    font-family: var(--font-mono);
+  }
+  .gt-ref.is-head { background: rgba(91,141,239,0.12); border-color: rgba(91,141,239,0.3); color: #8aaef2; }
+
+  /* ---- Knowledge base visual ---- */
+  .kb-split {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    min-height: 460px;
+  }
+  .kb-sidebar {
+    border-right: 1px solid var(--border-default);
+    background: #030303;
+    padding: 12px 8px;
+    font-size: 12px;
+    overflow: hidden;
+  }
+  .kb-sb-head {
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-ghost);
+    padding: 4px 8px 8px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .kb-folder {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 8px;
+    color: var(--text-secondary);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .kb-folder.is-open { color: var(--text-primary); }
+  .kb-folder svg { width: 12px; height: 12px; color: var(--text-ghost); }
+  .kb-file {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 8px 4px 24px;
+    color: var(--text-tertiary);
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  .kb-file:hover { background: var(--bg-hover); }
+  .kb-file.is-active { background: var(--bg-active); color: var(--text-primary); }
+  .kb-file svg { width: 11px; height: 11px; color: var(--text-ghost); }
+  .kb-editor {
+    padding: 20px 28px;
+    background: #000;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    overflow: hidden;
+  }
+  .kb-editor h1 {
+    color: var(--text-primary);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 6px;
+  }
+  .kb-editor h2 {
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 500;
+    margin: 18px 0 6px;
+    letter-spacing: -0.005em;
+  }
+  .kb-editor p { margin: 0 0 10px; color: var(--text-tertiary); font-size: 13px; }
+  .kb-editor .kb-meta {
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    margin-bottom: 16px;
+  }
+  .kb-editor ul { list-style: none; padding: 0; margin: 0 0 10px; }
+  .kb-editor li {
+    position: relative;
+    padding-left: 16px;
+    color: var(--text-tertiary);
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+  .kb-editor li::before {
+    content: "—";
+    position: absolute; left: 0;
+    color: var(--text-ghost);
+  }
+  .kb-editor code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg-raised);
+    padding: 1px 5px;
+    border-radius: 4px;
+    color: var(--text-primary);
+  }
+  .kb-tag {
+    display: inline-flex; align-items: center;
+    padding: 1px 6px;
+    background: rgba(91,141,239,0.08);
+    border: 1px solid rgba(91,141,239,0.2);
+    border-radius: 999px;
+    font-size: 10px;
+    color: #8aaef2;
+    margin-right: 4px;
+    font-family: var(--font-mono);
+  }
+
+  /* ---- Reference @ visual ---- */
+  .ref-frame {
+    padding: 32px;
+    min-height: 460px;
+    display: flex; flex-direction: column; justify-content: flex-end;
+    position: relative;
+  }
+  .ref-frame::before {
+    content: ""; position: absolute; inset: 0;
+    background-image:
+      radial-gradient(circle at 1px 1px, rgba(255,255,255,0.03) 1px, transparent 0);
+    background-size: 16px 16px;
+    pointer-events: none;
+  }
+  .ref-composer {
+    position: relative;
+    border: 1px solid var(--border-default);
+    border-radius: 10px;
+    background: #0a0a0a;
+    padding: 12px 14px;
+  }
+  .ref-composer-input {
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin-bottom: 12px;
+    line-height: 1.5;
+  }
+  .ref-composer-input .ref-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 1px 6px;
+    background: rgba(91,141,239,0.12);
+    border: 1px solid rgba(91,141,239,0.3);
+    border-radius: 4px;
+    color: #8aaef2;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    margin: 0 2px;
+  }
+  .ref-cursor {
+    display: inline-block;
+    width: 7px; height: 13px;
+    background: var(--text-primary);
+    vertical-align: middle;
+    animation: blink 1s steps(2) infinite;
+  }
+  .ref-composer-bottom {
+    display: flex; gap: 8px; align-items: center;
+    font-size: 11px;
+  }
+  .ref-mode-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 5px;
+    color: var(--text-secondary);
+    font-size: 11px;
+  }
+  .ref-mode-chip .atlas-dot { width: 5px; height: 5px; }
+  .ref-popover {
+    position: absolute;
+    bottom: calc(100% + 8px); left: 0; right: 0;
+    background: #0d0d0d;
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.8);
+    overflow: hidden;
+  }
+  .ref-pop-head {
+    padding: 6px 12px;
+    font-size: 10px; font-weight: 600;
+    color: var(--text-ghost);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border-default);
+    background: #050505;
+  }
+  .ref-pop-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .ref-pop-item.is-active { background: var(--bg-active); color: var(--text-primary); }
+  .ref-pop-item svg { width: 13px; height: 13px; color: var(--text-ghost); flex-shrink: 0; }
+  .ref-pop-item .ref-pop-meta {
+    margin-left: auto;
+    color: var(--text-ghost);
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+  }
+  .ref-pop-item.is-active .ref-pop-meta { color: var(--text-tertiary); }
+  .ref-pop-foot {
+    display: flex; gap: 14px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border-default);
+    background: #050505;
+    font-size: 10px;
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+  }
+  .ref-pop-key {
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .ref-pop-key span:first-child {
+    display: inline-block;
+    padding: 1px 5px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 3px;
+    color: var(--text-secondary);
+  }
+
+  /* ---- Code editor visual ---- */
+  .ce-tabs {
+    display: flex; align-items: center;
+    height: 30px;
+    padding: 0 6px;
+    background: #050505;
+    border-bottom: 1px solid var(--border-default);
+    gap: 2px;
+    font-size: 11.5px;
+  }
+  .ce-tab {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 22px; padding: 0 10px;
+    border-radius: 4px;
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+    cursor: pointer;
+  }
+  .ce-tab.is-active { background: var(--bg-tab-active); color: var(--text-primary); }
+  .ce-tab svg { width: 11px; height: 11px; }
+  .ce-tab.is-active .ce-dot {
+    width: 5px; height: 5px;
+    background: var(--text-secondary);
+    border-radius: 50%;
+  }
+  .ce-breadcrumb {
+    padding: 8px 16px;
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    border-bottom: 1px solid var(--border-default);
+    background: #030303;
+  }
+  .ce-breadcrumb .crumb-active { color: var(--text-secondary); }
+  .ce-breadcrumb .crumb-sep { margin: 0 4px; opacity: 0.4; }
+  .ce-code {
+    padding: 16px 0;
+    background: #000;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    min-height: 380px;
+  }
+  .ce-line {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    column-gap: 14px;
+    padding: 0 16px 0 0;
+  }
+  .ce-line.is-selected { background: rgba(91,141,239,0.08); }
+  .ce-num {
+    color: var(--text-ghost);
+    text-align: right;
+    user-select: none;
+    font-size: 11px;
+    padding-right: 4px;
+  }
+  .ce-src { color: var(--text-secondary); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  .ce-comment { color: var(--text-ghost); font-style: italic; }
+  .ce-kw { color: #d96baf; }
+  .ce-fn { color: #d8a449; }
+  .ce-str { color: #6aa97a; }
+  .ce-type { color: #5b8def; }
+  .ce-mac { color: #d97e35; }
+  .ce-punct { color: var(--text-tertiary); }
+
+  /* ---- Canvas (Spaces) visual ---- */
+  .cv-canvas {
+    position: relative;
+    min-height: 460px;
+    background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,0.05) 1px, transparent 0);
+    background-size: 18px 18px;
+    overflow: hidden;
+  }
+  .cv-note {
+    position: absolute;
+    background: #0a0a0a;
+    border: 1px solid var(--border-default);
+    border-radius: 8px;
+    padding: 12px 14px;
+    box-shadow: 0 12px 32px -16px rgba(0,0,0,0.7);
+  }
+  .cv-note-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px;
+  }
+  .cv-note-icon {
+    width: 22px; height: 22px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 5px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    color: var(--text-secondary);
+    flex-shrink: 0;
+  }
+  .cv-note-icon svg { width: 12px; height: 12px; }
+  .cv-note-title {
+    color: var(--text-primary);
+    font-size: 13px; font-weight: 500;
+    letter-spacing: -0.005em;
+  }
+  .cv-note-meta {
+    font-family: var(--font-mono);
+    color: var(--text-ghost);
+    font-size: 10.5px;
+    margin-left: auto;
+  }
+  .cv-note-body {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .cv-note-body p { margin: 0 0 6px; }
+  .cv-note-body ul { margin: 0; padding: 0; list-style: none; }
+  .cv-note-body li { position: relative; padding-left: 12px; margin-bottom: 2px; }
+  .cv-note-body li::before {
+    content: ""; position: absolute; left: 0; top: 8px;
+    width: 4px; height: 4px;
+    background: var(--text-ghost);
+    border-radius: 50%;
+  }
+  .cv-note-body code {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    border-radius: 5px;
+    padding: 6px 8px;
+    margin-top: 4px;
+    color: var(--text-primary);
+  }
+  .cv-edge {
+    position: absolute;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .cv-edge path {
+    stroke: rgba(255,255,255,0.15);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 4;
+    fill: none;
+  }
+  .cv-note-1 { top: 50px; left: 36px; width: 240px; }
+  .cv-note-2 { top: 240px; left: 280px; width: 230px; }
+  .cv-note-3 { top: 90px; right: 36px; width: 200px; }
+  .cv-note-4 { bottom: 32px; left: 50px; width: 200px; }
+
+  /* ---- Inbox visual ---- */
+  .ib-frame {
+    min-height: 460px;
+    background: #030303;
+  }
+  .ib-head {
+    display: flex; align-items: center;
+    height: 36px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--border-default);
+    font-size: 11px;
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
+    gap: 14px;
+  }
+  .ib-head .ib-tab {
+    color: var(--text-tertiary);
+    cursor: pointer;
+  }
+  .ib-head .ib-tab.is-active { color: var(--text-primary); }
+  .ib-head .ib-spacer { flex: 1; }
+  .ib-row {
+    display: grid;
+    grid-template-columns: 8px 1fr auto;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    cursor: pointer;
+    font-size: 12.5px;
+  }
+  .ib-row:hover { background: var(--bg-hover); }
+  .ib-row.is-unread { background: rgba(91,141,239,0.02); }
+  .ib-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    margin-top: 5px;
+    background: transparent;
+  }
+  .ib-row.is-unread .ib-dot { background: var(--accent-highlight, #5b8def); }
+  .ib-content {
+    min-width: 0;
+  }
+  .ib-row-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 2px;
+  }
+  .ib-kind {
+    display: inline-flex; align-items: center;
+    padding: 1px 6px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+  }
+  .ib-kind.is-perm { background: rgba(205,151,49,0.08); border-color: rgba(205,151,49,0.2); color: #d8a449; }
+  .ib-kind.is-error { background: rgba(244,71,71,0.06); border-color: rgba(244,71,71,0.2); color: #e08585; }
+  .ib-kind.is-stream { background: rgba(91,141,239,0.06); border-color: rgba(91,141,239,0.2); color: #8aaef2; }
+  .ib-agent {
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+  }
+  .ib-summary {
+    color: var(--text-secondary);
+    line-height: 1.45;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+  }
+  .ib-row.is-unread .ib-summary { color: var(--text-primary); }
+  .ib-time {
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+
+  /* ---- Log table visual ---- */
+  .lg-frame {
+    min-height: 460px;
+    background: #030303;
+  }
+  .lg-toolbar {
+    display: flex; align-items: center;
+    height: 32px;
+    padding: 0 12px;
+    border-bottom: 1px solid var(--border-default);
+    font-size: 11px;
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+    gap: 14px;
+  }
+  .lg-search {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 22px; padding: 0 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    color: var(--text-ghost);
+    flex: 1;
+    max-width: 220px;
+  }
+  .lg-search svg { width: 10px; height: 10px; }
+  .lg-filter {
+    color: var(--text-tertiary);
+  }
+  .lg-filter.is-active { color: var(--text-primary); }
+  .lg-stat { margin-left: auto; color: var(--text-ghost); }
+  .lg-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  .lg-table thead th {
+    text-align: left;
+    color: var(--text-ghost);
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border-default);
+    background: #050505;
+  }
+  .lg-table tbody tr {
+    cursor: pointer;
+  }
+  .lg-table tbody tr:hover { background: var(--bg-hover); }
+  .lg-table tbody td {
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: top;
+    color: var(--text-tertiary);
+  }
+  .lg-table tbody td.lg-time { color: var(--text-ghost); white-space: nowrap; }
+  .lg-table tbody td.lg-summary {
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 280px;
+  }
+  .lg-source {
+    display: inline-flex; align-items: center;
+    padding: 1px 6px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 3px;
+    color: var(--text-secondary);
+    font-size: 10px;
+  }
+  .lg-expand {
+    background: #050505;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .lg-expand td {
+    padding: 12px 14px 12px 30px;
+    color: var(--text-tertiary);
+    font-size: 11px;
+    line-height: 1.5;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .lg-expand .lg-json-key { color: #8aaef2; }
+  .lg-expand .lg-json-str { color: #6aa97a; }
+
+  /* ============================================================
+     ROADMAP
+     ============================================================ */
+  .roadmap-section {
+    padding: 120px 0;
+    border-top: 1px solid var(--border-default);
+  }
+  .roadmap-grid {
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    gap: 80px;
+  }
+  .roadmap-head .sec-title { font-size: clamp(28px, 3.4vw, 44px); }
+  .roadmap-head .sec-sub { margin-bottom: 24px; }
+  .roadmap-quote {
+    border-left: 2px solid var(--border-strong);
+    padding: 10px 0 10px 16px;
+    margin-top: 20px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.55;
+    font-style: italic;
+  }
+  .roadmap-list {
+    display: flex; flex-direction: column;
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    overflow: hidden;
+    background: #050505;
+  }
+  .roadmap-item {
+    display: grid;
+    grid-template-columns: 24px 1fr auto;
+    gap: 16px;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border-default);
+    align-items: flex-start;
+  }
+  .roadmap-item:last-child { border-bottom: 0; }
+  .roadmap-num {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-ghost);
+    padding-top: 3px;
+  }
+  .roadmap-body .roadmap-title {
+    color: var(--text-primary);
+    font-size: 14.5px;
+    font-weight: 500;
+    margin: 0 0 6px;
+    letter-spacing: -0.005em;
+  }
+  .roadmap-body .roadmap-desc {
+    color: var(--text-tertiary);
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 0;
+  }
+  .roadmap-badge {
+    display: inline-flex; align-items: center;
+    padding: 3px 8px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  .roadmap-badge.is-planning {
+    background: rgba(91,141,239,0.08);
+    border-color: rgba(91,141,239,0.25);
+    color: #8aaef2;
+  }
+  .roadmap-badge.is-exploring {
+    background: rgba(205,151,49,0.08);
+    border-color: rgba(205,151,49,0.25);
+    color: #d8a449;
+  }
+
+  /* ============================================================
+     FEATURES grid
+     ============================================================ */
+  .features {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border-default);
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-top: 24px;
+  }
+  .feature {
+    background: #000;
+    padding: 32px 28px;
+    min-height: 220px;
+    display: flex; flex-direction: column;
+  }
+  .feature-icon {
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border-default);
+    background: var(--bg-raised);
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-primary);
+    margin-bottom: 18px;
+  }
+  .feature-icon svg { width: 14px; height: 14px; }
+  .feature-title {
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 500;
+    margin: 0 0 8px;
+    letter-spacing: -0.01em;
+  }
+  .feature-desc {
+    color: var(--text-tertiary);
+    font-size: 13.5px;
+    line-height: 1.55;
+    margin: 0;
+  }
+  .feature-tag {
+    margin-top: auto;
+    padding-top: 18px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-ghost);
+  }
+
+  /* ============================================================
+     AGENTS strip
+     ============================================================ */
+  .agents-section {
+    padding: 96px 0;
+    border-top: 1px solid var(--border-default);
+  }
+  .agents-strip {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 60px;
+    align-items: center;
+  }
+  .agents-list {
+    display: flex; flex-direction: column;
+    border: 1px solid var(--border-default);
+    border-radius: 10px;
+    overflow: hidden;
+    background: #050505;
+  }
+  .agent-row {
+    display: flex; align-items: center;
+    gap: 14px;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border-default);
+    font-size: 13px;
+  }
+  .agent-row:last-child { border-bottom: 0; }
+  .agent-row.is-active { background: #0d0d0d; }
+  .agent-mark {
+    width: 28px; height: 28px;
+    border-radius: 6px;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-default);
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px; font-weight: 600;
+  }
+  .agent-info { flex: 1; }
+  .agent-name {
+    color: var(--text-primary);
+    font-size: 13px; font-weight: 500;
+  }
+  .agent-meta {
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    margin-top: 2px;
+  }
+  .agent-status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+  }
+
+  /* ============================================================
+     METRICS strip
+     ============================================================ */
+  .metrics {
+    border-top: 1px solid var(--border-default);
+    border-bottom: 1px solid var(--border-default);
+    padding: 56px 0;
+  }
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 32px;
+  }
+  .metric-num {
+    font-size: 44px; font-weight: 500;
+    color: var(--text-primary);
+    line-height: 1;
+    letter-spacing: -0.04em;
+    margin-bottom: 12px;
+    font-family: var(--font-ui);
+  }
+  .metric-num.metric-mono {
+    font-family: var(--font-mono);
+    font-size: 28px;
+    letter-spacing: -0.02em;
+  }
+  .metric-num .unit { font-size: 22px; color: var(--text-tertiary); margin-left: 2px; }
+  .metric-label {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    line-height: 1.5;
+  }
+
+  /* ============================================================
+     QUOTE / TESTIMONIAL
+     ============================================================ */
+  .quote-section {
+    padding: 120px 0;
+    border-top: 1px solid var(--border-default);
+    text-align: center;
+  }
+  .quote-mark {
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 24px;
+  }
+  .quote-body {
+    font-size: clamp(22px, 3vw, 32px);
+    line-height: 1.3;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+    font-weight: 500;
+    max-width: 28ch;
+    margin: 0 auto 28px;
+    text-wrap: balance;
+  }
+  .quote-cite {
+    font-size: 13px;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+  }
+
+  /* ============================================================
+     CTA section
+     ============================================================ */
+  .cta-section {
+    padding: 120px 0;
+    border-top: 1px solid var(--border-default);
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .cta-section::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(ellipse 50% 80% at 50% 100%, rgba(255,255,255,0.04), transparent 70%);
+    pointer-events: none;
+  }
+  .cta-title {
+    color: var(--text-primary);
+    font-size: clamp(36px, 5vw, 60px);
+    line-height: 1.05;
+    letter-spacing: -0.035em;
+    font-weight: 600;
+    margin: 0 0 16px;
+    max-width: 14ch;
+    margin-left: auto; margin-right: auto;
+    text-wrap: balance;
+  }
+  .cta-sub {
+    font-size: 16px;
+    color: var(--text-tertiary);
+    margin: 0 auto 36px;
+    max-width: 48ch;
+  }
+  .cta-row {
+    display: inline-flex; gap: 10px; flex-wrap: wrap; justify-content: center;
+    position: relative; z-index: 1;
+  }
+  .cta-tiny {
+    margin-top: 20px;
+    font-size: 11px;
+    color: var(--text-ghost);
+    font-family: var(--font-mono);
+  }
+
+  /* ============================================================
+     FOOTER
+     ============================================================ */
+  footer {
+    border-top: 1px solid var(--border-default);
+    padding: 18px 0 22px;
+  }
+  .footer-row {
+    display: flex; align-items: center;
+    gap: 24px;
+  }
+  .footer-brand {
+    display: flex; flex-direction: column;
+    gap: 3px;
+  }
+  .footer-brand-line {
+    display: flex; align-items: center; gap: 10px;
+    line-height: 1;
+  }
+  .footer-logo {
+    height: 13px;
+    width: auto;
+    opacity: 0.92;
+    display: block;
+  }
+  .footer-sep {
+    color: var(--border-strong);
+    font-weight: 300;
+  }
+  .footer-co {
+    color: var(--text-primary);
+    font-size: 13.5px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+  }
+  .footer-address {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-family: var(--font-mono);
+    letter-spacing: -0.005em;
+    line-height: 1.2;
+  }
+  .footer-links {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 12px;
+    font-size: 13px;
+  }
+  .footer-links a {
+    color: var(--text-secondary);
+    transition: color 120ms ease;
+  }
+  .footer-links a:hover { color: var(--text-primary); }
+
+  /* ============================================================
+     Responsive
+     ============================================================ */
+  @media (max-width: 1100px) {
+    .pw-body { grid-template-columns: 200px 1fr 240px; }
+    .features { grid-template-columns: repeat(2, 1fr); }
+    .agents-strip { grid-template-columns: 1fr; gap: 40px; }
+    .showcase-grid,
+    .showcase-grid.is-reversed { grid-template-columns: 1fr; gap: 40px; }
+    .showcase-grid.is-reversed .showcase-copy { order: 1; }
+    .showcase-grid.is-reversed .showcase-visual { order: 2; }
+    .roadmap-grid { grid-template-columns: 1fr; gap: 48px; }
+  }
+  @media (max-width: 820px) {
+    .wrap, .wrap-tight { padding: 0 20px; }
+    .nav-pill { padding: 4px 4px 4px 12px; }
+    .nav-brand { padding-right: 10px; margin-right: 2px; }
+    .nav-link { padding: 0 8px; font-size: 12.5px; }
+    .pillars-grid { grid-template-columns: 1fr; }
+    .pw-body { grid-template-columns: 1fr; min-height: auto; }
+    .pw-sidebar, .pw-inspector { display: none; }
+    .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+    section.scaffold { padding: 72px 0; }
+    .showcase-row { padding: 64px 0; }
+    .roadmap-section { padding: 72px 0; }
+    .footer-row { flex-direction: column; align-items: flex-start; gap: 20px; }
+    .footer-links { margin-left: 0; }
+    .kb-split { grid-template-columns: 140px 1fr; }
+    .gt-row { grid-template-columns: 60px 1fr auto; }
+    .gt-row .gt-hash { display: none; }
+  }
+  @media (max-width: 540px) {
+    .features { grid-template-columns: 1fr; }
+    .hero { padding: 110px 0 40px; }
+    .product-frame-outer { padding: 0 12px; }
+    .nav-pill .nav-link:not(:first-of-type) { display: none; }
+    .roadmap-item { grid-template-columns: 20px 1fr; }
+    .roadmap-badge { grid-column: 2 / 3; justify-self: start; margin-top: 4px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ====================== NAV ====================== -->
+<nav class="nav" id="nav">
+  <div class="nav-pill">
+    <a href="/" class="nav-brand">
+      <img src="icon-sm.svg" alt="" aria-hidden="true" />
+      Atlas
+    </a>
+    <a href="#product" class="nav-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72z"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></svg>
+      Product
+    </a>
+    <a href="https://github.com/pacifio/cersei" class="nav-link" target="_blank" rel="noopener" data-tooltip="rust coding agent framework">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      Cersei
+    </a>
+    <a href="https://github.com/pacifio/atlas" class="nav-link" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+      Star
+    </a>
+    <a href="https://discord.gg/GmnFggaPfP" class="nav-link" target="_blank" rel="noopener">
+      <svg viewBox="0 0 127.14 96.36" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/></svg>
+      Discord
+    </a>
+    <a href="https://github.com/pacifio/atlas/releases/download/alpha-0.1.0/Atlas_0.1.0_aarch64.dmg" class="nav-cta-btn">
+      Download
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
+    </a>
+  </div>
+</nav>
+
+<!-- ====================== HERO ====================== -->
+<header class="hero">
+  <div class="hero-grid"></div>
+  <div class="hero-glow"></div>
+  <div class="wrap hero-inner">
+    <div class="eyebrow">
+      <span class="eyebrow-tag">Alpha</span>
+      <a href="#agents">Claude Code today · ACP-ready for the rest <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5l7 7-7 7"/></svg></a>
+    </div>
+    <h1 class="hero-title">A planning surface for coding agents.</h1>
+    <p class="hero-sub">Atlas is a native macOS editor built for the work <em style="color:var(--text-secondary);font-style:normal">around</em> the code — research, planning, knowledge, and the agent threads that turn them into commits. Built so teams of humans and agents can move fast together.</p>
+    <div class="hero-cta">
+      <a href="https://github.com/pacifio/atlas/releases/download/alpha-0.1.0/Atlas_0.1.0_aarch64.dmg" class="btn btn-primary btn-lg">
+        Download for Mac
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
+      </a>
+      <a href="https://github.com/pacifio/atlas" target="_blank" rel="noopener" class="btn btn-secondary btn-lg">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.5 3.18-1.18 3.18-1.18.62 1.58.23 2.75.11 3.04.73.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.4-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56C20.21 21.38 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+        Star on GitHub
+      </a>
+    </div>
+    <div class="hero-meta">
+      <span class="atlas-dot atlas-dot-success"></span>
+      <span>v0.1.0 · alpha</span>
+      <span class="hero-meta-sep">·</span>
+      <span>macOS Apple Silicon only</span>
+      <span class="hero-meta-sep">·</span>
+      <span>local-first · no telemetry</span>
+    </div>
+  </div>
+</header>
+
+<!-- ====================== PRODUCT MOCK ====================== -->
+<section class="product-section" id="product">
+  <div class="product-frame-outer">
+    <div class="product-window">
+      <!-- Mac titlebar -->
+      <div class="pw-titlebar">
+        <div class="pw-dots">
+          <span class="pw-dot" style="background:#ff5f57"></span>
+          <span class="pw-dot" style="background:#febc2e"></span>
+          <span class="pw-dot" style="background:#28c840"></span>
+        </div>
+        <div class="pw-project">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
+          atlas-core
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+        <div class="pw-spacer"></div>
+        <div class="pw-titleicon" title="Inbox">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg>
+        </div>
+        <div class="pw-titleicon" title="Toggle right pane">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/><path d="m10 15-3-3 3-3"/></svg>
+        </div>
+      </div>
+
+      <!-- Tab bar -->
+      <div class="pw-tabs">
+        <div class="pw-tab is-active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Chat
+        </div>
+        <div class="pw-tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m4 17 6-6-6-6m8 14h8"/></svg>
+          Terminal
+        </div>
+        <div class="pw-tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-7l-2-2H5a2 2 0 0 0-2 2z"/></svg>
+          Spaces
+        </div>
+        <div class="pw-tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v16"/></svg>
+          Log
+        </div>
+        <div class="pw-tab">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+          Browser
+        </div>
+        <div class="pw-tabs-spacer"></div>
+        <div class="pw-tabs-right">
+          <span class="pw-chip">
+            <span class="atlas-dot atlas-dot-success"></span>
+            main
+          </span>
+          <span class="pw-chip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 2 3 14h7l-1 8 10-12h-7z"/></svg>
+            60.41M
+          </span>
+          <span class="pw-chip">$153.39</span>
+        </div>
+      </div>
+
+      <!-- Body -->
+      <div class="pw-body">
+        <!-- Sidebar -->
+        <aside class="pw-sidebar">
+          <div class="pw-sb-header">
+            <span>Threads</span>
+            <span style="display:inline-flex;gap:6px;align-items:center;color:var(--text-ghost)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+            </span>
+          </div>
+          <div class="pw-sb-search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            <span>Search</span>
+          </div>
+          <div class="pw-sb-thread is-active">
+            <div class="pw-sb-thread-title">Analyze cross-package types for new SDK release</div>
+            <div class="pw-sb-thread-meta"><span>now</span><span>14 msg</span></div>
+          </div>
+          <div class="pw-sb-thread">
+            <div class="pw-sb-thread-title">Re-index codebase and write PR description</div>
+            <div class="pw-sb-thread-meta"><span>2h</span><span>534 msg</span></div>
+          </div>
+          <div class="pw-sb-thread">
+            <div class="pw-sb-thread-title">Audit auth flow for token refresh edge cases</div>
+            <div class="pw-sb-thread-meta"><span>1d</span><span>47 msg</span></div>
+          </div>
+          <div class="pw-sb-thread">
+            <div class="pw-sb-thread-title">Bench compression on new tool-output set</div>
+            <div class="pw-sb-thread-meta"><span>3d</span><span>89 msg</span></div>
+          </div>
+        </aside>
+
+        <!-- Main: chat content -->
+        <div class="pw-main">
+          <div class="pw-main-scroll">
+            <h4>Plan: ship Go SDK at TypeScript parity</h4>
+            <ul>
+              <li><code>installation.mdx</code> &mdash; add Go install section and env-var note</li>
+              <li><code>quickstart.mdx</code> &mdash; Go tab across all 5 example blocks</li>
+              <li><code>api-reference.mdx</code> &mdash; <code>Client</code> constructor + <code>ChatCompletionsCreate</code></li>
+              <li><code>errors.mdx</code> &mdash; <code>errors.Is</code> / <code>AsCompressError</code> across 4 blocks</li>
+              <li><code>shared-context.mdx</code> &mdash; <code>Put</code> / <code>Get(full)</code> / <code>Stats</code> / lifecycle</li>
+            </ul>
+            <h4>Test plan</h4>
+            <ul>
+              <li><code>cd sdk/golang && go test ./...</code> (unit, no proxy)</li>
+              <li><code>headroom proxy --port 8788 --no-rate-limit</code> then full e2e</li>
+              <li><code>GEMINI_API_KEY=... go run ./examples/e2e</code> (real round-trip)</li>
+            </ul>
+          </div>
+          <div class="pw-composer">
+            <div class="pw-composer-input">Message Atlas… (@ to mention, / for commands)</div>
+            <div class="pw-composer-bottom">
+              <span class="pw-composer-chip">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m4 17 6-6-6-6m8 14h8"/></svg>
+                Claude Code
+              </span>
+              <span class="pw-composer-chip is-mode">
+                <span class="atlas-dot atlas-dot-success"></span>
+                Default
+              </span>
+              <span class="pw-composer-chip">@</span>
+              <div class="pw-composer-spacer"></div>
+              <span class="pw-composer-send">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 14 0M13 6l6 6-6 6"/></svg>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right inspector -->
+        <aside class="pw-inspector">
+          <div class="pw-tabs-sub">
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h16M4 6h16M4 18h10"/></svg>Changes</span>
+            <span class="is-active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l3-3 3 3 5-5"/></svg>Analysis</span>
+            <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5"/></svg>Explore</span>
+            <span><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.36-3.88-1.36-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.5 3.18-1.18 3.18-1.18.62 1.58.23 2.75.11 3.04.73.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.4-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56C20.21 21.38 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>GitHub</span>
+          </div>
+
+          <div class="pw-insp-section">
+            <div class="pw-insp-head">
+              <span class="pw-insp-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg>
+                Blast radius
+              </span>
+              <span class="pw-insp-count">14 files</span>
+            </div>
+            <div style="display:flex;gap:4px;margin-bottom:8px">
+              <span class="atlas-badge atlas-badge-warning" style="font-size:9.5px">DOCS</span>
+              <span class="atlas-badge atlas-badge-info" style="font-size:9.5px">SDK</span>
+              <span class="atlas-badge atlas-badge-success" style="font-size:9.5px">TESTS</span>
+            </div>
+            <div style="color:var(--text-tertiary);font-size:11px">42 symbols touched · 8 public API</div>
+          </div>
+
+          <div class="pw-insp-section">
+            <div class="pw-insp-head">
+              <span class="pw-insp-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M4.93 4.93l2.83 2.83M2 12h4M4.93 19.07l2.83-2.83M12 22v-4M19.07 19.07l-2.83-2.83M22 12h-4M19.07 4.93l-2.83 2.83"/></svg>
+                Complexity heatmap
+              </span>
+              <span class="pw-insp-count">symbols / file</span>
+            </div>
+            <div class="heatmap-row">
+              <span style="flex:1;font-size:10.5px;color:var(--text-tertiary);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">tests/memory/traffic_learner.py</span>
+              <span class="heatmap-num">181</span>
+            </div>
+            <div class="heatmap-row">
+              <span style="flex:1;font-size:10.5px;color:var(--text-tertiary);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">sdk/typescript/core/types.ts</span>
+              <span class="heatmap-num">180</span>
+            </div>
+            <div class="heatmap-row">
+              <span style="flex:1;font-size:10.5px;color:var(--text-tertiary);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">tests/proxy/handlers_batch.py</span>
+              <span class="heatmap-num">104</span>
+            </div>
+            <div class="heatmap-row">
+              <span style="flex:1;font-size:10.5px;color:var(--text-tertiary);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">crates/atlas-py/src/lib.rs</span>
+              <span class="heatmap-num">95</span>
+            </div>
+            <div class="heatmap-row">
+              <span style="flex:1;font-size:10.5px;color:var(--text-tertiary);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">tests/memory_handler_ops.py</span>
+              <span class="heatmap-num">91</span>
+            </div>
+            <div class="heatmap-row">
+              <span style="flex:1;font-size:10.5px;color:var(--text-tertiary);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">tests/proxy_anthropic_stability.py</span>
+              <span class="heatmap-num">86</span>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <!-- Statusbar -->
+      <div class="pw-statusbar">
+        <div class="left">
+          <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3v12a3 3 0 0 0 3 3h6"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/></svg> sdk/golang</span>
+        </div>
+        <div class="spacer"></div>
+        <div class="right">
+          <span>60.41M tokens</span>
+          <span>·</span>
+          <span>310 calls</span>
+          <span>·</span>
+          <span>$153.3935</span>
+          <span>·</span>
+          <span>claude-opus-4-7</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== PILLARS ====================== -->
+<section class="scaffold" id="features">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-eyebrow">The workspace</span>
+      <h2 class="sec-title">Everything in one window.<br/>No more tab-switching.</h2>
+      <p class="sec-sub">Chat with agents, run terminals, read code, browse docs, and capture plans &mdash; without leaving the room. Atlas keeps the loop tight.</p>
+    </div>
+
+    <div class="pillars-grid">
+
+      <!-- Pillar 1: Agents -->
+      <div class="pillar">
+        <div class="pillar-mock">
+          <div class="pm-chat">
+            <div class="pm-msg-user">Refactor <code style="font-family:var(--font-mono);background:var(--bg-raised);padding:1px 4px;border-radius:3px;font-size:10px;color:var(--text-primary)">memory.ts</code> to use streams.</div>
+            <div class="pm-msg">
+              <span style="color:var(--text-ghost)">→</span> read <span style="color:var(--text-primary)">src/memory.ts</span><br/>
+              <span style="color:var(--text-ghost)">→</span> edit <span style="color:var(--text-primary)">src/memory.ts</span> <span style="color:var(--status-success)">+47 -12</span><br/>
+              <span style="color:var(--text-ghost)">→</span> run <span style="color:var(--text-primary)">pnpm test</span> <span style="color:var(--status-success)">✓ 142</span>
+            </div>
+            <div class="pm-stream-line">
+              <span class="pm-tok">All 142 tests pass.</span>
+              <span class="pm-blink"></span>
+            </div>
+          </div>
+        </div>
+        <div class="pillar-body">
+          <div class="pillar-kicker">Chat</div>
+          <h3 class="pillar-title">Coding agents, native.</h3>
+          <p class="pillar-desc">Claude Code, Codex, and your custom agents &mdash; all first-class. Stream responses, watch tool calls, and intervene mid-flight.</p>
+        </div>
+      </div>
+
+      <!-- Pillar 2: Git Graph -->
+      <div class="pillar">
+        <div class="pillar-mock">
+          <div class="pm-git">
+            <div class="pm-git-row">
+              <span class="pm-git-node pm-git-node-blue"></span>
+              <span class="pm-git-msg">Merge #412 from chopratejas/fix-pypi</span>
+              <span class="pm-git-hash">f94a9d2</span>
+            </div>
+            <div class="pm-git-row">
+              <span class="pm-git-node pm-git-node-blue"></span>
+              <span class="pm-git-msg">fix(ci): publish skip-existing</span>
+              <span class="pm-git-hash">6a191b4</span>
+            </div>
+            <div class="pm-git-row">
+              <span class="pm-git-node pm-git-node-orange"></span>
+              <span class="pm-git-msg">Merge #410 hotfix WS responses</span>
+              <span class="pm-git-hash">1050e00</span>
+            </div>
+            <div class="pm-git-row">
+              <span class="pm-git-node pm-git-node-orange"></span>
+              <span class="pm-git-msg">fix(proxy): inline WebSocket</span>
+              <span class="pm-git-hash">4a50313</span>
+            </div>
+            <div class="pm-git-row">
+              <span class="pm-git-node pm-git-node-pink"></span>
+              <span class="pm-git-msg">style(ci): ruff format</span>
+              <span class="pm-git-hash">4f65421</span>
+            </div>
+            <div class="pm-git-row">
+              <span class="pm-git-node pm-git-node-pink"></span>
+              <span class="pm-git-msg">fix(codex): drop env_key from blocks</span>
+              <span class="pm-git-hash">32f499c</span>
+            </div>
+            <div class="pm-git-row">
+              <span class="pm-git-node pm-git-node-green"></span>
+              <span class="pm-git-msg">Deployed a7e1f93 with MkDocs</span>
+              <span class="pm-git-hash">948b712</span>
+            </div>
+            <div class="pm-git-row">
+              <span class="pm-git-node pm-git-node-green"></span>
+              <span class="pm-git-msg">Deployed 0c46c7e with MkDocs</span>
+              <span class="pm-git-hash">392e66f</span>
+            </div>
+          </div>
+        </div>
+        <div class="pillar-body">
+          <div class="pillar-kicker">Git Graph</div>
+          <h3 class="pillar-title">Read the whole history.</h3>
+          <p class="pillar-desc">Branches, merges, deploys &mdash; rendered inline. Click any commit to walk diffs without leaving your chat.</p>
+        </div>
+      </div>
+
+      <!-- Pillar 3: Spaces -->
+      <div class="pillar">
+        <div class="pillar-mock">
+          <div class="pm-canvas">
+            <div class="pm-note pm-note-1">
+              <div class="pm-note-title">Atlas Proxy</div>
+              <div class="pm-note-meta">2m ago</div>
+              <div class="pm-note-body">Wrap LLM calls with <code style="font-family:var(--font-mono);font-size:9px;color:var(--text-primary)">atlas_wrap()</code> for memory + traces.</div>
+            </div>
+            <div class="pm-note pm-note-2">
+              <div class="pm-note-title">API Design</div>
+              <div class="pm-note-meta">1m ago</div>
+              <div class="pm-note-body">Design from the ground up. Three primitives: <code style="font-family:var(--font-mono);font-size:9px;color:var(--text-primary)">Client</code>, <code style="font-family:var(--font-mono);font-size:9px;color:var(--text-primary)">Session</code>, <code style="font-family:var(--font-mono);font-size:9px;color:var(--text-primary)">Tool</code>.</div>
+            </div>
+            <div class="pm-note pm-note-3">
+              <div class="pm-note-title">Open Q</div>
+              <div class="pm-note-meta">5m</div>
+              <div class="pm-note-body">Cache policy?</div>
+            </div>
+          </div>
+        </div>
+        <div class="pillar-body">
+          <div class="pillar-kicker">Spaces</div>
+          <h3 class="pillar-title">Plans, on a canvas.</h3>
+          <p class="pillar-desc">Capture ideas as notes on an infinite canvas. Drag them into chat to give agents fresh context.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ====================== FEATURES GRID ====================== -->
+<section class="scaffold" style="padding-top:0;border-top:0">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="sec-eyebrow">Built for serious work</span>
+      <h2 class="sec-title">Engineered for the long session.</h2>
+      <p class="sec-sub">Atlas is a desktop application. Compact, AMOLED, fast. Every detail is tuned for ten-hour days at the keyboard.</p>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg>
+        </div>
+        <h3 class="feature-title">Blast radius analysis</h3>
+        <p class="feature-desc">See exactly which files, symbols, and tests an edit will touch &mdash; before the agent commits a single line.</p>
+        <div class="feature-tag">/analysis · realtime</div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m4 17 6-6-6-6m8 14h8"/></svg>
+        </div>
+        <h3 class="feature-title">Integrated terminal</h3>
+        <p class="feature-desc">Split panes, tabs, search across history. Agents share the same shell &mdash; no context smuggling.</p>
+        <div class="feature-tag">zsh · bash · fish</div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3v18h18"/><path d="M7 14l3-3 3 3 5-5"/></svg>
+        </div>
+        <h3 class="feature-title">Complexity heatmap</h3>
+        <p class="feature-desc">Rank every file by symbol density. Find the hot spots, refactor with intent, and watch the heat fade.</p>
+        <div class="feature-tag">tree-sitter</div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v16"/></svg>
+        </div>
+        <h3 class="feature-title">Activity log</h3>
+        <p class="feature-desc">Every agent action, every tool call, every commit &mdash; timestamped, searchable, replayable.</p>
+        <div class="feature-tag">JSONL · grep-friendly</div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        </div>
+        <h3 class="feature-title">Built-in browser</h3>
+        <p class="feature-desc">Read docs, copy snippets, save to Knowledge &mdash; without losing your place. Atlas indexes what you save.</p>
+        <div class="feature-tag">WebKit · indexed</div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13 2 3 14h7l-1 8 10-12h-7z"/></svg>
+        </div>
+        <h3 class="feature-title">Token transparency</h3>
+        <p class="feature-desc">Per-thread token, call, and dollar counters live in the status bar. No surprise bills, ever.</p>
+        <div class="feature-tag">live · BYO key</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: GIT TREE ====================== -->
+<section class="showcase-row" id="git-tree">
+  <div class="wrap">
+    <div class="showcase-grid">
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Git Graph</span>
+        <h2>The real shape of your repo.</h2>
+        <p>A custom lane-assignment graph renders every branch, merge, and deploy as you actually committed it &mdash; not as a flat list. Click any node to see the diff inline, without leaving your thread.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Lane-aware rendering</strong> &mdash; reads merges the way <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">git log --graph</code> can't.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Stage, unstage, commit</strong> &mdash; full git client. No terminal context-switch.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Branch picker</strong> &mdash; <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">@branch</code> in any thread to give the agent that branch's context.</span>
+          </li>
+        </ul>
+      </div>
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3v12a3 3 0 0 0 3 3h6"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/></svg>
+            atlas-core · git graph
+          </span>
+          <span style="margin-left:auto">128 commits · 6 branches</span>
+        </div>
+        <div class="git-tree">
+          <div class="gt-row is-selected">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-node is-filled" style="left:8px; --node-color:#5b8def"></span>
+            </div>
+            <span class="gt-msg"><span class="gt-ref is-head">main</span><span class="gt-ref">HEAD</span>Wire ACP driver into chat panel</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">f94a9d2</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-node is-filled" style="left:8px; --node-color:#5b8def"></span>
+            </div>
+            <span class="gt-msg">feat(acp): register codex + opencode adapters</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">6a191b4</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-lane" style="left:22px; --lane-color:#d97e35; top:0; bottom:50%"></span>
+              <span class="gt-node is-filled" style="left:8px; --node-color:#5b8def"></span>
+            </div>
+            <span class="gt-msg">Merge #410 from knowledge/sync-stream</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">1050e00</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-lane" style="left:22px; --lane-color:#d97e35"></span>
+              <span class="gt-node is-filled" style="left:22px; --node-color:#d97e35"></span>
+            </div>
+            <span class="gt-msg"><span class="gt-ref">knowledge/sync-stream</span>fix(knowledge): JSONL append race</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">4a50313</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-lane" style="left:22px; --lane-color:#d97e35"></span>
+              <span class="gt-node" style="left:8px; --node-color:#5b8def"></span>
+            </div>
+            <span class="gt-msg">refactor(chat): lift session sidebar state</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">c0baaf0</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-lane" style="left:22px; --lane-color:#d97e35"></span>
+              <span class="gt-lane" style="left:36px; --lane-color:#d96baf; top:50%; bottom:0"></span>
+              <span class="gt-node is-filled" style="left:8px; --node-color:#5b8def"></span>
+            </div>
+            <span class="gt-msg">Merge #406 from canvas/note-inspector</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">1a3098a</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-lane" style="left:22px; --lane-color:#d97e35"></span>
+              <span class="gt-lane" style="left:36px; --lane-color:#d96baf"></span>
+              <span class="gt-node" style="left:36px; --node-color:#d96baf"></span>
+            </div>
+            <span class="gt-msg"><span class="gt-ref">canvas/note-inspector</span>feat(canvas): tag panel</span>
+            <span class="gt-author">contributor</span>
+            <span class="gt-hash">32f499c</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-lane" style="left:22px; --lane-color:#d97e35"></span>
+              <span class="gt-lane" style="left:36px; --lane-color:#d96baf"></span>
+              <span class="gt-node" style="left:36px; --node-color:#d96baf"></span>
+            </div>
+            <span class="gt-msg">feat(canvas): note-node drag handles</span>
+            <span class="gt-author">contributor</span>
+            <span class="gt-hash">bf1e31b</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-lane" style="left:22px; --lane-color:#d97e35"></span>
+              <span class="gt-node" style="left:8px; --node-color:#5b8def"></span>
+            </div>
+            <span class="gt-msg">style: prettier on all features/</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">d54c5b6</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-lane" style="left:22px; --lane-color:#d97e35"></span>
+              <span class="gt-node" style="left:22px; --node-color:#d97e35"></span>
+            </div>
+            <span class="gt-msg">feat(knowledge): markdown frontmatter</span>
+            <span class="gt-author">contributor</span>
+            <span class="gt-hash">1c6ae45</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-node is-filled" style="left:8px; --node-color:#5b8def"></span>
+            </div>
+            <span class="gt-msg">chore: bump tauri to 2.4</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">09b8510</span>
+          </div>
+          <div class="gt-row">
+            <div class="gt-lanes">
+              <span class="gt-lane" style="left:8px; --lane-color:#5b8def"></span>
+              <span class="gt-node" style="left:8px; --node-color:#5b8def"></span>
+            </div>
+            <span class="gt-msg">feat: branch-popover with checkout/create/delete</span>
+            <span class="gt-author">pacifio</span>
+            <span class="gt-hash">a7e1f93</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: KNOWLEDGE BASE ====================== -->
+<section class="showcase-row" id="knowledge">
+  <div class="wrap">
+    <div class="showcase-grid is-reversed">
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            knowledge · auth-flow.md
+          </span>
+          <span style="margin-left:auto">.atlas/knowledge/</span>
+        </div>
+        <div class="kb-split">
+          <aside class="kb-sidebar">
+            <div class="kb-sb-head"><span>Knowledge</span><span>+</span></div>
+            <div class="kb-folder is-open">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              architecture
+            </div>
+            <div class="kb-file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>overview.md</div>
+            <div class="kb-file is-active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>auth-flow.md</div>
+            <div class="kb-file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>data-model.md</div>
+            <div class="kb-folder">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              decisions
+            </div>
+            <div class="kb-folder">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              research
+            </div>
+            <div class="kb-folder">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              threads
+            </div>
+            <div class="kb-file" style="padding-left:8px;margin-top:8px;color:var(--text-ghost)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>CLAUDE.md</div>
+            <div class="kb-file" style="padding-left:8px;color:var(--text-ghost)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>AGENTS.md</div>
+          </aside>
+          <div class="kb-editor">
+            <h1>Auth flow</h1>
+            <div class="kb-meta">architecture/auth-flow.md · updated 2h ago · 4 references</div>
+            <div style="margin-bottom:14px">
+              <span class="kb-tag">@architecture</span>
+              <span class="kb-tag">@auth</span>
+              <span class="kb-tag">@security</span>
+            </div>
+            <p>Token-refresh is opportunistic, not scheduled. The frontend never sees the refresh token; it lives only in the keychain proxy.</p>
+            <h2>Boundaries</h2>
+            <ul>
+              <li>Access tokens live in memory for the duration of the session.</li>
+              <li>Refresh tokens are written to the OS keychain via <code>tauri-plugin-stronghold</code>.</li>
+              <li>Renewal happens on the backend; failures surface as a single <code>auth.refresh.failed</code> event.</li>
+            </ul>
+            <h2>Open questions</h2>
+            <ul>
+              <li>Do we eagerly refresh on app focus or wait for a 401?</li>
+              <li>How long should the keychain entry persist after logout?</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Knowledge</span>
+        <h2>Markdown for humans. System prompt for agents.</h2>
+        <p>Atlas treats your project's knowledge base as a first-class surface. Notes live as plain markdown in <code style="font-family:var(--font-mono);font-size:13px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">.atlas/knowledge/</code> next to your code &mdash; one source of truth, read by you and by every agent thread in the project.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Files, not a database.</strong> Subdirectories, frontmatter, real markdown. Versioned with your repo.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Save threads as knowledge.</strong> Pick any agent thread, export it as a note. The agent learns from your last conversation, not your repo's hot air.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Plays nicely with <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">CLAUDE.md</code> &amp; <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">AGENTS.md</code></strong> &mdash; no migration. Atlas reads what's already there.</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: REFERENCE SYSTEM ====================== -->
+<section class="showcase-row" id="references">
+  <div class="wrap">
+    <div class="showcase-grid">
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Reference system</span>
+        <h2>@ anything in your project.</h2>
+        <p>Pull files, folders, branches, knowledge notes, commits, and entire threads into your prompts. Atlas resolves the references locally and hands the agent exactly the context it asked for &mdash; nothing more.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>File and line refs.</strong> <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">@src/auth.ts#L40-80</code> sends a slice, not the whole file.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Branches, commits, knowledge.</strong> <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">@branch</code>, <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">@commit</code>, <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">@knowledge/auth-flow</code>. Same syntax.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Cross-thread references.</strong> <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">@thread:plan-acp-driver</code> gives the agent a teammate's prior reasoning.</span>
+          </li>
+        </ul>
+      </div>
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            chat · plan-acp-driver
+          </span>
+          <span style="margin-left:auto">@-mention active</span>
+        </div>
+        <div class="ref-frame">
+          <div class="ref-composer">
+            <div class="ref-popover">
+              <div class="ref-pop-head">References · 6 results</div>
+              <div class="ref-pop-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3v12a3 3 0 0 0 3 3h6"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/></svg>
+                <span>main</span>
+                <span class="ref-pop-meta">branch · HEAD</span>
+              </div>
+              <div class="ref-pop-item is-active">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3v12a3 3 0 0 0 3 3h6"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/></svg>
+                <span>knowledge/sync-stream</span>
+                <span class="ref-pop-meta">branch</span>
+              </div>
+              <div class="ref-pop-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+                <span>src/features/chat/lib/acp-api.ts</span>
+                <span class="ref-pop-meta">file</span>
+              </div>
+              <div class="ref-pop-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+                <span>knowledge/architecture/auth-flow.md</span>
+                <span class="ref-pop-meta">knowledge</span>
+              </div>
+              <div class="ref-pop-item">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                <span>thread:plan-acp-driver</span>
+                <span class="ref-pop-meta">2h ago</span>
+              </div>
+              <div class="ref-pop-foot">
+                <span class="ref-pop-key"><span>↑↓</span> navigate</span>
+                <span class="ref-pop-key"><span>↵</span> select</span>
+                <span class="ref-pop-key"><span>esc</span> close</span>
+              </div>
+            </div>
+            <div class="ref-composer-input">
+              Apply the same lane-assignment from <span class="ref-pill">@src/features/git/components/commit-node.tsx</span> to the new <span class="ref-pill">@knowledge/sync-stream</span><span class="ref-cursor"></span>
+            </div>
+            <div class="ref-composer-bottom">
+              <span class="ref-mode-chip">
+                <span class="atlas-dot atlas-dot-success"></span>
+                Default
+              </span>
+              <span class="ref-mode-chip">@</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: CODE EDITOR ====================== -->
+<section class="showcase-row" id="editor">
+  <div class="wrap">
+    <div class="showcase-grid is-reversed">
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            editor · app.rs
+          </span>
+          <span style="margin-left:auto">CodeMirror 6 · rust-analyzer</span>
+        </div>
+        <div class="ce-tabs">
+          <div class="ce-tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            chat
+          </div>
+          <div class="ce-tab">axiosInstance.ts</div>
+          <div class="ce-tab">queryClient.ts</div>
+          <div class="ce-tab is-active"><span class="ce-dot"></span>app.rs</div>
+        </div>
+        <div class="ce-breadcrumb">
+          <span>crates</span><span class="crumb-sep">›</span><span>abstract-cli</span><span class="crumb-sep">›</span><span>src</span><span class="crumb-sep">›</span><span class="crumb-active">app.rs</span>
+        </div>
+        <div class="ce-code">
+          <div class="ce-line"><span class="ce-num">1</span><span class="ce-src"><span class="ce-comment">//! Application state, agent construction, and lifecycle management.</span></span></div>
+          <div class="ce-line"><span class="ce-num">2</span><span class="ce-src"> </span></div>
+          <div class="ce-line"><span class="ce-num">3</span><span class="ce-src"><span class="ce-kw">use</span> crate<span class="ce-punct">::</span>config<span class="ce-punct">::</span><span class="ce-type">AppConfig</span><span class="ce-punct">;</span></span></div>
+          <div class="ce-line"><span class="ce-num">4</span><span class="ce-src"><span class="ce-kw">use</span> crate<span class="ce-punct">::</span>permissions<span class="ce-punct">::</span><span class="ce-type">CliPermissionPolicy</span><span class="ce-punct">;</span></span></div>
+          <div class="ce-line"><span class="ce-num">5</span><span class="ce-src"><span class="ce-kw">use</span> crate<span class="ce-punct">::</span>sessions<span class="ce-punct">;</span></span></div>
+          <div class="ce-line"><span class="ce-num">6</span><span class="ce-src"><span class="ce-kw">use</span> cersei_agent<span class="ce-punct">::</span>effort<span class="ce-punct">::</span><span class="ce-type">EffortLevel</span><span class="ce-punct">;</span></span></div>
+          <div class="ce-line"><span class="ce-num">7</span><span class="ce-src"><span class="ce-kw">use</span> cersei_mcp<span class="ce-punct">::</span><span class="ce-type">McpServerConfig</span><span class="ce-punct">;</span></span></div>
+          <div class="ce-line"><span class="ce-num">8</span><span class="ce-src"><span class="ce-kw">use</span> cersei_memory<span class="ce-punct">::</span>manager<span class="ce-punct">::</span><span class="ce-type">MemoryManager</span><span class="ce-punct">;</span></span></div>
+          <div class="ce-line"><span class="ce-num">9</span><span class="ce-src"><span class="ce-kw">use</span> tokio_util<span class="ce-punct">::</span>sync<span class="ce-punct">::</span><span class="ce-type">CancellationToken</span><span class="ce-punct">;</span></span></div>
+          <div class="ce-line"><span class="ce-num">10</span><span class="ce-src"> </span></div>
+          <div class="ce-line"><span class="ce-num">11</span><span class="ce-src"><span class="ce-comment">/// Run the application (REPL or single-shot).</span></span></div>
+          <div class="ce-line"><span class="ce-num">12</span><span class="ce-src"><span class="ce-kw">pub async fn</span> <span class="ce-fn">run</span>(cli<span class="ce-punct">:</span> <span class="ce-type">Cli</span>, <span class="ce-kw">mut</span> config<span class="ce-punct">:</span> <span class="ce-type">AppConfig</span>) <span class="ce-punct">-&gt;</span> anyhow<span class="ce-punct">::</span><span class="ce-type">Result</span>&lt;()&gt; <span class="ce-punct">{</span></span></div>
+          <div class="ce-line"><span class="ce-num">13</span><span class="ce-src">    <span class="ce-kw">let</span> theme <span class="ce-punct">=</span> <span class="ce-type">Theme</span><span class="ce-punct">::</span><span class="ce-fn">from_name</span>(<span class="ce-punct">&amp;</span>config<span class="ce-punct">.</span>theme)<span class="ce-punct">;</span></span></div>
+          <div class="ce-line"><span class="ce-num">14</span><span class="ce-src"> </span></div>
+          <div class="ce-line"><span class="ce-num">15</span><span class="ce-src">    <span class="ce-comment">// Resolve or create session ID</span></span></div>
+          <div class="ce-line"><span class="ce-num">16</span><span class="ce-src">    <span class="ce-kw">let</span> session_id <span class="ce-punct">=</span> <span class="ce-kw">if let</span> <span class="ce-type">Some</span>(resume) <span class="ce-punct">=</span> cli<span class="ce-punct">.</span>resume <span class="ce-punct">{</span></span></div>
+          <div class="ce-line is-selected"><span class="ce-num">17</span><span class="ce-src">        sessions<span class="ce-punct">::</span><span class="ce-fn">last_session_id</span>(<span class="ce-punct">&amp;</span>config)</span></div>
+          <div class="ce-line"><span class="ce-num">18</span><span class="ce-src">            <span class="ce-punct">.</span><span class="ce-fn">ok_or_else</span>(|| anyhow<span class="ce-punct">::</span><span class="ce-mac">anyhow!</span>(<span class="ce-str">"No previous session found"</span>))<span class="ce-punct">?</span></span></div>
+          <div class="ce-line"><span class="ce-num">19</span><span class="ce-src">    <span class="ce-punct">}</span> <span class="ce-kw">else</span> <span class="ce-punct">{</span></span></div>
+          <div class="ce-line"><span class="ce-num">20</span><span class="ce-src">        uuid<span class="ce-punct">::</span><span class="ce-type">Uuid</span><span class="ce-punct">::</span><span class="ce-fn">new_v4</span>()<span class="ce-punct">.</span><span class="ce-fn">to_string</span>()</span></div>
+          <div class="ce-line"><span class="ce-num">21</span><span class="ce-src">    <span class="ce-punct">};</span></span></div>
+          <div class="ce-line"><span class="ce-num">22</span><span class="ce-src"> </span></div>
+          <div class="ce-line"><span class="ce-num">23</span><span class="ce-src">    <span class="ce-kw">let</span> memory_manager <span class="ce-punct">=</span> <span class="ce-fn">build_memory_manager</span>(<span class="ce-punct">&amp;</span>config)<span class="ce-punct">?;</span></span></div>
+          <div class="ce-line"><span class="ce-num">24</span><span class="ce-src">    <span class="ce-kw">let</span> cancel_token <span class="ce-punct">=</span> <span class="ce-type">CancellationToken</span><span class="ce-punct">::</span><span class="ce-fn">new</span>()<span class="ce-punct">;</span></span></div>
+        </div>
+      </div>
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Editor</span>
+        <h2>A real editor, not a textbox.</h2>
+        <p>CodeMirror 6 with first-class support for JS, TS, Python, Rust, Go, Java, C++, JSON, YAML, Markdown, SQL, CSS, HTML, XML. Files are real files &mdash; <code style="font-family:var(--font-mono);font-size:13px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">⌘S</code> writes to disk.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Multi-tab.</strong> Open as many files as your project needs. Tab dedupe means no duplicates.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Save = event.</strong> Every save emits to the activity log; agent threads see your edits without polling.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>No fork.</strong> Files on disk are the source of truth &mdash; you can close Atlas and pick up in vim.</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: CANVAS SPACES ====================== -->
+<section class="showcase-row" id="canvas">
+  <div class="wrap">
+    <div class="showcase-grid">
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Spaces · Canvas</span>
+        <h2>An infinite canvas for thinking out loud.</h2>
+        <p>Drop notes onto a spatial board. Link them with edges. Pin the ones the agent should treat as context. Everything persists as plain JSON in <code style="font-family:var(--font-mono);font-size:13px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">.atlas/canvas.json</code> &mdash; so your thinking versions with your code.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Spatial notes.</strong> ReactFlow under the hood. Pan, zoom, group, connect.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Drag into chat.</strong> Pull any note into the composer to give the agent fresh context.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>One canvas per project.</strong> Open Atlas, your map of the codebase is right where you left it.</span>
+          </li>
+        </ul>
+      </div>
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 7v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-7l-2-2H5a2 2 0 0 0-2 2z"/></svg>
+            spaces · canvas
+          </span>
+          <span style="margin-left:auto">4 notes · 3 edges</span>
+        </div>
+        <div class="cv-canvas">
+          <svg class="cv-edge" style="left:0;top:0;width:100%;height:100%" preserveAspectRatio="none">
+            <path d="M 270 130 Q 320 180 320 250" />
+            <path d="M 480 110 Q 460 180 510 280" />
+            <path d="M 200 280 Q 200 360 260 410" />
+          </svg>
+          <div class="cv-note cv-note-1">
+            <div class="cv-note-head">
+              <span class="cv-note-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+              </span>
+              <span class="cv-note-title">ACP driver plan</span>
+              <span class="cv-note-meta">just now</span>
+            </div>
+            <div class="cv-note-body">
+              <p>Three things to land before we can register Codex.</p>
+              <ul>
+                <li>Adapter trait in <code style="background:transparent;border:none;padding:0;font-size:11px">atlas-agents</code></li>
+                <li>PID registry per stream</li>
+                <li>Permission policy mux</li>
+              </ul>
+            </div>
+          </div>
+          <div class="cv-note cv-note-2">
+            <div class="cv-note-head">
+              <span class="cv-note-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              </span>
+              <span class="cv-note-title">Adapter shape</span>
+              <span class="cv-note-meta">2m ago</span>
+            </div>
+            <div class="cv-note-body">
+              <p>What every ACP adapter must implement:</p>
+              <code>fn spawn(&amp;self) -&gt; Result&lt;Stream&gt;</code>
+            </div>
+          </div>
+          <div class="cv-note cv-note-3">
+            <div class="cv-note-head">
+              <span class="cv-note-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+              </span>
+              <span class="cv-note-title">Open Q</span>
+              <span class="cv-note-meta">5m</span>
+            </div>
+            <div class="cv-note-body">
+              <p>How do we surface streaming bytes from a long-running adapter to the chat panel without coupling to Claude's JSONL shape?</p>
+            </div>
+          </div>
+          <div class="cv-note cv-note-4">
+            <div class="cv-note-head">
+              <span class="cv-note-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3v18h18"/><path d="m7 14 3-3 3 3 5-5"/></svg>
+              </span>
+              <span class="cv-note-title">Refs</span>
+              <span class="cv-note-meta">12m</span>
+            </div>
+            <div class="cv-note-body">
+              <p>Cersei's REPL session lifecycle; Claude Code subprocess hand-off.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: INBOX ====================== -->
+<section class="showcase-row" id="inbox">
+  <div class="wrap">
+    <div class="showcase-grid is-reversed">
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></svg>
+            inbox · 8 unread
+          </span>
+          <span style="margin-left:auto">⌘⇧I</span>
+        </div>
+        <div class="ib-frame">
+          <div class="ib-head">
+            <span class="ib-tab is-active">Unread</span>
+            <span class="ib-tab">All</span>
+            <span class="ib-tab">Mentions</span>
+            <span class="ib-spacer"></span>
+            <span>filtering: all sources</span>
+          </div>
+          <div class="ib-row is-unread">
+            <span class="ib-dot"></span>
+            <div class="ib-content">
+              <div class="ib-row-head">
+                <span class="ib-kind is-perm">permission</span>
+                <span class="ib-agent">claude-code · session 8c4f</span>
+              </div>
+              <div class="ib-summary">Agent wants to run <code style="font-family:var(--font-mono);background:var(--bg-raised);padding:0 3px;border-radius:3px;color:var(--text-primary)">cargo test --workspace</code> &mdash; approve?</div>
+            </div>
+            <span class="ib-time">12s ago</span>
+          </div>
+          <div class="ib-row is-unread">
+            <span class="ib-dot"></span>
+            <div class="ib-content">
+              <div class="ib-row-head">
+                <span class="ib-kind is-stream">stream-done</span>
+                <span class="ib-agent">claude-code · session a2b9</span>
+              </div>
+              <div class="ib-summary">Refactored <code style="font-family:var(--font-mono);background:var(--bg-raised);padding:0 3px;border-radius:3px;color:var(--text-primary)">acp-driver.rs</code> &mdash; 3 files changed, +47 -12, all tests pass.</div>
+            </div>
+            <span class="ib-time">1m ago</span>
+          </div>
+          <div class="ib-row is-unread">
+            <span class="ib-dot"></span>
+            <div class="ib-content">
+              <div class="ib-row-head">
+                <span class="ib-kind">tool-use</span>
+                <span class="ib-agent">claude-code · session a2b9</span>
+              </div>
+              <div class="ib-summary">Read <code style="font-family:var(--font-mono);background:var(--bg-raised);padding:0 3px;border-radius:3px;color:var(--text-primary)">src/features/chat/lib/acp-api.ts</code> (148 lines).</div>
+            </div>
+            <span class="ib-time">2m ago</span>
+          </div>
+          <div class="ib-row is-unread">
+            <span class="ib-dot"></span>
+            <div class="ib-content">
+              <div class="ib-row-head">
+                <span class="ib-kind">knowledge</span>
+                <span class="ib-agent">canvas</span>
+              </div>
+              <div class="ib-summary">Saved thread "plan-acp-driver" to <code style="font-family:var(--font-mono);background:var(--bg-raised);padding:0 3px;border-radius:3px;color:var(--text-primary)">knowledge/threads/acp.md</code>.</div>
+            </div>
+            <span class="ib-time">4m ago</span>
+          </div>
+          <div class="ib-row">
+            <span class="ib-dot"></span>
+            <div class="ib-content">
+              <div class="ib-row-head">
+                <span class="ib-kind">branch</span>
+                <span class="ib-agent">git</span>
+              </div>
+              <div class="ib-summary">Created branch <code style="font-family:var(--font-mono);background:var(--bg-raised);padding:0 3px;border-radius:3px;color:var(--text-primary)">acp/codex-adapter</code> from main.</div>
+            </div>
+            <span class="ib-time">12m ago</span>
+          </div>
+          <div class="ib-row">
+            <span class="ib-dot"></span>
+            <div class="ib-content">
+              <div class="ib-row-head">
+                <span class="ib-kind is-error">stream-error</span>
+                <span class="ib-agent">claude-code · session 5e2d</span>
+              </div>
+              <div class="ib-summary">Anthropic API returned 529 &mdash; overloaded. Retried 3 times, backed off.</div>
+            </div>
+            <span class="ib-time">28m ago</span>
+          </div>
+        </div>
+      </div>
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Inbox</span>
+        <h2>Never miss what your agents did.</h2>
+        <p>Every meaningful agent event &mdash; permission prompts, completed streams, tool calls, knowledge saves, branch operations &mdash; surfaces in a unified inbox. Approve, dismiss, jump back to the thread.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Permission prompts up front.</strong> Agents don't run destructive commands without your eyes on them.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Per-session filtering.</strong> Many threads running? Filter to one. Mute noisy sources.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>One-key jump.</strong> <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">⌘⇧I</code> from anywhere. Click a row to land in the source thread.</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: LOG ====================== -->
+<section class="showcase-row" id="log">
+  <div class="wrap">
+    <div class="showcase-grid">
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Activity Log</span>
+        <h2>Replay any session. Replay any week.</h2>
+        <p>Every meaningful event &mdash; chat sends, tool calls, file edits, git ops, terminal commands, knowledge writes &mdash; flows through a 500-event ring buffer in memory plus an append-only pinned log on disk. Searchable, filterable, JSON-expandable per row.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Survives restart.</strong> Pinned rows persist to <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">~/.atlas/log/pinned.jsonl</code>.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Source &amp; project filters.</strong> Drill into one agent, one project, one kind of event.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Grep-friendly.</strong> Plain JSONL on disk. Pipe it to <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">jq</code> from your terminal.</span>
+          </li>
+        </ul>
+      </div>
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v16"/></svg>
+            log · 500 events buffered
+          </span>
+          <span style="margin-left:auto">12 pinned · 2 projects</span>
+        </div>
+        <div class="lg-frame">
+          <div class="lg-toolbar">
+            <span class="lg-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+              <span>Search activity…</span>
+            </span>
+            <span class="lg-filter is-active">All</span>
+            <span class="lg-filter">Pinned</span>
+            <span class="lg-filter">Chat</span>
+            <span class="lg-filter">Git</span>
+            <span class="lg-filter">Editor</span>
+            <span class="lg-stat">5 / 500</span>
+          </div>
+          <table class="lg-table">
+            <thead>
+              <tr>
+                <th style="width:62px">Time</th>
+                <th style="width:74px">Source</th>
+                <th style="width:96px">Kind</th>
+                <th>Summary</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="lg-time">37s ago</td>
+                <td><span class="lg-source">agent</span></td>
+                <td>stream-done</td>
+                <td class="lg-summary">Refactored acp-driver — 3 files changed, +47 -12, all tests pass.</td>
+              </tr>
+              <tr class="lg-expand">
+                <td colspan="4">
+<span style="color:var(--text-ghost)">{</span><br/>
+&nbsp;&nbsp;<span class="lg-json-key">"source"</span>: <span class="lg-json-str">"agent"</span>,<br/>
+&nbsp;&nbsp;<span class="lg-json-key">"kind"</span>: <span class="lg-json-str">"stream-done"</span>,<br/>
+&nbsp;&nbsp;<span class="lg-json-key">"sessionId"</span>: <span class="lg-json-str">"a2b9727-634b-4129"</span>,<br/>
+&nbsp;&nbsp;<span class="lg-json-key">"exitCode"</span>: <span style="color:#d8a449">0</span>,<br/>
+&nbsp;&nbsp;<span class="lg-json-key">"durationMs"</span>: <span style="color:#d8a449">18404</span><br/>
+<span style="color:var(--text-ghost)">}</span>
+                </td>
+              </tr>
+              <tr>
+                <td class="lg-time">1m ago</td>
+                <td><span class="lg-source">canvas</span></td>
+                <td>note-add</td>
+                <td class="lg-summary">New note: "ACP driver plan"</td>
+              </tr>
+              <tr>
+                <td class="lg-time">2m ago</td>
+                <td><span class="lg-source">editor</span></td>
+                <td>file-save</td>
+                <td class="lg-summary">app.rs · 24 lines changed</td>
+              </tr>
+              <tr>
+                <td class="lg-time">2m ago</td>
+                <td><span class="lg-source">chat</span></td>
+                <td>send-agent</td>
+                <td class="lg-summary">"Wire the codex adapter into the chat panel."</td>
+              </tr>
+              <tr>
+                <td class="lg-time">4m ago</td>
+                <td><span class="lg-source">git</span></td>
+                <td>branch</td>
+                <td class="lg-summary">Created branch acp/codex-adapter from main.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== AGENTS ====================== -->
+<section class="agents-section" id="agents">
+  <div class="wrap">
+    <div class="agents-strip">
+      <div>
+        <span class="sec-eyebrow">Any agent · ACP-native</span>
+        <h2 class="sec-title" style="max-width:18ch">One workspace.<br/>Every coding agent.</h2>
+        <p class="sec-sub" style="margin-bottom:32px">Atlas speaks the Agent Client Protocol (ACP). Today it ships with Claude Code; Codex, OpenCode, and Kilo Code follow on the same shell. Swap mid-thread. Bring your own keys. No lock-in.</p>
+        <a href="https://github.com/zed-industries/agent-client-protocol" target="_blank" rel="noopener" class="btn btn-secondary btn-lg">
+          Read the ACP docs
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5l7 7-7 7"/></svg>
+        </a>
+      </div>
+      <div class="agents-list">
+        <div class="agent-row is-active">
+          <div class="agent-mark">CC</div>
+          <div class="agent-info">
+            <div class="agent-name">Claude Code</div>
+            <div class="agent-meta">claude-opus-4-7 · shipping today</div>
+          </div>
+          <div class="agent-status">
+            <span class="atlas-dot atlas-dot-success"></span>
+            Available
+          </div>
+        </div>
+        <div class="agent-row">
+          <div class="agent-mark">CX</div>
+          <div class="agent-info">
+            <div class="agent-name">Codex</div>
+            <div class="agent-meta">via ACP · landing soon</div>
+          </div>
+          <div class="agent-status">
+            <span class="atlas-dot atlas-dot-warning"></span>
+            Coming
+          </div>
+        </div>
+        <div class="agent-row">
+          <div class="agent-mark">OC</div>
+          <div class="agent-info">
+            <div class="agent-name">OpenCode</div>
+            <div class="agent-meta">via ACP · open-source agent</div>
+          </div>
+          <div class="agent-status">
+            <span class="atlas-dot atlas-dot-warning"></span>
+            Coming
+          </div>
+        </div>
+        <div class="agent-row">
+          <div class="agent-mark">KC</div>
+          <div class="agent-info">
+            <div class="agent-name">Kilo Code</div>
+            <div class="agent-meta">via ACP · open-source agent</div>
+          </div>
+          <div class="agent-status">
+            <span class="atlas-dot atlas-dot-warning"></span>
+            Coming
+          </div>
+        </div>
+        <div class="agent-row">
+          <div class="agent-mark">+</div>
+          <div class="agent-info">
+            <div class="agent-name">Your agent</div>
+            <div class="agent-meta">implements ACP · drop a binary, register it</div>
+          </div>
+          <div class="agent-status">Configure</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== METRICS ====================== -->
+<section class="metrics">
+  <div class="wrap">
+    <div class="metrics-grid">
+      <div>
+        <div class="metric-num">0</div>
+        <div class="metric-label">Telemetry. No account. No server. Your code never leaves your machine.</div>
+      </div>
+      <div>
+        <div class="metric-num metric-mono">.atlas/</div>
+        <div class="metric-label">All state is files. Knowledge, canvas, logs &mdash; markdown and JSON next to your code.</div>
+      </div>
+      <div>
+        <div class="metric-num">3<span class="unit">+</span></div>
+        <div class="metric-label">Concurrent agent threads per project. Switch tabs &mdash; streams keep running.</div>
+      </div>
+      <div>
+        <div class="metric-num metric-mono">ACP</div>
+        <div class="metric-label">Standard protocol. Any compliant agent slots into the same shell.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== ROADMAP ====================== -->
+<section class="roadmap-section" id="roadmap">
+  <div class="wrap">
+    <div class="roadmap-grid">
+      <div class="roadmap-head">
+        <span class="sec-eyebrow">On the roadmap</span>
+        <h2 class="sec-title">Built for one. Designed for teams.</h2>
+        <p class="sec-sub">A real problem: companies and teams don't have shared knowledge bases that humans and agents can both consume. Atlas is heading there. The single-player tools shipping today are the substrate for the multiplayer ones below.</p>
+        <div class="roadmap-quote">"The knowledge base and logging system is designed for teams. The next thing we ship is the network around it."</div>
+      </div>
+
+      <div class="roadmap-list">
+        <div class="roadmap-item">
+          <div class="roadmap-num">01</div>
+          <div class="roadmap-body">
+            <h3 class="roadmap-title">Atlas accounts &amp; team workspaces</h3>
+            <p class="roadmap-desc">Sign in to sync across machines. Invite teammates. Local-first stays local; only what you publish reaches the network.</p>
+          </div>
+          <span class="roadmap-badge is-planning">Planning</span>
+        </div>
+
+        <div class="roadmap-item">
+          <div class="roadmap-num">02</div>
+          <div class="roadmap-body">
+            <h3 class="roadmap-title">Shared knowledge bases</h3>
+            <p class="roadmap-desc">The same markdown files, mirrored across the team. Humans read them in Atlas; agents consume them as system prompt. One source of truth, both audiences.</p>
+          </div>
+          <span class="roadmap-badge is-planning">Planning</span>
+        </div>
+
+        <div class="roadmap-item">
+          <div class="roadmap-num">03</div>
+          <div class="roadmap-body">
+            <h3 class="roadmap-title">Thread sync across teams</h3>
+            <p class="roadmap-desc">Save any agent thread to the team knowledge base. Teammates pick up exactly where the agent left off, with full reasoning history attached.</p>
+          </div>
+          <span class="roadmap-badge is-planning">Planning</span>
+        </div>
+
+        <div class="roadmap-item">
+          <div class="roadmap-num">04</div>
+          <div class="roadmap-body">
+            <h3 class="roadmap-title">Version control for agent knowledge</h3>
+            <p class="roadmap-desc">Incremental versioning for <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">CLAUDE.md</code>, <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">AGENTS.md</code>, and every knowledge note. Diff agent context the same way you diff code. Roll back when an instruction regresses behaviour.</p>
+          </div>
+          <span class="roadmap-badge is-exploring">Exploring</span>
+        </div>
+
+        <div class="roadmap-item">
+          <div class="roadmap-num">05</div>
+          <div class="roadmap-body">
+            <h3 class="roadmap-title">Cloud integrations</h3>
+            <p class="roadmap-desc">Import knowledge from Jira and Confluence. Map tickets to threads, sync designs to notes. Stop copy-pasting context into prompts.</p>
+          </div>
+          <span class="roadmap-badge is-exploring">Exploring</span>
+        </div>
+
+        <div class="roadmap-item">
+          <div class="roadmap-num">06</div>
+          <div class="roadmap-body">
+            <h3 class="roadmap-title">Prompt polling &amp; tickets in one surface</h3>
+            <p class="roadmap-desc">Open a ticket, post the prompt, gather team votes on the agent's plan, then approve the run. Plan and execution, no Notion ↔ Linear ↔ Slack pinball.</p>
+          </div>
+          <span class="roadmap-badge is-exploring">Exploring</span>
+        </div>
+
+        <div class="roadmap-item">
+          <div class="roadmap-num">07</div>
+          <div class="roadmap-body">
+            <h3 class="roadmap-title">Team-level agent reference systems</h3>
+            <p class="roadmap-desc">Aggregate knowledge and system traces across the team into shared reference indices. Every agent inherits the team's best context automatically.</p>
+          </div>
+          <span class="roadmap-badge is-exploring">Exploring</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== CTA ====================== -->
+<section class="cta-section" id="download">
+  <div class="wrap-tight">
+    <h2 class="cta-title">Make agents part of the team.</h2>
+    <p class="cta-sub">Free during the alpha. Bring your own keys. Apple Silicon binary, no Electron, no telemetry, no account.</p>
+    <div class="cta-row">
+      <a href="https://github.com/pacifio/atlas/releases/download/alpha-0.1.0/Atlas_0.1.0_aarch64.dmg" class="btn btn-primary btn-lg">
+        Download for Mac
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
+      </a>
+      <a href="https://github.com/pacifio/atlas" target="_blank" rel="noopener" class="btn btn-secondary btn-lg">
+        Read the source
+      </a>
+    </div>
+    <div class="cta-tiny">v0.1.0 · macOS 13+ on Apple Silicon · alpha</div>
+  </div>
+</section>
+
+<!-- ====================== FOOTER ====================== -->
+<footer>
+  <div class="wrap">
+    <div class="footer-row">
+      <div class="footer-brand">
+        <div class="footer-brand-line">
+          <img src="icon-sm.svg" alt="Atlas" class="footer-logo" />
+          <span class="footer-sep">|</span>
+          <span class="footer-co">Atlas</span>
+        </div>
+        <div class="footer-address">1111B S Governors Ave #39146 Dover, DE 19904</div>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/pacifio/atlas" target="_blank" rel="noopener">Github</a>
+        <span class="footer-sep">|</span>
+        <a href="https://x.com/antarys_ai" target="_blank" rel="noopener" aria-label="X (Twitter)">X</a>
+        <span class="footer-sep">|</span>
+        <a href="https://www.linkedin.com/company/107506241/" target="_blank" rel="noopener" aria-label="LinkedIn">LinkedIn</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // Sticky nav border on scroll
+  const nav = document.getElementById('nav');
+  const onScroll = () => {
+    if (window.scrollY > 8) nav.classList.add('scrolled');
+    else nav.classList.remove('scrolled');
+  };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+</script>
+
+</body>
+</html>

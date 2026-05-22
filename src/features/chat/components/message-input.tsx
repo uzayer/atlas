@@ -3,26 +3,58 @@ import { cn } from "@/lib/utils";
 import {
   ArrowUp,
   AtSign,
-  Settings,
-  Terminal,
-  Sparkles,
   Square,
   Pencil,
   X,
 } from "lucide-react";
 import { useChatStore } from "../stores/chat-store";
 import { CLAUDE_PERMISSION_MODE_LABEL } from "@/types/agent";
+// `ChatInput` pulls in CodeMirror (~870 KB) via `cm-mention-extension`.
+// We import it dynamically so the chunk is not in the initial preload set.
+// The import is kicked off at module-evaluation time (below, outside the
+// component) so the chunk starts downloading the moment this module is
+// reached in the import graph — *before* MessageInput even mounts. Until
+// the chunk resolves the composer renders a same-sized empty placeholder
+// so the panel doesn't reflow when CM lands.
+//
+// `MentionPicker` only mounts when the user types `@`, so we let its chunk
+// load purely on demand — no eager preload (that would add a wasted Vite
+// roundtrip in dev for every MessageInput mount).
+import type { ChatInput as ChatInputComponent, ChatInputHandle } from "./chat-input";
+import type {
+  MentionPicker as MentionPickerComponent,
+  MentionPickerHandle,
+} from "./mention-picker";
+import { useProjectStore } from "@/features/project/stores/project-store";
+import type { MentionTrigger } from "../lib/cm-mention-extension";
+import type { MentionData } from "../lib/mentions";
+
+// Start the CodeMirror chunk download at module-evaluation time. Vite still
+// excludes it from `<link rel="modulepreload">` because the static analysis
+// only sees a dynamic `import()`. The promise is reused by every MessageInput
+// instance.
+const chatInputPromise: Promise<typeof import("./chat-input")> =
+  import("./chat-input");
+const mentionPickerPromise: Promise<typeof import("./mention-picker")> =
+  import("./mention-picker");
+
+// Module-level frozen empty array so selectors that return a "default empty
+// queue" hand back a stable reference instead of allocating per render.
+const EMPTY_QUEUE: readonly string[] = Object.freeze([]);
 
 interface MessageInputProps {
   tabId: string;
-  /** Send a message right now (used when idle, or to dequeue). */
-  onSend: (message: string) => void;
+  /**
+   * Send a message right now (used when idle, or to dequeue). Receives
+   * both the plain prose text and the list of mention records the user
+   * inserted — the panel-level handler composes the final wire prompt.
+   */
+  onSend: (message: string, mentions: MentionData[]) => void;
   /** Stop the current generation. */
   onStop?: () => void;
-  /** True while the agent/LLM is producing a response. */
+  /** True while the agent is producing a response. */
   running?: boolean;
   placeholder?: string;
-  onSettingsClick?: () => void;
 }
 
 export function MessageInput({
@@ -31,31 +63,128 @@ export function MessageInput({
   onStop,
   running = false,
   placeholder = "Message Atlas... (@ to mention, / for commands)",
-  onSettingsClick,
 }: MessageInputProps) {
-  const providerConfig = useChatStore.use.providerConfig();
-  const sessions = useChatStore.use.sessions();
-  const queues = useChatStore.use.queues();
   const {
-    toggleUseClaude,
     cycleClaudePermissionMode,
     enqueueMessage,
     removeQueueItem,
   } = useChatStore.use.actions();
-  const session = sessions[tabId];
-  const useClaude = session?.useClaude ?? true;
-  const permissionMode = session?.claudePermissionMode ?? "default";
-  const queue = queues[tabId] ?? [];
+  // Narrow per-tab selectors — primitives only, no message-array refs. This
+  // component otherwise would re-render on every streaming chunk because it
+  // sits inside the active chat panel.
+  const permissionMode = useChatStore(
+    (s) => s.sessions[tabId]?.claudePermissionMode ?? "default"
+  );
+  const queue = useChatStore((s) => s.queues[tabId] ?? EMPTY_QUEUE);
 
+  // The composer's plain-text content is mirrored into local state so the
+  // submit button can react to emptiness without round-tripping through
+  // CodeMirror on every keystroke. CodeMirror owns the document; this is a
+  // shallow shadow for the submit button.
   const [value, setValue] = useState("");
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<ChatInputHandle>(null);
 
-  // Auto-focus the chat input whenever this panel mounts (tab switch back into chat).
+  // The CM chunk started downloading at module-eval time (see the top of this
+  // file). Mirror the resolution into component state so React re-renders
+  // once the component class is available. We never render a textarea
+  // fallback — instead the placeholder div below holds the layout slot at
+  // the same height so the swap is invisible (no reflow, no mount/unmount
+  // of an interactive element mid-typing).
+  const [LazyChatInput, setLazyChatInput] =
+    useState<typeof ChatInputComponent | null>(null);
+  const [LazyMentionPicker, setLazyMentionPicker] =
+    useState<typeof MentionPickerComponent | null>(null);
+
   useEffect(() => {
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus();
+    let cancelled = false;
+    void chatInputPromise.then((m) => {
+      if (!cancelled) setLazyChatInput(() => m.ChatInput);
     });
+    void mentionPickerPromise.then((m) => {
+      if (!cancelled) setLazyMentionPicker(() => m.MentionPicker);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Fire `atlas:chat-input-focused` the first time this composer takes focus.
+  // ChatPanel listens for it to lazily bind an ACP session — deferring the
+  // agent spawn until the user actually intends to chat keeps it off the cold
+  // boot path. Reset per tab so re-focusing a fresh tab still binds.
+  const focusedOnceRef = useRef(false);
+  useEffect(() => {
+    focusedOnceRef.current = false;
   }, [tabId]);
+  const handleFocusCapture = useCallback(() => {
+    if (focusedOnceRef.current) return;
+    focusedOnceRef.current = true;
+    window.dispatchEvent(
+      new CustomEvent("atlas:chat-input-focused", { detail: { tabId } })
+    );
+  }, [tabId]);
+
+  // ── Mention picker orchestration ──────────────────────────────────────
+  const projectPath = useProjectStore((s) => s.currentProject?.path ?? null);
+  const [trigger, setTrigger] = useState<MentionTrigger | null>(null);
+  const pickerRef = useRef<MentionPickerHandle>(null);
+  const triggerRef = useRef<MentionTrigger | null>(null);
+  triggerRef.current = trigger;
+
+  const handleMentionSelect = useCallback(
+    (mention: MentionData) => {
+      const t = triggerRef.current;
+      if (!t) return;
+      inputRef.current?.insertMention(mention, t.from, t.to);
+      // Trigger naturally closes when the doc no longer has an `@…` before
+      // the caret; the plugin will fire the null transition for us.
+    },
+    []
+  );
+
+  // Forward Up/Down/Enter/Esc/Backspace from CodeMirror to the picker
+  // when it's open. Backspace and Escape "go back" one level (close a
+  // session sublist, unlock a scope) before falling through to their
+  // default behavior.
+  const keyInterceptor = useCallback(
+    (key: "Up" | "Down" | "Enter" | "Escape" | "Backspace") => {
+      const p = pickerRef.current;
+      const t = triggerRef.current;
+      if (!t || !p) return false;
+      switch (key) {
+        case "Up":
+          p.moveUp();
+          return true;
+        case "Down":
+          p.moveDown();
+          return true;
+        case "Enter":
+          return p.commit();
+        case "Escape":
+          // At a sublevel, Esc pops back. At the top level, it closes.
+          if (p.goBack()) return true;
+          setTrigger(null);
+          return true;
+        case "Backspace":
+          // Only consume Backspace when at a sublevel AND the query is
+          // empty — otherwise let CM delete a character in the query (or
+          // the `@` itself, which closes the picker via the trigger
+          // detector).
+          if (t.query === "" && p.goBack()) return true;
+          return false;
+      }
+    },
+    []
+  );
+
+  // Auto-focus the composer whenever this panel mounts (tab switch back into
+  // chat). If the CodeMirror chunk hasn't resolved yet, the next re-render
+  // (driven by `LazyChatInput` flipping non-null) re-runs this effect and
+  // focuses the real input as soon as it exists.
+  useEffect(() => {
+    if (!LazyChatInput) return;
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [tabId, LazyChatInput]);
 
   // Listen for "Reply" clicks on message items — prepend a quote block.
   useEffect(() => {
@@ -66,52 +195,37 @@ export function MessageInput({
         .split("\n")
         .map((l) => `> ${l}`)
         .join("\n");
-      setValue((v) => `${quoted}\n\n${v}`);
-      requestAnimationFrame(() => {
-        const el = textareaRef.current;
-        if (el) {
-          el.focus();
-          el.scrollTop = 0;
-          el.setSelectionRange(el.value.length, el.value.length);
-        }
-      });
+      const cur = inputRef.current?.getValue() ?? "";
+      const next = `${quoted}\n\n${cur}`;
+      inputRef.current?.setValue(next);
+      setValue(next);
+      requestAnimationFrame(() => inputRef.current?.focus());
     };
     window.addEventListener("atlas:chat-reply", handler);
     return () => window.removeEventListener("atlas:chat-reply", handler);
   }, []);
 
   const submit = useCallback(() => {
-    const trimmed = value.trim();
+    const text = inputRef.current?.getValue() ?? value;
+    const trimmed = text.trim();
     if (!trimmed) {
       // Empty + running → act as a stop button.
       if (running) onStop?.();
       return;
     }
+    const mentions = inputRef.current?.getMentions() ?? [];
     if (running) {
+      // Queued messages don't carry mentions yet — the queue holds raw
+      // strings and the agent will see whatever shortform text was in the
+      // composer. Mentions are dropped here intentionally; promoting the
+      // queue to a structured shape is a follow-up.
       enqueueMessage(tabId, trimmed);
     } else {
-      onSend(trimmed);
+      onSend(trimmed, mentions);
     }
+    inputRef.current?.clear();
     setValue("");
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-    }
   }, [value, running, onSend, onStop, enqueueMessage, tabId]);
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault();
-      submit();
-    }
-    // Shift+Tab handled at chat-panel level.
-  };
-
-  const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setValue(e.target.value);
-    const el = e.target;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 200) + "px";
-  };
 
   const trimmed = value.trim();
   // Tri-state button:
@@ -137,9 +251,12 @@ export function MessageInput({
                   key={i}
                   text={q}
                   onEdit={() => {
-                    setValue((cur) => (cur.trim() ? `${cur}\n${q}` : q));
+                    const cur = inputRef.current?.getValue() ?? "";
+                    const merged = cur.trim() ? `${cur}\n${q}` : q;
+                    inputRef.current?.setValue(merged);
+                    setValue(merged);
                     removeQueueItem(tabId, i);
-                    requestAnimationFrame(() => textareaRef.current?.focus());
+                    requestAnimationFrame(() => inputRef.current?.focus());
                   }}
                   onRemove={() => removeQueueItem(tabId, i)}
                 />
@@ -154,79 +271,64 @@ export function MessageInput({
             "shadow-[0_8px_24px_rgba(0,0,0,0.35)]",
             "focus-within:border-[var(--border-focus)] transition-colors"
           )}
+          onFocusCapture={handleFocusCapture}
         >
-          <textarea
-            ref={textareaRef}
-            value={value}
-            onChange={handleInput}
-            onKeyDown={handleKeyDown}
-            placeholder={
-              running
-                ? "Type to queue the next message…"
-                : placeholder
-            }
-            rows={1}
-            className={cn(
-              "w-full bg-transparent resize-none px-4 pt-3 pb-1 text-sm leading-relaxed",
-              "text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)]",
-              "outline-none",
-              "min-h-[44px] max-h-[200px]"
-            )}
-          />
+          {LazyChatInput ? (
+            <LazyChatInput
+              ref={inputRef}
+              initialValue={value}
+              placeholder={running ? "Type to queue the next message…" : placeholder}
+              onChange={setValue}
+              onSubmit={submit}
+              onMentionTrigger={setTrigger}
+              keyInterceptor={keyInterceptor}
+            />
+          ) : (
+            // Same-height empty slot so the panel layout doesn't reflow when
+            // CodeMirror lands. Non-interactive — by the time the user can
+            // visually find this region the chunk has typically resolved.
+            <div
+              aria-hidden="true"
+              style={{ minHeight: 44 }}
+              className="px-4 pt-3 pb-1"
+            />
+          )}
           <div className="flex items-center justify-between px-2 pb-2 pt-1">
             <div className="flex items-center gap-1">
               <button
-                onClick={() => toggleUseClaude(tabId)}
-                className={cn(
-                  "flex items-center gap-1.5 px-2.5 h-6.5 rounded-full text-[10px] leading-none font-medium transition-colors border cursor-pointer",
-                  useClaude
-                    ? "bg-[var(--bg-elevated)] text-[var(--text-primary)] border-[var(--border-default)] hover:bg-[var(--bg-hover)]"
-                    : "bg-[var(--accent-primary-muted)] text-[var(--accent-primary)] border-transparent hover:opacity-90"
-                )}
-                title="Toggle between Claude Code and LLM provider"
+                onClick={() => cycleClaudePermissionMode(tabId)}
+                className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+                title="Cycle permission mode (⇧⇥)"
               >
-                {useClaude ? <Terminal size={11} /> : <Sparkles size={11} />}
-                {useClaude ? "Claude Code" : providerConfig.provider}
+                <span
+                  className={cn(
+                    "w-1.5 h-1.5 rounded-full shrink-0",
+                    permissionMode === "default" && "bg-[var(--text-tertiary)]",
+                    permissionMode === "acceptEdits" && "bg-[var(--status-success)]",
+                    permissionMode === "plan" && "bg-[var(--accent-primary)]",
+                    permissionMode === "bypassPermissions" && "bg-[var(--status-error)]"
+                  )}
+                />
+                {CLAUDE_PERMISSION_MODE_LABEL[permissionMode]}
               </button>
-              {useClaude && (
-                <button
-                  onClick={() => cycleClaudePermissionMode(tabId)}
-                  className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
-                  title="Cycle permission mode (⇧⇥)"
-                >
-                  <span
-                    className={cn(
-                      "w-1.5 h-1.5 rounded-full shrink-0",
-                      permissionMode === "default" && "bg-[var(--text-tertiary)]",
-                      permissionMode === "acceptEdits" && "bg-[var(--status-success)]",
-                      permissionMode === "plan" && "bg-[var(--accent-primary)]",
-                      permissionMode === "bypassPermissions" && "bg-[var(--status-error)]"
-                    )}
-                  />
-                  {CLAUDE_PERMISSION_MODE_LABEL[permissionMode]}
-                </button>
-              )}
-              {!useClaude && (
-                <button
-                  onClick={onSettingsClick}
-                  className="px-2 h-6 rounded-md text-[11px] font-mono text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors"
-                  title="Model"
-                >
-                  {providerConfig.model}
-                </button>
-              )}
               <button
-                className="flex items-center justify-center w-6 h-6 rounded-md text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] transition-colors"
-                title="Mention"
+                onClick={() => {
+                  // Insert a literal `@` at the caret and refocus the
+                  // editor — the trigger plugin picks it up and opens
+                  // the picker just like a typed `@`.
+                  const view = inputRef.current?.view();
+                  if (!view) return;
+                  const head = view.state.selection.main.head;
+                  view.dispatch({
+                    changes: { from: head, to: head, insert: "@" },
+                    selection: { anchor: head + 1 },
+                  });
+                  inputRef.current?.focus();
+                }}
+                className="flex items-center justify-center w-6 h-6 rounded-md text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+                title="Mention (@)"
               >
                 <AtSign size={12} />
-              </button>
-              <button
-                onClick={onSettingsClick}
-                className="flex items-center justify-center w-6 h-6 rounded-md text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] transition-colors"
-                title="Settings"
-              >
-                <Settings size={12} />
               </button>
             </div>
 
@@ -245,9 +347,7 @@ export function MessageInput({
                     ? "Stop generation"
                     : mode === "queue"
                     ? "Queue message (sends after current finishes)"
-                    : useClaude
-                    ? "Send to Claude Code (⌘↵)"
-                    : "Send to LLM provider (⌘↵)"
+                    : "Send to agent (⌘↵)"
                 }
               >
                 {mode === "stop" ? (
@@ -260,6 +360,17 @@ export function MessageInput({
           </div>
         </div>
       </div>
+      {LazyMentionPicker && (
+        <LazyMentionPicker
+          ref={pickerRef}
+          open={trigger !== null}
+          query={trigger?.query ?? ""}
+          anchor={trigger?.anchor ?? null}
+          projectPath={projectPath}
+          onSelect={handleMentionSelect}
+          onClose={() => setTrigger(null)}
+        />
+      )}
     </div>
   );
 }

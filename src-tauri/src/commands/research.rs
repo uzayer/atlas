@@ -274,25 +274,28 @@ pub async fn save_paper_to_knowledge(
     link: String,
     categories: Vec<String>,
 ) -> Result<String, String> {
-    let kb_dir = Path::new(&project_path).join(".atlas").join("knowledge");
-    fs::create_dir_all(&kb_dir).map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let kb_dir = Path::new(&project_path).join(".atlas").join("knowledge");
+        fs::create_dir_all(&kb_dir).map_err(|e| e.to_string())?;
 
-    let filename = format!("paper-{}.md", paper_id.replace('/', "_"));
-    let filepath = kb_dir.join(&filename);
+        let filename = format!("paper-{}.md", paper_id.replace('/', "_"));
+        let filepath = kb_dir.join(&filename);
 
-    let content = format!(
-        "# {}\n\n**Authors:** {}\n\n**Categories:** {}\n\n**arXiv:** [{}]({})\n\n## Abstract\n\n{}\n\n---\n*Saved from Atlas Research*\n",
-        title,
-        authors.join(", "),
-        categories.join(", "),
-        paper_id,
-        link,
-        summary,
-    );
+        let content = format!(
+            "# {}\n\n**Authors:** {}\n\n**Categories:** {}\n\n**arXiv:** [{}]({})\n\n## Abstract\n\n{}\n\n---\n*Saved from Atlas Research*\n",
+            title,
+            authors.join(", "),
+            categories.join(", "),
+            paper_id,
+            link,
+            summary,
+        );
 
-    fs::write(&filepath, &content).map_err(|e| e.to_string())?;
-
-    Ok(filepath.to_string_lossy().to_string())
+        fs::write(&filepath, &content).map_err(|e| e.to_string())?;
+        Ok(filepath.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Fetch trending papers — runs all 3 category queries CONCURRENTLY
@@ -329,26 +332,40 @@ pub async fn fetch_trending_papers() -> Result<Vec<ArxivPaper>, String> {
     Ok(all_papers.into_iter().take(15).collect())
 }
 
+// `save_project_session` / `load_project_session` are async + spawn_blocking
+// for the same reason every other fs-touching Tauri command in this codebase
+// is: a sync handler would run on the NSApp main thread and freeze the UI
+// while the syscall blocked. `load_project_session` is part of the boot
+// cascade — its previous sync form was contributing to the warm-start
+// beachball.
 #[tauri::command]
-pub fn save_project_session(
+pub async fn save_project_session(
     project_path: String,
     session_data: String,
 ) -> Result<(), String> {
-    let atlas_dir = Path::new(&project_path).join(".atlas");
-    fs::create_dir_all(&atlas_dir).map_err(|e| e.to_string())?;
-    let session_path = atlas_dir.join("session.json");
-    fs::write(&session_path, &session_data).map_err(|e| e.to_string())?;
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let atlas_dir = Path::new(&project_path).join(".atlas");
+        fs::create_dir_all(&atlas_dir).map_err(|e| e.to_string())?;
+        let session_path = atlas_dir.join("session.json");
+        fs::write(&session_path, &session_data).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn load_project_session(project_path: String) -> Result<String, String> {
-    let session_path = Path::new(&project_path).join(".atlas").join("session.json");
-    if session_path.exists() {
-        fs::read_to_string(&session_path).map_err(|e| e.to_string())
-    } else {
-        Ok("{}".to_string())
-    }
+pub async fn load_project_session(project_path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let session_path = Path::new(&project_path).join(".atlas").join("session.json");
+        if session_path.exists() {
+            fs::read_to_string(&session_path).map_err(|e| e.to_string())
+        } else {
+            Ok("{}".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn extract_tag(xml: &str, tag: &str) -> Option<String> {

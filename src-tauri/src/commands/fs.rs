@@ -12,9 +12,21 @@ pub struct FileEntry {
     pub extension: Option<String>,
 }
 
+/// `#[tauri::command]` handlers WITHOUT `async` run on the NSApp main thread.
+/// Any meaningful file I/O there freezes the whole app (beachball). All three
+/// commands in this module therefore declare `async fn` + dispatch their
+/// blocking work through `tokio::task::spawn_blocking`, which puts the syscall
+/// on tokio's blocking worker pool and leaves the main thread responsive.
+
 #[tauri::command]
-pub fn read_directory(path: String) -> Result<Vec<FileEntry>, String> {
-    let dir = Path::new(&path);
+pub async fn read_directory(path: String) -> Result<Vec<FileEntry>, String> {
+    tokio::task::spawn_blocking(move || read_directory_sync(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn read_directory_sync(path: &str) -> Result<Vec<FileEntry>, String> {
+    let dir = Path::new(path);
     if !dir.is_dir() {
         return Err(format!("Not a directory: {}", path));
     }
@@ -32,9 +44,6 @@ pub fn read_directory(path: String) -> Result<Vec<FileEntry>, String> {
             Err(_) => continue,
         };
         let name = entry.file_name().to_string_lossy().to_string();
-
-        // Skip hidden files starting with .
-        // (we'll show them but mark them — the frontend can filter)
         let file_path = entry.path().to_string_lossy().to_string();
         let ext = entry
             .path()
@@ -71,6 +80,10 @@ pub async fn read_file_content(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn write_file_content(path: String, content: String) -> Result<(), String> {
-    fs::write(&path, &content).map_err(|e| format!("Failed to write {}: {}", path, e))
+pub async fn write_file_content(path: String, content: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        fs::write(&path, &content).map_err(|e| format!("Failed to write {}: {}", path, e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

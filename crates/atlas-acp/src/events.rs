@@ -9,7 +9,7 @@ use crate::registry::AgentId;
 /// One event per ACP protocol-level message that the UI cares about. Wire format is
 /// deliberately flat (`kind` + variant fields) so the TS side can pattern-match
 /// without unwrapping a tagged union envelope.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AcpEvent {
     /// Driver finished `connect_with` (process exited or protocol shut down).

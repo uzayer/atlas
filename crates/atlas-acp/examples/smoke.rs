@@ -1,6 +1,6 @@
 //! Vertical-slice smoke test for the ACP integration.
 //!
-//! Spawns a real ACP agent (defaults to `npx -y @zed-industries/claude-code-acp`),
+//! Spawns a real ACP agent (defaults to `npx -y @agentclientprotocol/claude-agent-acp`),
 //! initializes the protocol, opens a session in the current working directory,
 //! sends one prompt, prints every `SessionUpdate` it streams back, and exits on
 //! the prompt's `stop_reason`.
@@ -19,9 +19,14 @@ use agent_client_protocol::schema::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, TextContent,
 };
-use agent_client_protocol::{AcpAgent, Agent, ConnectionTo, LineDirection};
+use agent_client_protocol::{Agent, ConnectionTo};
+// `AcpAgent` (the subprocess + line-framed JSON-RPC transport) and the
+// `LineDirection` enum used by the debug callback live in the tokio-flavored
+// runtime crate, not the protocol's root. The driver in `src/driver.rs`
+// imports them the same way.
+use agent_client_protocol_tokio::{AcpAgent, LineDirection};
 
-const DEFAULT_COMMAND: &str = "npx -y @zed-industries/claude-code-acp";
+const DEFAULT_COMMAND: &str = "npx -y @agentclientprotocol/claude-agent-acp";
 const DEFAULT_PROMPT: &str = "Say hello in exactly one short sentence.";
 
 #[tokio::main]

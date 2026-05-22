@@ -1,7 +1,7 @@
 //! atlas-acp — ACP client plumbing for the Atlas Tauri host.
 //!
 //! Implements the `Client` role of the Agent Client Protocol against one or
-//! more spawned agent processes (canonical `@zed-industries/claude-code-acp`,
+//! more spawned agent processes (canonical `@agentclientprotocol/claude-agent-acp`,
 //! `claude-code-acp-rs`, or any other ACP-compatible agent).
 //!
 //! The crate is Tauri-independent: it exposes an [`EventSink`] trait that the

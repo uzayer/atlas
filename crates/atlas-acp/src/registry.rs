@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, NewSessionRequest, NewSessionResponse, PermissionOptionId,
-    PromptRequest, RequestPermissionOutcome, SelectedPermissionOutcome, SessionId, StopReason,
-    TextContent,
+    CancelNotification, ContentBlock, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
+    PermissionOptionId, PromptRequest, RequestPermissionOutcome, SelectedPermissionOutcome,
+    SessionId, SessionModeId, SetSessionModeRequest, StopReason, TextContent,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::driver::{self, AgentRuntime};
 use crate::error::{AcpError, Result};
-use crate::events::{AcpEvent, EventSink};
+use crate::events::EventSink;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(pub Uuid);
@@ -43,7 +43,10 @@ impl AgentSpec {
         Self {
             spec_id: "claude-code-ts".into(),
             display_name: "Claude Code (canonical)".into(),
-            command: "npx -y @zed-industries/claude-code-acp".into(),
+            // Upstream rename: `@zed-industries/claude-code-acp` was renamed
+            // to `@agentclientprotocol/claude-agent-acp`. The old name still
+            // resolves but no longer receives updates.
+            command: "npx -y @agentclientprotocol/claude-agent-acp".into(),
         }
     }
 
@@ -55,8 +58,33 @@ impl AgentSpec {
         }
     }
 
+    /// Codex ACP bridge. The actual command is a placeholder until OpenAI ships
+    /// an official ACP adapter — once it's live, swap the command string and
+    /// the multi-agent UI picks it up automatically.
+    pub fn codex() -> Self {
+        Self {
+            spec_id: "codex".into(),
+            display_name: "Codex (ACP)".into(),
+            command: "codex-acp".into(),
+        }
+    }
+
+    /// OpenCode ACP bridge. Same placeholder caveat as `codex()`.
+    pub fn opencode() -> Self {
+        Self {
+            spec_id: "opencode".into(),
+            display_name: "OpenCode (ACP)".into(),
+            command: "opencode-acp".into(),
+        }
+    }
+
     pub fn all_known() -> Vec<AgentSpec> {
-        vec![Self::claude_code_ts(), Self::claude_code_rs()]
+        vec![
+            Self::claude_code_ts(),
+            Self::claude_code_rs(),
+            Self::codex(),
+            Self::opencode(),
+        ]
     }
 }
 
@@ -175,6 +203,24 @@ impl AgentRegistry {
         Ok(resp.into())
     }
 
+    /// Resume a previously-saved session by id. The agent reads its own
+    /// persisted state for that session id (~/.claude/projects/.../<id>.jsonl
+    /// for the canonical Claude Code agent) so the next `send_prompt`
+    /// continues the same thread instead of starting a fresh one.
+    pub async fn load_session(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        cwd: PathBuf,
+    ) -> Result<()> {
+        let connection = self.connection(agent_id)?;
+        connection
+            .send_request(LoadSessionRequest::new(session_id, cwd))
+            .block_task()
+            .await?;
+        Ok(())
+    }
+
     /// Send a single text prompt. Resolves with the turn's `StopReason` when
     /// the agent finishes streaming. Notifications fire over the event sink
     /// throughout the turn.
@@ -195,10 +241,44 @@ impl AgentRegistry {
         Ok(resp.stop_reason)
     }
 
+    /// Switch the session's permission mode (default / acceptEdits / plan /
+    /// dontAsk / bypassPermissions). Calling this with `bypassPermissions`
+    /// stops the agent from ever emitting `RequestPermissionRequest` — the
+    /// fix for "bypass mode still prompts".
+    pub async fn set_session_mode(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        mode_id: String,
+    ) -> Result<()> {
+        let connection = self.connection(agent_id)?;
+        connection
+            .send_request(SetSessionModeRequest::new(
+                session_id,
+                SessionModeId::new(mode_id),
+            ))
+            .block_task()
+            .await?;
+        Ok(())
+    }
+
     /// Cancel an in-flight prompt turn. The agent will respond with
     /// `StopReason::Cancelled` on the still-awaiting `send_prompt` call.
+    /// Per ACP spec, the client MUST also resolve any pending permission
+    /// requests for the cancelled session as `Cancelled` — we do that by
+    /// dropping their oneshot senders, which causes the driver's `rx.await`
+    /// to fall through to the cancel branch.
     pub fn cancel_turn(&self, agent_id: AgentId, session_id: SessionId) -> Result<()> {
-        let connection = self.connection(agent_id)?;
+        let entry = self
+            .inner
+            .get(&agent_id)
+            .ok_or(AcpError::UnknownAgent)?;
+        entry
+            .runtime
+            .pending_permissions
+            .retain(|_, p| p.session_id != session_id);
+        let connection = entry.runtime.connection.clone();
+        drop(entry);
         connection
             .send_notification(CancelNotification::new(session_id))?;
         Ok(())
@@ -215,18 +295,20 @@ impl AgentRegistry {
             .inner
             .get(&agent_id)
             .ok_or(AcpError::UnknownAgent)?;
-        let (_, tx) = entry
+        let (_, pending) = entry
             .runtime
             .pending_permissions
             .remove(&request_id)
             .ok_or(AcpError::UnknownPermissionRequest(request_id))?;
         let resolved = match outcome {
-            PermissionDecision::Selected(opt_id) => RequestPermissionOutcome::Selected(
-                SelectedPermissionOutcome::new(PermissionOptionId::new(opt_id)),
+            PermissionDecision::Selected { option_id } => RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(PermissionOptionId::new(option_id)),
             ),
             PermissionDecision::Cancelled => RequestPermissionOutcome::Cancelled,
         };
-        tx.send(resolved)
+        pending
+            .sender
+            .send(resolved)
             .map_err(|_| AcpError::other("permission handler already dropped"))?;
         Ok(())
     }
@@ -242,24 +324,134 @@ impl AgentRegistry {
 
 /// Frontend-friendly permission outcome — the schema's enum is non_exhaustive
 /// and has Selected wrapping a struct, awkward to serialize across the wire.
+///
+/// Struct variant (not tuple) because serde's internal tagging (`tag = "..."`)
+/// only supports struct or unit variants; a tuple variant would silently lose
+/// the inner value when deserialised across the Tauri boundary.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PermissionDecision {
-    Selected(String),
+    Selected { option_id: String },
     Cancelled,
 }
 
-/// Convenience entrypoint: strip `CLAUDECODE` from the host environment so
-/// `@zed-industries/claude-code-acp` doesn't refuse to start when Atlas itself
-/// was launched from a parent Claude Code session.
+/// Startup-time host environment fix-ups for the ACP agent process.
+///
+/// Two concrete problems this addresses:
+///
+/// 1. **`CLAUDECODE` env var leak.** The canonical
+///    `@zed-industries/claude-code-acp` agent refuses to start when it sees
+///    `CLAUDECODE` set in its env (anti-nesting guard). If Atlas itself was
+///    launched from a parent Claude Code shell that var leaks into every
+///    spawned child. Strip it.
+///
+/// 2. **Minimal PATH in macOS GUI apps.** When Atlas is launched from
+///    Finder/the Dock the process PATH is only
+///    `/usr/bin:/bin:/usr/sbin:/sbin` — `npx` (used to fetch the canonical
+///    ACP agent), `node`, `bun`, `claude`, Homebrew binaries, etc. are all
+///    missing. Without this enrichment `acp_spawn_agent` fails with ENOENT
+///    in the bundled app even though everything works from a terminal.
 pub fn sanitize_host_env() {
     // SAFETY: called once at startup before any threads spawn child processes.
-    // remove_var is unsafe on the 2024 edition because mutating env in a
-    // multithreaded program is racy; we accept that risk here at boot.
+    // remove_var/set_var are unsafe on the 2024 edition because mutating env
+    // in a multithreaded program is racy; we accept that risk here at boot.
     unsafe {
         std::env::remove_var("CLAUDECODE");
     }
-    let _ = AcpEvent::AgentDisconnected {
-        reason: String::new(),
-    }; // touch enum to keep import path used in re-exports
+    enrich_path();
+}
+
+fn enrich_path() {
+    // Split into two passes:
+    //
+    // 1. The cheap, deterministic prepends (~$HOME/.local/bin, .bun, .cargo,
+    //    /opt/homebrew/{bin,sbin}, /usr/local/{bin,sbin}, /usr/{bin,sbin})
+    //    happen synchronously so the very first `acp_spawn_agent` call can
+    //    already resolve `npx`/`node` from a Homebrew install.
+    //
+    // 2. The `~/.nvm/versions/node/*` enumeration is moved to a background
+    //    thread. nvm doesn't symlink to a stable path so the directory walk
+    //    is unavoidable, and it can take ~100ms+ when many node versions are
+    //    installed. The walk runs while React paints the first frame; by the
+    //    time the user focuses the composer and the agent spawn kicks off
+    //    the additional PATH entries are in place. Homebrew/system node is
+    //    the fallback in the brief window before the walk lands.
+    apply_cheap_path_extras();
+    spawn_nvm_path_walk();
+}
+
+fn apply_cheap_path_extras() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut extras: Vec<String> = Vec::new();
+    if !home.is_empty() {
+        extras.push(format!("{home}/.local/bin"));
+        extras.push(format!("{home}/.bun/bin"));
+        extras.push(format!("{home}/.cargo/bin"));
+    }
+    extras.push("/opt/homebrew/bin".into());
+    extras.push("/opt/homebrew/sbin".into());
+    extras.push("/usr/local/bin".into());
+    extras.push("/usr/local/sbin".into());
+    extras.push("/usr/bin".into());
+    extras.push("/bin".into());
+    prepend_to_path(&extras);
+}
+
+fn spawn_nvm_path_walk() {
+    let home = match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() => h,
+        _ => return,
+    };
+    std::thread::spawn(move || {
+        let nvm_root = std::path::PathBuf::from(&home)
+            .join(".nvm")
+            .join("versions")
+            .join("node");
+        let Ok(entries) = std::fs::read_dir(&nvm_root) else {
+            return;
+        };
+        let mut versions: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path().join("bin"))
+            .filter(|p| p.is_dir())
+            .collect();
+        // Newest version first (lexicographic — fine for vMAJOR.MINOR.PATCH).
+        versions.sort();
+        versions.reverse();
+        let extras: Vec<String> = versions
+            .into_iter()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect();
+        if extras.is_empty() {
+            return;
+        }
+        prepend_to_path(&extras);
+    });
+}
+
+fn prepend_to_path(extras: &[String]) {
+    let base = std::env::var("PATH").unwrap_or_default();
+    let mut path_parts: Vec<String> = if base.is_empty() {
+        Vec::new()
+    } else {
+        base.split(':').map(String::from).collect()
+    };
+
+    // Prepend extras (in reverse so the first listed wins after all inserts),
+    // skipping anything already on PATH.
+    for extra in extras.iter().rev() {
+        if !path_parts.iter().any(|p| p == extra) {
+            path_parts.insert(0, extra.clone());
+        }
+    }
+
+    let new_path = path_parts.join(":");
+    // SAFETY: see `sanitize_host_env` — env mutation is racy in a multithreaded
+    // program. The background thread runs only after `sanitize_host_env` has
+    // returned and Tauri has started; any concurrent child-process spawn will
+    // either see the pre-nvm PATH (Homebrew node, fine) or the post-nvm PATH
+    // (nvm-managed node). Both are valid PATH values.
+    unsafe {
+        std::env::set_var("PATH", new_path);
+    }
 }

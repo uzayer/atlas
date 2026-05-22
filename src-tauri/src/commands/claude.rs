@@ -1,94 +1,43 @@
+//! Session-history readers against `~/.claude/projects/<encoded-cwd>/*.jsonl`.
+//!
+//! Both the legacy Claude Code CLI (no longer wired into Atlas) and the
+//! canonical ACP agent (`@agentclientprotocol/claude-agent-acp`, which sits on top
+//! of the Claude Agent SDK) write their session transcripts here, so the
+//! sidebar's history browser keeps working against the ACP-driven flow.
+//!
+//! Anything related to *running* Claude — `claude_run`, `claude_stream`,
+//! `claude_stop`, etc. — was removed once the ACP integration replaced it.
+
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
-use tauri::{AppHandle, Emitter};
+use std::time::SystemTime;
+use tauri::State;
 
-/// Tracks running claude PIDs by Atlas chat-tab id so we can kill them on demand.
-fn pid_registry() -> &'static Mutex<HashMap<String, u32>> {
-    static REG: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(HashMap::new()))
+/// Per-file metadata cache keyed by JSONL path. The cached entry is reused
+/// when the file's mtime matches what we last saw — the same path with a
+/// newer mtime is re-parsed in a single pass.
+///
+/// Process-lifetime; the file watcher invalidates *frontend* queries (which
+/// causes a re-call into this function), but the cache stays warm for files
+/// that didn't actually change. Net effect: rapid sidebar refreshes during a
+/// streaming turn only re-parse the one file that's actually growing.
+#[derive(Default)]
+pub struct ClaudeSessionIndex {
+    inner: Mutex<HashMap<PathBuf, CacheEntry>>,
 }
 
-/// macOS GUI apps inherit a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`),
-/// so `claude` (installed in `~/.local/bin` or `/opt/homebrew/bin`) can't be
-/// found by `Command::new("claude")`. We augment PATH with common locations.
-fn augmented_path() -> String {
-    let base = std::env::var("PATH").unwrap_or_default();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let extras = [
-        format!("{}/.local/bin", home),
-        format!("{}/.bun/bin", home),
-        format!("{}/.cargo/bin", home),
-        format!("{}/.nvm/versions/node", home), // most likely shadowed but cheap
-        "/opt/homebrew/bin".to_string(),
-        "/opt/homebrew/sbin".to_string(),
-        "/usr/local/bin".to_string(),
-        "/usr/local/sbin".to_string(),
-        "/usr/bin".to_string(),
-        "/bin".to_string(),
-    ];
-    let mut out = base;
-    for e in extras.iter().rev() {
-        if !out.split(':').any(|p| p == e) {
-            out = format!("{}:{}", e, out);
-        }
+impl ClaudeSessionIndex {
+    pub fn new() -> Self {
+        Self::default()
     }
-    out
 }
 
-/// Resolve the absolute path to the `claude` binary by asking the user's login
-/// shell where it lives, so we don't rely on Atlas's process PATH (which is
-/// minimal when launched from Finder).
-fn resolve_claude_path() -> Option<String> {
-    static CACHED: OnceLock<Option<String>> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            // First try the augmented PATH ourselves.
-            let path = augmented_path();
-            for dir in path.split(':') {
-                let candidate = Path::new(dir).join("claude");
-                if candidate.exists() {
-                    return Some(candidate.to_string_lossy().to_string());
-                }
-            }
-            // Fall back to a login shell — picks up shell-rc PATH exports.
-            for shell in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
-                if !Path::new(shell).exists() {
-                    continue;
-                }
-                if let Ok(out) = Command::new(shell)
-                    .arg("-l")
-                    .arg("-c")
-                    .arg("command -v claude")
-                    .output()
-                {
-                    if out.status.success() {
-                        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if !s.is_empty() && Path::new(&s).exists() {
-                            return Some(s);
-                        }
-                    }
-                }
-            }
-            None
-        })
-        .clone()
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ClaudeResponse {
-    pub output: String,
-    pub exit_code: i32,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ClaudeStreamEvent {
-    pub session_id: String,
-    pub event_type: String, // "text", "tool_use", "tool_result", "plan", "status", "error", "done", "session"
-    pub content: String,    // text content or JSON payload
+struct CacheEntry {
+    mtime: SystemTime,
+    meta: ClaudeSessionMeta,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,419 +74,6 @@ pub struct ChatMessageDump {
     pub content: String,
     pub timestamp: Option<String>,
     pub tool_calls: Vec<ToolCallDump>,
-}
-
-/// Run claude code in --print mode (non-interactive, single prompt)
-#[tauri::command]
-pub async fn claude_run(
-    prompt: String,
-    cwd: Option<String>,
-    model: Option<String>,
-) -> Result<ClaudeResponse, String> {
-    tokio::task::spawn_blocking(move || {
-        let claude_bin = resolve_claude_path().unwrap_or_else(|| "claude".to_string());
-        let mut cmd = Command::new(&claude_bin);
-        cmd.arg("--print");
-        cmd.arg(&prompt);
-
-        if let Some(ref m) = model {
-            cmd.arg("--model").arg(m);
-        }
-
-        if let Some(ref dir) = cwd {
-            cmd.current_dir(dir);
-        }
-
-        cmd.arg("--output-format").arg("text");
-        cmd.env("PATH", augmented_path());
-
-        let output = cmd.output().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "Claude Code CLI not found. Install it with: npm install -g @anthropic-ai/claude-code"
-                    .to_string()
-            } else {
-                format!("Failed to run claude: {}", e)
-            }
-        })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        let combined = if stderr.is_empty() {
-            stdout
-        } else {
-            format!("{}\n{}", stdout, stderr)
-        };
-
-        Ok(ClaudeResponse {
-            output: combined,
-            exit_code,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Run claude code with streaming JSON output, emitting events as they arrive
-#[tauri::command]
-pub async fn claude_stream(
-    app: AppHandle,
-    session_id: String,
-    prompt: String,
-    cwd: Option<String>,
-    resume_session_id: Option<String>,
-    permission_mode: Option<String>,
-) -> Result<(), String> {
-    let sid = session_id.clone();
-
-    let _ = app.emit(
-        "claude-stream",
-        ClaudeStreamEvent {
-            session_id: sid.clone(),
-            event_type: "status".into(),
-            content: "running".into(),
-        },
-    );
-
-    tokio::task::spawn_blocking(move || {
-        // Resolve the absolute path so we work when Atlas was launched from
-        // Finder (which strips ~/.local/bin from PATH).
-        let claude_bin = resolve_claude_path().unwrap_or_else(|| "claude".to_string());
-        let mut cmd = Command::new(&claude_bin);
-        cmd.arg("--print");
-        cmd.arg("--output-format").arg("stream-json");
-        cmd.arg("--verbose"); // stream-json requires --verbose in non-interactive mode
-
-        if let Some(ref rid) = resume_session_id {
-            cmd.arg("--resume").arg(rid);
-        }
-
-        if let Some(ref mode) = permission_mode {
-            // claude CLI accepts: default, acceptEdits, plan, bypassPermissions, delegate, dontAsk
-            cmd.arg("--permission-mode").arg(mode);
-        }
-
-        cmd.arg(&prompt);
-
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // Augment PATH so any child the CLI spawns (node, git, etc.) is reachable too.
-        cmd.env("PATH", augmented_path());
-
-        // Strip env vars that make Claude Code switch into SDK / agent mode
-        // (e.g. when Atlas is launched from a terminal that's already inside another
-        // Claude Code session, those vars leak into the child and break --print).
-        for k in [
-            "CLAUDE_CODE_ENTRYPOINT",
-            "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS",
-            "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
-            "AI_AGENT",
-        ] {
-            cmd.env_remove(k);
-        }
-
-        if let Some(ref dir) = cwd {
-            cmd.current_dir(dir);
-        }
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => {
-                // Track the PID so claude_stop can kill it.
-                if let Ok(mut reg) = pid_registry().lock() {
-                    reg.insert(sid.clone(), c.id());
-                }
-                c
-            }
-            Err(e) => {
-                let _ = app.emit(
-                    "claude-stream",
-                    ClaudeStreamEvent {
-                        session_id: sid.clone(),
-                        event_type: "error".into(),
-                        content: format!("Failed to start claude: {}", e),
-                    },
-                );
-                return;
-            }
-        };
-
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => break,
-                };
-
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let Some(cs) = v.get("session_id").and_then(|s| s.as_str()) {
-                        let _ = app.emit(
-                            "claude-stream",
-                            ClaudeStreamEvent {
-                                session_id: sid.clone(),
-                                event_type: "session".into(),
-                                content: cs.to_string(),
-                            },
-                        );
-                    }
-
-                    // Filter sub-agent traffic so the live stream matches the
-                    // saved JSONL replay (which drops sidechain events). Events
-                    // emitted by a Task sub-agent have parent_tool_use_id !=
-                    // null; the top-level agent's events have it null.
-                    let is_subagent = v
-                        .get("parent_tool_use_id")
-                        .map(|p| !p.is_null())
-                        .unwrap_or(false);
-                    if is_subagent {
-                        continue;
-                    }
-
-                    let (event_type, content) = parse_claude_event(&v);
-                    let _ = app.emit(
-                        "claude-stream",
-                        ClaudeStreamEvent {
-                            session_id: sid.clone(),
-                            event_type,
-                            content,
-                        },
-                    );
-                } else {
-                    let _ = app.emit(
-                        "claude-stream",
-                        ClaudeStreamEvent {
-                            session_id: sid.clone(),
-                            event_type: "text".into(),
-                            content: line,
-                        },
-                    );
-                }
-            }
-        }
-
-        let status = child.wait().unwrap_or_else(|_| std::process::ExitStatus::default());
-        // Drop the PID entry once the process exits.
-        if let Ok(mut reg) = pid_registry().lock() {
-            reg.remove(&sid);
-        }
-        let exit_code = status.code().unwrap_or(-1);
-
-        if let Some(stderr) = child.stderr.take() {
-            let reader = BufReader::new(stderr);
-            let stderr_text: String = reader
-                .lines()
-                .filter_map(|l| l.ok())
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !stderr_text.is_empty() {
-                let _ = app.emit(
-                    "claude-stream",
-                    ClaudeStreamEvent {
-                        session_id: sid.clone(),
-                        event_type: "error".into(),
-                        content: stderr_text,
-                    },
-                );
-            }
-        }
-
-        let _ = app.emit(
-            "claude-stream",
-            ClaudeStreamEvent {
-                session_id: sid.clone(),
-                event_type: "done".into(),
-                content: exit_code.to_string(),
-            },
-        );
-    });
-
-    Ok(())
-}
-
-fn parse_claude_event(v: &serde_json::Value) -> (String, String) {
-    let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("text");
-
-    match event_type {
-        "system" => {
-            let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-            ("status".to_string(), format!("system:{}", subtype))
-        }
-        "assistant" => {
-            let text = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .filter_map(|block| {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .next()
-                })
-                .unwrap_or_default();
-
-            if !text.is_empty() {
-                return ("text".to_string(), text);
-            }
-
-            // Check for tool_use within an assistant message
-            let tool = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                });
-            if let Some(t) = tool {
-                let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                let input = t.get("input").cloned().unwrap_or(serde_json::json!({}));
-                return (
-                    "tool_use".to_string(),
-                    serde_json::json!({ "name": name, "input": input }).to_string(),
-                );
-            }
-
-            ("text".to_string(), String::new())
-        }
-        "user" => {
-            // tool_result wrapped in a user message
-            let result = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-                        .and_then(|b| b.get("content"))
-                });
-            let content = match result {
-                Some(c) if c.is_string() => c.as_str().unwrap_or("").to_string(),
-                Some(c) => serde_json::to_string(c).unwrap_or_default(),
-                None => String::new(),
-            };
-            ("tool_result".to_string(), content)
-        }
-        "tool_use" | "tool_use_begin" => {
-            let tool_name = v
-                .get("tool")
-                .and_then(|t| t.get("name"))
-                .or_else(|| v.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("unknown");
-            let input = v
-                .get("tool")
-                .and_then(|t| t.get("input"))
-                .or_else(|| v.get("input"))
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
-            (
-                "tool_use".to_string(),
-                serde_json::json!({ "name": tool_name, "input": input }).to_string(),
-            )
-        }
-        "tool_result" => {
-            let result = v
-                .get("content")
-                .or_else(|| v.get("output"))
-                .map(|c| {
-                    if let Some(s) = c.as_str() {
-                        s.to_string()
-                    } else {
-                        serde_json::to_string(c).unwrap_or_default()
-                    }
-                })
-                .unwrap_or_default();
-            ("tool_result".to_string(), result)
-        }
-        "result" => {
-            // Final result envelope — text on success, or error info when subtype is error_*.
-            let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
-            let is_error =
-                v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false)
-                    || subtype.starts_with("error");
-
-            if is_error {
-                // Collect any error strings from the `errors` array.
-                let errors: Vec<String> = v
-                    .get("errors")
-                    .and_then(|e| e.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let mut msg = format!("Claude Code error ({}).", subtype);
-                if !errors.is_empty() {
-                    msg.push_str(" Details:\n");
-                    msg.push_str(&errors.join("\n"));
-                }
-                return ("error".to_string(), msg);
-            }
-
-            let text = v
-                .get("result")
-                .and_then(|r| r.as_str())
-                .unwrap_or("")
-                .to_string();
-            ("text".to_string(), text)
-        }
-        "content_block_delta" => {
-            let delta = v
-                .get("delta")
-                .and_then(|d| d.get("text"))
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
-            ("text".to_string(), delta.to_string())
-        }
-        _ => ("raw".to_string(), serde_json::to_string(v).unwrap_or_default()),
-    }
-}
-
-#[tauri::command]
-pub fn claude_stop(session_id: String) -> Result<(), String> {
-    let pid = match pid_registry().lock() {
-        Ok(reg) => reg.get(&session_id).copied(),
-        Err(_) => None,
-    };
-    if let Some(pid) = pid {
-        // Send SIGTERM via the system `kill` command (Unix). On macOS this
-        // gracefully stops claude; if it ignores SIGTERM, it'll respond to
-        // a follow-up SIGKILL too.
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .output();
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub fn claude_check() -> Result<bool, String> {
-    Ok(resolve_claude_path().is_some())
-}
-
-#[tauri::command]
-pub fn claude_version() -> Result<String, String> {
-    let bin = resolve_claude_path().ok_or_else(|| "claude not found".to_string())?;
-    let output = Command::new(bin)
-        .arg("--version")
-        .env("PATH", augmented_path())
-        .output()
-        .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 // ───────────────────────── Session management ─────────────────────────
@@ -601,130 +137,183 @@ fn extract_first_user_text(line: &str) -> Option<String> {
     Some(text.trim().to_string())
 }
 
-/// Is this whole jsonl file a sub-agent / warmup conversation rather than a real chat?
-fn jsonl_is_sidechain(path: &Path) -> bool {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let reader = BufReader::new(file);
-    // Inspect the first ~20 records; if every classified line is a sidechain we treat it as a warmup.
-    let mut saw_main = false;
-    let mut saw_sidechain = false;
-    for (i, line) in reader.lines().flatten().enumerate() {
-        if i > 30 {
-            break;
-        }
-        let v: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        match v.get("isSidechain").and_then(|x| x.as_bool()) {
-            Some(true) => saw_sidechain = true,
-            Some(false) => saw_main = true,
-            None => {}
-        }
-    }
-    saw_sidechain && !saw_main
-}
-
 fn extract_timestamp(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     v.get("timestamp").and_then(|t| t.as_str()).map(|s| s.to_string())
 }
 
 #[tauri::command]
-pub async fn list_claude_sessions(cwd: String) -> Result<Vec<ClaudeSessionMeta>, String> {
-    tokio::task::spawn_blocking(move || -> Result<Vec<ClaudeSessionMeta>, String> {
-        let folder = projects_dir()?.join(encode_cwd(&cwd));
-        if !folder.exists() {
-            return Ok(Vec::new());
-        }
+pub async fn list_claude_sessions(
+    cwd: String,
+    index: State<'_, ClaudeSessionIndex>,
+) -> Result<Vec<ClaudeSessionMeta>, String> {
+    // `index` is the Tauri-managed cache. We snapshot the relevant entries
+    // out of it before doing any blocking I/O, then re-acquire the lock to
+    // store updated results, so the cache mutex is never held across the
+    // disk walk.
+    let cache_snapshot: HashMap<PathBuf, CacheEntry> = {
+        let guard = index.inner.lock();
+        guard
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    CacheEntry {
+                        mtime: v.mtime,
+                        meta: v.meta.clone(),
+                    },
+                )
+            })
+            .collect()
+    };
 
-        let mut out: Vec<ClaudeSessionMeta> = Vec::new();
-        for entry in std::fs::read_dir(&folder).map_err(|e| e.to_string())? {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                continue;
+    let (out, fresh_entries) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<ClaudeSessionMeta>, Vec<(PathBuf, SystemTime, ClaudeSessionMeta)>), String> {
+            let folder = projects_dir()?.join(encode_cwd(&cwd));
+            if !folder.exists() {
+                return Ok((Vec::new(), Vec::new()));
             }
 
-            let id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            if id.is_empty() {
-                continue;
-            }
-            // Skip Claude Code's internal sub-agent / warmup session files.
-            if id.starts_with("agent-") {
-                continue;
-            }
-            if jsonl_is_sidechain(&path) {
-                continue;
-            }
+            let mut out: Vec<ClaudeSessionMeta> = Vec::new();
+            let mut fresh: Vec<(PathBuf, SystemTime, ClaudeSessionMeta)> = Vec::new();
 
-            let metadata = entry.metadata().ok();
-            let last_modified = metadata
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| {
-                    let dt: chrono::DateTime<chrono::Utc> = t.into();
-                    Some(dt.to_rfc3339())
-                });
-
-            let file = match std::fs::File::open(&path) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let reader = BufReader::new(file);
-
-            let mut started_at: Option<String> = None;
-            let mut preview: Option<String> = None;
-            let mut message_count = 0usize;
-
-            for line in reader.lines().flatten() {
-                if started_at.is_none() {
-                    started_at = extract_timestamp(&line);
+            for entry in std::fs::read_dir(&folder).map_err(|e| e.to_string())? {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
                 }
-                if preview.is_none() {
-                    if let Some(p) = extract_first_user_text(&line) {
-                        let p = p.replace('\n', " ");
-                        let truncated: String = if p.chars().count() > 80 {
-                            p.chars().take(80).collect::<String>() + "…"
-                        } else {
-                            p
-                        };
-                        preview = Some(truncated);
+
+                let id = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => continue,
+                };
+                // Skip Claude Code's internal sub-agent / warmup session files.
+                if id.starts_with("agent-") {
+                    continue;
+                }
+
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+                // Cache hit on unchanged mtime — reuse the parsed metadata
+                // without re-reading the file. This is the win during a
+                // streaming turn: only the one growing JSONL re-parses, all
+                // the historical ones short-circuit here.
+                if let Some(prev) = cache_snapshot.get(&path) {
+                    if prev.mtime == mtime {
+                        out.push(prev.meta.clone());
+                        continue;
                     }
                 }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if t == "user" || t == "assistant" {
-                        message_count += 1;
-                    }
-                }
+
+                let Some(meta) = parse_session_file(&path, &id, mtime) else {
+                    continue;
+                };
+                out.push(meta.clone());
+                fresh.push((path, mtime, meta));
             }
 
-            out.push(ClaudeSessionMeta {
-                id,
-                file_path: path.to_string_lossy().to_string(),
-                started_at,
-                last_modified,
-                message_count,
-                preview: preview.unwrap_or_else(|| "(no user message)".to_string()),
-            });
-        }
-
-        out.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
-        Ok(out)
-    })
+            out.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+            Ok((out, fresh))
+        },
+    )
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    // Stuff freshly-parsed entries back into the cache. Entries for files
+    // that disappeared get pruned so stale rows don't linger forever.
+    {
+        let mut guard = index.inner.lock();
+        let present_paths: std::collections::HashSet<PathBuf> = out
+            .iter()
+            .map(|m| PathBuf::from(&m.file_path))
+            .collect();
+        guard.retain(|k, _| present_paths.contains(k));
+        for (path, mtime, meta) in fresh_entries {
+            guard.insert(path, CacheEntry { mtime, meta });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Single-pass JSONL parse: started_at, preview, message_count, sidechain
+/// detection all from one read of the file. Returns `None` if the file is a
+/// sidechain-only transcript (skipped) or unreadable.
+fn parse_session_file(
+    path: &Path,
+    id: &str,
+    mtime: SystemTime,
+) -> Option<ClaudeSessionMeta> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+
+    let mut started_at: Option<String> = None;
+    let mut preview: Option<String> = None;
+    let mut message_count = 0usize;
+    let mut saw_main = false;
+    let mut saw_sidechain = false;
+    let mut classified_lines = 0usize;
+
+    for line in reader.lines().flatten() {
+        // Sidechain detection samples the first ~30 records, matching the
+        // pre-refactor `jsonl_is_sidechain` heuristic.
+        if classified_lines < 30 {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                match v.get("isSidechain").and_then(|x| x.as_bool()) {
+                    Some(true) => saw_sidechain = true,
+                    Some(false) => saw_main = true,
+                    None => {}
+                }
+                classified_lines += 1;
+            }
+        }
+        if started_at.is_none() {
+            started_at = extract_timestamp(&line);
+        }
+        if preview.is_none() {
+            if let Some(p) = extract_first_user_text(&line) {
+                let p = p.replace('\n', " ");
+                let truncated: String = if p.chars().count() > 80 {
+                    p.chars().take(80).collect::<String>() + "…"
+                } else {
+                    p
+                };
+                preview = Some(truncated);
+            }
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if t == "user" || t == "assistant" {
+                message_count += 1;
+            }
+        }
+    }
+
+    if saw_sidechain && !saw_main {
+        return None;
+    }
+
+    let last_modified = {
+        let dt: chrono::DateTime<chrono::Utc> = mtime.into();
+        Some(dt.to_rfc3339())
+    };
+
+    Some(ClaudeSessionMeta {
+        id: id.to_string(),
+        file_path: path.to_string_lossy().to_string(),
+        started_at,
+        last_modified,
+        message_count,
+        preview: preview.unwrap_or_else(|| "(no user message)".to_string()),
+    })
 }
 
 #[tauri::command]
