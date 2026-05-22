@@ -15,9 +15,28 @@ pub struct ArxivPaper {
     pub categories: Vec<String>,
 }
 
+/// Reqwest's default User-Agent is `reqwest/<ver>`, which arXiv and a
+/// few other research hosts throttle aggressively (and Semantic Scholar
+/// has historically returned 403s for it). A real UA that identifies
+/// the app + a contact URL keeps us under the polite-client policies.
+const USER_AGENT: &str = concat!(
+    "Atlas/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://atlas.antarys.ai; research integration)"
+);
+
 fn http_client() -> reqwest::Client {
+    build_client(Duration::from_secs(10))
+}
+
+fn build_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
+        .user_agent(USER_AGENT)
+        // Be explicit about gzip/brotli — Cargo feature flags enable the
+        // capability but the builder still has to opt in.
+        .gzip(true)
+        .brotli(true)
         .build()
         .unwrap_or_default()
 }
@@ -227,11 +246,10 @@ pub async fn download_paper(
     let filename = format!("{}.pdf", paper_id.replace('/', "_"));
     let dest = papers_dir.join(&filename);
 
-    // Async download with 30s timeout for large files
-    let bytes = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_default()
+    // Async download with 30s timeout for large files. Shared client
+    // shape (rustls + UA + compression) so prod builds behave the same
+    // as dev — see `build_client` in this file.
+    let bytes = build_client(Duration::from_secs(30))
         .get(&pdf_url)
         .send().await
         .map_err(|e| format!("Download failed: {}", e))?

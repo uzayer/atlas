@@ -253,7 +253,7 @@ class ChipWidget extends WidgetType {
 
     const icon = document.createElement("span");
     icon.className = "atlas-mention-chip__icon";
-    icon.textContent = kindGlyph(this.mention.kind);
+    icon.innerHTML = kindGlyph(this.mention.kind);
     el.appendChild(icon);
 
     const label = document.createElement("span");
@@ -271,16 +271,66 @@ class ChipWidget extends WidgetType {
   }
 }
 
+// Lucide icon SVG markup, kept inline so CM widgets (vanilla DOM, no React)
+// can render the same icon set as the React mention picker. Paths copied
+// from lucide-react@0.468 — keep in sync with `CategoryIcon` in
+// mention-picker.tsx. Stroke uses `currentColor` so the per-kind colors
+// declared in globals.css cascade through.
+function lucideSvg(body: string): string {
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" ` +
+    `viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ` +
+    `stroke-linecap="round" stroke-linejoin="round">${body}</svg>`
+  );
+}
+
+const ICON_FILE = lucideSvg(
+  `<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>` +
+    `<path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/>` +
+    `<path d="M16 13H8"/><path d="M16 17H8"/>`,
+);
+const ICON_FOLDER = lucideSvg(
+  `<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>`,
+);
+const ICON_HASH = lucideSvg(
+  `<line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/>` +
+    `<line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/>`,
+);
+const ICON_BOOK_OPEN = lucideSvg(
+  `<path d="M12 7v14"/>` +
+    `<path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>`,
+);
+const ICON_FOLDER_GIT = lucideSvg(
+  `<path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5"/>` +
+    `<circle cx="13" cy="12" r="2"/>` +
+    `<path d="M18 19c-2.8 0-5-2.2-5-5v8"/>` +
+    `<circle cx="20" cy="19" r="2"/>`,
+);
+const ICON_NEWSPAPER = lucideSvg(
+  `<path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/>` +
+    `<path d="M18 14h-8"/><path d="M15 18h-5"/>` +
+    `<path d="M10 6h8v4h-8V6Z"/>`,
+);
+const ICON_GIT_BRANCH = lucideSvg(
+  `<line x1="6" x2="6" y1="3" y2="15"/>` +
+    `<circle cx="18" cy="6" r="3"/>` +
+    `<circle cx="6" cy="18" r="3"/>` +
+    `<path d="M18 9a9 9 0 0 1-9 9"/>`,
+);
+const ICON_MESSAGE_SQUARE = lucideSvg(
+  `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`,
+);
+
 function kindGlyph(kind: MentionKind): string {
   switch (kind) {
-    case "file":         return "📄";
-    case "folder":       return "📁";
-    case "symbol":       return "⌬";
-    case "knowledge":    return "✦";
-    case "repo":         return "⎇";
-    case "paper":        return "📑";
-    case "branch":       return "⎇";
-    case "past_message": return "✉";
+    case "file":         return ICON_FILE;
+    case "folder":       return ICON_FOLDER;
+    case "symbol":       return ICON_HASH;
+    case "knowledge":    return ICON_BOOK_OPEN;
+    case "repo":         return ICON_FOLDER_GIT;
+    case "paper":        return ICON_NEWSPAPER;
+    case "branch":       return ICON_GIT_BRANCH;
+    case "past_message": return ICON_MESSAGE_SQUARE;
   }
 }
 

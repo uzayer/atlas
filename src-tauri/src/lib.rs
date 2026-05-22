@@ -27,7 +27,31 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_background_color(Some(tauri::window::Color(0, 0, 0, 255)));
+                // Transparent NSWindow + NSVisualEffectView blur. Combined
+                // with `macos-private-api`, this propagates a transparent
+                // background to the WKWebView's content NSView, so the
+                // brief gap between window-shown and first React paint
+                // shows a dark macOS material instead of the WebKit
+                // default white. Mirrors Athas's
+                // `src-tauri/src/commands/ui/window.rs:157-176` pattern.
+                let _ = window
+                    .set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+
+                #[cfg(target_os = "macos")]
+                {
+                    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
+                    if let Err(e) = apply_vibrancy(
+                        &window,
+                        NSVisualEffectMaterial::HudWindow,
+                        None,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            target: "atlas::boot",
+                            "apply_vibrancy failed: {e}"
+                        );
+                    }
+                }
             }
             // Pre-load the Rust-owned `AppState` (currentProject + recents)
             // before the webview starts loading — paid in parallel with the
@@ -54,6 +78,7 @@ pub fn run() {
             commands::fs::read_directory,
             commands::fs::read_file_content,
             commands::fs::write_file_content,
+            commands::fs::ensure_atlas_gitignore,
             commands::git::git_status,
             commands::git::git_log,
             commands::git::git_diff_all,
@@ -104,6 +129,9 @@ pub fn run() {
             commands::log::rewrite_pinned_log,
             commands::app_state::bootstrap_app_state,
             commands::app_state::save_app_state,
+            commands::claude_setup::claude_status,
+            commands::claude_setup::claude_install,
+            commands::claude_setup::claude_auth_login,
             commands::agents::agents_list_plugins,
             commands::agents::agents_list_running,
             commands::agents::agents_spawn,

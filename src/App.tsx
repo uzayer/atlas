@@ -19,9 +19,18 @@ import type { PendingPermission } from "@/types/acp";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { useRecentFilesStore } from "@/features/chat/stores/recent-files-store";
+import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { Toaster } from "sonner";
 
 export function App() {
+  // Probe Claude Code (installed? authed?) on mount. Drives the banner
+  // above the message composer and the hard-disabled state of the input
+  // when the CLI isn't ready. Fast — two parallel subprocesses, totals
+  // <100ms on a warm machine.
+  useEffect(() => {
+    void useClaudeSetupStore.getState().actions.refreshStatus();
+  }, []);
+
   // Alpha-only: nuke any legacy WebView storage. Nothing in the current
   // codebase reads from localStorage / sessionStorage — the only entries
   // are stale dust from previous zustand-persist builds. Wiping on every

@@ -37,6 +37,8 @@ pub struct AppState {
     pub current_project: Option<Project>,
     #[serde(default)]
     pub recent_projects: Vec<RecentProject>,
+    #[serde(default)]
+    pub settings: AppSettings,
     #[serde(default = "default_version")]
     pub version: u32,
 }
@@ -50,7 +52,36 @@ impl Default for AppState {
         Self {
             current_project: None,
             recent_projects: Vec::new(),
+            settings: AppSettings::default(),
             version: SCHEMA_VERSION,
+        }
+    }
+}
+
+/// User-facing toggles surfaced in Settings → General.
+///
+/// New fields MUST be `#[serde(default = "…")]` or have an obvious zero
+/// value so old `state.json` files (written before the field existed)
+/// load cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    /// On project open, ensure `.atlas/` is listed in the project's
+    /// `.gitignore` (creating the file if needed). No-op on non-git
+    /// projects. Default ON because Atlas writes caches / state into
+    /// `.atlas/` that don't belong in version control.
+    #[serde(default = "default_true")]
+    pub auto_add_atlas_gitignore: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            auto_add_atlas_gitignore: true,
         }
     }
 }

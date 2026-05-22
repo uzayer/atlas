@@ -54,6 +54,10 @@ interface MessageInputProps {
   onStop?: () => void;
   /** True while the agent is producing a response. */
   running?: boolean;
+  /** Hard-disable the composer (e.g. Claude Code isn't installed/authed). */
+  disabled?: boolean;
+  /** Placeholder text when `disabled` is true. */
+  disabledReason?: string;
   placeholder?: string;
 }
 
@@ -62,6 +66,8 @@ export function MessageInput({
   onSend,
   onStop,
   running = false,
+  disabled = false,
+  disabledReason,
   placeholder = "Message Atlas... (@ to mention, / for commands)",
 }: MessageInputProps) {
   const {
@@ -206,6 +212,10 @@ export function MessageInput({
   }, []);
 
   const submit = useCallback(() => {
+    // Hard gate: Claude Code missing or not authed — sending would just
+    // surface a confusing ACP spawn error. The banner above tells the user
+    // what to do instead.
+    if (disabled) return;
     const text = inputRef.current?.getValue() ?? value;
     const trimmed = text.trim();
     if (!trimmed) {
@@ -225,7 +235,7 @@ export function MessageInput({
     }
     inputRef.current?.clear();
     setValue("");
-  }, [value, running, onSend, onStop, enqueueMessage, tabId]);
+  }, [value, running, onSend, onStop, enqueueMessage, tabId, disabled]);
 
   const trimmed = value.trim();
   // Tri-state button:
@@ -234,7 +244,17 @@ export function MessageInput({
   //   not running + any → SEND
   type Mode = "send" | "queue" | "stop";
   const mode: Mode = running ? (trimmed ? "queue" : "stop") : "send";
-  const buttonEnabled = mode === "stop" ? true : trimmed.length > 0;
+  const buttonEnabled = disabled
+    ? false
+    : mode === "stop"
+      ? true
+      : trimmed.length > 0;
+
+  const effectivePlaceholder = disabled
+    ? (disabledReason ?? "Set up Claude Code to start chatting")
+    : running
+      ? "Type to queue the next message…"
+      : placeholder;
 
   return (
     <div className="px-4 pb-4 pt-2 bg-transparent">
@@ -269,7 +289,12 @@ export function MessageInput({
           className={cn(
             "rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)]",
             "shadow-[0_8px_24px_rgba(0,0,0,0.35)]",
-            "focus-within:border-[var(--border-focus)] transition-colors"
+            "focus-within:border-[var(--border-focus)] transition-colors",
+            // Hard-disable when Claude Code isn't ready. `pointer-events-none`
+            // also blocks the focus event so we never trigger the agent-bind
+            // listener (which would try to spawn a session against a CLI
+            // that isn't ready).
+            disabled && "opacity-60 pointer-events-none",
           )}
           onFocusCapture={handleFocusCapture}
         >
@@ -277,7 +302,7 @@ export function MessageInput({
             <LazyChatInput
               ref={inputRef}
               initialValue={value}
-              placeholder={running ? "Type to queue the next message…" : placeholder}
+              placeholder={effectivePlaceholder}
               onChange={setValue}
               onSubmit={submit}
               onMentionTrigger={setTrigger}

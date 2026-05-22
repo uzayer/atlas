@@ -7,13 +7,25 @@ import {
   Palette,
   Keyboard,
   Info,
+  FlaskConical,
 } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
+import { useDevFlagsStore } from "../stores/dev-flags-store";
+import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
+import { useProjectStore } from "@/features/project/stores/project-store";
+import { isDev } from "@/lib/env";
 
+// Developer section is dev-build only — production users never see the
+// diagnostic toggles (they change app behavior and aren't useful outside
+// UI testing). `isDev` is a Vite build constant, so the production bundle
+// drops the entry entirely via dead-code elimination.
 const SECTIONS = [
   { id: "general", label: "General", icon: Settings },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "keybindings", label: "Keybindings", icon: Keyboard },
+  ...(isDev
+    ? [{ id: "developer", label: "Developer", icon: FlaskConical }]
+    : []),
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -47,6 +59,7 @@ export function SettingsPanel() {
           {activeSection === "general" && <GeneralSettings />}
           {activeSection === "appearance" && <AppearanceSettings />}
           {activeSection === "keybindings" && <KeybindingsSettings />}
+          {isDev && activeSection === "developer" && <DeveloperSettings />}
           {activeSection === "about" && <AboutSettings />}
         </div>
       </ScrollArea>
@@ -55,26 +68,22 @@ export function SettingsPanel() {
 }
 
 function GeneralSettings() {
+  const settings = useProjectStore.use.settings();
+  const { updateSettings } = useProjectStore.use.actions();
+
   return (
     <div className="space-y-6">
       <SectionTitle title="General" subtitle="Application preferences" />
       <SettingRow
-        label="Auto-save"
-        description="Automatically save files after editing"
+        label="Auto-add .atlas to .gitignore"
+        description="When you open a git-tracked project, Atlas adds `.atlas/` to the project's .gitignore (creating one if needed). Atlas keeps its caches and state in `.atlas/` — keeping it out of version control is almost always what you want. No-op on non-git projects."
       >
-        <Toggle defaultChecked />
-      </SettingRow>
-      <SettingRow
-        label="Restore last project"
-        description="Reopen the last project on launch"
-      >
-        <Toggle />
-      </SettingRow>
-      <SettingRow
-        label="Show hidden files"
-        description="Display dotfiles in the file explorer"
-      >
-        <Toggle />
+        <Toggle
+          checked={settings.autoAddAtlasGitignore}
+          onChange={(next) =>
+            updateSettings({ autoAddAtlasGitignore: next })
+          }
+        />
       </SettingRow>
     </div>
   );
@@ -172,6 +181,43 @@ function KeybindingsSettings() {
   );
 }
 
+function DeveloperSettings() {
+  const triggerClaudeInstall = useDevFlagsStore.use.triggerClaudeInstall();
+  const { setTriggerClaudeInstall } = useDevFlagsStore.use.actions();
+  const { refreshStatus } = useClaudeSetupStore.use.actions();
+
+  return (
+    <div className="space-y-6">
+      <SectionTitle
+        title="Developer"
+        subtitle="Diagnostic toggles for UI testing — these change app behavior, leave off in normal use"
+      />
+
+      <div className="space-y-2">
+        <div className="text-[10px] uppercase tracking-wider text-text-tertiary px-1">
+          Claude Code setup
+        </div>
+        <div className="rounded-lg border border-border-default bg-bg-secondary px-3 py-3 space-y-3">
+          <SettingRow
+            label="Trigger Claude Install"
+            description="Force the install banner to appear regardless of whether the CLI is actually installed. The Install button and sign-in dialog run a simulated flow on this machine — no real curl, no real `claude /login`. Use this to UI-test the onboarding surface."
+          >
+            <Toggle
+              checked={triggerClaudeInstall}
+              onChange={(next) => {
+                setTriggerClaudeInstall(next);
+                // Re-run status so the banner reflects the new override
+                // immediately (turning OFF probes the real CLI again).
+                void refreshStatus();
+              }}
+            />
+          </SettingRow>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AboutSettings() {
   return (
     <div className="space-y-4">
@@ -181,7 +227,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.1 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.3 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">
@@ -213,20 +259,52 @@ function SettingRow({ label, description, children }: { label: string; descripti
   );
 }
 
-function Toggle({ defaultChecked = false }: { defaultChecked?: boolean }) {
-  const [checked, setChecked] = useState(defaultChecked);
+/**
+ * Toggle — controlled OR uncontrolled. If `checked` is provided the parent
+ * owns the state and `onChange` is fired on click; otherwise we keep
+ * internal state seeded by `defaultChecked` (original behavior).
+ */
+function Toggle({
+  defaultChecked = false,
+  checked,
+  onChange,
+}: {
+  defaultChecked?: boolean;
+  checked?: boolean;
+  onChange?: (next: boolean) => void;
+}) {
+  const [internal, setInternal] = useState(defaultChecked);
+  const isControlled = checked !== undefined;
+  const value = isControlled ? checked : internal;
+  const apply = (next: boolean) => {
+    if (!isControlled) setInternal(next);
+    onChange?.(next);
+  };
+  // shadcn/Radix switch proportions: the track has a 2px transparent
+  // border so its inner content area is exactly the thumb's size,
+  // making the thumb fill vertically and animate translate-x-0 → -x-4
+  // edge to edge. The thumb flips color when ON because Atlas's accent
+  // is pure white — a white-on-white thumb would disappear.
   return (
     <button
-      onClick={() => setChecked(!checked)}
+      onClick={() => apply(!value)}
+      role="switch"
+      aria-checked={value}
       className={cn(
-        "w-8 h-[18px] rounded-full transition-colors relative",
-        checked ? "bg-accent" : "bg-bg-elevated border border-border-default"
+        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center",
+        "rounded-full border-2 border-transparent transition-colors",
+        value
+          ? "bg-[var(--accent-primary)]"
+          : "bg-[var(--bg-elevated)]"
       )}
     >
-      <div
+      <span
         className={cn(
-          "w-3.5 h-3.5 rounded-full bg-white shadow-sm absolute top-[1px] transition-transform",
-          checked ? "translate-x-[15px]" : "translate-x-[1px]"
+          "pointer-events-none block h-4 w-4 rounded-full shadow-[0_1px_3px_rgba(0,0,0,0.45)]",
+          "transition-transform duration-150",
+          value
+            ? "translate-x-4 bg-[var(--bg-base)]"
+            : "translate-x-0 bg-white"
         )}
       />
     </button>

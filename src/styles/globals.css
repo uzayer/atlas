@@ -123,9 +123,14 @@
   max-width: 320px;
 }
 .atlas-mention-chip__icon {
-  font-size: 10px;
-  opacity: 0.75;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.85;
   flex-shrink: 0;
+}
+.atlas-mention-chip__icon svg {
+  display: block;
 }
 .atlas-mention-chip__label {
   overflow: hidden;
@@ -406,3 +411,14 @@
   .reader-content picture, .reader-content figure, .reader-content canvas,
   .reader-content svg, .reader-content iframe, .reader-content object { display: none; }
 }
+
+/* Pill enter animation — used by the floating row above the chat composer
+   (setup banner, scroll-to-bottom button). Slides up + fades in. */
+@keyframes atlas-pill-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.atlas-pill-in {
+  animation: atlas-pill-in 200ms ease-out both;
+}
+

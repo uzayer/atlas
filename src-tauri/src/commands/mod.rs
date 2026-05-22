@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod analysis;
 pub mod app_state;
+pub mod claude_setup;
 pub mod fileindex;
 pub mod canvas;
 pub mod claude;
