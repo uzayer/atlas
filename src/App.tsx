@@ -19,6 +19,8 @@ import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta } from "@/types/agents";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
+import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
+import { listen } from "@tauri-apps/api/event";
 import { useRecentFilesStore } from "@/features/chat/stores/recent-files-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { Toaster } from "sonner";
@@ -307,6 +309,36 @@ export function App() {
     return () => {
       cancelled = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
+      unlisten?.();
+    };
+  }, []);
+
+  // Live file-tree updates. The fileindex watcher (started in
+  // `fileindex_open_project`) emits `atlas:explorer:changed` with the
+  // set of parent directories touched in each debounced batch. We
+  // reconcile each loaded directory in place — agent-side file writes
+  // appear in the tree without the user touching a refresh button.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    type Payload = { dirs: string[]; fullRefresh: boolean };
+    listen<Payload>("atlas:explorer:changed", (e) => {
+      if (cancelled) return;
+      const actions = useExplorerStore.getState().actions;
+      const { dirs, fullRefresh } = e.payload;
+      if (fullRefresh) {
+        void actions.refresh();
+        return;
+      }
+      for (const dir of dirs) {
+        void actions.reconcileDirectory(dir);
+      }
+    }).then((un) => {
+      if (cancelled) un();
+      else unlisten = un;
+    });
+    return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, []);

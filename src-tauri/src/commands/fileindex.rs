@@ -102,10 +102,33 @@ pub async fn fileindex_open_project(
             None,
             move |result: notify_debouncer_full::DebounceEventResult| match result {
                 Ok(events) => {
+                    // Compute the set of parent dirs touched BEFORE
+                    // we hand `events` to `apply_events` (which
+                    // consumes them). The explorer uses this to
+                    // refetch only the affected, currently-loaded
+                    // directories instead of re-walking the whole
+                    // project — agent file writes are tiny bursts,
+                    // typically one parent dir per debounce.
+                    let (dirs_touched, full_refresh) = summarise_events(&events);
+
                     apply_events(&root_for_watch, &files_for_watch, events);
                     let _ = app_for_watch.emit(
                         "atlas:fileindex:updated",
                         serde_json::json!({ "count": files_for_watch.read().len() }),
+                    );
+                    let _ = app_for_watch.emit(
+                        "atlas:explorer:changed",
+                        serde_json::json!({
+                            "dirs": dirs_touched
+                                .iter()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .collect::<Vec<_>>(),
+                            // When `notify` gives us an opaque modify
+                            // event (e.g. rename) we can't pinpoint
+                            // dirs — the frontend should re-walk the
+                            // whole loaded tree in that case.
+                            "fullRefresh": full_refresh,
+                        }),
                     );
                 }
                 Err(errors) => {
@@ -328,6 +351,35 @@ fn relative(path: &Path, root: &Path) -> Option<String> {
     path.strip_prefix(root)
         .ok()
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Bucket a batch of debounced filesystem events into:
+///   - the unique parent directories whose contents changed (so the
+///     explorer can refetch JUST those), and
+///   - a `full_refresh` flag for events `notify` reports as opaque
+///     `Modify(_)` (typically renames) that we can't pin to a specific
+///     parent. The explorer falls back to re-walking the loaded tree
+///     in that case.
+fn summarise_events(events: &[DebouncedEvent]) -> (std::collections::HashSet<PathBuf>, bool) {
+    use std::collections::HashSet;
+    let mut dirs: HashSet<PathBuf> = HashSet::new();
+    let mut full_refresh = false;
+    for ev in events {
+        match ev.event.kind {
+            EventKind::Create(_) | EventKind::Remove(_) => {
+                for p in &ev.event.paths {
+                    if let Some(parent) = p.parent() {
+                        dirs.insert(parent.to_path_buf());
+                    }
+                }
+            }
+            EventKind::Modify(_) => {
+                full_refresh = true;
+            }
+            _ => {}
+        }
+    }
+    (dirs, full_refresh)
 }
 
 fn apply_events(
