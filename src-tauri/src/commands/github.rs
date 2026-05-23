@@ -16,7 +16,7 @@ pub struct GithubRepo {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ClonedRepo {
     pub name: String,
     pub path: String,

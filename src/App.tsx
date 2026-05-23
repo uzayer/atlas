@@ -21,7 +21,11 @@ import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
 import { listen } from "@tauri-apps/api/event";
-import { useRecentFilesStore } from "@/features/chat/stores/recent-files-store";
+import {
+  useRecentFilesStore,
+  ensureRecentFilesListener,
+  type RecentFile,
+} from "@/features/chat/stores/recent-files-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { Toaster } from "sonner";
 
@@ -32,6 +36,35 @@ export function App() {
   // <100ms on a warm machine.
   useEffect(() => {
     void useClaudeSetupStore.getState().actions.refreshStatus();
+  }, []);
+
+  // Refresh the `atlas` CLI helper at `~/.local/bin/atlas` on every
+  // launch. Fire-and-forget; an older or hand-edited copy gets
+  // replaced with the current version. Failures are non-fatal — the
+  // app still works without the helper, the user just can't type
+  // `atlas ./` in their terminal until they hit the install button
+  // in Settings → General.
+  useEffect(() => {
+    void invoke("cli_install_helper").catch((e) => {
+      console.warn("atlas CLI helper refresh failed:", e);
+    });
+  }, []);
+
+  // If the user launched Atlas via `atlas <path>` from a terminal,
+  // open that path as the active project as soon as hydration
+  // finishes. `cli_take_initial_project_path` is single-shot — a
+  // window reload won't re-trigger it.
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<string | null>("cli_take_initial_project_path")
+      .then((path) => {
+        if (cancelled || !path) return;
+        void useProjectStore.getState().actions.openProject(path);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Alpha-only: nuke any legacy WebView storage. Nothing in the current
@@ -386,6 +419,7 @@ export function App() {
     if (!currentProject) {
       fileIndex.closeProject().catch(() => {});
       void invoke("git_watch_stop").catch(() => {});
+      void invoke("recent_files_close_project").catch(() => {});
       return;
     }
     fileIndex
@@ -397,7 +431,24 @@ export function App() {
     void invoke("git_watch_start", { projectPath: currentProject.path }).catch(
       (e) => console.warn("git watch start failed:", e),
     );
+    // Recent-files state: Rust loads `<project>/.atlas/recent-files.json`
+    // and returns the list. We hydrate the JS mirror with it so the
+    // mention picker's "Recent files" section is correct from the
+    // first render of the new project.
+    void invoke<RecentFile[]>("recent_files_open_project", {
+      projectPath: currentProject.path,
+    })
+      .then((items) => {
+        useRecentFilesStore.getState().actions.hydrate(items);
+      })
+      .catch((e) => console.warn("recent_files_open_project failed:", e));
   }, [currentProject?.path]);
+
+  // Install the singleton listener for `atlas:recent-files-changed`
+  // once — every push from Rust patches the mirror in place.
+  useEffect(() => {
+    ensureRecentFilesListener();
+  }, []);
 
   useHotkeys([
     {

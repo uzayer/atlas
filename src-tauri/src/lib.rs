@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use atlas_acp::AgentRegistry;
 use commands::claude::ClaudeSessionIndex;
+use commands::cli::CliLaunchState;
 use commands::fileindex::FileIndexState;
 use commands::git_watcher::GitWatcherState;
+use commands::recent_files::RecentFilesState;
 use commands::papers::SavedPapersIndex;
 use commands::sessions_watch::SessionsWatchState;
 use commands::terminal::TerminalState;
@@ -24,6 +26,11 @@ pub fn run() {
     // Strip CLAUDECODE so child ACP agents (canonical claude-code-acp) don't
     // refuse to start when Atlas was launched from a parent Claude Code shell.
     atlas_acp::sanitize_host_env();
+
+    // Parse argv for an initial project path BEFORE tauri::Builder starts
+    // so the webview boot path can read it via `cli_take_initial_project_path`.
+    // Triggered by the `atlas <path>` shell helper at ~/.local/bin/atlas.
+    let initial_project = commands::cli::parse_initial_project();
 
     tauri::Builder::default()
         .setup(|app| {
@@ -69,6 +76,8 @@ pub fn run() {
         .manage(AgentRegistry::new())
         .manage(FileIndexState::new())
         .manage(GitWatcherState::new())
+        .manage(RecentFilesState::new())
+        .manage(CliLaunchState::new(initial_project))
         .manage(SessionsWatchState::new())
         .manage(ClaudeSessionIndex::new())
         .manage(SavedPapersIndex::new())
@@ -98,6 +107,12 @@ pub fn run() {
             commands::git_watcher::git_watch_start,
             commands::git_watcher::git_watch_stop,
             commands::git_watcher::git_watch_status,
+            commands::mention_search::mention_search,
+            commands::recent_files::recent_files_open_project,
+            commands::recent_files::recent_files_close_project,
+            commands::recent_files::recent_files_push,
+            commands::recent_files::recent_files_list,
+            commands::recent_files::recent_files_clear,
             commands::github::search_github,
             commands::github::clone_github_repo,
             commands::github::list_cloned_repos,
@@ -136,6 +151,9 @@ pub fn run() {
             commands::app_state::bootstrap_app_state,
             commands::app_state::save_app_state,
             commands::compose_prompt::compose_prompt,
+            commands::cli::cli_status,
+            commands::cli::cli_install_helper,
+            commands::cli::cli_take_initial_project_path,
             commands::claude_setup::claude_status,
             commands::claude_setup::claude_install,
             commands::agents::agents_list_plugins,

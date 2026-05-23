@@ -55,6 +55,24 @@ impl FileIndexState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Snapshot the current project's file list + root for consumers
+    /// outside this module (e.g. `mention_search`) that need to run
+    /// their own ranking over the same data the Cmd+P palette uses.
+    /// Returns `(rel paths + absolute paths, project root)` or `None`
+    /// when no project is indexed yet.
+    pub fn snapshot_files(&self) -> Option<(Vec<(String, std::path::PathBuf)>, std::path::PathBuf)> {
+        let guard = self.current.read();
+        guard.as_ref().map(|p| {
+            let files = p
+                .files
+                .read()
+                .iter()
+                .map(|f| (f.rel.clone(), f.path.clone()))
+                .collect();
+            (files, p.root.clone())
+        })
+    }
 }
 
 /// Open (or replace) the indexed project. Returns once the initial walk

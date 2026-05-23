@@ -36,12 +36,10 @@ import { cn } from "@/lib/utils";
 
 import {
   MENTION_CATEGORIES,
-  PROVIDERS,
   categoryForKind,
   listMessagesInPastSession,
   listPastSessions,
-  rankMention,
-  stripCategoryAlias,
+  searchMentions,
   type MentionCategory,
   type MentionContext,
   type MentionData,
@@ -161,7 +159,11 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
           }
         );
       } else {
-        void runSearch(query, scope, ctx, controller.signal).then((r) => {
+        // Unified Rust mention_search — replaces the per-provider JS
+        // fan-out and the JS-side `rankMention` blending. Results
+        // are already ranked top-N (per kind for a scoped search,
+        // blended across kinds for a no-scope search).
+        void searchMentions(query, scope, ctx).then((r) => {
           if (controller.signal.aborted) return;
           setResults(r);
           setPastSessions([]);
@@ -225,17 +227,10 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         }
         return out;
       }
-      // Blended: rank everything together and slice.
-      const recentSet = new Set(recentFiles.map((r) => r.absPath));
-      const ranked = results
-        .map((m) => ({
-          m,
-          score: rankMention(query, m, m.kind === "file" && recentSet.has(m.id)),
-        }))
-        .filter((x) => x.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 20);
-      for (const { m } of ranked) {
+      // Blended: results are already ranked by Rust (nucleo), capped
+      // top-N. JS just renders in the order Rust returned them — no
+      // second scoring pass.
+      for (const m of results) {
         out.push({ type: "mention", mention: m });
       }
       return out;
@@ -496,32 +491,6 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
 );
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-async function runSearch(
-  query: string,
-  scope: MentionKind | null,
-  ctx: MentionContext,
-  signal: AbortSignal
-): Promise<MentionData[]> {
-  if (scope) {
-    return PROVIDERS[scope]
-      .search(stripCategoryAlias(query, scope), ctx, signal)
-      .catch(() => []);
-  }
-  // Blended view — fan out to all providers in parallel and concatenate.
-  // Ranking happens in the rows memo so providers can finish in any order.
-  const settled = await Promise.allSettled(
-    MENTION_CATEGORIES.map((cat) =>
-      PROVIDERS[cat.kind].search(stripCategoryAlias(query, cat.kind), ctx, signal)
-    )
-  );
-  if (signal.aborted) return [];
-  const out: MentionData[] = [];
-  for (const s of settled) {
-    if (s.status === "fulfilled") out.push(...s.value);
-  }
-  return out;
-}
 
 function recentToMention(r: RecentFile): MentionData {
   return {

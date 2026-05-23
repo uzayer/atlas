@@ -10,12 +10,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
-import { useRecentFilesStore } from "@/features/chat/stores/recent-files-store";
 import { listClaudeSessions, readClaudeSession } from "./claude-api";
-import type { RawRefs } from "@/features/git/lib/git-graph";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -145,269 +142,18 @@ export interface MentionContext {
   projectPath: string | null;
 }
 
-export interface MentionProvider {
-  kind: MentionKind;
-  /**
-   * Resolve matches for the given query. Empty query is valid — the provider
-   * may return its "top" entries (recents, current items, etc).
-   */
-  search: (
-    query: string,
-    ctx: MentionContext,
-    signal: AbortSignal
-  ) => Promise<MentionData[]>;
-}
+// ── Providers (removed) ─────────────────────────────────────────────────────
+//
+// Per-kind JS providers + the blended `rankMention` scorer used to
+// live here. They've been replaced by `searchMentions` (defined
+// further down) which delegates the whole search + ranking to one
+// Rust command (`commands::mention_search`). The two-level
+// past-message picker stays JS-side because it reads JSONL
+// transcripts and has its own session-then-message UX.
+//
+// Past-session helpers below ↓
 
-// ── Providers ────────────────────────────────────────────────────────────────
-
-const fileProvider: MentionProvider = {
-  kind: "file",
-  async search(query, _ctx, signal) {
-    if (signal.aborted) return [];
-    // Empty-query: prefer the recent-files list (in-memory). The picker also
-    // shows recents explicitly above the divider, but include them here too
-    // so blended results don't have a "Files" gap when the query is empty.
-    if (!query) {
-      const recents = useRecentFilesStore.getState().items;
-      return recents.map<MentionFile>((r) => ({
-        kind: "file",
-        id: r.absPath,
-        displayName: r.rel,
-        absPath: r.absPath,
-      }));
-    }
-    const matches = await fileIndex.search(query, 30);
-    if (signal.aborted) return [];
-    return matches.map<MentionFile>((m) => ({
-      kind: "file",
-      id: m.path,
-      displayName: m.rel,
-      absPath: m.path,
-    }));
-  },
-};
-
-const folderProvider: MentionProvider = {
-  kind: "folder",
-  async search(query, _ctx, signal) {
-    if (signal.aborted) return [];
-    const matches = await fileIndex.searchDirs(query, 30);
-    if (signal.aborted) return [];
-    return matches.map<MentionFolder>((m) => ({
-      kind: "folder",
-      id: m.path,
-      displayName: m.rel,
-      absPath: m.path,
-    }));
-  },
-};
-
-const symbolProvider: MentionProvider = {
-  kind: "symbol",
-  async search(query, _ctx, _signal) {
-    const all = useAnalysisStore.getState().symbols;
-    const q = query.toLowerCase();
-    const out: MentionSymbol[] = [];
-    for (const s of all) {
-      if (q && !s.name.toLowerCase().includes(q)) continue;
-      out.push({
-        kind: "symbol",
-        id: `${s.name}@${s.file_path}:${s.line}`,
-        displayName: s.name,
-        signature: s.signature,
-        filePath: s.file_path,
-        line: s.line,
-        symbolKind: s.kind,
-      });
-      if (out.length >= 30) break;
-    }
-    return out;
-  },
-};
-
-const knowledgeProvider: MentionProvider = {
-  kind: "knowledge",
-  async search(query, _ctx, _signal) {
-    const entries = useKnowledgeStore.getState().entries;
-    const q = query.toLowerCase();
-    const out: MentionKnowledge[] = [];
-    for (const e of entries) {
-      // The id may be `Adib/weekly-notes` for nested entries — that's how
-      // the user's mental model of "spaces" maps onto disk. Match against
-      // the folder prefix too so typing `@adib` finds entries grouped
-      // under the "Adib" space.
-      const slash = e.id.lastIndexOf("/");
-      const folder = slash > 0 ? e.id.slice(0, slash) : null;
-      if (
-        q &&
-        !e.title.toLowerCase().includes(q) &&
-        !(folder && folder.toLowerCase().includes(q))
-      ) {
-        continue;
-      }
-      out.push({
-        kind: "knowledge",
-        id: e.id,
-        displayName: e.title,
-        filePath: e.file_path,
-        source: e.source,
-        folder,
-      });
-      if (out.length >= 30) break;
-    }
-    return out;
-  },
-};
-
-interface ClonedRepoRow {
-  name: string;
-  path: string;
-  has_readme: boolean;
-}
-const repoProvider: MentionProvider = {
-  kind: "repo",
-  async search(query, ctx, signal) {
-    if (!ctx.projectPath) return [];
-    let repos: ClonedRepoRow[] = [];
-    try {
-      repos = await invoke<ClonedRepoRow[]>("list_cloned_repos", {
-        projectPath: ctx.projectPath,
-      });
-    } catch {
-      return [];
-    }
-    if (signal.aborted) return [];
-    const q = query.toLowerCase();
-    return repos
-      .filter((r) => !q || r.name.toLowerCase().includes(q))
-      .slice(0, 30)
-      .map<MentionRepo>((r) => ({
-        kind: "repo",
-        id: r.path,
-        displayName: r.name,
-        absPath: r.path,
-        hasReadme: r.has_readme,
-      }));
-  },
-};
-
-interface SavedPaper {
-  id: string;
-  title: string;
-  authors: string[];
-  metadata_path: string;
-}
-const paperProvider: MentionProvider = {
-  kind: "paper",
-  async search(query, ctx, signal) {
-    if (!ctx.projectPath) return [];
-    let papers: SavedPaper[] = [];
-    try {
-      papers = await invoke<SavedPaper[]>("list_saved_papers", {
-        projectPath: ctx.projectPath,
-      });
-    } catch {
-      // Command not registered yet (v1 lands later in the migration order)
-      return [];
-    }
-    if (signal.aborted) return [];
-    const q = query.toLowerCase();
-    return papers
-      .filter((p) => !q || p.title.toLowerCase().includes(q))
-      .slice(0, 30)
-      .map<MentionPaper>((p) => ({
-        kind: "paper",
-        id: p.id,
-        displayName: p.title,
-        authors: p.authors,
-        metadataPath: p.metadata_path,
-      }));
-  },
-};
-
-const branchProvider: MentionProvider = {
-  kind: "branch",
-  async search(query, ctx, signal) {
-    if (!ctx.projectPath) return [];
-    let refs: RawRefs;
-    try {
-      refs = await invoke<RawRefs>("git_refs", { path: ctx.projectPath });
-    } catch {
-      return [];
-    }
-    if (signal.aborted) return [];
-    const q = query.toLowerCase();
-    return refs.refs
-      .filter((r) => r.kind === "branch" || r.kind === "remote")
-      .filter((r) => !q || r.name.toLowerCase().includes(q))
-      .slice(0, 30)
-      .map<MentionBranch>((r) => ({
-        kind: "branch",
-        id: r.name,
-        displayName: r.name,
-        sha: r.sha,
-        refKind: r.kind as "branch" | "remote",
-        isCurrent: r.is_current,
-      }));
-  },
-};
-
-const pastMessageProvider: MentionProvider = {
-  kind: "past_message",
-  async search(query, ctx, signal) {
-    if (!ctx.projectPath) return [];
-    // v1: only the most recent ~3 sessions to keep blended-view fast.
-    // The two-level picker (sessions → messages) drives deeper search.
-    let sessions;
-    try {
-      sessions = await listClaudeSessions(ctx.projectPath);
-    } catch {
-      return [];
-    }
-    if (signal.aborted) return [];
-    const top = sessions.slice(0, 3);
-    const out: MentionPastMessage[] = [];
-    const q = query.toLowerCase();
-    for (const s of top) {
-      if (signal.aborted) return [];
-      let dump;
-      try {
-        dump = await readClaudeSession(s.file_path);
-      } catch {
-        continue;
-      }
-      let idx = 0;
-      for (const m of dump) {
-        if (m.role !== "user") {
-          idx += 1;
-          continue;
-        }
-        const content = m.content.trim();
-        if (!content) {
-          idx += 1;
-          continue;
-        }
-        if (q && !content.toLowerCase().includes(q)) {
-          idx += 1;
-          continue;
-        }
-        out.push({
-          kind: "past_message",
-          id: `${s.id}#${idx}`,
-          displayName: truncate(content.replace(/\s+/g, " "), 60),
-          sessionId: s.id,
-          sessionTitle: s.preview || "Untitled session",
-          timestamp: m.timestamp,
-          content,
-        });
-        idx += 1;
-        if (out.length >= 15) break;
-      }
-      if (out.length >= 15) break;
-    }
-    return out;
-  },
-};
+// (legacy providers removed — see header comment above)
 
 // Two-level past-message picker support ─────────────────────────────────────
 // The blended picker view shows just the top few user messages across the
@@ -486,61 +232,6 @@ export async function listMessagesInPastSession(
   return out;
 }
 
-export const PROVIDERS: Readonly<Record<MentionKind, MentionProvider>> = {
-  file: fileProvider,
-  folder: folderProvider,
-  symbol: symbolProvider,
-  knowledge: knowledgeProvider,
-  repo: repoProvider,
-  paper: paperProvider,
-  branch: branchProvider,
-  past_message: pastMessageProvider,
-};
-
-// ── Ranking (blended view) ───────────────────────────────────────────────────
-
-/** Substring score: 1.0 prefix, 0.8 word-boundary, 0.5 anywhere, 0 otherwise. */
-function fuzzyMatchScore(query: string, displayName: string): number {
-  if (!query) return 0.5;
-  const q = query.toLowerCase();
-  const name = displayName.toLowerCase();
-  if (name === q) return 1.5;
-  if (name.startsWith(q)) return 1.0;
-  // word-boundary
-  if (new RegExp(`(^|[/_\\-\\s.])${escapeRegExp(q)}`).test(name)) return 0.8;
-  if (name.includes(q)) return 0.5;
-  return 0;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Categories whose alias prefixes the query get a large boost. */
-export function categoryHintBoost(query: string, kind: MentionKind): number {
-  if (!query) return 0;
-  const q = query.toLowerCase();
-  for (const cat of MENTION_CATEGORIES) {
-    if (cat.kind !== kind) continue;
-    for (const a of cat.aliases) {
-      if (q.startsWith(a)) return 0.6;
-    }
-  }
-  return 0;
-}
-
-export function rankMention(
-  query: string,
-  item: MentionData,
-  isRecent: boolean
-): number {
-  const base = fuzzyMatchScore(query, item.displayName);
-  const w = categoryForKind(item.kind).weight;
-  const recency = isRecent ? 0.25 : 0;
-  const hint = categoryHintBoost(query, item.kind);
-  return base * w + recency + hint;
-}
-
 /** Strip the category alias from the query so per-provider matching doesn't
  *  re-match the literal prefix (e.g. with `@note auth`, send `auth` to the
  *  knowledge provider, not `note auth`). */
@@ -575,6 +266,48 @@ export function toShortForm(m: MentionData): string {
       return `@branch:${m.displayName}`;
     case "past_message":
       return `@msg:${m.timestamp ?? m.id}`;
+  }
+}
+
+/** Unified mention search — runs in Rust. Replaces the per-provider
+ *  JS fan-out + `rankMention` blending in `mention-picker.tsx`. Pass
+ *  knowledge + symbols from the JS stores (Rust doesn't cache them
+ *  yet); files / folders / repos / papers / branches come from
+ *  Rust-owned state. Returns already-ranked top-N results.
+ *
+ *  Past-message is not handled here — it has its own two-level
+ *  pick-session-then-search flow. The picker calls listPastSessions /
+ *  listMessagesInPastSession directly for that scope. */
+export async function searchMentions(
+  query: string,
+  scope: MentionKind | null,
+  ctx: MentionContext,
+): Promise<MentionData[]> {
+  if (scope === "past_message") return [];
+  const knowledge = useKnowledgeStore.getState().entries.map((e) => ({
+    id: e.id,
+    title: e.title,
+    source: e.source,
+    filePath: e.file_path,
+  }));
+  const symbols = useAnalysisStore.getState().symbols.map((s) => ({
+    name: s.name,
+    kind: s.kind,
+    filePath: s.file_path,
+    line: s.line,
+    signature: s.signature,
+  }));
+  try {
+    const results = await invoke<MentionData[]>("mention_search", {
+      query: stripCategoryAlias(query, scope ?? "file"),
+      scope,
+      projectPath: ctx.projectPath,
+      inputs: { knowledge, symbols },
+    });
+    return results;
+  } catch (e) {
+    console.warn("mention_search invoke failed:", e);
+    return [];
   }
 }
 

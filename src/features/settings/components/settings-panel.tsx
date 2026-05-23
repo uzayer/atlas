@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { ScrollArea } from "@/ui/scroll-area";
 import { KbdCombo } from "@/ui/kbd";
 import { cn } from "@/lib/utils";
@@ -67,9 +69,53 @@ export function SettingsPanel() {
   );
 }
 
+interface CliStatus {
+  installed: boolean;
+  path: string | null;
+  installedVersion: string | null;
+  currentVersion: string;
+}
+
 function GeneralSettings() {
   const settings = useProjectStore.use.settings();
   const { updateSettings } = useProjectStore.use.actions();
+  const [cli, setCli] = useState<CliStatus | null>(null);
+  const [installing, setInstalling] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<CliStatus>("cli_status")
+      .then((s) => {
+        if (!cancelled) setCli(s);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const installCli = async () => {
+    setInstalling(true);
+    try {
+      const next = await invoke<CliStatus>("cli_install_helper");
+      setCli(next);
+      toast.success("Installed atlas tools");
+    } catch (e) {
+      toast.error(`Install failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  const cliInstalledLine = cli?.installed
+    ? cli.installedVersion === cli.currentVersion
+      ? `Installed at ${cli.path}`
+      : `Installed at ${cli.path}${
+          cli.installedVersion
+            ? ` (version ${cli.installedVersion}, current ${cli.currentVersion})`
+            : ` (version unknown, current ${cli.currentVersion})`
+        }`
+    : `Will install to ${cli?.path ?? "~/.local/bin/atlas"}`;
 
   return (
     <div className="space-y-6">
@@ -84,6 +130,23 @@ function GeneralSettings() {
             updateSettings({ autoAddAtlasGitignore: next })
           }
         />
+      </SettingRow>
+      <SettingRow
+        label="atlas terminal helper"
+        description={`Adds an \`atlas\` command to your shell — type \`atlas .\` in any terminal to open the current folder as a project. Refreshed automatically on every launch so an older copy never lingers. ${cliInstalledLine}.`}
+      >
+        <button
+          type="button"
+          onClick={() => void installCli()}
+          disabled={installing}
+          className={cn(
+            "h-7 rounded-md px-2.5 text-[11px] font-medium border border-border-default bg-bg-elevated",
+            "text-text-primary hover:bg-bg-hover transition-colors",
+            "disabled:opacity-50 disabled:cursor-not-allowed",
+          )}
+        >
+          {installing ? "Installing…" : cli?.installed ? "Reinstall" : "Install"}
+        </button>
       </SettingRow>
     </div>
   );
@@ -227,7 +290,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.3 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.4 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">

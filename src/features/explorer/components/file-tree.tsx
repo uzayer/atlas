@@ -129,8 +129,13 @@ export function FileTree() {
                   style={{
                     height: ROW_HEIGHT - 2,
                     top: 1,
+                    // Base 2px lands the chevron at 12px from the panel
+                    // edge (container px-1.5 = 6, row mx-1 = 4, +2),
+                    // aligning with the header's `px-3` left padding so
+                    // the "M" of MARKOPOLO and the top chevron sit on
+                    // the same vertical line.
                     transform: `translateY(${virtualRow.start}px)`,
-                    paddingLeft: 6 + depth * INDENT_PER_LEVEL,
+                    paddingLeft: 2 + depth * INDENT_PER_LEVEL,
                     paddingRight: 6,
                   }}
                   title={node.entry.path}
