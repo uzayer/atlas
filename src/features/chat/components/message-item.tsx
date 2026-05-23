@@ -24,24 +24,31 @@ import { Markdown } from "@/lib/markdown";
 
 const FILE_PATH_KEYS = ["file_path", "path", "filename", "filePath"];
 
-// User prompts composed via the @-mention picker have heavy context blocks
-// appended after a fixed separator (see `composePrompt` in features/chat/lib/mentions.ts).
-// Split here so the thread shows just the prose and tucks the context bodies
-// into a collapsed accordion — keeps the message list scannable.
-const ATLAS_CONTEXT_MARKER = "\n\n---\n# Atlas context\n\n";
+// User prompts composed via the @-mention picker carry a heavy
+// "Atlas context" suffix. The split + block count are computed ONCE
+// when the message is inserted into the chat-store (see
+// `addMessage` / `replaceMessages` in chat-store.ts) and stored as
+// `atlasProse` / `atlasContext` / `atlasContextBlockCount` fields on
+// the ChatMessage. MessageItem just reads those — no regex per
+// render. The lazy fallback at render time exists only for legacy
+// messages saved before this metadata was added.
+import {
+  splitAtlasContext,
+  type SplitContext,
+} from "../lib/atlas-context";
 
-function splitAtlasContext(content: string): { prose: string; context: string | null } {
-  const idx = content.indexOf(ATLAS_CONTEXT_MARKER);
-  if (idx === -1) return { prose: content, context: null };
-  const prose = content.slice(0, idx);
-  const context = content.slice(idx + ATLAS_CONTEXT_MARKER.length).replace(/\n+$/, "");
-  return { prose, context: context.length > 0 ? context : null };
-}
-
-function countContextBlocks(context: string): number {
-  // Each block in `composePrompt` starts with a `## ` heading.
-  const matches = context.match(/^## /gm);
-  return matches ? matches.length : 0;
+function getAtlasSplit(message: ChatMessage): SplitContext {
+  if (message.atlasContext !== undefined) {
+    return {
+      prose: message.atlasProse ?? message.content,
+      context: message.atlasContext,
+      blockCount: message.atlasContextBlockCount ?? 0,
+    };
+  }
+  // No precomputed metadata. Either it's not a user message with an
+  // Atlas-context suffix (cheap early return inside splitAtlasContext)
+  // or it's a legacy message we never split. Compute lazily.
+  return splitAtlasContext(message.content);
 }
 
 function getFilePathFromInput(input: Record<string, unknown>): string | null {
@@ -94,9 +101,12 @@ export const MessageItem = memo(function MessageItem({
   const isAssistant = message.role === "assistant";
 
   // Only user messages carry the @-mention "Atlas context" suffix.
-  const { prose, context } = isUser
-    ? splitAtlasContext(message.content)
-    : { prose: message.content, context: null };
+  // `getAtlasSplit` reads from precomputed fields when present (set by
+  // chat-store on insert) and falls back to a one-time regex parse
+  // for legacy messages — no regex per render in the hot path.
+  const { prose, context, blockCount: contextBlockCount } = isUser
+    ? getAtlasSplit(message)
+    : { prose: message.content, context: null, blockCount: 0 };
 
   return (
     <div
@@ -179,7 +189,10 @@ export const MessageItem = memo(function MessageItem({
           {/* Heavy @-mention bodies (files / folders / repo READMEs / notes /
               papers) collapsed by default so the thread stays scannable. */}
           {context && (
-            <AtlasContextAccordion context={context} />
+            <AtlasContextAccordion
+              context={context}
+              blockCount={contextBlockCount}
+            />
           )}
 
           {/* Tool calls */}
@@ -302,9 +315,14 @@ function ActionButton({
   );
 }
 
-function AtlasContextAccordion({ context }: { context: string }) {
+function AtlasContextAccordion({
+  context,
+  blockCount,
+}: {
+  context: string;
+  blockCount: number;
+}) {
   const [open, setOpen] = useState(false);
-  const blockCount = countContextBlocks(context);
 
   return (
     <details

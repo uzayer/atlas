@@ -578,123 +578,43 @@ export function toShortForm(m: MentionData): string {
   }
 }
 
-/** Cap how much body content one mention can dump into the context block.
- *  Tuned for chat agents: ~32 KB is enough to read a medium source file. */
-const MENTION_BODY_BUDGET_BYTES = 32 * 1024;
-
-function clipBody(body: string): string {
-  if (body.length <= MENTION_BODY_BUDGET_BYTES) return body;
-  return (
-    body.slice(0, MENTION_BODY_BUDGET_BYTES) +
-    `\n\n… (truncated, ${body.length - MENTION_BODY_BUDGET_BYTES} bytes elided)`
-  );
-}
-
-/** Fenced body block appended to the prompt. Returns null when the mention
- *  has no body to add (e.g. branches — name alone is the content). */
-async function toContextBlock(m: MentionData): Promise<string | null> {
-  switch (m.kind) {
-    case "file": {
-      let body: string;
-      try {
-        body = await invoke<string>("read_file_content", { path: m.absPath });
-      } catch (e) {
-        body = `(failed to read: ${e instanceof Error ? e.message : String(e)})`;
-      }
-      return `## ${toShortForm(m)}\n\n\`\`\`\n${clipBody(body)}\n\`\`\``;
-    }
-    case "folder": {
-      // No "read folder" command — the agent has tools to list/read paths
-      // itself. Inject the absolute path so the agent knows exactly where
-      // to look, without us inlining the entire subtree contents.
-      return `## ${toShortForm(m)}\n\nDirectory at \`${m.absPath}\`. Use your filesystem tools to explore.`;
-    }
-    case "repo": {
-      // Repos live under `<project>/.atlas/repos/<name>/`. Inline the README
-      // (capped) so the agent has the elevator pitch + structure; the agent
-      // can read more files itself via its tools.
-      let body: string;
-      if (m.hasReadme) {
-        try {
-          body = await invoke<string>("read_repo_readme", {
-            projectPath: projectRootFromRepo(m.absPath),
-            repoName: m.displayName,
-          });
-        } catch {
-          body = "(README present but unreadable)";
-        }
-      } else {
-        body = "(no README in this repo)";
-      }
-      return `## ${toShortForm(m)}\n\nCloned at \`${m.absPath}\`.\n\n${clipBody(body)}`;
-    }
-    case "knowledge": {
-      // Pull the freshest body from the store first (already in memory).
-      // Falls back to disk if the entry isn't loaded.
-      const entry = useKnowledgeStore
-        .getState()
-        .entries.find((e) => e.id === m.id);
-      let body = entry?.content ?? "";
-      if (!body) {
-        try {
-          body = await invoke<string>("read_file_content", {
-            path: m.filePath,
-          });
-        } catch {
-          body = "(unable to read knowledge entry)";
-        }
-      }
-      return `## ${toShortForm(m)}\n\n${clipBody(body)}`;
-    }
-    case "paper": {
-      // The metadata JSON sidecar carries the abstract; the PDF body is too
-      // heavy to inline. Read the sidecar and pull whatever long-form text
-      // it has.
-      let body: string;
-      try {
-        body = await invoke<string>("read_file_content", {
-          path: m.metadataPath,
-        });
-      } catch {
-        body = "(unable to read paper metadata)";
-      }
-      const authors = m.authors.length ? `Authors: ${m.authors.join(", ")}\n\n` : "";
-      return `## ${toShortForm(m)}\n\n${authors}${clipBody(body)}`;
-    }
-    case "symbol":
-      return `## ${toShortForm(m)}\n\n${m.signature}\n\n_(${m.symbolKind} at ${m.filePath}:${m.line})_`;
-    case "past_message":
-      return `## ${toShortForm(m)} _(from session ${m.sessionTitle})_\n\n${clipBody(m.content)}`;
-    case "branch":
-      // Branch shortname is the entire payload — no body block needed.
-      return null;
-  }
-}
-
-/** Build the final prompt sent to the agent. Inline references stay where
- *  the user typed them; deduplicated context blocks are appended at the
- *  bottom under a clear separator so JSONL transcripts stay scannable. */
+/** Build the final prompt sent to the agent. Pure pass-through to a
+ *  Rust command that:
+ *   - dedupes mentions by id
+ *   - fans out file reads in parallel on the tokio blocking pool
+ *   - assembles the wire string with the same shape JS used to produce
+ *     (`<prose>\n\n---\n# Atlas context\n\n## @ref\n\n…`)
+ *
+ *  Before this change every send paid N+1 IPC round-trips (N for the
+ *  per-mention file reads + 1 for the final agent send). Now it's
+ *  just one `compose_prompt` invoke that returns the composed string;
+ *  the caller then ships that to the agent.
+ *
+ *  Knowledge entries pre-fill `inlineBody` from the in-memory store so
+ *  Rust doesn't re-read them from disk. */
 export async function composePrompt(
   prosePlainText: string,
   mentions: MentionData[]
 ): Promise<string> {
   if (mentions.length === 0) return prosePlainText;
-
-  // Dedupe by id — a user can reference the same file twice in one message
-  // but the context block should only carry it once.
-  const seen = new Set<string>();
-  const uniq: MentionData[] = [];
-  for (const m of mentions) {
-    if (seen.has(m.id)) continue;
-    seen.add(m.id);
-    uniq.push(m);
+  const wireMentions = mentions.map((m) =>
+    m.kind === "knowledge"
+      ? {
+          ...m,
+          inlineBody:
+            useKnowledgeStore.getState().entries.find((e) => e.id === m.id)?.content ?? null,
+        }
+      : m
+  );
+  try {
+    return await invoke<string>("compose_prompt", {
+      prose: prosePlainText,
+      mentions: wireMentions,
+    });
+  } catch (e) {
+    console.warn("compose_prompt invoke failed, sending raw prose:", e);
+    return prosePlainText;
   }
-
-  const blocks = await Promise.all(uniq.map(toContextBlock));
-  const present = blocks.filter((b): b is string => b !== null);
-  if (present.length === 0) return prosePlainText;
-
-  return `${prosePlainText}\n\n---\n# Atlas context\n\n${present.join("\n\n")}\n`;
 }
 
 // ── Small utils ──────────────────────────────────────────────────────────────
@@ -702,15 +622,4 @@ export async function composePrompt(
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return s.slice(0, n) + "…";
-}
-
-/** Recover the project root from a cloned-repo absolute path. Repos are
- *  stored at `<project>/.atlas/repos/<name>/`, so we strip those three
- *  segments off the end. Falls back to the repo path itself if the layout
- *  ever changes (the Rust command will then return an error and we surface
- *  it gracefully in toContextBlock). */
-function projectRootFromRepo(repoAbsPath: string): string {
-  const marker = "/.atlas/repos/";
-  const idx = repoAbsPath.indexOf(marker);
-  return idx > 0 ? repoAbsPath.slice(0, idx) : repoAbsPath;
 }

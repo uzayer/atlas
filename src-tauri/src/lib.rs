@@ -7,6 +7,7 @@ use std::sync::Arc;
 use atlas_acp::AgentRegistry;
 use commands::claude::ClaudeSessionIndex;
 use commands::fileindex::FileIndexState;
+use commands::git_watcher::GitWatcherState;
 use commands::papers::SavedPapersIndex;
 use commands::sessions_watch::SessionsWatchState;
 use commands::terminal::TerminalState;
@@ -67,6 +68,7 @@ pub fn run() {
         .manage(TerminalState::new())
         .manage(AgentRegistry::new())
         .manage(FileIndexState::new())
+        .manage(GitWatcherState::new())
         .manage(SessionsWatchState::new())
         .manage(ClaudeSessionIndex::new())
         .manage(SavedPapersIndex::new())
@@ -92,6 +94,10 @@ pub fn run() {
             commands::git::git_delete_branch,
             commands::git::git_refs,
             commands::git::git_graph_signature,
+            commands::git_graph::git_graph_build,
+            commands::git_watcher::git_watch_start,
+            commands::git_watcher::git_watch_stop,
+            commands::git_watcher::git_watch_status,
             commands::github::search_github,
             commands::github::clone_github_repo,
             commands::github::list_cloned_repos,
@@ -129,6 +135,7 @@ pub fn run() {
             commands::log::rewrite_pinned_log,
             commands::app_state::bootstrap_app_state,
             commands::app_state::save_app_state,
+            commands::compose_prompt::compose_prompt,
             commands::claude_setup::claude_status,
             commands::claude_setup::claude_install,
             commands::agents::agents_list_plugins,

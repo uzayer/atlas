@@ -11,6 +11,7 @@ import type {
 import { CLAUDE_PERMISSION_MODES } from "@/types/agent";
 import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta, ToolCall as AgentToolCall } from "@/types/agents";
+import { splitAtlasContext } from "../lib/atlas-context";
 
 /** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
 function toChatToolCall(tc: AgentToolCall): ChatMessage["toolCalls"][number] {
@@ -251,6 +252,11 @@ export const useChatStore = createSelectors(
           set((s) => {
             const session = s.sessions[sessionId];
             if (!session) return;
+            // Pre-split for user-composed messages so MessageItem
+            // doesn't run regex on every render. No-op for assistant /
+            // system messages (they don't carry the Atlas-context
+            // suffix).
+            const split = role === "user" ? splitAtlasContext(content) : null;
             const msg: ChatMessage = {
               id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
               role,
@@ -259,6 +265,13 @@ export const useChatStore = createSelectors(
               fileChanges: [],
               plan: null,
               timestamp: new Date().toISOString(),
+              ...(split && split.context !== null
+                ? {
+                    atlasProse: split.prose,
+                    atlasContext: split.context,
+                    atlasContextBlockCount: split.blockCount,
+                  }
+                : {}),
             };
             session.messages.push(msg);
             session.updatedAt = new Date().toISOString();
@@ -345,22 +358,32 @@ export const useChatStore = createSelectors(
           set((s) => {
             const session = s.sessions[sessionId];
             if (!session) return;
-            session.messages = messages.map((m, i) => ({
-              id: `msg-${Date.now()}-${i}`,
-              role: m.role,
-              content: m.content,
-              toolCalls: (m.toolCalls ?? []).map((tc, j) => ({
-                id: `tc-${Date.now()}-${i}-${j}`,
-                toolName: tc.toolName,
-                arguments: tc.arguments,
-                result: null,
-                status: "completed" as const,
-                duration: null,
-              })),
-              fileChanges: [],
-              plan: null,
-              timestamp: m.timestamp ?? new Date().toISOString(),
-            }));
+            session.messages = messages.map((m, i) => {
+              const split = m.role === "user" ? splitAtlasContext(m.content) : null;
+              return {
+                id: `msg-${Date.now()}-${i}`,
+                role: m.role,
+                content: m.content,
+                toolCalls: (m.toolCalls ?? []).map((tc, j) => ({
+                  id: `tc-${Date.now()}-${i}-${j}`,
+                  toolName: tc.toolName,
+                  arguments: tc.arguments,
+                  result: null,
+                  status: "completed" as const,
+                  duration: null,
+                })),
+                fileChanges: [],
+                plan: null,
+                timestamp: m.timestamp ?? new Date().toISOString(),
+                ...(split && split.context !== null
+                  ? {
+                      atlasProse: split.prose,
+                      atlasContext: split.context,
+                      atlasContextBlockCount: split.blockCount,
+                    }
+                  : {}),
+              };
+            });
             // Recompute the cached preview/count from the loaded transcript
             // so the sidebar doesn't have to scan messages on every chunk.
             session.firstUserContent =

@@ -385,11 +385,18 @@ export function App() {
   useEffect(() => {
     if (!currentProject) {
       fileIndex.closeProject().catch(() => {});
+      void invoke("git_watch_stop").catch(() => {});
       return;
     }
     fileIndex
       .openProject(currentProject.path)
       .catch((e) => console.warn("fileindex open failed:", e));
+    // Git watcher: emits `atlas:git-changed` on commit / checkout /
+    // branch ops. Replaces the 3-second polling that git-graph-panel
+    // used to do via `refetchInterval` on `git_graph_signature`.
+    void invoke("git_watch_start", { projectPath: currentProject.path }).catch(
+      (e) => console.warn("git watch start failed:", e),
+    );
   }, [currentProject?.path]);
 
   useHotkeys([

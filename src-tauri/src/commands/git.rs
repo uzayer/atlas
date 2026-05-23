@@ -230,133 +230,145 @@ async fn git_status_compute(path: &str) -> Result<GitStatus, String> {
     })
 }
 
+/// Synchronous core of `git_log` — extracted as a `pub(crate)` helper
+/// so `git_graph_build` can call it directly inside a `tokio::join!`
+/// without going through the Tauri command boundary (which would be
+/// awkward + needlessly serialize the result twice).
+pub(crate) fn git_log_compute(
+    path: &str,
+    limit: u32,
+    all: bool,
+) -> Result<Vec<GitLogEntry>, String> {
+    let n = limit.to_string();
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        format!("-{}", n),
+        "--topo-order".into(),
+        "--decorate=short".into(),
+        "--pretty=format:%H%x1f%h%x1f%s%x1f%an%x1f%ae%x1f%cr%x1f%P%x1f%D%x1e".into(),
+    ];
+    if all {
+        args.push("--all".into());
+    }
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let log_str = String::from_utf8_lossy(&output.stdout);
+    let entries = log_str
+        .split('\x1e')
+        .map(|s| s.trim_start_matches('\n'))
+        .filter(|s| !s.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\x1f').collect();
+            if parts.len() < 8 {
+                return None;
+            }
+            let parents: Vec<String> = parts[6]
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            let refs: Vec<String> = parts[7]
+                .split(',')
+                .map(|r| r.trim().to_string())
+                .filter(|r| !r.is_empty())
+                .collect();
+            Some(GitLogEntry {
+                hash: parts[0].to_string(),
+                short_hash: parts[1].to_string(),
+                message: parts[2].to_string(),
+                author: parts[3].to_string(),
+                email: parts[4].to_string(),
+                date: parts[5].to_string(),
+                parents,
+                refs,
+            })
+        })
+        .collect();
+    Ok(entries)
+}
+
 #[tauri::command]
 pub async fn git_log(
     path: String,
     limit: Option<u32>,
     all: Option<bool>,
 ) -> Result<Vec<GitLogEntry>, String> {
-    tokio::task::spawn_blocking(move || {
-        let n = limit.unwrap_or(50).to_string();
-        let mut args: Vec<String> = vec![
-            "log".into(),
-            format!("-{}", n),
-            "--topo-order".into(),
-            "--decorate=short".into(),
-            // Fields, separated by \x1f, terminated by \x1e to handle multi-line author etc.
-            "--pretty=format:%H%x1f%h%x1f%s%x1f%an%x1f%ae%x1f%cr%x1f%P%x1f%D%x1e".into(),
-        ];
-        if all.unwrap_or(true) {
-            args.push("--all".into());
-        }
-        let output = Command::new("git")
-            .args(&args)
-            .current_dir(&path)
-            .output()
-            .map_err(|e| e.to_string())?;
+    let lim = limit.unwrap_or(50);
+    let all_flag = all.unwrap_or(true);
+    tokio::task::spawn_blocking(move || git_log_compute(&path, lim, all_flag))
+        .await
+        .map_err(|e| e.to_string())?
+}
 
-        let log_str = String::from_utf8_lossy(&output.stdout);
-        let entries = log_str
-            .split('\x1e')
-            .map(|s| s.trim_start_matches('\n'))
-            .filter(|s| !s.is_empty())
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.split('\x1f').collect();
-                if parts.len() < 8 {
-                    return None;
-                }
-                let parents: Vec<String> = parts[6]
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
-                let refs: Vec<String> = parts[7]
-                    .split(',')
-                    .map(|r| r.trim().to_string())
-                    .filter(|r| !r.is_empty())
-                    .collect();
-                Some(GitLogEntry {
-                    hash: parts[0].to_string(),
-                    short_hash: parts[1].to_string(),
-                    message: parts[2].to_string(),
-                    author: parts[3].to_string(),
-                    email: parts[4].to_string(),
-                    date: parts[5].to_string(),
-                    parents,
-                    refs,
-                })
-            })
-            .collect();
-        Ok(entries)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+pub(crate) fn git_refs_compute(path: &str) -> Result<GitRefs, String> {
+    let head_sha = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+    let head_ref = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    let out = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)\x1f%(objectname)\x1f%(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ])
+        .current_dir(path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let mut refs: Vec<GitRef> = Vec::new();
+    for line in txt.lines() {
+        let parts: Vec<&str> = line.split('\x1f').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let name = parts[0].to_string();
+        let sha = parts[1].to_string();
+        let full = parts[2];
+        let kind = if full.starts_with("refs/tags/") {
+            "tag"
+        } else if full.starts_with("refs/remotes/") {
+            "remote"
+        } else {
+            "branch"
+        }
+        .to_string();
+        let is_current = head_ref.as_deref() == Some(&name);
+        refs.push(GitRef { name, sha, kind, is_current });
+    }
+    Ok(GitRefs { head: head_sha, head_ref, refs })
 }
 
 #[tauri::command]
 pub async fn git_refs(path: String) -> Result<GitRefs, String> {
-    tokio::task::spawn_blocking(move || {
-        let head_sha = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&path)
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            });
-        let head_ref = Command::new("git")
-            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-            .current_dir(&path)
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            });
-
-        // refname:short \x1f objectname \x1f refname (full)  per ref
-        let out = Command::new("git")
-            .args([
-                "for-each-ref",
-                "--format=%(refname:short)\x1f%(objectname)\x1f%(refname)",
-                "refs/heads",
-                "refs/remotes",
-                "refs/tags",
-            ])
-            .current_dir(&path)
-            .output()
-            .map_err(|e| e.to_string())?;
-        let txt = String::from_utf8_lossy(&out.stdout);
-        let mut refs: Vec<GitRef> = Vec::new();
-        for line in txt.lines() {
-            let parts: Vec<&str> = line.split('\x1f').collect();
-            if parts.len() < 3 {
-                continue;
-            }
-            let name = parts[0].to_string();
-            let sha = parts[1].to_string();
-            let full = parts[2];
-            let kind = if full.starts_with("refs/tags/") {
-                "tag"
-            } else if full.starts_with("refs/remotes/") {
-                "remote"
-            } else {
-                "branch"
-            }
-            .to_string();
-            let is_current = head_ref.as_deref() == Some(&name);
-            refs.push(GitRef { name, sha, kind, is_current });
-        }
-        Ok(GitRefs { head: head_sha, head_ref, refs })
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || git_refs_compute(&path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

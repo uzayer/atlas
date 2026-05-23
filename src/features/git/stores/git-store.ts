@@ -58,6 +58,18 @@ function ensureGitStatusFreshListener(): void {
       s.behind = e.payload.status.behind;
     });
   });
+
+  // Live updates from the git watcher (commands/git_watcher.rs) —
+  // commit / checkout / branch / fetch all fire `atlas:git-changed`.
+  // Refresh status + branch list so the Changes panel and branch
+  // chip reflect on-disk truth without polling.
+  void listen<{ project: string }>("atlas:git-changed", (e) => {
+    const current = useGitStore.getState().repoPath;
+    if (!current || current !== e.payload.project) return;
+    const actions = useGitStore.getState().actions;
+    void actions.loadStatus(current).catch(() => {});
+    void actions.listBranches().catch(() => {});
+  });
 }
 
 interface GitState {
@@ -166,28 +178,29 @@ export const useGitStore = createSelectors(
             // not a git repo
           }
         },
+        // Mutations no longer do explicit `loadStatus` / `listBranches`
+        // afterwards — the Rust git watcher (commands/git_watcher.rs)
+        // observes the resulting .git/HEAD, .git/refs/, .git/index
+        // change and fires `atlas:git-changed`, which the listener
+        // above translates into a refresh. One source of truth
+        // (filesystem) instead of two (explicit refresh + watcher).
         checkout: async (branch) => {
           const repoPath = get().repoPath;
           if (!repoPath) return;
           await invoke("git_checkout", { path: repoPath, branch });
           logEvent({ source: "git", kind: "checkout", summary: branch, payload: { branch } });
-          await get().actions.loadStatus(repoPath);
-          await get().actions.listBranches();
         },
         createBranch: async (name) => {
           const repoPath = get().repoPath;
           if (!repoPath) return;
           await invoke("git_create_branch", { path: repoPath, name });
           logEvent({ source: "git", kind: "branch-create", summary: name, payload: { name } });
-          await get().actions.loadStatus(repoPath);
-          await get().actions.listBranches();
         },
         deleteBranch: async (name) => {
           const repoPath = get().repoPath;
           if (!repoPath) return;
           await invoke("git_delete_branch", { path: repoPath, name });
           logEvent({ source: "git", kind: "branch-delete", summary: name, payload: { name } });
-          await get().actions.listBranches();
         },
         stageFiles: async (paths) => {
           const repoPath = get().repoPath;
@@ -199,7 +212,6 @@ export const useGitStore = createSelectors(
             summary: paths.length === 1 ? paths[0] : `${paths.length} files`,
             payload: { files: paths },
           });
-          await get().actions.loadStatus(repoPath);
         },
         unstageFiles: async (paths) => {
           const repoPath = get().repoPath;
@@ -211,7 +223,6 @@ export const useGitStore = createSelectors(
             summary: paths.length === 1 ? paths[0] : `${paths.length} files`,
             payload: { files: paths },
           });
-          await get().actions.loadStatus(repoPath);
         },
         commit: async (message) => {
           const repoPath = get().repoPath;
@@ -223,10 +234,6 @@ export const useGitStore = createSelectors(
             summary: message.slice(0, 120),
             payload: { message },
           });
-          await get().actions.loadStatus(repoPath);
-          // No `loadLog` here — the store's `log` field is unused by any
-          // panel (git-graph fetches its own via useQuery). Calling it just
-          // wastes a slow `git log --all` subprocess.
         },
       },
     }))

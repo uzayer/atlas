@@ -87,6 +87,16 @@ export interface ChatMessage {
   mode?: "text" | "tool" | "thinking";
   /** Accumulated thinking chunks; only set when mode === "thinking". */
   thinking?: string;
+  /** Pre-split for user messages composed via the @-mention picker. The
+   *  composer appends a "Atlas context" suffix to the prose; storing
+   *  the split + block count here means MessageItem doesn't re-run a
+   *  regex on `content` for every render. Computed once in `addMessage`
+   *  when the message is inserted. Undefined for messages that don't
+   *  carry an Atlas-context block (every assistant message, every user
+   *  message sent without `@` mentions). */
+  atlasProse?: string;
+  atlasContext?: string;
+  atlasContextBlockCount?: number;
 }
 
 export interface ToolCallDisplay {
