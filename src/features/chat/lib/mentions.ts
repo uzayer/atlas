@@ -10,12 +10,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
-import { useRecentFilesStore } from "@/features/chat/stores/recent-files-store";
 import { listClaudeSessions, readClaudeSession } from "./claude-api";
-import type { RawRefs } from "@/features/git/lib/git-graph";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -145,269 +142,18 @@ export interface MentionContext {
   projectPath: string | null;
 }
 
-export interface MentionProvider {
-  kind: MentionKind;
-  /**
-   * Resolve matches for the given query. Empty query is valid — the provider
-   * may return its "top" entries (recents, current items, etc).
-   */
-  search: (
-    query: string,
-    ctx: MentionContext,
-    signal: AbortSignal
-  ) => Promise<MentionData[]>;
-}
+// ── Providers (removed) ─────────────────────────────────────────────────────
+//
+// Per-kind JS providers + the blended `rankMention` scorer used to
+// live here. They've been replaced by `searchMentions` (defined
+// further down) which delegates the whole search + ranking to one
+// Rust command (`commands::mention_search`). The two-level
+// past-message picker stays JS-side because it reads JSONL
+// transcripts and has its own session-then-message UX.
+//
+// Past-session helpers below ↓
 
-// ── Providers ────────────────────────────────────────────────────────────────
-
-const fileProvider: MentionProvider = {
-  kind: "file",
-  async search(query, _ctx, signal) {
-    if (signal.aborted) return [];
-    // Empty-query: prefer the recent-files list (in-memory). The picker also
-    // shows recents explicitly above the divider, but include them here too
-    // so blended results don't have a "Files" gap when the query is empty.
-    if (!query) {
-      const recents = useRecentFilesStore.getState().items;
-      return recents.map<MentionFile>((r) => ({
-        kind: "file",
-        id: r.absPath,
-        displayName: r.rel,
-        absPath: r.absPath,
-      }));
-    }
-    const matches = await fileIndex.search(query, 30);
-    if (signal.aborted) return [];
-    return matches.map<MentionFile>((m) => ({
-      kind: "file",
-      id: m.path,
-      displayName: m.rel,
-      absPath: m.path,
-    }));
-  },
-};
-
-const folderProvider: MentionProvider = {
-  kind: "folder",
-  async search(query, _ctx, signal) {
-    if (signal.aborted) return [];
-    const matches = await fileIndex.searchDirs(query, 30);
-    if (signal.aborted) return [];
-    return matches.map<MentionFolder>((m) => ({
-      kind: "folder",
-      id: m.path,
-      displayName: m.rel,
-      absPath: m.path,
-    }));
-  },
-};
-
-const symbolProvider: MentionProvider = {
-  kind: "symbol",
-  async search(query, _ctx, _signal) {
-    const all = useAnalysisStore.getState().symbols;
-    const q = query.toLowerCase();
-    const out: MentionSymbol[] = [];
-    for (const s of all) {
-      if (q && !s.name.toLowerCase().includes(q)) continue;
-      out.push({
-        kind: "symbol",
-        id: `${s.name}@${s.file_path}:${s.line}`,
-        displayName: s.name,
-        signature: s.signature,
-        filePath: s.file_path,
-        line: s.line,
-        symbolKind: s.kind,
-      });
-      if (out.length >= 30) break;
-    }
-    return out;
-  },
-};
-
-const knowledgeProvider: MentionProvider = {
-  kind: "knowledge",
-  async search(query, _ctx, _signal) {
-    const entries = useKnowledgeStore.getState().entries;
-    const q = query.toLowerCase();
-    const out: MentionKnowledge[] = [];
-    for (const e of entries) {
-      // The id may be `Adib/weekly-notes` for nested entries — that's how
-      // the user's mental model of "spaces" maps onto disk. Match against
-      // the folder prefix too so typing `@adib` finds entries grouped
-      // under the "Adib" space.
-      const slash = e.id.lastIndexOf("/");
-      const folder = slash > 0 ? e.id.slice(0, slash) : null;
-      if (
-        q &&
-        !e.title.toLowerCase().includes(q) &&
-        !(folder && folder.toLowerCase().includes(q))
-      ) {
-        continue;
-      }
-      out.push({
-        kind: "knowledge",
-        id: e.id,
-        displayName: e.title,
-        filePath: e.file_path,
-        source: e.source,
-        folder,
-      });
-      if (out.length >= 30) break;
-    }
-    return out;
-  },
-};
-
-interface ClonedRepoRow {
-  name: string;
-  path: string;
-  has_readme: boolean;
-}
-const repoProvider: MentionProvider = {
-  kind: "repo",
-  async search(query, ctx, signal) {
-    if (!ctx.projectPath) return [];
-    let repos: ClonedRepoRow[] = [];
-    try {
-      repos = await invoke<ClonedRepoRow[]>("list_cloned_repos", {
-        projectPath: ctx.projectPath,
-      });
-    } catch {
-      return [];
-    }
-    if (signal.aborted) return [];
-    const q = query.toLowerCase();
-    return repos
-      .filter((r) => !q || r.name.toLowerCase().includes(q))
-      .slice(0, 30)
-      .map<MentionRepo>((r) => ({
-        kind: "repo",
-        id: r.path,
-        displayName: r.name,
-        absPath: r.path,
-        hasReadme: r.has_readme,
-      }));
-  },
-};
-
-interface SavedPaper {
-  id: string;
-  title: string;
-  authors: string[];
-  metadata_path: string;
-}
-const paperProvider: MentionProvider = {
-  kind: "paper",
-  async search(query, ctx, signal) {
-    if (!ctx.projectPath) return [];
-    let papers: SavedPaper[] = [];
-    try {
-      papers = await invoke<SavedPaper[]>("list_saved_papers", {
-        projectPath: ctx.projectPath,
-      });
-    } catch {
-      // Command not registered yet (v1 lands later in the migration order)
-      return [];
-    }
-    if (signal.aborted) return [];
-    const q = query.toLowerCase();
-    return papers
-      .filter((p) => !q || p.title.toLowerCase().includes(q))
-      .slice(0, 30)
-      .map<MentionPaper>((p) => ({
-        kind: "paper",
-        id: p.id,
-        displayName: p.title,
-        authors: p.authors,
-        metadataPath: p.metadata_path,
-      }));
-  },
-};
-
-const branchProvider: MentionProvider = {
-  kind: "branch",
-  async search(query, ctx, signal) {
-    if (!ctx.projectPath) return [];
-    let refs: RawRefs;
-    try {
-      refs = await invoke<RawRefs>("git_refs", { path: ctx.projectPath });
-    } catch {
-      return [];
-    }
-    if (signal.aborted) return [];
-    const q = query.toLowerCase();
-    return refs.refs
-      .filter((r) => r.kind === "branch" || r.kind === "remote")
-      .filter((r) => !q || r.name.toLowerCase().includes(q))
-      .slice(0, 30)
-      .map<MentionBranch>((r) => ({
-        kind: "branch",
-        id: r.name,
-        displayName: r.name,
-        sha: r.sha,
-        refKind: r.kind as "branch" | "remote",
-        isCurrent: r.is_current,
-      }));
-  },
-};
-
-const pastMessageProvider: MentionProvider = {
-  kind: "past_message",
-  async search(query, ctx, signal) {
-    if (!ctx.projectPath) return [];
-    // v1: only the most recent ~3 sessions to keep blended-view fast.
-    // The two-level picker (sessions → messages) drives deeper search.
-    let sessions;
-    try {
-      sessions = await listClaudeSessions(ctx.projectPath);
-    } catch {
-      return [];
-    }
-    if (signal.aborted) return [];
-    const top = sessions.slice(0, 3);
-    const out: MentionPastMessage[] = [];
-    const q = query.toLowerCase();
-    for (const s of top) {
-      if (signal.aborted) return [];
-      let dump;
-      try {
-        dump = await readClaudeSession(s.file_path);
-      } catch {
-        continue;
-      }
-      let idx = 0;
-      for (const m of dump) {
-        if (m.role !== "user") {
-          idx += 1;
-          continue;
-        }
-        const content = m.content.trim();
-        if (!content) {
-          idx += 1;
-          continue;
-        }
-        if (q && !content.toLowerCase().includes(q)) {
-          idx += 1;
-          continue;
-        }
-        out.push({
-          kind: "past_message",
-          id: `${s.id}#${idx}`,
-          displayName: truncate(content.replace(/\s+/g, " "), 60),
-          sessionId: s.id,
-          sessionTitle: s.preview || "Untitled session",
-          timestamp: m.timestamp,
-          content,
-        });
-        idx += 1;
-        if (out.length >= 15) break;
-      }
-      if (out.length >= 15) break;
-    }
-    return out;
-  },
-};
+// (legacy providers removed — see header comment above)
 
 // Two-level past-message picker support ─────────────────────────────────────
 // The blended picker view shows just the top few user messages across the
@@ -486,61 +232,6 @@ export async function listMessagesInPastSession(
   return out;
 }
 
-export const PROVIDERS: Readonly<Record<MentionKind, MentionProvider>> = {
-  file: fileProvider,
-  folder: folderProvider,
-  symbol: symbolProvider,
-  knowledge: knowledgeProvider,
-  repo: repoProvider,
-  paper: paperProvider,
-  branch: branchProvider,
-  past_message: pastMessageProvider,
-};
-
-// ── Ranking (blended view) ───────────────────────────────────────────────────
-
-/** Substring score: 1.0 prefix, 0.8 word-boundary, 0.5 anywhere, 0 otherwise. */
-function fuzzyMatchScore(query: string, displayName: string): number {
-  if (!query) return 0.5;
-  const q = query.toLowerCase();
-  const name = displayName.toLowerCase();
-  if (name === q) return 1.5;
-  if (name.startsWith(q)) return 1.0;
-  // word-boundary
-  if (new RegExp(`(^|[/_\\-\\s.])${escapeRegExp(q)}`).test(name)) return 0.8;
-  if (name.includes(q)) return 0.5;
-  return 0;
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Categories whose alias prefixes the query get a large boost. */
-export function categoryHintBoost(query: string, kind: MentionKind): number {
-  if (!query) return 0;
-  const q = query.toLowerCase();
-  for (const cat of MENTION_CATEGORIES) {
-    if (cat.kind !== kind) continue;
-    for (const a of cat.aliases) {
-      if (q.startsWith(a)) return 0.6;
-    }
-  }
-  return 0;
-}
-
-export function rankMention(
-  query: string,
-  item: MentionData,
-  isRecent: boolean
-): number {
-  const base = fuzzyMatchScore(query, item.displayName);
-  const w = categoryForKind(item.kind).weight;
-  const recency = isRecent ? 0.25 : 0;
-  const hint = categoryHintBoost(query, item.kind);
-  return base * w + recency + hint;
-}
-
 /** Strip the category alias from the query so per-provider matching doesn't
  *  re-match the literal prefix (e.g. with `@note auth`, send `auth` to the
  *  knowledge provider, not `note auth`). */
@@ -578,123 +269,85 @@ export function toShortForm(m: MentionData): string {
   }
 }
 
-/** Cap how much body content one mention can dump into the context block.
- *  Tuned for chat agents: ~32 KB is enough to read a medium source file. */
-const MENTION_BODY_BUDGET_BYTES = 32 * 1024;
-
-function clipBody(body: string): string {
-  if (body.length <= MENTION_BODY_BUDGET_BYTES) return body;
-  return (
-    body.slice(0, MENTION_BODY_BUDGET_BYTES) +
-    `\n\n… (truncated, ${body.length - MENTION_BODY_BUDGET_BYTES} bytes elided)`
-  );
-}
-
-/** Fenced body block appended to the prompt. Returns null when the mention
- *  has no body to add (e.g. branches — name alone is the content). */
-async function toContextBlock(m: MentionData): Promise<string | null> {
-  switch (m.kind) {
-    case "file": {
-      let body: string;
-      try {
-        body = await invoke<string>("read_file_content", { path: m.absPath });
-      } catch (e) {
-        body = `(failed to read: ${e instanceof Error ? e.message : String(e)})`;
-      }
-      return `## ${toShortForm(m)}\n\n\`\`\`\n${clipBody(body)}\n\`\`\``;
-    }
-    case "folder": {
-      // No "read folder" command — the agent has tools to list/read paths
-      // itself. Inject the absolute path so the agent knows exactly where
-      // to look, without us inlining the entire subtree contents.
-      return `## ${toShortForm(m)}\n\nDirectory at \`${m.absPath}\`. Use your filesystem tools to explore.`;
-    }
-    case "repo": {
-      // Repos live under `<project>/.atlas/repos/<name>/`. Inline the README
-      // (capped) so the agent has the elevator pitch + structure; the agent
-      // can read more files itself via its tools.
-      let body: string;
-      if (m.hasReadme) {
-        try {
-          body = await invoke<string>("read_repo_readme", {
-            projectPath: projectRootFromRepo(m.absPath),
-            repoName: m.displayName,
-          });
-        } catch {
-          body = "(README present but unreadable)";
-        }
-      } else {
-        body = "(no README in this repo)";
-      }
-      return `## ${toShortForm(m)}\n\nCloned at \`${m.absPath}\`.\n\n${clipBody(body)}`;
-    }
-    case "knowledge": {
-      // Pull the freshest body from the store first (already in memory).
-      // Falls back to disk if the entry isn't loaded.
-      const entry = useKnowledgeStore
-        .getState()
-        .entries.find((e) => e.id === m.id);
-      let body = entry?.content ?? "";
-      if (!body) {
-        try {
-          body = await invoke<string>("read_file_content", {
-            path: m.filePath,
-          });
-        } catch {
-          body = "(unable to read knowledge entry)";
-        }
-      }
-      return `## ${toShortForm(m)}\n\n${clipBody(body)}`;
-    }
-    case "paper": {
-      // The metadata JSON sidecar carries the abstract; the PDF body is too
-      // heavy to inline. Read the sidecar and pull whatever long-form text
-      // it has.
-      let body: string;
-      try {
-        body = await invoke<string>("read_file_content", {
-          path: m.metadataPath,
-        });
-      } catch {
-        body = "(unable to read paper metadata)";
-      }
-      const authors = m.authors.length ? `Authors: ${m.authors.join(", ")}\n\n` : "";
-      return `## ${toShortForm(m)}\n\n${authors}${clipBody(body)}`;
-    }
-    case "symbol":
-      return `## ${toShortForm(m)}\n\n${m.signature}\n\n_(${m.symbolKind} at ${m.filePath}:${m.line})_`;
-    case "past_message":
-      return `## ${toShortForm(m)} _(from session ${m.sessionTitle})_\n\n${clipBody(m.content)}`;
-    case "branch":
-      // Branch shortname is the entire payload — no body block needed.
-      return null;
+/** Unified mention search — runs in Rust. Replaces the per-provider
+ *  JS fan-out + `rankMention` blending in `mention-picker.tsx`. Pass
+ *  knowledge + symbols from the JS stores (Rust doesn't cache them
+ *  yet); files / folders / repos / papers / branches come from
+ *  Rust-owned state. Returns already-ranked top-N results.
+ *
+ *  Past-message is not handled here — it has its own two-level
+ *  pick-session-then-search flow. The picker calls listPastSessions /
+ *  listMessagesInPastSession directly for that scope. */
+export async function searchMentions(
+  query: string,
+  scope: MentionKind | null,
+  ctx: MentionContext,
+): Promise<MentionData[]> {
+  if (scope === "past_message") return [];
+  const knowledge = useKnowledgeStore.getState().entries.map((e) => ({
+    id: e.id,
+    title: e.title,
+    source: e.source,
+    filePath: e.file_path,
+  }));
+  const symbols = useAnalysisStore.getState().symbols.map((s) => ({
+    name: s.name,
+    kind: s.kind,
+    filePath: s.file_path,
+    line: s.line,
+    signature: s.signature,
+  }));
+  try {
+    const results = await invoke<MentionData[]>("mention_search", {
+      query: stripCategoryAlias(query, scope ?? "file"),
+      scope,
+      projectPath: ctx.projectPath,
+      inputs: { knowledge, symbols },
+    });
+    return results;
+  } catch (e) {
+    console.warn("mention_search invoke failed:", e);
+    return [];
   }
 }
 
-/** Build the final prompt sent to the agent. Inline references stay where
- *  the user typed them; deduplicated context blocks are appended at the
- *  bottom under a clear separator so JSONL transcripts stay scannable. */
+/** Build the final prompt sent to the agent. Pure pass-through to a
+ *  Rust command that:
+ *   - dedupes mentions by id
+ *   - fans out file reads in parallel on the tokio blocking pool
+ *   - assembles the wire string with the same shape JS used to produce
+ *     (`<prose>\n\n---\n# Atlas context\n\n## @ref\n\n…`)
+ *
+ *  Before this change every send paid N+1 IPC round-trips (N for the
+ *  per-mention file reads + 1 for the final agent send). Now it's
+ *  just one `compose_prompt` invoke that returns the composed string;
+ *  the caller then ships that to the agent.
+ *
+ *  Knowledge entries pre-fill `inlineBody` from the in-memory store so
+ *  Rust doesn't re-read them from disk. */
 export async function composePrompt(
   prosePlainText: string,
   mentions: MentionData[]
 ): Promise<string> {
   if (mentions.length === 0) return prosePlainText;
-
-  // Dedupe by id — a user can reference the same file twice in one message
-  // but the context block should only carry it once.
-  const seen = new Set<string>();
-  const uniq: MentionData[] = [];
-  for (const m of mentions) {
-    if (seen.has(m.id)) continue;
-    seen.add(m.id);
-    uniq.push(m);
+  const wireMentions = mentions.map((m) =>
+    m.kind === "knowledge"
+      ? {
+          ...m,
+          inlineBody:
+            useKnowledgeStore.getState().entries.find((e) => e.id === m.id)?.content ?? null,
+        }
+      : m
+  );
+  try {
+    return await invoke<string>("compose_prompt", {
+      prose: prosePlainText,
+      mentions: wireMentions,
+    });
+  } catch (e) {
+    console.warn("compose_prompt invoke failed, sending raw prose:", e);
+    return prosePlainText;
   }
-
-  const blocks = await Promise.all(uniq.map(toContextBlock));
-  const present = blocks.filter((b): b is string => b !== null);
-  if (present.length === 0) return prosePlainText;
-
-  return `${prosePlainText}\n\n---\n# Atlas context\n\n${present.join("\n\n")}\n`;
 }
 
 // ── Small utils ──────────────────────────────────────────────────────────────
@@ -702,15 +355,4 @@ export async function composePrompt(
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return s.slice(0, n) + "…";
-}
-
-/** Recover the project root from a cloned-repo absolute path. Repos are
- *  stored at `<project>/.atlas/repos/<name>/`, so we strip those three
- *  segments off the end. Falls back to the repo path itself if the layout
- *  ever changes (the Rust command will then return an error and we surface
- *  it gracefully in toContextBlock). */
-function projectRootFromRepo(repoAbsPath: string): string {
-  const marker = "/.atlas/repos/";
-  const idx = repoAbsPath.indexOf(marker);
-  return idx > 0 ? repoAbsPath.slice(0, idx) : repoAbsPath;
 }

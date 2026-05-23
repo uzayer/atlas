@@ -9,6 +9,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   RefreshCw,
@@ -21,15 +22,11 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { useGitStore } from "@/features/git/stores/git-store";
 import { CommitRowView } from "./commit-node";
 import {
-  buildGraph,
   ROW_HEIGHT,
-  type RawCommit,
-  type RawRefs,
   type BuiltGraph,
 } from "../lib/git-graph";
 
 const DEFAULT_LIMIT = 1000;
-const SIGNATURE_REFRESH_MS = 3000;
 
 // Persist scroll position per repo path across mount/unmount + fullscreen toggle.
 const scrollPositionCache = new Map<string, number>();
@@ -44,25 +41,28 @@ export function GitGraphPanel() {
   const [fullscreen, setFullscreen] = useState(false);
   const queryClient = useQueryClient();
 
+  // No polling — the Rust-side git watcher (commands/git_watcher.rs)
+  // emits `atlas:git-changed` on commit / checkout / branch / fetch
+  // ops, and the effect below invalidates this query in response.
+  // Refocus also triggers a refetch in case the user did something in
+  // an external terminal while Atlas was backgrounded.
   const sigQuery = useQuery({
     queryKey: ["git-graph-signature", path],
     queryFn: () => invoke<string>("git_graph_signature", { path }),
     enabled: !!path && isRepo,
-    staleTime: SIGNATURE_REFRESH_MS,
-    refetchInterval: SIGNATURE_REFRESH_MS,
+    staleTime: Infinity,
     refetchOnWindowFocus: true,
   });
   const signature = sigQuery.data ?? "";
 
+  // Single invoke: Rust runs `git log` + `git for-each-ref` in
+  // parallel, lays out the lanes/segments, and ships the finished
+  // BuiltGraph. React just renders. The 300-LOC JS layout algorithm
+  // that used to live in `lib/git-graph.ts::buildGraph` is gone.
   const graphQuery = useQuery<BuiltGraph>({
     queryKey: ["git-graph", path, signature, limit],
-    queryFn: async () => {
-      const [log, refs] = await Promise.all([
-        invoke<RawCommit[]>("git_log", { path, limit, all: true }),
-        invoke<RawRefs>("git_refs", { path }),
-      ]);
-      return buildGraph(log, refs);
-    },
+    queryFn: () =>
+      invoke<BuiltGraph>("git_graph_build", { path, limit, all: true }),
     enabled: !!path && isRepo && !!signature,
     staleTime: Infinity,
     placeholderData: (prev) => prev,
@@ -72,11 +72,19 @@ export function GitGraphPanel() {
 
   useEffect(() => {
     if (!path) return;
-    const handler = () => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    listen("atlas:git-changed", () => {
+      if (cancelled) return;
       queryClient.invalidateQueries({ queryKey: ["git-graph-signature", path] });
+    }).then((un) => {
+      if (cancelled) un();
+      else unlisten = un;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
-    window.addEventListener("atlas:git-changed", handler);
-    return () => window.removeEventListener("atlas:git-changed", handler);
   }, [path, queryClient]);
 
   const onSelect = useCallback((sha: string) => {
