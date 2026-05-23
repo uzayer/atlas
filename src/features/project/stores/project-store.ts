@@ -7,6 +7,7 @@ import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { useGitStore } from "@/features/git/stores/git-store";
 import { useSessionStore } from "./session-store";
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
+import { useChatStore } from "@/features/chat/stores/chat-store";
 import { logEvent } from "@/features/log/lib/log";
 
 interface Project {
@@ -104,6 +105,18 @@ export const useProjectStore = createSelectors(
       openProject: async (path: string) => {
         const name = path.split("/").pop() ?? path;
 
+        // Wipe tabs + chat sessions from the previous project BEFORE the
+        // new project's loaders fire. Otherwise the layout-store's
+        // `loadEditorState` appends saved editor tabs on top of the old
+        // ones, and chat tabs (which aren't covered by editor-state
+        // persistence at all) survive every switch with dead acpSessionIds
+        // pointing at the old project's `.atlas/`.
+        const prevProjectPath = get().currentProject?.path;
+        if (prevProjectPath && prevProjectPath !== path) {
+          useLayoutStore.getState().actions.resetForProjectSwitch();
+          useChatStore.getState().actions.resetSessions();
+        }
+
         set((s) => ({
           currentProject: { name, path },
           recentProjects: [
@@ -140,6 +153,8 @@ export const useProjectStore = createSelectors(
         ]);
       },
       closeProject: () => {
+        useLayoutStore.getState().actions.resetForProjectSwitch();
+        useChatStore.getState().actions.resetSessions();
         set({ currentProject: null });
         scheduleSave(get());
       },

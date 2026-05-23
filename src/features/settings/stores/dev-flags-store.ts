@@ -16,8 +16,9 @@ interface DevFlagsState {
    *   - `claudeSetup.install()` simulates a fake install lifecycle
    *     (a few log lines → success tick → "not-authed") with no real
    *     subprocess.
-   *   - `claudeSetup.authLogin()` simulates a brief auth handshake and
-   *     flips to `ready`.
+   *   - `loadAuthMethods()` returns a hard-coded simulated chooser
+   *     instead of fetching from the ACP adapter, and `runAuthMethod()`
+   *     fakes a brief handshake and flips to `ready`.
    * Toggling this off triggers a real `claude_status` re-check so the
    * banner reflects the actual machine state again.
    */

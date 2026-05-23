@@ -76,13 +76,17 @@ export const MessageItem = memo(function MessageItem({
   /**
    * When true, suppress the avatar + role/timestamp header so consecutive
    * messages from the same role render as one continuous turn — matches
-   * Zed's grouped tool-call view.
+   * Zed's grouped tool-call view. Also collapses TOP padding so this
+   * message hugs the one above it.
    */
   compact?: boolean;
   /**
    * True when this is the final message of a consecutive same-role run.
-   * Only the last message in the group renders the Reply/Save/Copy row so
-   * the action affordances don't repeat after every text/tool sub-block.
+   * Only the last message in the group renders the Reply/Save/Copy row,
+   * and BOTTOM padding stays at the normal `py-6` value to anchor the
+   * end of the turn. Middle messages collapse to a tight bottom so the
+   * next sub-block (text → tool → text) hugs without visible gaps —
+   * fixes the "orange line" inter-block gaps the user flagged.
    */
   isLastInGroup?: boolean;
 }) {
@@ -98,7 +102,13 @@ export const MessageItem = memo(function MessageItem({
     <div
       className={cn(
         "group px-6",
-        compact ? "pt-1 pb-2" : "py-6",
+        // Top padding: tight when this message follows another from
+        // the same role (compact), normal otherwise (start of a turn).
+        compact ? "pt-1" : "pt-6",
+        // Bottom padding: tight unless this is the last of the run —
+        // then we anchor with normal spacing so the next user turn
+        // doesn't crowd the action row.
+        isLastInGroup ? "pb-6" : "pb-1",
         isUser && "bg-[var(--bg-primary)]",
         dividerAbove && "border-t border-dashed border-[var(--border-default)]"
       )}

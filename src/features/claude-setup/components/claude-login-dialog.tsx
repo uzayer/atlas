@@ -1,63 +1,42 @@
-import { useState } from "react";
+import { useEffect } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import {
-  ChevronRight,
-  Globe,
-  KeyRound,
-  Loader2,
-} from "lucide-react";
+import { ChevronRight, KeyRound, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useClaudeSetupStore } from "../stores/claude-setup-store";
+import type { AuthMethodWire } from "@/features/chat/lib/agents-api";
 
 /**
- * Two-option login dialog: paste an Anthropic API key, OR launch the
- * Claude Subscription OAuth flow (browser hand-off). Both paths complete
- * by re-running `claude_status` and flipping `phase` to `ready` if the
- * CLI reports authenticated.
- *
- * Mirrors the structure of `permission-modal.tsx` for visual consistency.
+ * Sign-in dialog rendered from the live `authMethods` list the ACP
+ * adapter (claude-agent-acp) advertised during `initialize`. The host's
+ * only job is to spawn the subprocess the adapter handed us — the
+ * vendored CLI inside the adapter does its own localhost-loopback OAuth
+ * (browser → localhost → CLI). No code paste, no PTY automation, no
+ * hand-rolled URL parsing.
  */
 export function ClaudeLoginDialog() {
   const open = useClaudeSetupStore.use.loginDialogOpen();
-  const phase = useClaudeSetupStore.use.phase();
-  const { authLogin, closeLoginDialog } = useClaudeSetupStore.use.actions();
+  const authMethods = useClaudeSetupStore.use.authMethods();
+  const authRun = useClaudeSetupStore.use.authRun();
+  const { loadAuthMethods, runAuthMethod, closeLoginDialog } =
+    useClaudeSetupStore.use.actions();
 
-  const [mode, setMode] = useState<"choose" | "api-key">("choose");
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
-
-  const submitApiKey = async () => {
-    const trimmed = apiKey.trim();
-    if (!trimmed) {
-      setApiKeyError("Paste your Anthropic API key.");
-      return;
+  // Load the methods list every time the dialog opens. The Rust side
+  // already cached them on the AgentManager (per spawned agent), so
+  // this is just an IPC round-trip — cheap.
+  useEffect(() => {
+    if (open) {
+      void loadAuthMethods();
     }
-    if (!trimmed.startsWith("sk-ant-")) {
-      setApiKeyError("Doesn't look like an Anthropic key (expected sk-ant-…).");
-      return;
-    }
-    setApiKeyError(null);
-    await authLogin({ kind: "api_key", value: trimmed });
-  };
+  }, [open, loadAuthMethods]);
 
-  const startSubscription = () => {
-    void authLogin({ kind: "subscription" });
-  };
-
-  const reset = () => {
-    setMode("choose");
-    setApiKey("");
-    setApiKeyError(null);
-  };
+  const isRunning = authRun.phase === "running";
+  const isFailed = authRun.phase === "failed";
 
   return (
     <Dialog.Root
       open={open}
       onOpenChange={(next) => {
-        if (!next) {
-          reset();
-          closeLoginDialog();
-        }
+        if (!next) closeLoginDialog();
       }}
     >
       <Dialog.Portal>
@@ -76,110 +55,64 @@ export function ClaudeLoginDialog() {
                 Sign in to Claude Code
               </Dialog.Title>
               <Dialog.Description className="mt-0.5 text-xs text-text-secondary">
-                Atlas runs prompts through your local <span className="font-mono">claude</span>{" "}
-                CLI. Pick how you'd like to authenticate.
+                Atlas runs prompts through the{" "}
+                <span className="font-mono">claude-agent-acp</span> adapter.
+                Pick how you'd like to authenticate.
               </Dialog.Description>
             </div>
           </div>
 
-          {mode === "choose" && (
+          {/* Chooser — visible until the user picks a method. */}
+          {!isRunning && (
             <div className="flex flex-col gap-1.5 px-4 py-3">
-              <ChoiceButton
-                icon={<KeyRound className="size-3.5 shrink-0" />}
-                label="Anthropic API Key"
-                description="Paste an sk-ant-… key from console.anthropic.com"
-                onClick={() => setMode("api-key")}
-              />
-              <ChoiceButton
-                icon={<Globe className="size-3.5 shrink-0" />}
-                label="Claude Subscription"
-                description="Open the OAuth flow in your browser to sign in with your Claude account."
-                onClick={startSubscription}
-              />
-            </div>
-          )}
-
-          {mode === "api-key" && (
-            <div className="flex flex-col gap-2 px-4 py-3">
-              <label className="text-[11px] text-text-secondary">
-                Anthropic API Key
-              </label>
-              <input
-                type="password"
-                autoFocus
-                value={apiKey}
-                onChange={(e) => {
-                  setApiKey(e.target.value);
-                  if (apiKeyError) setApiKeyError(null);
-                }}
-                placeholder="sk-ant-…"
-                disabled={phase === "authing"}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void submitApiKey();
-                  }
-                }}
-                className={cn(
-                  "w-full rounded-sm border bg-bg-base px-2 py-1.5 font-mono text-xs",
-                  "outline-none focus:border-[var(--border-focus)]",
-                  apiKeyError
-                    ? "border-[var(--status-error)]/60"
-                    : "border-border-default",
-                )}
-              />
-              {apiKeyError && (
-                <p className="text-[11px] text-[var(--status-error)]">{apiKeyError}</p>
+              {authMethods.length === 0 ? (
+                <div className="inline-flex items-center gap-1.5 text-xs text-text-tertiary px-1 py-2">
+                  <Loader2 className="size-3 animate-spin text-accent" />
+                  Loading sign-in options…
+                </div>
+              ) : (
+                authMethods.map((m) => (
+                  <ChoiceButton
+                    key={m.id}
+                    method={m}
+                    onClick={() => void runAuthMethod(m.id)}
+                  />
+                ))
               )}
-              <p className="text-[10px] text-text-tertiary">
-                Stored in <span className="font-mono">~/.claude/.credentials.json</span> with
-                user-only permissions; the Claude CLI reads it from there.
-              </p>
-              <div className="mt-1 flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => setMode("choose")}
-                  className="rounded-sm px-2.5 py-1 text-xs text-text-secondary hover:bg-bg-base hover:text-text-primary"
-                >
-                  ← Back
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void submitApiKey()}
-                  disabled={phase === "authing"}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-sm border border-border-default bg-bg-base px-3 py-1 text-xs",
-                    "hover:bg-bg-hover hover:text-text-primary disabled:opacity-50 disabled:cursor-not-allowed",
-                  )}
-                >
-                  {phase === "authing" ? (
-                    <Loader2 className="size-3.5 animate-spin text-accent" />
-                  ) : null}
-                  Save & verify
-                </button>
-              </div>
             </div>
           )}
 
-          {phase === "authing" && mode === "choose" && (
-            <div className="border-t border-border-default bg-bg-base px-4 py-2.5 text-[11px] text-text-secondary">
-              <span className="inline-flex items-center gap-1.5">
+          {/* Waiting — the spawned subprocess opens the browser and waits
+              for the localhost callback. We have no progress signal until
+              the subprocess exits, so just show a clear waiting state. */}
+          {isRunning && (
+            <div className="flex flex-col gap-2 px-4 py-3 text-xs">
+              <div className="inline-flex items-center gap-1.5 text-text-secondary">
                 <Loader2 className="size-3 animate-spin text-accent" />
-                Waiting for browser sign-in to complete…
-              </span>
+                Waiting for browser sign-in…
+              </div>
+              <p className="text-[11px] text-text-tertiary leading-relaxed">
+                Your browser should open to the Anthropic sign-in page. Click
+                Authorize and this dialog will close automatically.
+              </p>
+            </div>
+          )}
+
+          {isFailed && (
+            <div className="flex flex-col gap-1.5 border-t border-border-default px-4 py-2.5 text-xs">
+              <p className="text-[11px] text-[var(--status-error)]">
+                {authRun.message}
+              </p>
             </div>
           )}
 
           <div className="flex justify-end gap-2 border-t border-border-default px-4 py-2.5">
             <button
               type="button"
-              onClick={() => {
-                reset();
-                closeLoginDialog();
-              }}
+              onClick={closeLoginDialog}
               className="rounded-sm px-2.5 py-1 text-xs text-text-secondary hover:bg-bg-base hover:text-text-primary"
             >
-              Cancel (ESC)
+              {isRunning ? "Cancel" : "Close (ESC)"}
             </button>
           </div>
         </Dialog.Content>
@@ -189,29 +122,41 @@ export function ClaudeLoginDialog() {
 }
 
 function ChoiceButton({
-  icon,
-  label,
-  description,
+  method,
   onClick,
 }: {
-  icon: React.ReactNode;
-  label: string;
-  description: string;
+  method: AuthMethodWire;
   onClick: () => void;
 }) {
+  // Methods without a terminal-auth spec can't be run from the host —
+  // the adapter expected us to handle them via the ACP `authenticate()`
+  // call (gateway path). We don't yet, so disable the row + explain.
+  const runnable = method.terminalCommand !== null;
+  const description =
+    method.description ??
+    method.terminalLabel ??
+    (runnable ? "Sign in via terminal" : "Not yet supported in Atlas");
+
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={runnable ? onClick : undefined}
+      disabled={!runnable}
       className={cn(
         "group flex items-start gap-3 rounded-sm border border-border-default bg-bg-base px-3 py-2.5 text-left",
-        "transition-colors hover:bg-bg-hover",
+        "transition-colors",
+        runnable
+          ? "hover:bg-bg-hover"
+          : "opacity-50 cursor-not-allowed",
       )}
     >
-      <span className="mt-0.5 text-text-primary">{icon}</span>
       <span className="flex-1 min-w-0">
-        <span className="block text-xs font-medium text-text-primary">{label}</span>
-        <span className="mt-0.5 block text-[11px] text-text-secondary">{description}</span>
+        <span className="block text-xs font-medium text-text-primary">
+          {method.name}
+        </span>
+        <span className="mt-0.5 block text-[11px] text-text-secondary">
+          {description}
+        </span>
       </span>
       <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-text-tertiary group-hover:text-text-primary transition-colors" />
     </button>

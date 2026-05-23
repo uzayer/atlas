@@ -1,19 +1,83 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use agent_client_protocol::schema::{
-    InitializeRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SessionId, SessionNotification,
+    ClientCapabilities, InitializeRequest, ProtocolVersion, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SessionId, SessionNotification,
 };
 use agent_client_protocol::{Agent, ConnectionTo};
 use agent_client_protocol_tokio::{AcpAgent, LineDirection};
 use dashmap::DashMap;
+use serde::Serialize;
+use serde_json::{Map, Value};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::error::{AcpError, Result};
 use crate::events::{AcpEvent, EventSink};
 use crate::registry::AgentId;
+
+/// Per-(agent, session) lifecycle guard the driver consults before
+/// forwarding any inbound event to the rest of the stack. Created on
+/// `register_session` and dropped on `drop_session`.
+///
+/// The guard solves a real race: when the user hits Stop, the host
+/// fires `cancel_turn` which (a) sends a `CancelNotification` to the
+/// agent and (b) drops the senders for already-pending permission
+/// requests so the driver's `rx.await` resolves as `Cancelled`. But
+/// the agent may already have a `RequestPermissionRequest` or a
+/// `SessionUpdate` in flight. Without the guard the driver happily
+/// dispatches it — the user gets a permission popup ~seconds AFTER
+/// hitting Stop, or sees stale assistant chunks accrue in the
+/// transcript. With the guard set to `cancelled = true`, the driver
+/// rejects late inbound traffic at the protocol boundary and the
+/// frontend never knows it existed.
+///
+/// `turn_epoch` is bumped on every `mark_turn_started` so future work
+/// (e.g. dropping events for a stale-but-not-cancelled prior turn)
+/// has a monotonic counter to compare against. Today only the
+/// `cancelled` flag is read at the gate; `turn_epoch` is kept for
+/// the upcoming multi-agent / multi-workspace use cases the user
+/// flagged (rapid Stop + new prompt on the same session, etc).
+pub struct SessionGuard {
+    pub turn_epoch: AtomicU64,
+    pub cancelled: AtomicBool,
+}
+
+impl SessionGuard {
+    pub fn new() -> Self {
+        Self {
+            turn_epoch: AtomicU64::new(0),
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    /// True if any event for this session should be dropped at the
+    /// driver (cancelled and not yet re-armed by a new turn).
+    fn is_blocked(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Called by the registry on `cancel_turn`.
+    pub fn mark_cancelled(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    /// Called by the registry on `mark_turn_started`. Re-arms the
+    /// guard so subsequent inbound events for this session flow
+    /// through again.
+    pub fn mark_turn_started(&self) {
+        self.turn_epoch.fetch_add(1, Ordering::AcqRel);
+        self.cancelled.store(false, Ordering::Release);
+    }
+}
+
+/// Per-agent map of session lifecycle guards. The driver consults
+/// this on every inbound notification/request; the registry mutates
+/// it from `register_session` / `drop_session` / `cancel_turn` /
+/// `mark_turn_started`.
+pub type SessionGuards = DashMap<SessionId, Arc<SessionGuard>>;
 
 /// One outstanding permission request waiting on the UI.
 pub struct PendingPermissionEntry {
@@ -35,8 +99,96 @@ pub type PendingPermissions = DashMap<Uuid, PendingPermissionEntry>;
 pub struct AgentRuntime {
     pub connection: ConnectionTo<Agent>,
     pub pending_permissions: Arc<PendingPermissions>,
+    /// Per-session lifecycle guards. Shared `Arc` so the driver task
+    /// reads it on every inbound event while the registry mutates it
+    /// from cancel / start / drop. See [`SessionGuard`].
+    pub session_guards: Arc<SessionGuards>,
     /// Drop to ask the driver task to shut down.
     pub shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Auth methods the agent advertised in its `InitializeResponse`.
+    /// For claude-agent-acp these include "Claude Subscription" and
+    /// "Anthropic Console" entries with `_meta.terminal-auth` carrying
+    /// the exact subprocess spec the host must run to drive the OAuth
+    /// flow. Returned as a JSON-friendly projection so the Tauri layer
+    /// can hand them straight to the frontend.
+    pub auth_methods: Vec<AuthMethodWire>,
+}
+
+/// JSON-friendly projection of `AuthMethod` for the wire. The ACP Rust
+/// schema's `AuthMethod` struct only has `id`/`name`/`description`/`meta`,
+/// but claude-agent-acp puts the actual usable spec (subprocess command +
+/// args) inside `_meta.terminal-auth`. We pull that out here so the
+/// frontend doesn't have to know the meta key layout.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthMethodWire {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// `_meta.terminal-auth.command` — typically `process.execPath` (the
+    /// adapter's Node binary). Required to actually run the auth flow.
+    pub terminal_command: Option<String>,
+    /// `_meta.terminal-auth.args` — the full argv tail to hand to the
+    /// command above (already includes `--cli auth login --claudeai`
+    /// etc., relative to the adapter binary).
+    pub terminal_args: Option<Vec<String>>,
+    /// `_meta.terminal-auth.label` — human-readable label the adapter
+    /// suggests for any UI affordance that runs the spec.
+    pub terminal_label: Option<String>,
+}
+
+impl AuthMethodWire {
+    /// Project an `AuthMethod` re-serialized as JSON. We go through JSON
+    /// instead of matching the enum directly because the `Terminal`
+    /// variant is gated on the `unstable_auth_methods` feature flag and
+    /// without it the wire-level `type: "terminal"` + top-level `args`
+    /// silently fall through to the `Agent` variant during deserialization.
+    /// The `_meta.terminal-auth` block survives either way and is the
+    /// canonical source of the subprocess spec — read it directly.
+    fn from_json(v: &Value) -> Option<Self> {
+        let obj = v.as_object()?;
+        let id = obj.get("id")?.as_str()?.to_string();
+        let name = obj.get("name")?.as_str()?.to_string();
+        let description = obj.get("description").and_then(|d| d.as_str()).map(String::from);
+        let (terminal_command, terminal_args, terminal_label) = obj
+            .get("_meta")
+            .and_then(|m| m.as_object())
+            .and_then(|m| extract_terminal_auth(m))
+            .map(|t| (Some(t.command), Some(t.args), t.label))
+            .unwrap_or((None, None, None));
+        Some(Self {
+            id,
+            name,
+            description,
+            terminal_command,
+            terminal_args,
+            terminal_label,
+        })
+    }
+}
+
+struct TerminalAuth {
+    command: String,
+    args: Vec<String>,
+    label: Option<String>,
+}
+
+fn extract_terminal_auth(meta: &Map<String, Value>) -> Option<TerminalAuth> {
+    let ta = meta.get("terminal-auth")?.as_object()?;
+    let command = ta.get("command").and_then(|v| v.as_str())?.to_string();
+    let args = ta
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let label = ta.get("label").and_then(|v| v.as_str()).map(String::from);
+    Some(TerminalAuth { command, args, label })
+}
+
+/// What the driver hands back when initialize completes.
+pub struct InitializedAgent {
+    pub connection: ConnectionTo<Agent>,
+    pub auth_methods: Vec<AuthMethodWire>,
 }
 
 /// Spawn an ACP agent and wait for its `initialize` handshake to complete.
@@ -50,10 +202,12 @@ pub async fn spawn_agent(
     sink: Arc<dyn EventSink>,
 ) -> Result<AgentRuntime> {
     let pending: Arc<PendingPermissions> = Arc::new(DashMap::new());
-    let (ready_tx, ready_rx) = oneshot::channel::<Result<ConnectionTo<Agent>>>();
+    let guards: Arc<SessionGuards> = Arc::new(DashMap::new());
+    let (ready_tx, ready_rx) = oneshot::channel::<Result<InitializedAgent>>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let pending_for_task = pending.clone();
+    let guards_for_task = guards.clone();
     let sink_for_task = sink.clone();
     let command_for_task = command.clone();
 
@@ -63,6 +217,7 @@ pub async fn spawn_agent(
             command_for_task,
             sink_for_task.clone(),
             pending_for_task,
+            guards_for_task,
             ready_tx,
             shutdown_rx,
         )
@@ -75,14 +230,16 @@ pub async fn spawn_agent(
         sink_for_task.emit(agent_id, AcpEvent::AgentDisconnected { reason });
     });
 
-    let connection = ready_rx
+    let initialized = ready_rx
         .await
         .map_err(|_| AcpError::other("driver task panicked before initialize"))??;
 
     Ok(AgentRuntime {
-        connection,
+        connection: initialized.connection,
         pending_permissions: pending,
+        session_guards: guards,
         shutdown_tx: Some(shutdown_tx),
+        auth_methods: initialized.auth_methods,
     })
 }
 
@@ -91,7 +248,8 @@ async fn run_driver(
     command: String,
     sink: Arc<dyn EventSink>,
     pending: Arc<PendingPermissions>,
-    ready_tx: oneshot::Sender<Result<ConnectionTo<Agent>>>,
+    guards: Arc<SessionGuards>,
+    ready_tx: oneshot::Sender<Result<InitializedAgent>>,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
     let sink_dbg = sink.clone();
@@ -116,11 +274,37 @@ async fn run_driver(
     let sink_notif = sink.clone();
     let sink_perm = sink.clone();
     let pending_for_handler = pending.clone();
+    let guards_for_notif = guards.clone();
+    let guards_for_perm = guards.clone();
 
     agent_client_protocol::Client
         .builder()
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
+                // Drop late updates for cancelled sessions at the
+                // protocol boundary. Without this gate, assistant
+                // chunks or tool calls emitted between the user's Stop
+                // and the agent's terminal `stop_reason: cancelled`
+                // would contaminate the transcript.
+                //
+                // "Guard missing" is treated as PASS-THROUGH (not
+                // blocked) deliberately: the agent often emits early
+                // notifications (e.g. `available_commands_update`)
+                // before `new_session` returns to the host, so the
+                // guard may not be installed yet when those land.
+                // Guards only exist to BLOCK; absence means "no
+                // opinion, let it through."
+                if let Some(guard) = guards_for_notif.get(&notification.session_id) {
+                    if guard.is_blocked() {
+                        tracing::debug!(
+                            target: "atlas_acp::driver",
+                            agent = ?agent_id,
+                            session = ?notification.session_id,
+                            "dropping late SessionUpdate (session cancelled)"
+                        );
+                        return Ok(());
+                    }
+                }
                 sink_notif.emit(
                     agent_id,
                     AcpEvent::SessionUpdate {
@@ -134,6 +318,30 @@ async fn run_driver(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _connection| {
+                // Auto-reject permission requests for cancelled
+                // sessions. The agent gets a clean `Cancelled`
+                // outcome (so its turn can wind down per ACP spec)
+                // and the frontend never sees a popup it shouldn't
+                // have to dismiss.
+                //
+                // Missing guard = pass through (see notification
+                // handler comment for why).
+                let blocked = guards_for_perm
+                    .get(&request.session_id)
+                    .map(|g| g.is_blocked())
+                    .unwrap_or(false);
+                if blocked {
+                    tracing::debug!(
+                        target: "atlas_acp::driver",
+                        agent = ?agent_id,
+                        session = ?request.session_id,
+                        "auto-cancelling permission request for cancelled session"
+                    );
+                    return responder.respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ));
+                }
+
                 let request_id = Uuid::new_v4();
                 let (tx, rx) = oneshot::channel::<RequestPermissionOutcome>();
                 pending_for_handler.insert(
@@ -166,14 +374,43 @@ async fn run_driver(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(agent, |connection: ConnectionTo<Agent>| async move {
+            // Advertise `_meta.terminal-auth: true` so adapters like
+            // claude-agent-acp populate the response's `authMethods`
+            // with structured subprocess specs we can actually run.
+            // Without this flag the adapter returns an empty auth-methods
+            // list and `/login` has no way to launch the OAuth flow.
+            let mut caps = ClientCapabilities::default();
+            let mut meta = Map::new();
+            meta.insert("terminal-auth".into(), Value::Bool(true));
+            caps.meta = Some(meta);
+
             let init_result = connection
-                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .send_request(
+                    InitializeRequest::new(ProtocolVersion::V1).client_capabilities(caps),
+                )
                 .block_task()
                 .await;
 
             match init_result {
-                Ok(_) => {
-                    let _ = ready_tx.send(Ok(connection.clone()));
+                Ok(resp) => {
+                    // Re-serialize and pick out the auth methods as JSON.
+                    // See AuthMethodWire::from_json for why.
+                    let methods: Vec<AuthMethodWire> = serde_json::to_value(&resp)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("authMethods")
+                                .and_then(|a| a.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(AuthMethodWire::from_json)
+                                        .collect()
+                                })
+                        })
+                        .unwrap_or_default();
+                    let _ = ready_tx.send(Ok(InitializedAgent {
+                        connection: connection.clone(),
+                        auth_methods: methods,
+                    }));
                 }
                 Err(e) => {
                     let _ = ready_tx.send(Err(AcpError::Protocol(format!("{e:?}"))));

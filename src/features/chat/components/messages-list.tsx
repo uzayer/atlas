@@ -34,6 +34,21 @@ export interface MessagesListHandle {
 const scrollPositionCache = new Map<string, number>();
 const NEAR_BOTTOM_PX = 100;
 
+/** A message is "empty" — would render nothing visible — when it has
+ *  no prose, no thinking text, no tool calls, no file changes, and no
+ *  plan. claude-agent-acp routinely emits empty `thinking` blocks
+ *  (signature-only, content `""`) as turn markers; rendering them
+ *  produces phantom message-items whose wrapper padding shows up as
+ *  unexplained gaps in the thread. Filter them out at the list level. */
+function isEmptyMessage(m: ChatMessage): boolean {
+  const hasProse = m.content && m.content.trim().length > 0;
+  const hasThinking = m.thinking && m.thinking.trim().length > 0;
+  const hasTools = m.toolCalls.length > 0;
+  const hasFiles = m.fileChanges.length > 0;
+  const hasPlan = m.plan != null && m.plan.length > 0;
+  return !hasProse && !hasThinking && !hasTools && !hasFiles && !hasPlan;
+}
+
 export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   function MessagesList(
     {
@@ -57,21 +72,28 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   // implementation used `messages.findIndex` per filtered message, making
   // this O(n²) on every streaming chunk (hot path) — at a few thousand
   // messages it was the single biggest contributor to UI stutter.
+  //
+  // We also drop phantom-empty messages (e.g. claude-agent-acp's empty
+  // `thinking` blocks that arrive with `thinking: ""`). They render
+  // nothing but still pay the MessageItem wrapper's vertical padding,
+  // which used to show up as a mystery gap in the thread.
   const { filtered, indexMap } = useMemo(() => {
-    if (roleFilter === "all") {
-      const idx = messages.map((_, i) => i);
-      return { filtered: messages, indexMap: idx };
-    }
     const filt: ChatMessage[] = [];
     const idx: number[] = [];
+    const lastIdx = messages.length - 1;
     for (let i = 0; i < messages.length; i++) {
-      if (messages[i].role === roleFilter) {
-        filt.push(messages[i]);
-        idx.push(i);
-      }
+      const m = messages[i];
+      if (roleFilter !== "all" && m.role !== roleFilter) continue;
+      // Keep the streaming-tail message even if it's transiently empty
+      // so MessageItem can render its "Thinking…" spinner; otherwise
+      // drop phantom-empty messages so they don't add invisible gaps.
+      const isStreamingTail = isStreaming && i === lastIdx && m.role === "assistant";
+      if (!isStreamingTail && isEmptyMessage(m)) continue;
+      filt.push(m);
+      idx.push(i);
     }
     return { filtered: filt, indexMap: idx };
-  }, [messages, roleFilter]);
+  }, [messages, roleFilter, isStreaming]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,

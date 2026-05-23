@@ -4,7 +4,26 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-agent-client-protocol = "0.11"
+# Enable every `unstable_*` schema feature — claude-agent-acp's SDK
+# emits notifications gated on these (e.g. `usage_update`, `current_model_update`).
+# Without them turned on, the strongly-typed `SessionNotification` deserializer
+# rejects the unknown variant with a `-32602 Invalid params`, the agent's
+# `await client.sessionUpdate(...)` throws, and downstream output (slash
+# command bodies, streaming chunks after the rejected one) is dropped on
+# the floor. Keep this list in sync with whatever the vendored adapter at
+# `third-party/claude-agent-acp/` actually sends.
+agent-client-protocol = { version = "0.11", features = [
+    "unstable_auth_methods",
+    "unstable_boolean_config",
+    "unstable_logout",
+    "unstable_message_id",
+    "unstable_session_additional_directories",
+    "unstable_session_close",
+    "unstable_session_fork",
+    "unstable_session_model",
+    "unstable_session_resume",
+    "unstable_session_usage",
+] }
 agent-client-protocol-tokio = "0.11"
 tokio = { version = "1.52", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

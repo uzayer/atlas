@@ -43,6 +43,11 @@ import {
   type MentionKeyInterceptor,
   type MentionTrigger,
 } from "../lib/cm-mention-extension";
+import {
+  slashTriggerPlugin,
+  type SlashKeyInterceptor,
+  type SlashTrigger,
+} from "../lib/cm-slash-extension";
 import type { MentionData } from "../lib/mentions";
 
 export interface ChatInputHandle {
@@ -74,11 +79,16 @@ interface ChatInputProps {
   onSubmit?: () => void;
   /** Fires whenever the `@` trigger range changes (open or close). */
   onMentionTrigger?: (trigger: MentionTrigger | null) => void;
+  /** Fires whenever the `/` trigger range changes (open or close). */
+  onSlashTrigger?: (trigger: SlashTrigger | null) => void;
   /**
    * Lookup function called for Up/Down/Enter/Escape **before** CodeMirror's
    * default keymap. Return `true` to swallow the key (picker is open and
    * handled it); return `false` to pass through to CM. Read at keypress
    * time so callers can change it without remounting the view.
+   *
+   * Wired to both the mention and slash keymaps — the parent decides which
+   * picker is open and routes accordingly.
    */
   keyInterceptor?: MentionKeyInterceptor | null;
   /** Slot for future extensions. */
@@ -97,6 +107,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
       onChange,
       onSubmit,
       onMentionTrigger,
+      onSlashTrigger,
       keyInterceptor,
       extraExtensions,
       minHeight = 44,
@@ -116,7 +127,11 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
     onSubmitRef.current = onSubmit;
     const onMentionTriggerRef = useRef(onMentionTrigger);
     onMentionTriggerRef.current = onMentionTrigger;
-    const keyInterceptorRef = useRef(keyInterceptor);
+    const onSlashTriggerRef = useRef(onSlashTrigger);
+    onSlashTriggerRef.current = onSlashTrigger;
+    const keyInterceptorRef = useRef<
+      MentionKeyInterceptor | SlashKeyInterceptor | null | undefined
+    >(keyInterceptor);
     keyInterceptorRef.current = keyInterceptor;
 
     // Build the theme once — sized to the container, transparent
@@ -244,14 +259,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
             }),
             ...mentionExtension,
             mentionTriggerPlugin((t) => onMentionTriggerRef.current?.(t)),
-            // Prec.highest puts the mention keymap above lang-markdown's
+            slashTriggerPlugin((t) => onSlashTriggerRef.current?.(t)),
+            // Prec.highest puts the picker keymap above lang-markdown's
             // Enter binding (which would otherwise continue a bullet) and
-            // above the default Enter (which inserts a newline). When the
-            // picker is open the interceptor consumes Up/Down/Enter/Esc/
-            // Backspace; when it's closed the interceptor returns false
-            // and the lower-precedence keymaps run normally.
+            // above the default Enter (which inserts a newline). The
+            // mention and slash pickers share an interceptor signature —
+            // the parent routes by which trigger state is non-null — so
+            // one keymap fronts both pickers and we avoid running the
+            // interceptor twice per keypress.
             Prec.highest(
-              keymap.of(mentionKeymap(() => keyInterceptorRef.current ?? null))
+              keymap.of(
+                mentionKeymap(
+                  () =>
+                    (keyInterceptorRef.current as MentionKeyInterceptor | null) ?? null,
+                )
+              )
             ),
             ...(extensionsKey ?? []),
           ],

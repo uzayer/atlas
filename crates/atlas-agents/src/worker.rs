@@ -16,9 +16,15 @@ use crate::session::{SessionState, SessionStatus, new_user_message};
 
 /// Commands the worker accepts. All entry points (Tauri commands) drop into
 /// this enum so the worker can serialise turn execution against state changes.
+///
+/// Note: there is intentionally no `Cancel` variant. Cancel cannot go
+/// through this queue because the worker spends most of its time
+/// `await`ing `send_prompt` for an in-flight turn — a queued cancel
+/// would only get processed after the turn it was meant to stop has
+/// naturally ended. `AgentManager::cancel` instead calls the registry
+/// directly so the driver's cancellation guard is set immediately.
 pub enum SessionCommand {
     SendPrompt(String),
-    Cancel,
     SetMode(String),
     SetModel(String),
     RespondPermission {
@@ -46,13 +52,6 @@ impl SessionWorker {
             match cmd {
                 SessionCommand::SendPrompt(text) => {
                     self.handle_send(text).await;
-                }
-                SessionCommand::Cancel => {
-                    if let Err(e) =
-                        self.registry.cancel_turn(self.agent_id, self.acp_session_id.clone())
-                    {
-                        tracing::warn!(target: "atlas_agents::worker", "cancel failed: {e}");
-                    }
                 }
                 SessionCommand::SetMode(mode_id) => {
                     if let Err(e) = self
@@ -90,20 +89,38 @@ impl SessionWorker {
     }
 
     async fn handle_send(&self, text: String) {
-        // 1. Append the user message to state.
+        // 1. Append the user message to local state for replay parity
+        // (snapshot / cold-attach callers read state.messages). The
+        // frontend already added the same message optimistically in
+        // chat-panel's handleSend before invoking agents.send, so we
+        // deliberately do NOT emit a MessageAppended delta here —
+        // doing so would render the user message twice in the chat
+        // thread. The Status delta below is still emitted so the UI
+        // can flip the spinner / disable send.
         let user_msg = new_user_message(text.clone());
         {
             let mut st = self.state.lock();
-            st.messages.push(user_msg.clone());
+            st.messages.push(user_msg);
             st.status = SessionStatus::Running;
             st.touch();
         }
-        self.emit(SessionDelta::MessageAppended { message: user_msg });
         self.emit(SessionDelta::Status {
             status: SessionStatus::Running,
         });
 
-        // 2. Drive the prompt. Notifications during the turn arrive via the
+        // 2. Re-arm the session's lifecycle guard. If the previous turn
+        // was cancelled, the driver was dropping all inbound traffic
+        // for this session id; this clears that flag so events for the
+        // new turn flow through. Cheap (an `AtomicBool` store + an
+        // `AtomicU64` increment).
+        if let Err(e) = self
+            .registry
+            .mark_turn_started(self.agent_id, &self.acp_session_id)
+        {
+            tracing::warn!(target: "atlas_agents::worker", "mark_turn_started failed: {e}");
+        }
+
+        // 3. Drive the prompt. Notifications during the turn arrive via the
         // manager's EventSink, mutate state, and emit their own deltas — we
         // don't see them here.
         let result = self

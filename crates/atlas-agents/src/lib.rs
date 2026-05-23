@@ -31,4 +31,4 @@ pub use session::{
 
 // Re-export common atlas-acp identifiers so the Tauri layer only needs to
 // depend on this crate for the high-level surface.
-pub use atlas_acp::{AgentId, AgentInfo, PermissionDecision, SessionId, StopReason};
+pub use atlas_acp::{AgentId, AgentInfo, AuthMethodWire, PermissionDecision, SessionId, StopReason};

@@ -12,6 +12,7 @@ pub mod error;
 pub mod events;
 pub mod registry;
 
+pub use driver::AuthMethodWire;
 pub use error::{AcpError, Result};
 pub use events::{AcpEvent, EventSink};
 pub use registry::{

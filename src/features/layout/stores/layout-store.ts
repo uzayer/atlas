@@ -65,6 +65,11 @@ interface LayoutActions {
     activateTabByIndex: (i: number) => void;
     saveEditorState: (projectPath: string) => void;
     loadEditorState: (projectPath: string) => Promise<void>;
+    /** Wipe tabs/history back to the welcome-chat baseline. Called when
+     *  the user switches projects so the previous project's editor / chat
+     *  tabs don't leak into the new one. Panel layout (widths, sidebar
+     *  visibility) is intentionally preserved — those are user prefs. */
+    resetForProjectSwitch: () => void;
   };
 }
 
@@ -253,6 +258,22 @@ export const useLayoutStore = createSelectors(
             stateJson: JSON.stringify(data),
           }).catch(() => {});
         },
+        resetForProjectSwitch: () =>
+          set((s) => {
+            s.tabs = [
+              {
+                id: "welcome-chat",
+                type: "chat",
+                title: "Chat",
+                closable: false,
+                dirty: false,
+                data: {},
+              },
+            ];
+            s.activeTabId = "welcome-chat";
+            s.tabHistory = ["welcome-chat"];
+            s.tabHistoryIndex = 0;
+          }),
         loadEditorState: async (projectPath) => {
           try {
             const raw = await invoke<string>("load_editor_state", { projectPath });

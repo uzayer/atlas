@@ -20,6 +20,29 @@ import type {
   SessionSnapshot,
 } from "@/types/agents";
 
+/** Mirror of `atlas_acp::AuthMethodWire` — auth methods the ACP adapter
+ *  advertised in its `initialize` response. The dialog renders one row
+ *  per entry and calls `runAuthMethod(method.id)` on selection. */
+export interface AuthMethodWire {
+  id: string;
+  name: string;
+  description: string | null;
+  terminalCommand: string | null;
+  terminalArgs: string[] | null;
+  terminalLabel: string | null;
+}
+
+export interface AuthRunDone {
+  success: boolean;
+  exitCode: number | null;
+  message: string | null;
+}
+
+export interface AuthRunProgress {
+  stream: "stdout" | "stderr";
+  line: string;
+}
+
 export const agents = {
   listPlugins: () => invoke<PluginSpec[]>("agents_list_plugins"),
   listRunning: () => invoke<AgentInfo[]>("agents_list_running"),
@@ -56,7 +79,22 @@ export const agents = {
       requestId,
       decision,
     }),
+
+  listAuthMethods: (agentId: AgentId) =>
+    invoke<AuthMethodWire[]>("agents_list_auth_methods", { agentId }),
+  runAuthMethod: (agentId: AgentId, methodId: string) =>
+    invoke<void>("agents_run_auth_method", { agentId, methodId }),
 };
+
+export const listenAuthRunProgress = (
+  handler: (p: AuthRunProgress) => void,
+): Promise<UnlistenFn> =>
+  listen<AuthRunProgress>("atlas:auth-run:progress", (e) => handler(e.payload));
+
+export const listenAuthRunDone = (
+  handler: (p: AuthRunDone) => void,
+): Promise<UnlistenFn> =>
+  listen<AuthRunDone>("atlas:auth-run:done", (e) => handler(e.payload));
 
 /**
  * Subscribe to the single multiplexed delta stream. Every delta carries

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use agent_client_protocol::schema as acp_schema;
 use atlas_acp::{
-    AcpEvent, AgentId, AgentInfo, AgentRegistry, EventSink, NewSessionInfo, PermissionDecision,
-    SessionId,
+    AcpEvent, AgentId, AgentInfo, AgentRegistry, AuthMethodWire, EventSink, NewSessionInfo,
+    PermissionDecision, SessionId,
 };
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -80,6 +80,14 @@ impl AgentManager {
             .agent_plugins
             .insert(info.agent_id, plugin.plugin_id);
         Ok(info)
+    }
+
+    /// Auth methods the agent advertised during `initialize` — surfaced
+    /// to the UI so it can render a chooser populated from whatever the
+    /// adapter actually supports (Claude Subscription, Anthropic Console,
+    /// SSO, etc.) without hard-coding labels.
+    pub fn auth_methods(&self, agent_id: AgentId) -> Result<Vec<AuthMethodWire>> {
+        Ok(self.inner.acp.auth_methods(agent_id)?)
     }
 
     pub fn kill(&self, agent_id: AgentId) -> Result<()> {
@@ -177,8 +185,27 @@ impl AgentManager {
         self.handle_for(key)?.send(SessionCommand::SendPrompt(text))
     }
 
+    /// Cancel an in-flight turn IMMEDIATELY. We deliberately bypass the
+    /// worker's mpsc queue here because the worker is almost certainly
+    /// `await`ing `send_prompt` for the turn we want to cancel — that
+    /// await holds the loop, so a `SessionCommand::Cancel` queued
+    /// behind it wouldn't be processed until the turn naturally ended.
+    /// By calling `cancel_turn` directly on the registry we set the
+    /// driver's cancellation guard immediately, so the next inbound
+    /// event from the agent (text chunk, tool call, permission
+    /// request) is dropped at the protocol boundary instead of
+    /// reaching the chat-store and the UI.
+    ///
+    /// The agent will eventually wind down the turn and the worker's
+    /// `send_prompt` await will resolve with `StopReason::Cancelled` —
+    /// the worker then emits `TurnFinished` + the terminal `Status`
+    /// delta the same way it does for any clean turn end.
     pub fn cancel(&self, key: &SessionKey) -> Result<()> {
-        self.handle_for(key)?.send(SessionCommand::Cancel)
+        let handle = self.handle_for(key)?;
+        self.inner
+            .acp
+            .cancel_turn(handle.agent_id, handle.acp_session_id.clone())?;
+        Ok(())
     }
 
     pub fn set_mode(&self, key: &SessionKey, mode_id: String) -> Result<()> {

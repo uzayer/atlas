@@ -66,6 +66,10 @@ interface ChatActions {
     setTranscriptLoading: (sessionId: string, loading: boolean) => void;
     clearSession: (sessionId: string) => void;
     removeSession: (sessionId: string) => void;
+    /** Drop all chat sessions, queues, and pending permissions. Used when
+     *  the user switches projects so dead acpSessionIds from the old
+     *  project's `.atlas/` don't linger and cause ghost-bound tabs. */
+    resetSessions: () => void;
     cycleClaudePermissionMode: (sessionId: string) => void;
     setClaudePermissionMode: (
       sessionId: string,
@@ -111,9 +115,36 @@ interface ChatActions {
     appendAssistantText: (acpSessionId: string, text: string) => void;
     /** RAF-coalesced fast path for `agent_thought_chunk`. */
     appendAssistantThought: (acpSessionId: string, text: string) => void;
+    /**
+     * Apply a frame's worth of buffered events in a SINGLE immer pass.
+     * On a "read 30 files" turn the adapter emits ~60 `tool_call` /
+     * `tool_call_update` events plus a stream of text chunks. Calling
+     * `applyAgentDelta` (which is its own `set(...)`) per event paid an
+     * immer snapshot + subscriber notification per event — at 60 events
+     * that's 60 full structural-share passes over `s.sessions[tid]`
+     * and 60 `MessagesList` re-renders with `measureElement` work.
+     * Batching collapses that to 1 immer pass + 1 re-render per frame.
+     *
+     * The caller (App.tsx::listenAgents) is expected to:
+     *  - Dedupe `tool_call_upserted` by `(session, tool_call.id)` so
+     *    only the latest state for each tool call lands.
+     *  - Pass text/thought as merged-per-session strings (same as the
+     *    old per-event RAF flush did).
+     *  - Pass other deltas in wire order — they're applied verbatim.
+     */
+    applyAgentBatch: (batch: {
+      texts: Array<{ sessionId: string; text: string }>;
+      thoughts: Array<{ sessionId: string; text: string }>;
+      deltas: AgentDelta[];
+    }) => void;
     pushPermission: (req: PendingPermission) => void;
     popPermission: (acpSessionId: string, requestId: string) => void;
     clearPermissionsForAgent: (agentId: string) => void;
+    /** Drop every pending permission for a specific ACP session.
+     *  Called on Stop so a modal left over from the cancelled turn
+     *  doesn't linger and trick the user into clicking Allow on a
+     *  request the agent already abandoned. */
+    clearPermissionsForSession: (acpSessionId: string) => void;
   };
 }
 
@@ -352,6 +383,13 @@ export const useChatStore = createSelectors(
               s.activeSessionId = keys.length > 0 ? keys[0] : null;
             }
           }),
+        resetSessions: () =>
+          set((s) => {
+            s.sessions = {};
+            s.queues = {};
+            s.pendingPermissions = {};
+            s.activeSessionId = null;
+          }),
         enqueueMessage: (sessionId, text) =>
           set((s) => {
             const cur = s.queues[sessionId] ?? [];
@@ -392,44 +430,28 @@ export const useChatStore = createSelectors(
 
         appendAssistantText: (acpSessionId, text) =>
           set((s) => {
-            if (!text) return;
-            const tid = findTabByAcpSession(s.sessions, acpSessionId);
-            if (!tid) return;
-            const session = s.sessions[tid];
-            const last = session.messages[session.messages.length - 1];
-            // Append into the trailing text-mode message; otherwise start a
-            // new one so a preceding tool/thinking block isn't merged with
-            // unrelated narration.
-            //
-            // NOTE: deliberately not bumping `updatedAt` here. Streaming
-            // chunks fire dozens of times per second; touching `updatedAt`
-            // each time used to invalidate the sidebar's `hasRunning`/sort
-            // memos and re-render every top-level chat consumer per chunk.
-            // The sidebar sort still updates correctly via `addMessage`
-            // (user send) and the turn-end status flip.
-            if (
-              last &&
-              last.role === "assistant" &&
-              (last.mode === "text" || last.mode === undefined) &&
-              last.toolCalls.length === 0
-            ) {
-              last.content += text;
-              return;
-            }
-            session.messages.push(makeAssistantTextMessage(text));
+            appendTextToDraft(s, acpSessionId, text);
           }),
         appendAssistantThought: (acpSessionId, text) =>
           set((s) => {
-            if (!text) return;
-            const tid = findTabByAcpSession(s.sessions, acpSessionId);
-            if (!tid) return;
-            const session = s.sessions[tid];
-            const last = session.messages[session.messages.length - 1];
-            if (last && last.role === "assistant" && last.mode === "thinking") {
-              last.thinking = (last.thinking ?? "") + text;
-              return;
+            appendThoughtToDraft(s, acpSessionId, text);
+          }),
+        applyAgentBatch: ({ texts, thoughts, deltas }) =>
+          set((s) => {
+            // Single immer pass for everything buffered in this frame.
+            // Order is: text → thoughts → deltas. Within deltas, wire
+            // order is preserved by the caller (App.tsx's RAF flush);
+            // `tool_call_upserted` events are deduped there before
+            // arriving so we never apply the same tool-call id twice.
+            for (const { sessionId, text } of texts) {
+              appendTextToDraft(s, sessionId, text);
             }
-            session.messages.push(makeAssistantThinkingMessage(text));
+            for (const { sessionId, text } of thoughts) {
+              appendThoughtToDraft(s, sessionId, text);
+            }
+            for (const env of deltas) {
+              applyDeltaToDraft(s, env);
+            }
           }),
         setAcpBinding: (tabId, agentId, acpSessionId) =>
           set((s) => {
@@ -461,24 +483,89 @@ export const useChatStore = createSelectors(
               else s.pendingPermissions[sid] = list;
             }
           }),
+        clearPermissionsForSession: (acpSessionId) =>
+          set((s) => {
+            delete s.pendingPermissions[acpSessionId];
+          }),
         applyAgentDelta: (env) =>
           set((s) => {
-            const tid = findTabByAcpSession(s.sessions, env.session_id);
-            if (!tid) return;
-            const session = s.sessions[tid];
-            switch (env.kind) {
-              case "status": {
-                session.status =
-                  env.status === "idle"
-                    ? "idle"
-                    : env.status === "running"
-                      ? "running"
-                      : env.status === "waiting"
-                        ? "waiting"
-                        : "error";
-                return;
-              }
-              case "turn_finished": {
+            applyDeltaToDraft(s, env);
+          }),
+      },
+    }))
+  )
+);
+
+// ── Draft-mutating helpers ────────────────────────────────────────────────
+//
+// The chat-store hot path applies AgentDeltas inside an immer draft. To
+// support both the single-event `applyAgentDelta` and the RAF-coalesced
+// `applyAgentBatch` (which runs many events in ONE immer pass for a
+// large perf win on tool-heavy turns), the per-event logic lives in
+// these standalone functions instead of being inlined into `set(...)`.
+// They take the writable draft directly and mutate in place — no
+// `set(...)` inside, no return value.
+
+type ChatDraft = ChatState & ChatActions;
+
+function appendTextToDraft(s: ChatDraft, acpSessionId: string, text: string): void {
+  if (!text) return;
+  const tid = findTabByAcpSession(s.sessions, acpSessionId);
+  if (!tid) return;
+  const session = s.sessions[tid];
+  const last = session.messages[session.messages.length - 1];
+  // Append into the trailing text-mode message; otherwise start a new
+  // one so a preceding tool/thinking block isn't merged with unrelated
+  // narration.
+  //
+  // NOTE: deliberately not bumping `updatedAt` here. Streaming chunks
+  // fire dozens of times per second; touching `updatedAt` each time
+  // used to invalidate the sidebar's `hasRunning`/sort memos and
+  // re-render every top-level chat consumer per chunk. The sidebar
+  // sort still updates correctly via `addMessage` (user send) and the
+  // turn-end status flip.
+  if (
+    last &&
+    last.role === "assistant" &&
+    (last.mode === "text" || last.mode === undefined) &&
+    last.toolCalls.length === 0
+  ) {
+    last.content += text;
+    return;
+  }
+  session.messages.push(makeAssistantTextMessage(text));
+}
+
+function appendThoughtToDraft(s: ChatDraft, acpSessionId: string, text: string): void {
+  if (!text) return;
+  const tid = findTabByAcpSession(s.sessions, acpSessionId);
+  if (!tid) return;
+  const session = s.sessions[tid];
+  const last = session.messages[session.messages.length - 1];
+  if (last && last.role === "assistant" && last.mode === "thinking") {
+    last.thinking = (last.thinking ?? "") + text;
+    return;
+  }
+  session.messages.push(makeAssistantThinkingMessage(text));
+}
+
+function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
+  const tid = findTabByAcpSession(s.sessions, env.session_id);
+  if (!tid) return;
+  const session = s.sessions[tid];
+  switch (env.kind) {
+    case "status": {
+      session.status =
+        env.status === "idle"
+          ? "idle"
+          : env.status === "running"
+            ? "running"
+            : env.status === "waiting"
+              ? "waiting"
+              : "error";
+      return;
+    }
+    case "turn_finished": {
                 // Empty-turn detection: if no assistant content arrived
                 // between the last user message and turn-end, insert a
                 // placeholder so the UI doesn't show a vanishing spinner.
@@ -490,134 +577,163 @@ export const useChatStore = createSelectors(
                   }
                 }
                 const responded = session.messages
-                  .slice(lastUserIdx + 1)
-                  .some(
-                    (m) =>
-                      m.role === "assistant" &&
-                      ((m.content && m.content.length > 0) ||
-                        m.toolCalls.length > 0 ||
-                        (m.thinking && m.thinking.length > 0))
-                  );
-                if (!responded && env.stop_reason !== "cancelled") {
-                  const label =
-                    env.stop_reason === "end_turn"
-                      ? "(no response — the agent ended its turn without output)"
-                      : `(no response — stop_reason: ${env.stop_reason})`;
-                  session.messages.push(makeAssistantTextMessage(label));
-                }
-                session.status =
-                  env.stop_reason === "end_turn" ||
-                  env.stop_reason === "cancelled"
-                    ? "idle"
-                    : "error";
-                return;
-              }
-              case "turn_failed": {
-                session.messages.push(
-                  makeAssistantTextMessage(`ACP error: ${env.error}`)
-                );
-                session.status = "error";
-                return;
-              }
-              case "text_chunk": {
-                // Rust pre-decides "new message vs append" — every text_chunk
-                // refers to the trailing text-mode assistant message. We just
-                // append; MessageAppended events handle the "new message"
-                // case ahead of this.
-                const last = session.messages[session.messages.length - 1];
-                if (
-                  last &&
-                  last.role === "assistant" &&
-                  (last.mode === "text" || last.mode === undefined) &&
-                  last.toolCalls.length === 0
-                ) {
-                  last.content += env.delta;
-                } else {
-                  session.messages.push(makeAssistantTextMessage(env.delta));
-                }
-                return;
-              }
-              case "thinking_chunk": {
-                const last = session.messages[session.messages.length - 1];
-                if (last && last.role === "assistant" && last.mode === "thinking") {
-                  last.thinking = (last.thinking ?? "") + env.delta;
-                } else {
-                  session.messages.push(makeAssistantThinkingMessage(env.delta));
-                }
-                return;
-              }
-              case "message_appended": {
-                // Convert the Rust-shaped message into a ChatMessage and push.
-                // Rust already decided this is a new message; the frontend
-                // mirrors without re-deciding.
-                const m = env.message;
-                session.messages.push({
-                  id: m.id,
-                  role: m.role,
-                  content: m.content,
-                  thinking: m.thinking ?? "",
-                  toolCalls: m.tool_calls.map(toChatToolCall),
-                  fileChanges: [],
-                  plan: m.plan
-                    ? m.plan.map((e, idx) => ({
-                        id: `plan-${idx}`,
-                        description: e.content,
-                        status:
-                          (e.status as "pending" | "in_progress" | "completed") ??
-                          "pending",
-                      }))
-                    : null,
-                  timestamp: m.timestamp,
-                  mode: m.mode,
-                });
-                return;
-              }
-              case "tool_call_upserted": {
-                const found = findToolCall(session, env.tool_call.id);
-                if (found) {
-                  Object.assign(found.tc, toChatToolCall(env.tool_call));
-                  return;
-                }
-                session.messages.push(
-                  makeAssistantToolMessage(toChatToolCall(env.tool_call))
-                );
-                return;
-              }
-              case "plan_updated": {
-                const last = session.messages[session.messages.length - 1];
-                const planSteps = env.plan.map((e, idx) => ({
-                  id: `plan-${idx}`,
-                  description: e.content,
-                  status:
-                    (e.status as "pending" | "in_progress" | "completed") ??
-                    "pending",
-                }));
-                if (last && last.role === "assistant") {
-                  last.plan = planSteps;
-                } else {
-                  const fresh = makeAssistantTextMessage("");
-                  fresh.plan = planSteps;
-                  session.messages.push(fresh);
-                }
-                return;
-              }
-              case "available_commands": {
-                session.availableCommands = env.commands;
-                return;
-              }
-              case "mode_changed": {
-                session.acpCurrentMode = env.mode_id;
-                return;
-              }
-              case "model_changed": {
-                session.acpCurrentModel = env.model_id;
-                return;
-              }
-              default:
-                return;
+        .slice(lastUserIdx + 1)
+        .some(
+          (m) =>
+            m.role === "assistant" &&
+            ((m.content && m.content.length > 0) ||
+              m.toolCalls.length > 0 ||
+              (m.thinking && m.thinking.length > 0))
+        );
+      if (!responded && env.stop_reason !== "cancelled") {
+        const label =
+          env.stop_reason === "end_turn"
+            ? "(no response — the agent ended its turn without output)"
+            : `(no response — stop_reason: ${env.stop_reason})`;
+        session.messages.push(makeAssistantTextMessage(label));
+      }
+      // Resolve any tool calls still in pending/running state. After
+      // Stop, the driver gate drops further updates from the agent
+      // for this session, so an in-flight tool would otherwise spin
+      // forever. Mark them failed so the user sees a clear terminal
+      // state instead of a phantom loader.
+      if (env.stop_reason === "cancelled") {
+        for (const msg of session.messages) {
+          for (const tc of msg.toolCalls) {
+            if (tc.status === "pending" || tc.status === "running") {
+              tc.status = "failed";
             }
-          }),
-      },
-    }))
-  )
-);
+          }
+        }
+      }
+      session.status =
+        env.stop_reason === "end_turn" ||
+        env.stop_reason === "cancelled"
+          ? "idle"
+          : "error";
+      return;
+    }
+    case "turn_failed": {
+      session.messages.push(
+        makeAssistantTextMessage(`ACP error: ${env.error}`)
+      );
+      session.status = "error";
+      return;
+    }
+    case "text_chunk": {
+      // Rust pre-decides "new message vs append" — every text_chunk
+      // refers to the trailing text-mode assistant message. We just
+      // append; MessageAppended events handle the "new message" case
+      // ahead of this.
+      const last = session.messages[session.messages.length - 1];
+      if (
+        last &&
+        last.role === "assistant" &&
+        (last.mode === "text" || last.mode === undefined) &&
+        last.toolCalls.length === 0
+      ) {
+        last.content += env.delta;
+      } else {
+        session.messages.push(makeAssistantTextMessage(env.delta));
+      }
+      return;
+    }
+    case "thinking_chunk": {
+      const last = session.messages[session.messages.length - 1];
+      if (last && last.role === "assistant" && last.mode === "thinking") {
+        last.thinking = (last.thinking ?? "") + env.delta;
+      } else {
+        session.messages.push(makeAssistantThinkingMessage(env.delta));
+      }
+      return;
+    }
+    case "message_appended": {
+      // Convert the Rust-shaped message into a ChatMessage and push.
+      // Rust already decided this is a new message; the frontend
+      // mirrors without re-deciding.
+      const m = env.message;
+      session.messages.push({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        thinking: m.thinking ?? "",
+        toolCalls: m.tool_calls.map(toChatToolCall),
+        fileChanges: [],
+        plan: m.plan
+          ? m.plan.map((e, idx) => ({
+              id: `plan-${idx}`,
+              description: e.content,
+              status:
+                (e.status as "pending" | "in_progress" | "completed") ??
+                "pending",
+            }))
+          : null,
+        timestamp: m.timestamp,
+        mode: m.mode,
+      });
+      return;
+    }
+    case "tool_call_upserted": {
+      const found = findToolCall(session, env.tool_call.id);
+      if (found) {
+        Object.assign(found.tc, toChatToolCall(env.tool_call));
+        return;
+      }
+      // Collapse consecutive tool calls into ONE assistant message
+      // so the thread doesn't render N separate message-item boxes
+      // (each with its own padding) for every Find/Read/Bash the
+      // agent emits in a single turn. If the trailing message is
+      // already an assistant tool-mode message, just append the new
+      // tool call to its `toolCalls` array; the MessageItem renders
+      // all cards in one stacked group with tight internal
+      // `space-y-1.5`. Only when the trailing message ISN'T a tool
+      // message (text/thinking intervened) do we start a fresh tool
+      // message.
+      const last = session.messages[session.messages.length - 1];
+      if (
+        last &&
+        last.role === "assistant" &&
+        last.mode === "tool"
+      ) {
+        last.toolCalls.push(toChatToolCall(env.tool_call));
+        return;
+      }
+      session.messages.push(
+        makeAssistantToolMessage(toChatToolCall(env.tool_call))
+      );
+      return;
+    }
+    case "plan_updated": {
+      const last = session.messages[session.messages.length - 1];
+      const planSteps = env.plan.map((e, idx) => ({
+        id: `plan-${idx}`,
+        description: e.content,
+        status:
+          (e.status as "pending" | "in_progress" | "completed") ??
+          "pending",
+      }));
+      if (last && last.role === "assistant") {
+        last.plan = planSteps;
+      } else {
+        const fresh = makeAssistantTextMessage("");
+        fresh.plan = planSteps;
+        session.messages.push(fresh);
+      }
+      return;
+    }
+    case "available_commands": {
+      session.availableCommands = env.commands;
+      return;
+    }
+    case "mode_changed": {
+      session.acpCurrentMode = env.mode_id;
+      return;
+    }
+    case "model_changed": {
+      session.acpCurrentModel = env.model_id;
+      return;
+    }
+    default:
+      return;
+  }
+}

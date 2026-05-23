@@ -16,6 +16,7 @@ import {
   resetDefaultAgent,
 } from "@/features/chat/lib/agents-api";
 import type { PendingPermission } from "@/types/acp";
+import type { AgentDelta } from "@/types/agents";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { useRecentFilesStore } from "@/features/chat/stores/recent-files-store";
@@ -175,32 +176,68 @@ export function App() {
   // events into the chat-store, queues permission requests for the
   // PermissionModal, and resets the lazy agent handle on disconnect.
   //
-  // text_chunk / thinking_chunk arrive at the rate the agent streams (many
-  // per second). Coalesce per requestAnimationFrame so the re-render rate
-  // caps at ~60 Hz instead of paying an Immer + subscriber notification per
-  // chunk.
+  // ACP events arrive at the rate the agent streams them — for a
+  // tool-heavy turn (e.g. "read 30 files") that's ~60 `tool_call` /
+  // `tool_call_update` events plus a continuous text chunk stream. Per
+  // event without batching: 1 immer draft + 1 subscriber notification
+  // + 1 `MessagesList` re-render (and the virtualizer's
+  // `measureElement` runs). On a fast turn that pegs the main thread.
+  //
+  // Coalesce every frame via RAF and apply the whole batch in ONE
+  // immer pass through `applyAgentBatch`. Dedup `tool_call_upserted`
+  // by `(session, tool_call.id)` (last-write-wins, original position
+  // preserved) so a tool that flips through pending → running →
+  // completed in a single frame only contributes once. Other deltas
+  // go in strict wire order — `message_appended` before subsequent
+  // tool calls so a new assistant message anchors them correctly,
+  // etc.
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
 
     const pendingText = new Map<string, string>(); // session_id → buffered narration
     const pendingThought = new Map<string, string>(); // session_id → buffered thinking
+    const pendingDeltas: AgentDelta[] = [];
+    const toolDeltaPos = new Map<string, number>(); // dedup key → index in pendingDeltas
     let rafId: number | null = null;
+
     const flush = () => {
       rafId = null;
-      const actions = useChatStore.getState().actions;
-      for (const [sid, text] of pendingText) {
-        actions.appendAssistantText(sid, text);
+      if (
+        pendingText.size === 0 &&
+        pendingThought.size === 0 &&
+        pendingDeltas.length === 0
+      ) {
+        return;
       }
+      const texts = Array.from(pendingText, ([sessionId, text]) => ({ sessionId, text }));
+      const thoughts = Array.from(pendingThought, ([sessionId, text]) => ({ sessionId, text }));
+      const deltas = pendingDeltas.slice();
       pendingText.clear();
-      for (const [sid, text] of pendingThought) {
-        actions.appendAssistantThought(sid, text);
-      }
       pendingThought.clear();
+      pendingDeltas.length = 0;
+      toolDeltaPos.clear();
+      useChatStore.getState().actions.applyAgentBatch({ texts, thoughts, deltas });
     };
     const schedule = () => {
       if (rafId !== null) return;
       rafId = requestAnimationFrame(flush);
+    };
+
+    const bufferDelta = (env: AgentDelta) => {
+      // Coalesce same-id `tool_call_upserted` events: replace the
+      // entry at the position the tool first appeared so the latest
+      // state lands and ordering vs other events stays correct.
+      if (env.kind === "tool_call_upserted") {
+        const key = `${env.session_id}::${env.tool_call.id}`;
+        const existing = toolDeltaPos.get(key);
+        if (existing !== undefined) {
+          pendingDeltas[existing] = env;
+          return;
+        }
+        toolDeltaPos.set(key, pendingDeltas.length);
+      }
+      pendingDeltas.push(env);
     };
 
     listenAgents((env) => {
@@ -222,6 +259,10 @@ export function App() {
           schedule();
           return;
         case "permission_request":
+          // Permission requests block the agent waiting for the user
+          // — apply synchronously so the modal opens on the very next
+          // tick, not the next RAF (which can be ~16 ms away or more
+          // if the frame is busy with a flush of accumulated chunks).
           actions.pushPermission({
             agentId: env.agent_id,
             acpSessionId: env.session_id,
@@ -234,11 +275,20 @@ export function App() {
           actions.popPermission(env.session_id, env.request_id);
           return;
         case "agent_disconnected":
+          // Flush whatever's buffered before tearing the agent down
+          // so we don't lose a final chunk to the post-disconnect
+          // discard.
+          if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+          }
+          flush();
           actions.clearPermissionsForAgent(env.agent_id);
           resetDefaultAgent();
           return;
         default:
-          actions.applyAgentDelta(env);
+          bufferDelta(env);
+          schedule();
           return;
       }
     }).then((un) => {

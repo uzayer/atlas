@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::driver::{self, AgentRuntime};
+use crate::driver::{self, AgentRuntime, AuthMethodWire, SessionGuard};
 use crate::error::{AcpError, Result};
 use crate::events::EventSink;
 
@@ -193,20 +193,22 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Open a new session in `cwd` against the given agent.
+    /// Open a new session in `cwd` against the given agent. Registers
+    /// a `SessionGuard` for the returned session id so the driver can
+    /// gate inbound traffic on the session's lifecycle.
     pub async fn new_session(&self, agent_id: AgentId, cwd: PathBuf) -> Result<NewSessionInfo> {
         let connection = self.connection(agent_id)?;
         let resp = connection
             .send_request(NewSessionRequest::new(cwd))
             .block_task()
             .await?;
+        self.register_session(agent_id, resp.session_id.clone())?;
         Ok(resp.into())
     }
 
-    /// Resume a previously-saved session by id. The agent reads its own
-    /// persisted state for that session id (~/.claude/projects/.../<id>.jsonl
-    /// for the canonical Claude Code agent) so the next `send_prompt`
-    /// continues the same thread instead of starting a fresh one.
+    /// Resume a previously-saved session by id. Same guard registration
+    /// as `new_session` — the resumed session can be cancelled / killed
+    /// through the normal flow.
     pub async fn load_session(
         &self,
         agent_id: AgentId,
@@ -215,9 +217,66 @@ impl AgentRegistry {
     ) -> Result<()> {
         let connection = self.connection(agent_id)?;
         connection
-            .send_request(LoadSessionRequest::new(session_id, cwd))
+            .send_request(LoadSessionRequest::new(session_id.clone(), cwd))
             .block_task()
             .await?;
+        self.register_session(agent_id, session_id)?;
+        Ok(())
+    }
+
+    /// Install a lifecycle guard for a session. Idempotent — if a
+    /// guard for this session already exists, the call is a no-op.
+    /// Called from `new_session` / `load_session`.
+    pub fn register_session(&self, agent_id: AgentId, session_id: SessionId) -> Result<()> {
+        let entry = self
+            .inner
+            .get(&agent_id)
+            .ok_or(AcpError::UnknownAgent)?;
+        entry
+            .runtime
+            .session_guards
+            .entry(session_id)
+            .or_insert_with(|| Arc::new(SessionGuard::new()));
+        Ok(())
+    }
+
+    /// Remove a session's guard. Called when the host-side session
+    /// representation is being torn down (tab close, project switch,
+    /// agent kill) so the driver's gates drop any further inbound
+    /// traffic for this id.
+    pub fn drop_session(&self, agent_id: AgentId, session_id: &SessionId) -> Result<()> {
+        let entry = self
+            .inner
+            .get(&agent_id)
+            .ok_or(AcpError::UnknownAgent)?;
+        entry.runtime.session_guards.remove(session_id);
+        Ok(())
+    }
+
+    /// Re-arm the session's guard before starting a new turn. Bumps
+    /// the turn epoch and clears the `cancelled` flag so inbound
+    /// notifications / permission requests for this turn flow
+    /// through. Called by the worker right before `send_prompt`.
+    pub fn mark_turn_started(
+        &self,
+        agent_id: AgentId,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        let entry = self
+            .inner
+            .get(&agent_id)
+            .ok_or(AcpError::UnknownAgent)?;
+        if let Some(guard) = entry.runtime.session_guards.get(session_id) {
+            guard.mark_turn_started();
+        } else {
+            // Race: send arrived before register_session finished, or
+            // the session was just dropped. Install a fresh guard so
+            // the turn isn't auto-blocked.
+            entry
+                .runtime
+                .session_guards
+                .insert(session_id.clone(), Arc::new(SessionGuard::new()));
+        }
         Ok(())
     }
 
@@ -262,17 +321,27 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Cancel an in-flight prompt turn. The agent will respond with
-    /// `StopReason::Cancelled` on the still-awaiting `send_prompt` call.
-    /// Per ACP spec, the client MUST also resolve any pending permission
-    /// requests for the cancelled session as `Cancelled` — we do that by
-    /// dropping their oneshot senders, which causes the driver's `rx.await`
-    /// to fall through to the cancel branch.
+    /// Cancel an in-flight prompt turn. Three things happen:
+    ///
+    /// 1. The session's lifecycle guard is marked `cancelled`. From
+    ///    this point until the next `mark_turn_started`, the driver
+    ///    drops every inbound notification / permission request for
+    ///    this session at the protocol boundary — no late popups, no
+    ///    transcript contamination.
+    /// 2. Already-pending permission senders are dropped so the
+    ///    driver's `rx.await` resolves as `Cancelled` and the agent
+    ///    gets a clean answer for in-flight requests.
+    /// 3. `CancelNotification` is sent so the agent winds down the
+    ///    turn and replies to `send_prompt` with
+    ///    `StopReason::Cancelled` per ACP spec.
     pub fn cancel_turn(&self, agent_id: AgentId, session_id: SessionId) -> Result<()> {
         let entry = self
             .inner
             .get(&agent_id)
             .ok_or(AcpError::UnknownAgent)?;
+        if let Some(guard) = entry.runtime.session_guards.get(&session_id) {
+            guard.mark_cancelled();
+        }
         entry
             .runtime
             .pending_permissions
@@ -319,6 +388,17 @@ impl AgentRegistry {
             .get(&agent_id)
             .ok_or(AcpError::UnknownAgent)?;
         Ok(entry.runtime.connection.clone())
+    }
+
+    /// Auth methods the agent advertised in its `initialize` response.
+    /// Empty if the agent doesn't support any (or didn't run `initialize`
+    /// successfully — though spawn would have errored in that case).
+    pub fn auth_methods(&self, agent_id: AgentId) -> Result<Vec<AuthMethodWire>> {
+        let entry = self
+            .inner
+            .get(&agent_id)
+            .ok_or(AcpError::UnknownAgent)?;
+        Ok(entry.runtime.auth_methods.clone())
     }
 }
 

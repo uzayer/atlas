@@ -71,12 +71,13 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     }
   }, [tabId, session, createSession]);
 
-  // Bind an ACP agent + session to this tab the first time the user focuses
-  // the message input. Listening for `atlas:chat-input-focused` instead of
-  // doing this on mount avoids paying the `npx`/Node spawn cost on app boot —
-  // the spawn is on the order of 1–3s warm and 10–30s on a cold npm cache,
-  // which used to dominate startup time. Skipped when a session is already
-  // bound (sidebar resume, or a tab re-mount).
+  // Bind an ACP agent + session to this tab as soon as the panel mounts.
+  // The agent spawn takes 1–3 s warm and up to 30 s on a cold `npx` cache,
+  // so kicking it off in parallel with the user reading the empty chat
+  // hides the latency. If the user hits Send before the bind lands, the
+  // submit handler queues the message and the drain effect below flushes
+  // it once `acpSessionId` is set. Skipped when a session is already bound
+  // (sidebar resume, or a tab re-mount).
   useEffect(() => {
     if (!session) return;
     if (session.acpSessionId) return;
@@ -90,10 +91,6 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         if (cancelled) return;
         const project = useProjectStore.getState().currentProject;
         const cwd = project?.path ?? "/";
-        // `agents.newSession` goes through atlas-agents — installs a
-        // SessionState + per-session worker in Rust. The returned key is
-        // (agent_id, session_id); we keep the same `setAcpBinding(tabId, ...)`
-        // shape since the wire-form session id is interchangeable.
         const key = await agents.newSession(agent.agent_id, cwd);
         if (cancelled) return;
         useChatStore
@@ -116,9 +113,15 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         pending = false;
       }
     };
+    // Eager bind on mount.
+    void ensureBound();
+    // Focus event acts as a retry — if the initial bind threw (e.g. the
+    // agent process couldn't spawn yet because Claude Code finished
+    // installing mid-session), refocusing the composer will try again.
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ tabId?: string }>).detail;
       if (!detail || detail.tabId !== tabId) return;
+      if (useChatStore.getState().sessions[tabId]?.acpSessionId) return;
       void ensureBound();
     };
     window.addEventListener("atlas:chat-input-focused", handler);
@@ -126,7 +129,15 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       cancelled = true;
       window.removeEventListener("atlas:chat-input-focused", handler);
     };
-  }, [tabId, session?.acpSessionId]);
+    // `!!session` is in the dep list so the bind effect actually
+    // fires after the parallel `createSession` effect above flips
+    // `session` from null → defined. Without it, deps stay
+    // `[tabId, undefined]` across both renders (acpSessionId is
+    // still undefined on the newly-created session) so React skips
+    // the effect, the bind never starts, and every send sits in
+    // the queue forever — the exact "messages get queued on a
+    // brand-new project" symptom.
+  }, [tabId, !!session, session?.acpSessionId]);
 
   // Cmd+F → open the message-jump palette (ChatPanel only mounts when its tab is active).
   useEffect(() => {
@@ -169,8 +180,13 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     return () => window.removeEventListener("keydown", handler, true);
   }, [tabId]);
 
-  // Drain the per-tab queue when the agent transitions back to idle.
+  // Drain the per-tab queue when the agent transitions back to idle OR
+  // when the ACP session id first becomes available. The latter covers the
+  // "user typed and hit Send before the bind landed" case — submit pushes
+  // onto the queue and this effect flushes it the moment the binding
+  // appears, no error message, no lost message.
   const prevStatusRef = useRef<string | null>(null);
+  const prevAcpRef = useRef<string | undefined>(undefined);
   const handleSendRef = useRef<
     ((content: string, mentions: MentionData[]) => void) | null
   >(null);
@@ -178,7 +194,12 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     const cur = session?.status ?? "idle";
     const prev = prevStatusRef.current;
     prevStatusRef.current = cur;
-    if (prev === "running" && cur !== "running") {
+    const curAcp = session?.acpSessionId;
+    const prevAcp = prevAcpRef.current;
+    prevAcpRef.current = curAcp;
+    const turnFinished = prev === "running" && cur !== "running";
+    const justBound = !prevAcp && !!curAcp;
+    if (turnFinished || justBound) {
       const next = useChatStore.getState().actions.shiftQueue(tabId);
       if (next && handleSendRef.current) {
         // Defer one microtask so the React commit completes first.
@@ -187,7 +208,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         Promise.resolve().then(() => handleSendRef.current?.(next, []));
       }
     }
-  }, [session?.status, tabId]);
+  }, [session?.status, session?.acpSessionId, tabId]);
 
   if (!session) return null;
 
@@ -201,6 +222,13 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     // instant feel.
     cs.actions.updateSessionStatus(tabId, "idle");
     cs.actions.clearQueue(tabId);
+    // Drop any permission modal that was awaiting the user's click.
+    // The Rust side has already resolved the in-flight request as
+    // `Cancelled` (see registry.cancel_turn); leaving the modal up
+    // would let the user click Allow on a request the agent already
+    // abandoned, which silently fails on the backend and confuses
+    // them into thinking permission is broken.
+    cs.actions.clearPermissionsForSession(s.acpSessionId);
     const key: SessionKey = {
       agent_id: s.acpAgentId,
       session_id: s.acpSessionId,
@@ -210,6 +238,18 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
 
   const handleSend = async (content: string, mentions: MentionData[]) => {
     const actualContent = content;
+
+    // The mount effect kicks off the bind in parallel, but on a fresh
+    // project the agent spawn + first new_session roundtrip can take a
+    // few seconds. If the user hits Send before that lands, queue the
+    // prompt and let the drain effect above flush it once `acpSessionId`
+    // appears. The MessageInput's queued-messages strip already shows the
+    // pending text as a chip — same UX as "type while running".
+    const bound = useChatStore.getState().sessions[tabId];
+    if (!bound?.acpAgentId || !bound.acpSessionId) {
+      useChatStore.getState().actions.enqueueMessage(tabId, actualContent);
+      return;
+    }
 
     // The user-visible message keeps the prose as the user typed it,
     // including the shortform mention references (`@file:src/foo.rs` etc).
@@ -226,20 +266,6 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       setSessionTitle(tabId, actualContent.slice(0, 40) + (actualContent.length > 40 ? "..." : ""));
     }
 
-    // The mount effect binds an agent + session eagerly, so by the time the
-    // user can hit Send the binding is ready. The only failure mode is
-    // "binding never happened" — agent process couldn't spawn.
-    const bound = useChatStore.getState().sessions[tabId];
-    if (!bound?.acpAgentId || !bound.acpSessionId) {
-      useChatStore
-        .getState()
-        .actions.addMessage(
-          tabId,
-          "assistant",
-          "Agent session isn't ready yet — try again in a moment, or restart the chat."
-        );
-      return;
-    }
     updateSessionStatus(tabId, "running");
 
     // Expand mentions into a trailing context block. composePrompt fetches

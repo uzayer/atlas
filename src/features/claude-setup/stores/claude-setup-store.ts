@@ -1,15 +1,34 @@
 // Claude Code setup state machine. Drives the banner above the message
-// input and the gating of the input itself. See the plan file for the
-// state-transition diagram.
+// input and the gating of the input itself.
+//
+// Login flow:
+//   1. User opens the dialog (from the banner or `/login`).
+//   2. `loadAuthMethods()` calls `agents_list_auth_methods` against the
+//      default agent (claude-agent-acp). The adapter advertised these in
+//      its ACP `initialize` response.
+//   3. User picks one. `runAuthMethod()` invokes `agents_run_auth_method`
+//      which spawns the subprocess spec the adapter handed us. For the
+//      Subscription path that's the adapter's vendored Node CLI with
+//      `--cli auth login --claudeai` — it runs a localhost-loopback OAuth
+//      flow (no copy/paste), opens the browser, catches the callback,
+//      writes credentials to `~/.claude/.credentials.json`, exits.
+//   4. On the `atlas:auth-run:done` event we re-probe `claude_status`. If
+//      authenticated, we close the dialog. If not, surface the message
+//      with a Retry button.
 
 import { create } from "zustand";
 import { createSelectors } from "@/lib/create-selectors";
 import { useDevFlagsStore } from "@/features/settings/stores/dev-flags-store";
 import {
+  agents,
+  ensureDefaultAgent,
+  listenAuthRunDone,
+  type AuthMethodWire,
+} from "@/features/chat/lib/agents-api";
+import {
   claudeSetup,
   listenClaudeInstallDone,
   listenClaudeInstallProgress,
-  type ClaudeAuthMethod,
   type ClaudeStatus,
 } from "../lib/claude-setup-api";
 
@@ -25,12 +44,16 @@ export type ClaudeSetupPhase =
 
 /** Cap the in-memory log so a chatty install doesn't bloat the store. */
 const LOG_LINE_CAP = 50;
-/** How fast we poll `claude_status` after kicking off the subscription
- *  OAuth flow. The CLI writes credentials once the browser callback
- *  arrives; this picks that up so the UI re-checks. */
-const AUTH_POLL_MS = 1500;
 /** How long the green "Installed ✓" flash lingers before re-checking. */
 const SUCCESS_FLASH_MS = 800;
+
+/** Status of the in-flight auth subprocess. The dialog reads this to
+ *  render: chooser (`idle`), waiting (`running`), or failure (`failed`).
+ *  Success drops back to `idle` and `phase: "ready"` on the parent. */
+export type AuthRunState =
+  | { phase: "idle" }
+  | { phase: "running"; methodId: string }
+  | { phase: "failed"; message: string };
 
 interface ClaudeSetupState {
   phase: ClaudeSetupPhase;
@@ -38,13 +61,22 @@ interface ClaudeSetupState {
   authSummary: string | null;
   installLog: string[];
   installError: string | null;
-  /** True while a login dialog should be visible (separate from `phase`
-   *  so the dialog can stay open across an `authing` → poll cycle). */
+  /** True while a login dialog should be visible. */
   loginDialogOpen: boolean;
+  /** Methods loaded from the ACP adapter's initialize response. Empty
+   *  until `loadAuthMethods()` resolves (which happens on dialog open). */
+  authMethods: AuthMethodWire[];
+  /** Sub-state for the in-flight subprocess (if any). */
+  authRun: AuthRunState;
   actions: {
     refreshStatus: () => Promise<void>;
     install: () => Promise<void>;
-    authLogin: (method: ClaudeAuthMethod) => Promise<void>;
+    /** Populate `authMethods` from the live ACP adapter. Called when the
+     *  dialog opens; cheap subsequent calls are no-ops (cached on the
+     *  Rust side). */
+    loadAuthMethods: () => Promise<void>;
+    /** Invoke a method from `authMethods` by id. */
+    runAuthMethod: (methodId: string) => Promise<void>;
     openLoginDialog: () => void;
     closeLoginDialog: () => void;
   };
@@ -58,10 +90,10 @@ function phaseFromStatus(status: ClaudeStatus): ClaudeSetupPhase {
 
 export const useClaudeSetupStore = createSelectors(
   create<ClaudeSetupState>((set, get) => {
-    // Module-level handles so duplicate install or auth-poll cycles can't
+    // Module-level handles so duplicate install or auth cycles can't
     // stack up. Each new flow tears down its predecessor's listeners.
     let installUnlistens: Array<() => void> = [];
-    let authPollTimer: ReturnType<typeof setInterval> | null = null;
+    let authUnlistens: Array<() => void> = [];
 
     function clearInstallListeners() {
       for (const u of installUnlistens) {
@@ -74,11 +106,15 @@ export const useClaudeSetupStore = createSelectors(
       installUnlistens = [];
     }
 
-    function stopAuthPoll() {
-      if (authPollTimer !== null) {
-        clearInterval(authPollTimer);
-        authPollTimer = null;
+    function clearAuthListeners() {
+      for (const u of authUnlistens) {
+        try {
+          u();
+        } catch {
+          // ignore
+        }
       }
+      authUnlistens = [];
     }
 
     async function applyStatus(status: ClaudeStatus) {
@@ -90,15 +126,10 @@ export const useClaudeSetupStore = createSelectors(
     }
 
     async function refreshStatus(): Promise<void> {
-      // Don't flip back to `checking` if we're mid-install/auth — the
-      // transient phases own the banner during those flows.
       const current = get().phase;
       if (current === "installing" || current === "install-success") {
         return;
       }
-      // Dev override: pin the banner to "not-installed" so we can
-      // visually exercise the install + sign-in UI without touching the
-      // real CLI on this machine.
       if (useDevFlagsStore.getState().triggerClaudeInstall) {
         set({
           phase: "not-installed",
@@ -112,8 +143,6 @@ export const useClaudeSetupStore = createSelectors(
         const status = await claudeSetup.status();
         await applyStatus(status);
       } catch (e) {
-        // If the IPC itself fails (extremely rare), treat it as
-        // not-installed so the user has a recovery affordance.
         console.warn("claude_status invoke failed:", e);
         set({
           phase: "not-installed",
@@ -131,8 +160,6 @@ export const useClaudeSetupStore = createSelectors(
         installError: null,
       });
 
-      // Dev override: simulate the install lifecycle so the UI can be
-      // exercised without curl-bashing the real installer on this machine.
       if (useDevFlagsStore.getState().triggerClaudeInstall) {
         const fakeLines = [
           "[simulated] Downloading claude-code-cli…",
@@ -147,8 +174,6 @@ export const useClaudeSetupStore = createSelectors(
         await new Promise((r) => setTimeout(r, 200));
         set({ phase: "install-success" });
         setTimeout(() => {
-          // After the tick, drop into the auth-required state so the
-          // sign-in dialog can be exercised too.
           set({ phase: "not-authed" });
         }, SUCCESS_FLASH_MS);
         return;
@@ -190,65 +215,128 @@ export const useClaudeSetupStore = createSelectors(
       }
     }
 
-    async function authLogin(method: ClaudeAuthMethod): Promise<void> {
-      stopAuthPoll();
-      set({ phase: "authing" });
-
-      // Dev override: simulate a brief auth handshake regardless of
-      // method, then flip to ready so the post-sign-in UI is reachable.
+    async function loadAuthMethods(): Promise<void> {
       if (useDevFlagsStore.getState().triggerClaudeInstall) {
-        await new Promise((r) => setTimeout(r, 700));
+        // Simulated chooser — exercise the dialog without an ACP agent.
+        set({
+          authMethods: [
+            {
+              id: "simulated-subscription",
+              name: "Claude Subscription",
+              description: "[simulated] Use Claude subscription",
+              terminalCommand: null,
+              terminalArgs: null,
+              terminalLabel: null,
+            },
+            {
+              id: "simulated-console",
+              name: "Anthropic Console",
+              description: "[simulated] API usage billing",
+              terminalCommand: null,
+              terminalArgs: null,
+              terminalLabel: null,
+            },
+          ],
+        });
+        return;
+      }
+      try {
+        const agent = await ensureDefaultAgent();
+        const methods = await agents.listAuthMethods(agent.agent_id);
+        set({ authMethods: methods });
+      } catch (e) {
+        console.warn("loadAuthMethods failed:", e);
+        set({
+          authMethods: [],
+          authRun: {
+            phase: "failed",
+            message: `Couldn't load sign-in methods: ${String(e)}`,
+          },
+        });
+      }
+    }
+
+    async function runAuthMethod(methodId: string): Promise<void> {
+      clearAuthListeners();
+      set({
+        phase: "authing",
+        authRun: { phase: "running", methodId },
+      });
+
+      // Dev override: skip the real spawn, flash a brief running state,
+      // then mark ready so the post-auth UI is exercisable.
+      if (useDevFlagsStore.getState().triggerClaudeInstall) {
+        await new Promise((r) => setTimeout(r, 800));
         set({
           phase: "ready",
           loginDialogOpen: false,
           authSummary: "[simulated] Logged in",
+          authRun: { phase: "idle" },
         });
         return;
       }
 
-      try {
-        await claudeSetup.authLogin(method);
-      } catch (e) {
-        set({
-          phase: "not-authed",
-          installError: `Sign-in failed: ${String(e)}`,
-          loginDialogOpen: true,
-        });
-        return;
-      }
-
-      // API-key path completes synchronously on the Rust side — one
-      // refresh is enough. Subscription path needs polling because the
-      // CLI's browser callback writes credentials asynchronously.
-      if (method.kind === "api_key") {
-        await refreshStatus();
-        if (get().phase === "ready") {
-          set({ loginDialogOpen: false });
-        }
-        return;
-      }
-
-      // Subscription: poll until authed or until the user closes the
-      // dialog. The poll auto-stops when phase flips to `ready` OR when
-      // the dialog is dismissed.
-      authPollTimer = setInterval(() => {
-        if (!get().loginDialogOpen) {
-          stopAuthPoll();
+      // Subscribe to the done event BEFORE invoking so we never miss a
+      // fast-completing run.
+      const doneUnlisten = await listenAuthRunDone((p) => {
+        clearAuthListeners();
+        if (!p.success) {
+          set({
+            phase: "not-authed",
+            authRun: {
+              phase: "failed",
+              message:
+                p.message ?? "Sign-in subprocess didn't complete successfully.",
+            },
+          });
           return;
         }
+        // Re-probe status. The subprocess wrote credentials to disk
+        // before exiting, so the next `claude_status` should report
+        // authenticated.
         void (async () => {
           try {
             const status = await claudeSetup.status();
-            if (status.authenticated) {
-              stopAuthPoll();
-              await applyStatus(status);
-              set({ loginDialogOpen: false });
+            await applyStatus(status);
+            if (get().phase === "ready") {
+              set({
+                loginDialogOpen: false,
+                authRun: { phase: "idle" },
+              });
+            } else {
+              set({
+                authRun: {
+                  phase: "failed",
+                  message:
+                    "Sign-in finished but the CLI still reports unauthenticated. Try again.",
+                },
+              });
             }
-          } catch {
-            // ignore transient probe failures
+          } catch (e) {
+            set({
+              authRun: {
+                phase: "failed",
+                message: `Couldn't verify status: ${String(e)}`,
+              },
+            });
           }
         })();
-      }, AUTH_POLL_MS);
+      });
+      authUnlistens = [doneUnlisten];
+
+      try {
+        const agent = await ensureDefaultAgent();
+        await agents.runAuthMethod(agent.agent_id, methodId);
+      } catch (e) {
+        clearAuthListeners();
+        set({
+          phase: "not-authed",
+          authRun: {
+            phase: "failed",
+            message: `Couldn't start sign-in: ${String(e)}`,
+          },
+        });
+      }
     }
 
     return {
@@ -258,16 +346,24 @@ export const useClaudeSetupStore = createSelectors(
       installLog: [],
       installError: null,
       loginDialogOpen: false,
+      authMethods: [],
+      authRun: { phase: "idle" },
       actions: {
         refreshStatus,
         install,
-        authLogin,
-        openLoginDialog: () => set({ loginDialogOpen: true }),
+        loadAuthMethods,
+        runAuthMethod,
+        openLoginDialog: () =>
+          set({
+            loginDialogOpen: true,
+            authRun: { phase: "idle" },
+          }),
         closeLoginDialog: () => {
-          stopAuthPoll();
-          set({ loginDialogOpen: false });
-          // If we were stuck in `authing` because of a cancelled
-          // subscription flow, revert so the banner re-prompts.
+          clearAuthListeners();
+          set({
+            loginDialogOpen: false,
+            authRun: { phase: "idle" },
+          });
           if (get().phase === "authing") {
             set({ phase: "not-authed" });
           }

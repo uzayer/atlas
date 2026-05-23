@@ -71,7 +71,7 @@ Concretely:
 ### Install and run in dev
 
 ```bash
-git clone https://github.com/<your-org>/atlas
+git clone https://github.com/pacifio/atlas
 cd atlas
 
 # Install JS dependencies — pick one

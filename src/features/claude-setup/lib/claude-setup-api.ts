@@ -1,5 +1,8 @@
-// Thin TS wrapper around the `claude_setup` Tauri commands + their stream
-// events. Mirrors `src/features/chat/lib/agents-api.ts` in shape.
+// Thin TS wrapper around the `claude_status` + `claude_install` Tauri
+// commands and their stream events. The auth login flow lives in
+// `agents-api.ts` because the canonical source for "how do I log in" is
+// the ACP adapter's `authMethods` (see `agents.listAuthMethods` /
+// `agents.runAuthMethod`).
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -10,10 +13,6 @@ export interface ClaudeStatus {
   authenticated: boolean;
   auth_summary: string | null;
 }
-
-export type ClaudeAuthMethod =
-  | { kind: "api_key"; value: string }
-  | { kind: "subscription" };
 
 export interface ClaudeInstallProgress {
   stream: "stdout" | "stderr";
@@ -28,8 +27,6 @@ export interface ClaudeInstallDone {
 export const claudeSetup = {
   status: () => invoke<ClaudeStatus>("claude_status"),
   install: () => invoke<void>("claude_install"),
-  authLogin: (method: ClaudeAuthMethod) =>
-    invoke<void>("claude_auth_login", { method }),
 };
 
 export const listenClaudeInstallProgress = (

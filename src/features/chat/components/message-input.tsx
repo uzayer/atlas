@@ -25,8 +25,17 @@ import type {
   MentionPicker as MentionPickerComponent,
   MentionPickerHandle,
 } from "./mention-picker";
+import type {
+  SlashCommandPicker as SlashCommandPickerComponent,
+  SlashCommandPickerHandle,
+  SlashCommand,
+} from "./slash-command-picker";
+import { commandRequiresArgs } from "./slash-command-picker";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import type { MentionTrigger } from "../lib/cm-mention-extension";
+import type { SlashTrigger } from "../lib/cm-slash-extension";
+import { clearSlashRange } from "../lib/cm-slash-extension";
 import type { MentionData } from "../lib/mentions";
 
 // Start the CodeMirror chunk download at module-evaluation time. Vite still
@@ -37,6 +46,8 @@ const chatInputPromise: Promise<typeof import("./chat-input")> =
   import("./chat-input");
 const mentionPickerPromise: Promise<typeof import("./mention-picker")> =
   import("./mention-picker");
+const slashCommandPickerPromise: Promise<typeof import("./slash-command-picker")> =
+  import("./slash-command-picker");
 
 // Module-level frozen empty array so selectors that return a "default empty
 // queue" hand back a stable reference instead of allocating per render.
@@ -100,6 +111,8 @@ export function MessageInput({
     useState<typeof ChatInputComponent | null>(null);
   const [LazyMentionPicker, setLazyMentionPicker] =
     useState<typeof MentionPickerComponent | null>(null);
+  const [LazySlashPicker, setLazySlashPicker] =
+    useState<typeof SlashCommandPickerComponent | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -108,6 +121,9 @@ export function MessageInput({
     });
     void mentionPickerPromise.then((m) => {
       if (!cancelled) setLazyMentionPicker(() => m.MentionPicker);
+    });
+    void slashCommandPickerPromise.then((m) => {
+      if (!cancelled) setLazySlashPicker(() => m.SlashCommandPicker);
     });
     return () => {
       cancelled = true;
@@ -137,6 +153,13 @@ export function MessageInput({
   const triggerRef = useRef<MentionTrigger | null>(null);
   triggerRef.current = trigger;
 
+  // ── Slash-command picker orchestration ────────────────────────────────
+  const [slashTrigger, setSlashTrigger] = useState<SlashTrigger | null>(null);
+  const slashPickerRef = useRef<SlashCommandPickerHandle>(null);
+  const slashTriggerRef = useRef<SlashTrigger | null>(null);
+  slashTriggerRef.current = slashTrigger;
+  const { openLoginDialog } = useClaudeSetupStore.use.actions();
+
   const handleMentionSelect = useCallback(
     (mention: MentionData) => {
       const t = triggerRef.current;
@@ -148,12 +171,92 @@ export function MessageInput({
     []
   );
 
-  // Forward Up/Down/Enter/Esc/Backspace from CodeMirror to the picker
-  // when it's open. Backspace and Escape "go back" one level (close a
-  // session sublist, unlock a scope) before falling through to their
-  // default behavior.
+  const handleSlashSelect = useCallback(
+    (cmd: SlashCommand) => {
+      const t = slashTriggerRef.current;
+      const view = inputRef.current?.view();
+      if (!t || !view) return;
+
+      if (cmd.handler === "atlas-login") {
+        // `/login` doesn't pass through to the agent — the adapter
+        // filters it. Open Atlas's own dialog instead.
+        clearSlashRange(view, t.from, t.to);
+        setSlashTrigger(null);
+        openLoginDialog();
+        inputRef.current?.focus();
+        return;
+      }
+
+      // Passthrough: every other command is sent verbatim to the agent.
+      // claude-agent-acp's SDK processes the slash command client-side
+      // and emits the result as `<local-command-*>` blocks via the
+      // normal `agent_message_chunk` channel, so the response renders in
+      // the chat thread alongside regular assistant output.
+      //
+      // Gate on `disabled` — passthrough requires a working ACP
+      // connection, and sending a slash command to a not-yet-authed
+      // agent would just surface an error. `/login` bypasses this gate
+      // above because it's the path that fixes "not authed".
+      if (disabled) {
+        clearSlashRange(view, t.from, t.to);
+        setSlashTrigger(null);
+        return;
+      }
+      if (commandRequiresArgs(cmd)) {
+        // Drop `/<name> ` into the composer and put the caret at the
+        // end so the user can fill in the required args. Don't send
+        // until they press Enter.
+        const insertText = `/${cmd.name} `;
+        view.dispatch({
+          changes: { from: t.from, to: t.to, insert: insertText },
+          selection: { anchor: t.from + insertText.length },
+        });
+        setSlashTrigger(null);
+        inputRef.current?.focus();
+        return;
+      }
+
+      // No required args — fire and forget. Clear the composer (the
+      // user's `/query` doesn't need to linger) and dispatch via the
+      // panel's normal send path.
+      clearSlashRange(view, t.from, t.to);
+      inputRef.current?.clear();
+      setValue("");
+      setSlashTrigger(null);
+      onSend(`/${cmd.name}`, []);
+    },
+    [openLoginDialog, onSend, disabled]
+  );
+
+  // Forward Up/Down/Enter/Esc/Backspace from CodeMirror to whichever
+  // picker is open. Slash and mention pickers are mutually exclusive in
+  // practice (slash only fires at line start of an otherwise-empty
+  // composer), but we still route deterministically.
   const keyInterceptor = useCallback(
     (key: "Up" | "Down" | "Enter" | "Escape" | "Backspace") => {
+      // Slash takes precedence when both happen to be open.
+      const sp = slashPickerRef.current;
+      const st = slashTriggerRef.current;
+      if (st && sp) {
+        switch (key) {
+          case "Up":
+            sp.moveUp();
+            return true;
+          case "Down":
+            sp.moveDown();
+            return true;
+          case "Enter":
+            return sp.commit();
+          case "Escape":
+            setSlashTrigger(null);
+            return true;
+          case "Backspace":
+            // Let CM delete a query char or the `/` itself (which closes
+            // the picker via the trigger detector).
+            return false;
+        }
+      }
+
       const p = pickerRef.current;
       const t = triggerRef.current;
       if (!t || !p) return false;
@@ -306,6 +409,7 @@ export function MessageInput({
               onChange={setValue}
               onSubmit={submit}
               onMentionTrigger={setTrigger}
+              onSlashTrigger={setSlashTrigger}
               keyInterceptor={keyInterceptor}
             />
           ) : (
@@ -394,6 +498,16 @@ export function MessageInput({
           projectPath={projectPath}
           onSelect={handleMentionSelect}
           onClose={() => setTrigger(null)}
+        />
+      )}
+      {LazySlashPicker && (
+        <LazySlashPicker
+          ref={slashPickerRef}
+          open={slashTrigger !== null}
+          query={slashTrigger?.query ?? ""}
+          anchor={slashTrigger?.anchor ?? null}
+          onSelect={handleSlashSelect}
+          onClose={() => setSlashTrigger(null)}
         />
       )}
     </div>
