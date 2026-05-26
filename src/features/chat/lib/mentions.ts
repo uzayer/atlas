@@ -11,6 +11,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
+import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-meta-store";
 import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { listClaudeSessions, readClaudeSession } from "./claude-api";
 
@@ -306,14 +307,21 @@ export async function searchMentions(
 }
 
 /** Push knowledge entries into the Rust mention cache. Call from
- *  the JS knowledge store whenever `entries` is replaced or mutated. */
+ *  the JS knowledge store whenever `entries` is replaced or mutated,
+ *  and from the meta store whenever a page-header title changes. */
 export function publishKnowledgeToMentionCache(): void {
-  const items = useKnowledgeStore.getState().entries.map((e) => ({
-    id: e.id,
-    title: e.title,
-    source: e.source,
-    filePath: e.file_path,
-  }));
+  const pages = useKnowledgeMetaStore.getState().pages;
+  const items = useKnowledgeStore.getState().entries.map((e) => {
+    const override = pages[e.id]?.title?.trim();
+    return {
+      id: e.id,
+      // Prefer the page-header title set via `_meta.json`; falls back
+      // to the wire title (now just the filename) for untitled notes.
+      title: override || e.title,
+      source: e.source,
+      filePath: e.file_path,
+    };
+  });
   void invoke("mention_cache_set_knowledge", { items }).catch((err) =>
     console.warn("mention_cache_set_knowledge failed:", err),
   );

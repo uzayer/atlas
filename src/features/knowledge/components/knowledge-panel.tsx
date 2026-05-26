@@ -14,6 +14,7 @@ import {
   TiptapEditor,
   type TiptapEditorHandle,
 } from "@/features/editor-notion/components/tiptap-editor";
+import { ReadmeView } from "./readme-view";
 import { clearDocCache } from "@/features/editor-notion/lib/blocks-cache";
 import {
   useEditorOutline,
@@ -42,7 +43,6 @@ export function KnowledgePanel() {
   const entries = useKnowledgeStore.use.entries();
   const activeEntryId = useKnowledgeStore.use.activeEntryId();
   const editContent = useKnowledgeStore.use.editContent();
-  const loading = useKnowledgeStore.use.loading();
   const {
     loadEntries,
     selectEntry,
@@ -141,6 +141,15 @@ export function KnowledgePanel() {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
+        // Force-blur the active element first. The page-header title
+        // input commits its draft to `_meta.json` on blur — without
+        // this, Cmd+S while typing in the title saves the body but
+        // leaves the title patch pending until the next outside click,
+        // making the sidebar tree appear to lag behind the save.
+        const ae = document.activeElement;
+        if (ae instanceof HTMLElement && ae !== document.body) {
+          ae.blur();
+        }
         if (currentProject && isDirty) {
           void flushAndSave();
         }
@@ -289,14 +298,12 @@ export function KnowledgePanel() {
     <div className="h-full flex" style={{ background: "var(--bg-canvas)" }}>
       <KnowledgeSidebar
         projectPath={currentProject.path}
-        loading={loading}
         entries={sidebarEntries}
         activeEntryId={activeEntryId}
         activeRepoName={activeRepoName}
         recentIds={recentIds}
         onSelectEntry={handleSelectEntry}
         onDeleteEntry={handleDeleteEntry}
-        onRefresh={() => loadEntries(currentProject.path)}
         onNewFolder={() => setShowFolderInput((v) => !v)}
         onNewNote={() => createEntry(currentProject.path)}
         onOpenGraph={() =>
@@ -333,12 +340,17 @@ export function KnowledgePanel() {
               onToggleInspector={() => setShowInspector((v) => !v)}
             />
             {repoReadme ? (
-              <TiptapEditor
-                documentId={`repo:${activeRepoName}`}
-                initialMarkdown={repoReadme}
-                editable={false}
-                className="flex-1"
-              />
+              // README is read-only — a full Tiptap instance is wrong here.
+              // It mounts the mention extension whose <body>-level popup
+              // host leaks into the next note opened. Use the lightweight
+              // <Markdown> renderer instead; it's the same one chat /
+              // canvas inspectors use. Wrap it in a padded, scrollable
+              // viewport so long READMEs scroll cleanly.
+              <div className="flex-1 min-h-0 overflow-auto">
+                <div className="max-w-3xl mx-auto px-8 py-8">
+                  <ReadmeView source={repoReadme} />
+                </div>
+              </div>
             ) : (
               <RepoEmpty path={clonedRepos.find((r) => r.name === activeRepoName)?.path ?? ""} />
             )}

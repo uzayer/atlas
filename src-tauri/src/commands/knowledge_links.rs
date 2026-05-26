@@ -163,12 +163,11 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String, String)>) {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let title = body
-            .lines()
-            .find(|l| l.starts_with('#'))
-            .map(|l| l.trim_start_matches('#').trim().to_string())
-            .unwrap_or(filename);
-        out.push((id, title, body));
+        // Filename-only fallback. The user-edited title in `_meta.json`
+        // wins on the JS side; deriving from the first `#` would cause
+        // the graph node label to drift to body content. Mirrors the
+        // same change in `knowledge::list_knowledge`.
+        out.push((id, filename, body));
     }
 }
 

@@ -18,6 +18,7 @@ pub mod knowledge_meta;
 pub mod log;
 pub mod mention_search;
 pub mod papers;
+pub mod pomodoro;
 pub mod recent_files;
 pub mod research;
 pub mod search;

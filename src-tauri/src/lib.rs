@@ -75,6 +75,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(TerminalState::new())
         .manage(AgentRegistry::new())
         .manage(FileIndexState::new())
@@ -208,6 +209,8 @@ pub fn run() {
             commands::sessions_watch::sessions_watch_close,
             commands::sessions_watch::sessions_watch_status,
             commands::papers::list_saved_papers,
+            commands::pomodoro::pomodoro_load,
+            commands::pomodoro::pomodoro_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas");

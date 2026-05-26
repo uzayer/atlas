@@ -148,6 +148,15 @@ const store = create<KnowledgeMetaState>()((set, get) => ({
           entryId,
           patch: toRustPatch(patch),
         });
+        // If this patch touched the page-header title, republish the
+        // mention cache so @-picker results immediately reflect the
+        // new label. Lazy-imported to avoid a static cycle with
+        // chat/lib/mentions, which imports this store.
+        if (patch.title !== undefined) {
+          void import("@/features/chat/lib/mentions").then((m) =>
+            m.publishKnowledgeToMentionCache(),
+          );
+        }
       } catch {
         // On error, restore the prior state.
         set({ pages });

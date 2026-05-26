@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { logEvent } from "@/features/log/lib/log";
 import {
-  RefreshCw,
   FolderPlus,
   FilePlus,
   GitBranch,
@@ -14,7 +13,6 @@ import { KnowledgeTree } from "./knowledge-tree";
 
 interface KnowledgeSidebarProps {
   projectPath: string;
-  loading: boolean;
   entries: Array<{ id: string; title: string; icon?: string | null }>;
   activeEntryId: string | null;
   activeRepoName: string | null;
@@ -22,7 +20,6 @@ interface KnowledgeSidebarProps {
   /** Click a note */
   onSelectEntry: (id: string) => void;
   onDeleteEntry: (id: string) => void;
-  onRefresh: () => void;
   onNewFolder: () => void;
   onNewNote: () => void;
   onOpenGraph: () => void;
@@ -38,14 +35,12 @@ interface KnowledgeSidebarProps {
 
 export function KnowledgeSidebar({
   projectPath,
-  loading,
   entries,
   activeEntryId,
   activeRepoName,
   recentIds,
   onSelectEntry,
   onDeleteEntry,
-  onRefresh,
   onNewFolder,
   onNewNote,
   onOpenGraph,
@@ -133,17 +128,6 @@ export function KnowledgeSidebar({
           style={{ width: 22, height: 22 }}
         >
           <Network size={12} />
-        </button>
-        <button
-          onClick={onRefresh}
-          className={cn(
-            "p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors",
-            loading && "animate-spin",
-          )}
-          title="Refresh"
-          style={{ width: 22, height: 22 }}
-        >
-          <RefreshCw size={12} />
         </button>
         <button
           onClick={onNewFolder}

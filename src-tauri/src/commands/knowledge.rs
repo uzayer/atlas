@@ -67,10 +67,13 @@ fn walk_knowledge(dir: &Path, root: &Path, entries: &mut Vec<KnowledgeEntry>) {
 
         let filename = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
-        let title = content.lines()
-            .find(|l| l.starts_with('#'))
-            .map(|l| l.trim_start_matches('#').trim().to_string())
-            .unwrap_or_else(|| filename.clone());
+        // Use only the filename as the wire-side title fallback. The
+        // user-edited page-header title lives in `_meta.json` and is
+        // merged client-side; deriving a title from the first `#` line
+        // here meant the tree label drifted to the body's first heading
+        // (often a content paragraph after a markdown auto-shortcut),
+        // which was confusing and inconsistent with the page header.
+        let title = filename.clone();
 
         let source = if filename.starts_with("paper-") { "paper" }
             else if filename.starts_with("chat-") { "chat" }

@@ -86,11 +86,10 @@ export function KnowledgeGraph() {
   const { graph: rawGraph, loading } = useProjectGraph();
   const metaPages = useKnowledgeMetaStore.use.pages();
 
-  // Enrich node titles with `meta.title` when set (otherwise the Rust
-  // scanner's fallback is the filename — e.g. `note-1779272396411` —
-  // which reads as gibberish in the graph). Falls through to the
-  // existing Rust title (first `#` line, then filename) when no meta
-  // override exists.
+  // Enrich node titles with `meta.title` when set. Rust now returns
+  // the filename as the title (no longer derives from the first `#`
+  // line), so the user-edited page-header title always wins when present
+  // and the filename — e.g. `note-1779272396411` — shows otherwise.
   const graph = useMemo<ProjectGraph>(() => {
     if (!rawGraph.nodes.length) return rawGraph;
     return {

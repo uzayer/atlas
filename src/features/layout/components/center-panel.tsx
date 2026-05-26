@@ -23,6 +23,7 @@ const KnowledgeGraph = lazy(() => import("@/features/knowledge/components/knowle
 const ResearchPanel = lazy(() => import("@/features/research/components/research-panel").then(m => ({ default: m.ResearchPanel })));
 const SettingsPanel = lazy(() => import("@/features/settings/components/settings-panel").then(m => ({ default: m.SettingsPanel })));
 const LogPanel = lazy(() => import("@/features/log/components/log-panel").then(m => ({ default: m.LogPanel })));
+const PomodoroPanel = lazy(() => import("@/features/pomodoro/components/pomodoro-panel").then(m => ({ default: m.PomodoroPanel })));
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { useShallow } from "zustand/react/shallow";
@@ -44,6 +45,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ScrollText,
+  Timer,
 } from "lucide-react";
 import type { TabType } from "@/lib/constants";
 
@@ -62,6 +64,7 @@ const tabIcons: Record<TabType, React.ElementType> = {
   log: ScrollText,
   media: Code,
   unsupported: Code,
+  pomodoro: Timer,
 };
 
 export function CenterPanel() {
@@ -332,6 +335,8 @@ function TabContent({ tab }: { tab: Tab }) {
       return <SettingsPanel />;
     case "log":
       return <LogPanel />;
+    case "pomodoro":
+      return <PomodoroPanel />;
     case "media":
       return <MediaViewer filePath={tab.data.filePath as string} />;
     case "unsupported":
@@ -366,6 +371,7 @@ const NEW_TAB_OPTIONS: Array<{ type: TabType; label: string; icon: React.Element
   { type: "research", label: "Research", icon: BookOpen },
   { type: "knowledge", label: "Knowledge", icon: Brain },
   { type: "log", label: "Log", icon: ScrollText },
+  { type: "pomodoro", label: "Pomodoro", icon: Timer },
 ];
 
 function NewTabDropdown({ addTab }: { addTab: (tab: Tab) => void }) {

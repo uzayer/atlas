@@ -12,6 +12,7 @@ import {
   Code,
   Settings,
   Search,
+  Timer,
   type LucideProps,
 } from "lucide-react";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
@@ -43,6 +44,7 @@ const MODULES: ModuleEntry[] = [
   { id: "browser", type: "browser", label: "Browser", icon: Globe },
   { id: "editor", type: "editor", label: "Untitled Editor", icon: Code, shortcut: "⌘N" },
   { id: "log", type: "log", label: "Log", icon: ScrollText },
+  { id: "pomodoro", type: "pomodoro", label: "Pomodoro", icon: Timer },
   { id: "settings", type: "settings", label: "Settings", icon: Settings, shortcut: "⌘," },
 ];
 
@@ -114,6 +116,15 @@ export function NewTabPalette({
         id: "settings",
         type: "settings",
         title: "Settings",
+        closable: true,
+        dirty: false,
+        data: {},
+      });
+    } else if (item.type === "pomodoro") {
+      addTab({
+        id: "pomodoro",
+        type: "pomodoro",
+        title: "Pomodoro",
         closable: true,
         dirty: false,
         data: {},

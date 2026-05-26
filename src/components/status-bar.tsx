@@ -1,5 +1,6 @@
 import { UsageBar } from "@/features/monitor/components/usage-bar";
 import { BranchPopover } from "./branch-popover";
+import { StatusBarTimer } from "@/features/pomodoro/components/status-bar-timer";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 
 export function StatusBar() {
@@ -13,8 +14,14 @@ export function StatusBar() {
       <div className="flex items-center gap-3">
         <BranchPopover />
       </div>
-      <div className="flex items-center gap-4">
-        {showUsage && <UsageBar />}
+      <div className="flex items-center gap-3">
+        {showUsage && (
+          <>
+            <UsageBar />
+            <div className="w-px h-3 bg-border-default" aria-hidden />
+          </>
+        )}
+        <StatusBarTimer />
       </div>
     </div>
   );

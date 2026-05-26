@@ -22,6 +22,7 @@ export const TAB_TYPES = [
   "log",
   "media",
   "unsupported",
+  "pomodoro",
 ] as const;
 
 export type TabType = (typeof TAB_TYPES)[number];
