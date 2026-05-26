@@ -32,10 +32,14 @@
   --color-bg-secondary: var(--bg-secondary);
   --color-bg-tertiary: var(--bg-tertiary);
   --color-bg-elevated: var(--bg-elevated);
+  --color-bg-elevated-2: var(--bg-elevated-2);
   --color-bg-hover: var(--bg-hover);
   --color-bg-active: var(--bg-active);
   --color-bg-selected: var(--bg-selected);
   --color-bg-input: var(--bg-input);
+  --color-bg-overlay: var(--bg-overlay);
+  --color-bg-canvas: var(--bg-canvas);
+  --color-bg-rail: var(--bg-rail);
   --color-bg-tab-active: var(--bg-tab-active);
 
   --color-text-primary: var(--text-primary);

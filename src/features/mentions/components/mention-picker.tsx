@@ -17,11 +17,13 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   BookOpen,
   FileText,
@@ -45,11 +47,11 @@ import {
   type MentionData,
   type MentionKind,
   type PastSessionRef,
-} from "../lib/mentions";
+} from "@/features/chat/lib/mentions";
 import {
   useRecentFilesStore,
   type RecentFile,
-} from "../stores/recent-files-store";
+} from "@/features/chat/stores/recent-files-store";
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -81,6 +83,15 @@ export interface MentionPickerProps {
   onSelect: (mention: MentionData) => void;
   /** Picker closed itself (Esc, no anchor, etc). */
   onClose: () => void;
+  /** Optional `${kind}:${id}` set whose entries are hidden from the
+   *  results (e.g. the knowledge editor passes the currently-open note
+   *  so users can't @-reference the document they're editing). */
+  excludeIds?: Set<string>;
+  /** Additional CSS selectors that, if any ancestor matches, should
+   *  NOT trigger an outside-click dismiss. Always includes
+   *  `.atlas-chat-cm-host` and `.atlas-mention-picker`; callers in
+   *  other surfaces (Tiptap, future composers) add their own. */
+  hostSelectors?: string[];
 }
 
 // ── Internal model ───────────────────────────────────────────────────────────
@@ -100,7 +111,16 @@ const RECENT_LIMIT = 5;
 
 export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>(
   function MentionPicker(
-    { open, query, anchor, projectPath, onSelect, onClose },
+    {
+      open,
+      query,
+      anchor,
+      projectPath,
+      onSelect,
+      onClose,
+      excludeIds,
+      hostSelectors,
+    },
     ref
   ) {
     const recentFiles = useRecentFilesStore.use.items();
@@ -136,11 +156,30 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       const controller = new AbortController();
       const ctx: MentionContext = { projectPath };
 
+      // Empty query + no scope renders "Recent files + Browse
+      // categories" — the picker ignores `results` entirely in that
+      // state. Short-circuit so we don't pay any IPC.
+      if (!query.trim() && !scope) {
+        setResults([]);
+        setPastSessions([]);
+        setActive(0);
+        return () => controller.abort();
+      }
+
+      // No debounce — the Rust side reads everything from cached
+      // state now (file index, folder list, git refs, knowledge,
+      // symbols are all in `MentionCacheState` / `FileIndexState`),
+      // so each invoke is sub-millisecond. Firing on every keystroke
+      // keeps the picker truly live; the AbortController drops the
+      // result of any in-flight invoke if a newer keystroke beat it
+      // back, so stale results never paint.
+      const applyExcludes = (items: MentionData[]) => {
+        if (!excludeIds || excludeIds.size === 0) return items;
+        return items.filter((m) => !excludeIds.has(`${m.kind}:${m.id}`));
+      };
       if (scope === "past_message" && !pastSession) {
         void listPastSessions(ctx).then((sessions) => {
           if (controller.signal.aborted) return;
-          // Sessions don't go through the rank pipeline — they're a level
-          // selector, not mention candidates. Filter by query manually.
           const q = query.trim().toLowerCase();
           const filtered = q
             ? sessions.filter((s) => s.title.toLowerCase().includes(q))
@@ -153,26 +192,22 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         void listMessagesInPastSession(pastSession, query, controller.signal).then(
           (msgs) => {
             if (controller.signal.aborted) return;
-            setResults(msgs);
+            setResults(applyExcludes(msgs));
             setPastSessions([]);
             setActive(0);
           }
         );
       } else {
-        // Unified Rust mention_search — replaces the per-provider JS
-        // fan-out and the JS-side `rankMention` blending. Results
-        // are already ranked top-N (per kind for a scoped search,
-        // blended across kinds for a no-scope search).
         void searchMentions(query, scope, ctx).then((r) => {
           if (controller.signal.aborted) return;
-          setResults(r);
+          setResults(applyExcludes(r));
           setPastSessions([]);
           setActive(0);
         });
       }
 
       return () => controller.abort();
-    }, [open, query, scope, pastSession, projectPath]);
+    }, [open, query, scope, pastSession, projectPath, excludeIds]);
 
     // Build the renderable row list. Order:
     //   no scope + empty query → Recents (header) → files → Categories header → categories
@@ -304,7 +339,12 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       [activeRow, navIndices.length, pastSession, scope]
     );
 
-    // Dismiss on click outside the picker AND outside the editor host.
+    // Dismiss on click outside the picker AND outside the host editor.
+    // Defaults cover the chat composer (.atlas-chat-cm-host); other
+    // surfaces (Tiptap, future composers) pass their own selectors via
+    // `hostSelectors` so a click inside their editable doesn't dismiss.
+    const hostSelectorsRef = useRef(hostSelectors);
+    hostSelectorsRef.current = hostSelectors;
     useEffect(() => {
       if (!open) return;
       const handler = (e: MouseEvent) => {
@@ -312,6 +352,12 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         if (!target) return;
         if (target.closest(".atlas-chat-cm-host")) return;
         if (target.closest(".atlas-mention-picker")) return;
+        const extras = hostSelectorsRef.current;
+        if (extras) {
+          for (const sel of extras) {
+            if (target.closest(sel)) return;
+          }
+        }
         onCloseRef.current();
       };
       // Mousedown so we beat click handlers inside the editor.
@@ -354,126 +400,27 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
           zIndex: 9999,
         }}
       >
-            <div className="flex-1 overflow-y-auto py-1">
-              {rows.length === 0 ||
-              (rows.length === 1 && rows[0].type === "header") ? (
-                <div className="px-3 py-6 text-center text-[11px] text-[var(--text-tertiary)] leading-snug">
-                  {emptyStateCopy({
-                    scope,
-                    pastSession: pastSession !== null,
-                    query: query.trim(),
-                    hasProject: projectPath !== null,
-                  })}
-                </div>
-              ) : (
-                rows.map((row, i) => {
-                  if (row.type === "header") {
-                    return (
-                      <div
-                        key={`h-${i}`}
-                        className="px-3 pt-2 pb-1 text-[9px] uppercase tracking-wider text-[var(--text-tertiary)] font-semibold"
-                      >
-                        {row.label}
-                      </div>
-                    );
-                  }
-                  const isActive = i === activeRowIdx;
-                  if (row.type === "category") {
-                    return (
-                      <button
-                        key={`c-${row.cat.kind}`}
-                        onMouseEnter={() => {
-                          const navIdx = navIndices.indexOf(i);
-                          if (navIdx >= 0) setActive(navIdx);
-                        }}
-                        onMouseDown={(e) => {
-                          // Avoid stealing focus.
-                          e.preventDefault();
-                          setScope(row.cat.kind);
-                          setActive(0);
-                        }}
-                        className={cn(
-                          "w-full text-left px-3 h-[26px] flex items-center gap-2 text-[11.5px]",
-                          isActive
-                            ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
-                            : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
-                        )}
-                      >
-                        <span className="opacity-75 w-4 flex items-center justify-center">
-                          <CategoryIcon kind={row.cat.kind} />
-                        </span>
-                        <span>{row.cat.label}</span>
-                      </button>
-                    );
-                  }
-                  if (row.type === "session") {
-                    return (
-                      <button
-                        key={`s-${row.session.id}`}
-                        onMouseEnter={() => {
-                          const navIdx = navIndices.indexOf(i);
-                          if (navIdx >= 0) setActive(navIdx);
-                        }}
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          setPastSession(row.session);
-                          setActive(0);
-                        }}
-                        className={cn(
-                          "w-full text-left px-3 h-[26px] flex items-center gap-2 text-[11.5px]",
-                          isActive
-                            ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
-                            : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
-                        )}
-                        title={row.session.filePath}
-                      >
-                        <span className="opacity-75 w-4 flex items-center justify-center">
-                          <MessageSquare size={11} />
-                        </span>
-                        <span className="truncate flex-1 min-w-0">
-                          {row.session.title}
-                        </span>
-                        <span className="text-[10px] text-[var(--text-tertiary)] shrink-0">
-                          {row.session.messageCount} msgs
-                        </span>
-                      </button>
-                    );
-                  }
-                  // Mention row
-                  const m = row.mention;
-                  return (
-                    <button
-                      key={`m-${m.kind}-${m.id}`}
-                      onMouseEnter={() => {
-                        const navIdx = navIndices.indexOf(i);
-                        if (navIdx >= 0) setActive(navIdx);
-                      }}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        onSelectRef.current(m);
-                      }}
-                      className={cn(
-                        "w-full text-left px-3 h-[26px] flex items-center gap-2 text-[11.5px]",
-                        isActive
-                          ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
-                          : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
-                      )}
-                      title={mentionTitle(m)}
-                    >
-                      <span className="opacity-75 w-4 flex items-center justify-center">
-                        <CategoryIcon kind={m.kind} />
-                      </span>
-                      <span className="truncate min-w-0 flex-shrink-0">
-                        {primaryLabel(m)}
-                      </span>
-                      <span className="flex-1 min-w-0 text-[10px] text-[var(--text-tertiary)] truncate">
-                        {row.recentLabel ?? secondaryLabel(m)}
-                      </span>
-                    </button>
-                  );
-                })
-              )}
-            </div>
+            {rows.length === 0 ||
+            (rows.length === 1 && rows[0].type === "header") ? (
+              <div className="flex-1 px-3 py-6 text-center text-[11px] text-[var(--text-tertiary)] leading-snug">
+                {emptyStateCopy({
+                  scope,
+                  pastSession: pastSession !== null,
+                  query: query.trim(),
+                  hasProject: projectPath !== null,
+                })}
+              </div>
+            ) : (
+              <VirtualizedRows
+                rows={rows}
+                activeRowIdx={activeRowIdx}
+                navIndices={navIndices}
+                setActive={setActive}
+                setScope={setScope}
+                setPastSession={setPastSession}
+                onSelect={onSelectRef}
+              />
+            )}
             <div className="border-t border-[var(--border-default)] px-3 h-[24px] flex items-center justify-between text-[9px] text-[var(--text-tertiary)] uppercase tracking-wider shrink-0">
               <span>
                 {scope
@@ -489,6 +436,185 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
     );
   }
 );
+
+// ── Virtualized row list ────────────────────────────────────────────────────
+//
+// All row types render in a uniform 26 px slot so the virtualizer's
+// estimateSize is exact and there's no jump on first measurement.
+// Header rows visually have slightly different padding but still fit
+// inside the slot, so we don't pay measureElement cost.
+
+const ROW_HEIGHT = 26;
+const PICKER_INNER_MAX_HEIGHT = 336; // 360 (picker max) − 24 (footer)
+
+function VirtualizedRows({
+  rows,
+  activeRowIdx,
+  navIndices,
+  setActive,
+  setScope,
+  setPastSession,
+  onSelect,
+}: {
+  rows: Row[];
+  activeRowIdx: number | undefined;
+  navIndices: number[];
+  setActive: (n: number) => void;
+  setScope: (k: MentionKind) => void;
+  setPastSession: (s: PastSessionRef) => void;
+  onSelect: React.MutableRefObject<(m: MentionData) => void>;
+}) {
+  const parentRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 8,
+  });
+
+  // Auto-scroll so the active row stays visible as the user navigates
+  // with the keyboard. Without this the active highlight can scroll
+  // off-screen below the viewport on a long results list.
+  useLayoutEffect(() => {
+    if (activeRowIdx === undefined) return;
+    virtualizer.scrollToIndex(activeRowIdx, { align: "auto" });
+  }, [activeRowIdx, virtualizer]);
+
+  return (
+    <div
+      ref={parentRef}
+      className="flex-1 overflow-y-auto py-1"
+      style={{ maxHeight: PICKER_INNER_MAX_HEIGHT }}
+    >
+      <div
+        style={{
+          height: virtualizer.getTotalSize(),
+          width: "100%",
+          position: "relative",
+        }}
+      >
+        {virtualizer.getVirtualItems().map((vRow) => {
+          const i = vRow.index;
+          const row = rows[i];
+          const style: React.CSSProperties = {
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: ROW_HEIGHT,
+            transform: `translateY(${vRow.start}px)`,
+          };
+          if (row.type === "header") {
+            return (
+              <div
+                key={`h-${i}`}
+                style={style}
+                className="px-3 pt-2 pb-1 text-[9px] uppercase tracking-wider text-[var(--text-tertiary)] font-semibold"
+              >
+                {row.label}
+              </div>
+            );
+          }
+          const isActive = i === activeRowIdx;
+          if (row.type === "category") {
+            return (
+              <button
+                key={`c-${row.cat.kind}`}
+                style={style}
+                onMouseEnter={() => {
+                  const navIdx = navIndices.indexOf(i);
+                  if (navIdx >= 0) setActive(navIdx);
+                }}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setScope(row.cat.kind);
+                  setActive(0);
+                }}
+                className={cn(
+                  "text-left px-3 flex items-center gap-2 text-[11.5px]",
+                  isActive
+                    ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
+                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                )}
+              >
+                <span className="opacity-75 w-4 flex items-center justify-center">
+                  <CategoryIcon kind={row.cat.kind} />
+                </span>
+                <span>{row.cat.label}</span>
+              </button>
+            );
+          }
+          if (row.type === "session") {
+            return (
+              <button
+                key={`s-${row.session.id}`}
+                style={style}
+                onMouseEnter={() => {
+                  const navIdx = navIndices.indexOf(i);
+                  if (navIdx >= 0) setActive(navIdx);
+                }}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setPastSession(row.session);
+                  setActive(0);
+                }}
+                className={cn(
+                  "text-left px-3 flex items-center gap-2 text-[11.5px]",
+                  isActive
+                    ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
+                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                )}
+                title={row.session.filePath}
+              >
+                <span className="opacity-75 w-4 flex items-center justify-center">
+                  <MessageSquare size={11} />
+                </span>
+                <span className="truncate flex-1 min-w-0">
+                  {row.session.title}
+                </span>
+                <span className="text-[10px] text-[var(--text-tertiary)] shrink-0">
+                  {row.session.messageCount} msgs
+                </span>
+              </button>
+            );
+          }
+          const m = row.mention;
+          return (
+            <button
+              key={`m-${m.kind}-${m.id}`}
+              style={style}
+              onMouseEnter={() => {
+                const navIdx = navIndices.indexOf(i);
+                if (navIdx >= 0) setActive(navIdx);
+              }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onSelect.current(m);
+              }}
+              className={cn(
+                "text-left px-3 flex items-center gap-2 text-[11.5px]",
+                isActive
+                  ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
+                  : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+              )}
+              title={mentionTitle(m)}
+            >
+              <span className="opacity-75 w-4 flex items-center justify-center">
+                <CategoryIcon kind={m.kind} />
+              </span>
+              <span className="truncate min-w-0 flex-shrink-0">
+                {primaryLabel(m)}
+              </span>
+              <span className="flex-1 min-w-0 text-[10px] text-[var(--text-tertiary)] truncate">
+                {row.recentLabel ?? secondaryLabel(m)}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

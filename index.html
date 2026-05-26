@@ -137,6 +137,34 @@
         0%, 100% { opacity: 0.5; }
         50%      { opacity: 1; }
       }
+
+      /* Native-macOS hairline border around the window.
+         Native apps like Zed and Chrome have a subtle 1px gray line
+         around the entire window frame; ours only had it on top
+         because the macOS titlebar provides that edge for free and
+         everything else paints to the WKWebView edge with no border.
+         A pointer-events:none overlay floats above the entire UI
+         (including the titlebar) and paints the inset shadow at the
+         WebView edge — macOS clips it to the window's rounded corners
+         the same way it clips our content. */
+      /* macOS already paints the top hairline as part of the titlebar,
+         so stacking our own on top of it doubles the line and looks
+         darker than the sides. Paint only left / right / bottom. */
+      /* Match macOS window corner radius (~10px on Sonoma/Sequoia) so
+         the border follows the rounded corner instead of getting clipped
+         by it — straight inset lines into a rounded corner read as a
+         faded/missing corner. We use `border` (not box-shadow) because
+         border honors border-radius cleanly on all four sides. The top
+         segment is hidden by the titlebar, which provides its own
+         hairline. */
+      .atlas-window-border {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 10px;
+        z-index: 99999;
+      }
     </style>
   </head>
   <body style="background:#000">
@@ -178,6 +206,7 @@
         </div>
       </div>
     </div>
+    <div class="atlas-window-border" aria-hidden="true"></div>
     <script>
       // Defer boot-skeleton removal until React dispatches `atlas:app-ready`.
       // The skeleton stays visible across React's first commit + the Rust

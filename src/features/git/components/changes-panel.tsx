@@ -80,7 +80,8 @@ type SortMode = "default" | "most-changes";
 
 type VirtualRow =
   | { kind: "file-header"; file: DiffFile; fileIndex: number }
-  | { kind: "diff-line"; line: DiffLine; fileIndex: number };
+  | { kind: "diff-line"; line: DiffLine; fileIndex: number }
+  | { kind: "file-footer"; fileIndex: number };
 
 function buildRows(files: DiffFile[], collapsedFiles: Set<string>): VirtualRow[] {
   const rows: VirtualRow[] = [];
@@ -93,6 +94,9 @@ function buildRows(files: DiffFile[], collapsedFiles: Set<string>): VirtualRow[]
         rows.push({ kind: "diff-line", line, fileIndex: fi });
       }
     }
+    // Bottom-cap row so the diff card closes with a rounded border
+    // instead of leaving a dangling open edge below the last line.
+    rows.push({ kind: "file-footer", fileIndex: fi });
   }
   return rows;
 }
@@ -146,7 +150,12 @@ export function ChangesPanel() {
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => rows[i].kind === "file-header" ? 30 : 20,
+    estimateSize: (i) => {
+      const k = rows[i].kind;
+      if (k === "file-header") return 30;
+      if (k === "file-footer") return 8;
+      return 20;
+    },
     overscan: 30,
   });
 
@@ -227,6 +236,16 @@ export function ChangesPanel() {
                   <button onClick={(e) => { e.stopPropagation(); openFile(file.path); }} className="opacity-0 group-hover:opacity-100 p-0.5 text-text-tertiary hover:text-text-primary"><ExternalLink size={9} /></button>
                   <span className="text-[9px] font-mono shrink-0"><span className="text-success">+{file.additions}</span> <span className="text-error">-{file.deletions}</span></span>
                 </div>
+              );
+            }
+
+            if (row.kind === "file-footer") {
+              return (
+                <div
+                  key={virtualRow.index}
+                  style={{ position: "absolute", top: 0, transform: `translateY(${virtualRow.start}px)`, width: "100%", height: virtualRow.size }}
+                  className="border-x border-b border-border-default rounded-b-md bg-[#0a0a0a]"
+                />
               );
             }
 

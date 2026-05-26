@@ -13,6 +13,8 @@ pub mod git_graph;
 pub mod git_watcher;
 pub mod github;
 pub mod knowledge;
+pub mod knowledge_links;
+pub mod knowledge_meta;
 pub mod log;
 pub mod mention_search;
 pub mod papers;

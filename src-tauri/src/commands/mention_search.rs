@@ -21,20 +21,70 @@
 //! scope — it's a two-level pick-session-then-search flow that
 //! doesn't fit the unified shape.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use super::fileindex::FileIndexState;
-use super::git::{git_refs_compute, GitRef, GitRefs};
+use super::git::{GitRef, GitRefs};
+use super::git_watcher::GitWatcherState;
 use super::github::{list_cloned_repos, ClonedRepo};
 use super::papers::{list_saved_papers, SavedPaper, SavedPapersIndex};
 
 const PER_KIND_LIMIT: usize = 30;
 const TOTAL_LIMIT: usize = 30;
+
+/// Per-process cache of the two mention-search inputs whose authoritative
+/// state currently lives in JS stores (knowledge entries from
+/// `useKnowledgeStore`, symbols from `useAnalysisStore`). Pushed in via
+/// `mention_cache_set_knowledge` / `mention_cache_set_symbols` when the
+/// JS stores hydrate or mutate; read by `mention_search`.
+///
+/// Why this exists: before the cache, every @-picker keystroke
+/// serialized the full knowledge + symbols arrays from JS to JSON,
+/// shipped them over IPC to Rust, then Rust deserialized them. On a
+/// project with 1000 symbols this was ~150 KB of JSON encode +
+/// decode work on the JS main thread per keystroke — the perceived
+/// typing lag in the picker. With the cache the per-keystroke
+/// payload is just `(query, scope, project_path)` (a few hundred
+/// bytes) and the heavy data sits hot in Rust.
+#[derive(Default)]
+pub struct MentionCacheState {
+    knowledge: RwLock<Vec<KnowledgeInput>>,
+    symbols: RwLock<Vec<SymbolInput>>,
+}
+
+impl MentionCacheState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[tauri::command]
+pub fn mention_cache_set_knowledge(
+    items: Vec<KnowledgeInput>,
+    state: State<'_, MentionCacheState>,
+) {
+    *state.knowledge.write() = items;
+}
+
+#[tauri::command]
+pub fn mention_cache_set_symbols(
+    items: Vec<SymbolInput>,
+    state: State<'_, MentionCacheState>,
+) {
+    *state.symbols.write() = items;
+}
+
+#[tauri::command]
+pub fn mention_cache_clear(state: State<'_, MentionCacheState>) {
+    state.knowledge.write().clear();
+    state.symbols.write().clear();
+}
 
 /// Frontend-supplied caches for kinds whose source-of-truth state
 /// lives in JS today (analysis store, knowledge store). Mirrors of
@@ -60,13 +110,6 @@ pub struct KnowledgeInput {
     pub file_path: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct MentionSearchInputs {
-    #[serde(default)]
-    pub knowledge: Vec<KnowledgeInput>,
-    #[serde(default)]
-    pub symbols: Vec<SymbolInput>,
-}
 
 /// Single result, discriminated by `kind`. Mirrors the TS
 /// `MentionData` union field-for-field; `kind` is rendered in
@@ -130,28 +173,13 @@ pub async fn mention_search(
     query: String,
     scope: Option<String>,
     project_path: Option<String>,
-    inputs: MentionSearchInputs,
     fileindex: State<'_, FileIndexState>,
     papers: State<'_, SavedPapersIndex>,
+    git_watcher: State<'_, GitWatcherState>,
+    cache: State<'_, MentionCacheState>,
 ) -> Result<Vec<MentionResult>, String> {
     let scope_ref = scope.as_deref();
     let trimmed = query.trim().to_string();
-
-    // Snapshot the file-index data once — releasing the lock before
-    // any async work — so the two file/folder branches can run
-    // without contending. Empty when no project is open.
-    let file_snapshot: Option<(Vec<(String, PathBuf)>, PathBuf)> = {
-        let guard = fileindex.snapshot_files();
-        guard.map(|(files, root)| {
-            (
-                files
-                    .into_iter()
-                    .map(|(rel, abs)| (rel, abs))
-                    .collect::<Vec<_>>(),
-                root,
-            )
-        })
-    };
 
     let want_file = matches_scope(scope_ref, "file");
     let want_folder = matches_scope(scope_ref, "folder");
@@ -160,6 +188,21 @@ pub async fn mention_search(
     let want_branch = matches_scope(scope_ref, "branch");
     let want_symbol = matches_scope(scope_ref, "symbol");
     let want_knowledge = matches_scope(scope_ref, "knowledge");
+
+    // Pull file/folder snapshots ONCE (no redundant clone) directly
+    // from the lock-protected state. snapshot_folders uses the
+    // watcher-invalidated cache so the O(files × depth) derivation
+    // only runs after a real file-set change — not per keystroke.
+    let files_snapshot: Option<Vec<(String, PathBuf)>> = if want_file {
+        fileindex.snapshot_files().map(|(files, _)| files)
+    } else {
+        None
+    };
+    let folders_snapshot: Option<Vec<(String, PathBuf)>> = if want_folder {
+        fileindex.snapshot_folders()
+    } else {
+        None
+    };
 
     let project_for_repo = project_path.clone();
     let project_for_paper = project_path.clone();
@@ -173,25 +216,18 @@ pub async fn mention_search(
     let trimmed_for_symbol = trimmed.clone();
     let trimmed_for_knowledge = trimmed.clone();
 
-    let file_snapshot_for_file = file_snapshot.clone();
     let file_fut = async move {
-        if !want_file {
-            return Vec::new();
-        }
-        let Some((files, _)) = file_snapshot_for_file else {
+        let Some(files) = files_snapshot else {
             return Vec::new();
         };
         rank_files(&trimmed_for_file, files)
     };
 
     let folder_fut = async move {
-        if !want_folder {
-            return Vec::new();
-        }
-        let Some((files, root)) = file_snapshot else {
+        let Some(folders) = folders_snapshot else {
             return Vec::new();
         };
-        rank_folders(&trimmed_for_folder, files, root)
+        rank_folders(&trimmed_for_folder, folders)
     };
 
     let repo_fut = async move {
@@ -221,22 +257,38 @@ pub async fn mention_search(
         }
     };
 
+    // Branch refs come from a watcher-invalidated cache (see
+    // `GitWatcherState::get_or_compute_refs`). First call per project
+    // pays the ~80 ms of `git rev-parse` / `for-each-ref` shell-outs;
+    // every subsequent keystroke is sub-microsecond until the
+    // watcher flushes the cache on the next git mutation. Before
+    // this cache the @-mention picker fired three `git` subprocesses
+    // per keystroke and stuttered visibly on large repos.
+    let cached_refs: Option<GitRefs> = match (&project_for_branch, want_branch) {
+        (Some(p), true) => git_watcher.get_or_compute_refs(p),
+        _ => None,
+    };
     let branch_fut = async move {
         if !want_branch {
             return Vec::new();
         }
-        let Some(project_path) = project_for_branch else {
-            return Vec::new();
-        };
-        let result =
-            tokio::task::spawn_blocking(move || git_refs_compute(&project_path)).await;
-        let Ok(Ok(refs)) = result else {
+        let Some(refs) = cached_refs else {
             return Vec::new();
         };
         rank_branches(&trimmed_for_branch, refs)
     };
 
-    let symbols_data = inputs.symbols;
+    // Pull from the cache instead of taking the data as an argument.
+    // Cloning a few hundred entries here is sub-millisecond; the
+    // savings come from NOT serializing+deserializing those
+    // entries across the IPC boundary on every keystroke (the old
+    // path could push 100-500 KB per keystroke on a project with
+    // many symbols, which was the visible typing lag).
+    let symbols_data: Vec<SymbolInput> = if want_symbol {
+        cache.symbols.read().clone()
+    } else {
+        Vec::new()
+    };
     let symbol_fut = async move {
         if !want_symbol {
             return Vec::new();
@@ -244,7 +296,11 @@ pub async fn mention_search(
         rank_symbols(&trimmed_for_symbol, symbols_data)
     };
 
-    let knowledge_data = inputs.knowledge;
+    let knowledge_data: Vec<KnowledgeInput> = if want_knowledge {
+        cache.knowledge.read().clone()
+    } else {
+        Vec::new()
+    };
     let knowledge_fut = async move {
         if !want_knowledge {
             return Vec::new();
@@ -277,96 +333,117 @@ pub async fn mention_search(
 
 // ── Per-kind ranking ────────────────────────────────────────────────────
 
-fn pattern_for(query: &str) -> Option<Pattern> {
-    if query.is_empty() {
-        None
-    } else {
-        Some(Pattern::parse(
-            query,
-            CaseMatching::Smart,
-            Normalization::Smart,
-        ))
-    }
-}
-
-fn score_one(matcher: &mut Matcher, pattern: Option<&Pattern>, haystack: &str) -> Option<u32> {
-    match pattern {
-        Some(p) => {
-            let mut buf = Vec::new();
-            let utf = Utf32Str::new(haystack, &mut buf);
-            p.score(utf, matcher)
-        }
-        None => Some(0),
-    }
-}
-
+/// Empty-query fast path: no scoring, no full vec, no sort. The
+/// caller is asking for "top N in some natural order" — for a
+/// scoped picker view this is "the first N items as we have them."
+/// Skipping nucleo for the empty case avoids the previous behavior
+/// of allocating an N-entry scored vec + sort_by every keystroke
+/// when no query has been typed yet.
 fn rank_files(query: &str, files: Vec<(String, PathBuf)>) -> Vec<MentionResult> {
-    let pattern = pattern_for(query);
+    if query.is_empty() {
+        return files
+            .into_iter()
+            .take(PER_KIND_LIMIT)
+            .map(|(rel, abs)| {
+                let abs_str = abs.to_string_lossy().into_owned();
+                MentionResult::File {
+                    id: abs_str.clone(),
+                    display_name: rel,
+                    abs_path: abs_str,
+                }
+            })
+            .collect();
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut matcher = Matcher::default();
     let mut scored: Vec<(u32, (String, PathBuf))> = files
         .into_iter()
-        .filter_map(|(rel, abs)| score_one(&mut matcher, pattern.as_ref(), &rel).map(|s| (s, (rel, abs))))
+        .filter_map(|(rel, abs)| {
+            let mut buf = Vec::new();
+            let utf = Utf32Str::new(&rel, &mut buf);
+            pattern.score(utf, &mut matcher).map(|s| (s, (rel, abs)))
+        })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored
         .into_iter()
         .take(PER_KIND_LIMIT)
-        .map(|(_, (rel, abs))| MentionResult::File {
-            id: abs.to_string_lossy().into_owned(),
-            display_name: rel,
-            abs_path: abs.to_string_lossy().into_owned(),
+        .map(|(_, (rel, abs))| {
+            let abs_str = abs.to_string_lossy().into_owned();
+            MentionResult::File {
+                id: abs_str.clone(),
+                display_name: rel,
+                abs_path: abs_str,
+            }
         })
         .collect()
 }
 
 fn rank_folders(
     query: &str,
-    files: Vec<(String, PathBuf)>,
-    root: PathBuf,
+    folders: Vec<(String, PathBuf)>,
 ) -> Vec<MentionResult> {
-    // Derive unique parent dirs from the file list — same logic as
-    // fileindex_search_dirs.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut folders: Vec<(String, PathBuf)> = Vec::new();
-    for (rel, _) in &files {
-        let mut cur = Path::new(rel).parent();
-        while let Some(p) = cur {
-            let r = p.to_string_lossy();
-            if r.is_empty() {
-                break;
-            }
-            let r = r.into_owned();
-            if seen.insert(r.clone()) {
-                folders.push((r, root.join(p)));
-            }
-            cur = p.parent();
-        }
+    if query.is_empty() {
+        return folders
+            .into_iter()
+            .take(PER_KIND_LIMIT)
+            .map(|(rel, abs)| {
+                let abs_str = abs.to_string_lossy().into_owned();
+                MentionResult::Folder {
+                    id: abs_str.clone(),
+                    display_name: rel,
+                    abs_path: abs_str,
+                }
+            })
+            .collect();
     }
-
-    let pattern = pattern_for(query);
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut matcher = Matcher::default();
     let mut scored: Vec<(u32, (String, PathBuf))> = folders
         .into_iter()
-        .filter_map(|(rel, abs)| score_one(&mut matcher, pattern.as_ref(), &rel).map(|s| (s, (rel, abs))))
+        .filter_map(|(rel, abs)| {
+            let mut buf = Vec::new();
+            let utf = Utf32Str::new(&rel, &mut buf);
+            pattern.score(utf, &mut matcher).map(|s| (s, (rel, abs)))
+        })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored
         .into_iter()
         .take(PER_KIND_LIMIT)
-        .map(|(_, (rel, abs))| MentionResult::Folder {
-            id: abs.to_string_lossy().into_owned(),
-            display_name: rel,
-            abs_path: abs.to_string_lossy().into_owned(),
+        .map(|(_, (rel, abs))| {
+            let abs_str = abs.to_string_lossy().into_owned();
+            MentionResult::Folder {
+                id: abs_str.clone(),
+                display_name: rel,
+                abs_path: abs_str,
+            }
         })
         .collect()
 }
 
 fn rank_repos(query: &str, rows: Vec<ClonedRepo>) -> Vec<MentionResult> {
-    let pattern = pattern_for(query);
+    if query.is_empty() {
+        return rows
+            .into_iter()
+            .take(PER_KIND_LIMIT)
+            .map(|r| MentionResult::Repo {
+                id: r.path.clone(),
+                display_name: r.name,
+                abs_path: r.path,
+                has_readme: r.has_readme,
+            })
+            .collect();
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut matcher = Matcher::default();
     let mut scored: Vec<(u32, ClonedRepo)> = rows
         .into_iter()
-        .filter_map(|r| score_one(&mut matcher, pattern.as_ref(), &r.name).map(|s| (s, r)))
+        .filter_map(|r| {
+            let mut buf = Vec::new();
+            let utf = Utf32Str::new(&r.name, &mut buf);
+            pattern.score(utf, &mut matcher).map(|s| (s, r))
+        })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored
@@ -382,11 +459,27 @@ fn rank_repos(query: &str, rows: Vec<ClonedRepo>) -> Vec<MentionResult> {
 }
 
 fn rank_papers(query: &str, rows: Vec<SavedPaper>) -> Vec<MentionResult> {
-    let pattern = pattern_for(query);
+    if query.is_empty() {
+        return rows
+            .into_iter()
+            .take(PER_KIND_LIMIT)
+            .map(|p| MentionResult::Paper {
+                id: p.id,
+                display_name: p.title,
+                authors: p.authors,
+                metadata_path: p.metadata_path,
+            })
+            .collect();
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut matcher = Matcher::default();
     let mut scored: Vec<(u32, SavedPaper)> = rows
         .into_iter()
-        .filter_map(|p| score_one(&mut matcher, pattern.as_ref(), &p.title).map(|s| (s, p)))
+        .filter_map(|p| {
+            let mut buf = Vec::new();
+            let utf = Utf32Str::new(&p.title, &mut buf);
+            pattern.score(utf, &mut matcher).map(|s| (s, p))
+        })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored
@@ -407,11 +500,28 @@ fn rank_branches(query: &str, refs: GitRefs) -> Vec<MentionResult> {
         .into_iter()
         .filter(|r| r.kind == "branch" || r.kind == "remote")
         .collect();
-    let pattern = pattern_for(query);
+    if query.is_empty() {
+        return pool
+            .into_iter()
+            .take(PER_KIND_LIMIT)
+            .map(|r| MentionResult::Branch {
+                id: r.name.clone(),
+                display_name: r.name,
+                sha: r.sha,
+                ref_kind: r.kind,
+                is_current: r.is_current,
+            })
+            .collect();
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut matcher = Matcher::default();
     let mut scored: Vec<(u32, GitRef)> = pool
         .into_iter()
-        .filter_map(|r| score_one(&mut matcher, pattern.as_ref(), &r.name).map(|s| (s, r)))
+        .filter_map(|r| {
+            let mut buf = Vec::new();
+            let utf = Utf32Str::new(&r.name, &mut buf);
+            pattern.score(utf, &mut matcher).map(|s| (s, r))
+        })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored
@@ -428,11 +538,29 @@ fn rank_branches(query: &str, refs: GitRefs) -> Vec<MentionResult> {
 }
 
 fn rank_symbols(query: &str, symbols: Vec<SymbolInput>) -> Vec<MentionResult> {
-    let pattern = pattern_for(query);
+    if query.is_empty() {
+        return symbols
+            .into_iter()
+            .take(PER_KIND_LIMIT)
+            .map(|s| MentionResult::Symbol {
+                id: format!("{}@{}:{}", s.name, s.file_path, s.line),
+                display_name: s.name,
+                signature: s.signature,
+                symbol_kind: s.kind,
+                file_path: s.file_path,
+                line: s.line,
+            })
+            .collect();
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut matcher = Matcher::default();
     let mut scored: Vec<(u32, SymbolInput)> = symbols
         .into_iter()
-        .filter_map(|s| score_one(&mut matcher, pattern.as_ref(), &s.name).map(|sc| (sc, s)))
+        .filter_map(|s| {
+            let mut buf = Vec::new();
+            let utf = Utf32Str::new(&s.name, &mut buf);
+            pattern.score(utf, &mut matcher).map(|sc| (sc, s))
+        })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     scored
@@ -450,9 +578,25 @@ fn rank_symbols(query: &str, symbols: Vec<SymbolInput>) -> Vec<MentionResult> {
 }
 
 fn rank_knowledge(query: &str, entries: Vec<KnowledgeInput>) -> Vec<MentionResult> {
+    if query.is_empty() {
+        return entries
+            .into_iter()
+            .take(PER_KIND_LIMIT)
+            .map(|e| {
+                let folder = e.id.rfind('/').map(|i| e.id[..i].to_string());
+                MentionResult::Knowledge {
+                    id: e.id,
+                    display_name: e.title,
+                    source: e.source,
+                    file_path: e.file_path,
+                    folder,
+                }
+            })
+            .collect();
+    }
     // Match against `title + " " + folder` so typing a space name
     // surfaces its entries — parity with the prior JS behavior.
-    let pattern = pattern_for(query);
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
     let mut matcher = Matcher::default();
     let mut scored: Vec<(u32, KnowledgeInput, Option<String>)> = entries
         .into_iter()
@@ -465,7 +609,9 @@ fn rank_knowledge(query: &str, entries: Vec<KnowledgeInput>) -> Vec<MentionResul
                 Some(f) => format!("{} {}", e.title, f),
                 None => e.title.clone(),
             };
-            score_one(&mut matcher, pattern.as_ref(), &haystack).map(|s| (s, e, folder))
+            let mut buf = Vec::new();
+            let utf = Utf32Str::new(&haystack, &mut buf);
+            pattern.score(utf, &mut matcher).map(|s| (s, e, folder))
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));

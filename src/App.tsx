@@ -420,6 +420,10 @@ export function App() {
       fileIndex.closeProject().catch(() => {});
       void invoke("git_watch_stop").catch(() => {});
       void invoke("recent_files_close_project").catch(() => {});
+      // Drop the mention cache so the @-picker doesn't briefly
+      // surface the previous project's notes / symbols on a fresh
+      // open. Replays land via knowledge/analysis store hydration.
+      void invoke("mention_cache_clear").catch(() => {});
       return;
     }
     fileIndex

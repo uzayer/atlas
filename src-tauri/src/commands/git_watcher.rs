@@ -19,6 +19,7 @@
 //! zero signal. The above cover every state change the UI cares about.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -26,6 +27,8 @@ use notify_debouncer_full::new_debouncer;
 use parking_lot::RwLock;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
+
+use super::git::{git_refs_compute, GitRefs};
 
 struct ActiveWatcher {
     root: PathBuf,
@@ -40,11 +43,57 @@ struct ActiveWatcher {
 #[derive(Default)]
 pub struct GitWatcherState {
     current: RwLock<Option<ActiveWatcher>>,
+    /// Cached `GitRefs` for the active project. Populated lazily by
+    /// `get_or_compute_refs` and invalidated by the watcher callback
+    /// the instant any `.git/HEAD` / refs / packed-refs change lands.
+    ///
+    /// Lives here (not in a standalone state) because the
+    /// invalidation cycle is the watcher itself — they share a
+    /// lifecycle and an Arc keeps the watcher closure able to flush
+    /// the cache without a JS round-trip.
+    refs_cache: Arc<RwLock<Option<(PathBuf, GitRefs)>>>,
 }
 
 impl GitWatcherState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return a cached `GitRefs` snapshot for `project_path`. Computes
+    /// + populates the cache on first call (~80 ms — three `git`
+    /// shell-outs) and on every call after a watcher-driven
+    /// invalidation. Cached reads are sub-microsecond, which is the
+    /// difference between the @-mention picker feeling instant and
+    /// gating every keystroke on subprocess spawns.
+    pub fn get_or_compute_refs(&self, project_path: &str) -> Option<GitRefs> {
+        {
+            let guard = self.refs_cache.read();
+            if let Some((path, refs)) = guard.as_ref() {
+                if path.as_os_str() == std::ffi::OsStr::new(project_path) {
+                    return Some(refs.clone());
+                }
+            }
+        }
+        // Cache miss — compute, install, return. Lock is dropped
+        // around the (slow) compute so concurrent callers don't pile
+        // up behind us; worst case is two compute calls land at the
+        // same time and the second overwrites the first, both with
+        // equivalent results.
+        let refs = git_refs_compute(project_path).ok()?;
+        *self.refs_cache.write() = Some((PathBuf::from(project_path), refs.clone()));
+        Some(refs)
+    }
+
+    pub fn invalidate_refs(&self) {
+        *self.refs_cache.write() = None;
+    }
+
+    /// Shared handle for the watcher closure to invalidate the cache
+    /// from outside `impl GitWatcherState`. Arc-cloning is constant
+    /// time; the closure ends up owning a second Arc and writes
+    /// through it on every git-side change.
+    pub(crate) fn refs_cache_handle(&self) -> Arc<RwLock<Option<(PathBuf, GitRefs)>>> {
+        self.refs_cache.clone()
     }
 }
 
@@ -71,6 +120,12 @@ pub async fn git_watch_start(
         return Ok(());
     }
 
+    // Cache invalidation runs FROM the watcher callback so the very
+    // next `mention_search` (or any cached refs read) recomputes
+    // against fresh on-disk state. Cheap — one RwLock write.
+    state.invalidate_refs();
+    let refs_cache_for_cb = state.refs_cache_handle();
+
     // Off the main thread: watcher creation does an initial FSEvents
     // scan on macOS.
     let root_for_task = root.clone();
@@ -90,6 +145,11 @@ pub async fn git_watch_start(
                 None,
                 move |result: notify_debouncer_full::DebounceEventResult| match result {
                     Ok(_events) => {
+                        // Flush the refs cache first — by the time
+                        // listeners (mention_search, git-store) see
+                        // the event, a fresh compute would be cheap
+                        // *and* correct.
+                        *refs_cache_for_cb.write() = None;
                         let _ = app_for_cb.emit(
                             "atlas:git-changed",
                             GitChangedPayload {

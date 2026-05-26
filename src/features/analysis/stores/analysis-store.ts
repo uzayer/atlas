@@ -66,6 +66,13 @@ export const useAnalysisStore = createSelectors(
               s.languages = result.languages;
               s.symbols = result.symbols;
             });
+            // Mirror to the Rust mention cache so the @-picker
+            // reads symbols from native state instead of re-shipping
+            // the array every keystroke. Lazy import to avoid
+            // pulling chat/lib into the analysis module graph.
+            void import("@/features/chat/lib/mentions").then((m) =>
+              m.publishSymbolsToMentionCache(),
+            );
           } catch {
             set((s) => { s.loading = false; });
           }

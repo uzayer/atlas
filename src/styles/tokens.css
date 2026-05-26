@@ -3,16 +3,27 @@
 
   /* === Enterprise Dark — AMOLED black, monochromatic === */
   --bg-base: #000000;
-  --bg-sidebar: #000000;
+  /* Sidebar rail color — used by chat history, knowledge sidebar, and
+     anything else that wants the "slightly off-pure-black" rail surface
+     from the Claude design handoff. */
+  --bg-sidebar: #0a0a0a;
   --bg-surface: #000000;
   --bg-raised: #0f0f0f;
-  --bg-overlay: #0f0f0f;
+  --bg-overlay: #1c1c1c;
   --bg-input: #0a0a0a;
   --bg-tab-active: #171717;
   --bg-tab-inactive: transparent;
   --bg-hover: rgba(255, 255, 255, 0.04);
   --bg-selected: rgba(255, 255, 255, 0.06);
   --bg-active: rgba(255, 255, 255, 0.08);
+
+  /* Knowledge / editor surfaces from the Claude Design handoff
+     (atlas-knowledge.jsx). Distinct from --bg-base so we get the
+     subtle ladder between rail (#0a) / canvas (#0a) / panel (#0f)
+     that the design relies on. */
+  --bg-canvas: #0a0a0a;
+  --bg-rail:   #0a0a0a;
+  --bg-elevated-2: #161616;  /* card/elevated above --bg-raised */
 
   /* Compat aliases */
   --bg-primary: var(--bg-surface);
@@ -41,6 +52,24 @@
   --accent-primary-hover: #cccccc;
   --accent-primary-muted: rgba(255, 255, 255, 0.06);
   --accent-secondary: #777777;
+
+  /* === Per-agent identity chips (Claude Design tokens) ============
+     `--agent` stays neutral so text/borders read monochrome; only the
+     chip square gets a faint per-agent tint. Surface via .agent-*
+     utility classes below (so `<span class="agent-claude">` exposes
+     --agent, --agent-bg, --agent-chip locally). */
+  --agent-claude-chip:    #c98263;
+  --agent-claude-chip-bg: rgba(201, 130, 99, 0.10);
+  --agent-gpt-chip:       #5fb39a;
+  --agent-gpt-chip-bg:    rgba(95, 179, 154, 0.10);
+  --agent-gemini-chip:    #7aa7e8;
+  --agent-gemini-chip-bg: rgba(122, 167, 232, 0.10);
+  --agent-local-chip:     #b8a3df;
+  --agent-local-chip-bg:  rgba(184, 163, 223, 0.10);
+  --agent-cursor-chip:    #d9b56e;
+  --agent-cursor-chip-bg: rgba(217, 181, 110, 0.10);
+  --agent-amp-chip:       #d68aae;
+  --agent-amp-chip-bg:    rgba(214, 138, 174, 0.10);
 
   /* === Semantic status === */
   --status-success: #4d4d4d;
@@ -131,3 +160,72 @@
   --z-tooltip: 400;
   --z-max: 9999;
 }
+
+/* ==========================================================================
+   Utility classes from the Claude Design handoff (atlas-tokens.css).
+   Used by the knowledge panel chrome (eyebrows / mono tags / agent chips /
+   keyboard hints / pill badges). Self-contained — no JS dependency.
+   ========================================================================== */
+
+/* Section-header treatment. Matches the project file-tree's
+   `text-[10px] font-semibold text-text-tertiary uppercase tracking-wider`
+   so panel chrome reads as one consistent Atlas system instead of the
+   handoff design's heavier mono eyebrow. */
+.eyebrow {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  font-weight: 600;
+}
+
+.mono   { font-family: var(--font-mono); font-feature-settings: "zero", "ss02"; }
+.tnum   { font-variant-numeric: tabular-nums; }
+
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 500;
+  color: var(--text-tertiary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 8px;
+  border-radius: 9999px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  white-space: nowrap;
+}
+.pill-bare { background: transparent; }
+
+.dot       { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; display: inline-block; }
+.dot-lg    { width: 8px; height: 8px; }
+
+/* Per-agent color helpers — surface --agent / --agent-bg / --agent-chip
+   so children read them off CSS custom properties. */
+.agent-claude { --agent: var(--text-primary); --agent-bg: var(--agent-claude-chip-bg); --agent-chip: var(--agent-claude-chip); }
+.agent-gpt    { --agent: var(--text-primary); --agent-bg: var(--agent-gpt-chip-bg);    --agent-chip: var(--agent-gpt-chip); }
+.agent-gemini { --agent: var(--text-primary); --agent-bg: var(--agent-gemini-chip-bg); --agent-chip: var(--agent-gemini-chip); }
+.agent-local  { --agent: var(--text-primary); --agent-bg: var(--agent-local-chip-bg);  --agent-chip: var(--agent-local-chip); }
+.agent-cursor { --agent: var(--text-primary); --agent-bg: var(--agent-cursor-chip-bg); --agent-chip: var(--agent-cursor-chip); }
+.agent-amp    { --agent: var(--text-primary); --agent-bg: var(--agent-amp-chip-bg);    --agent-chip: var(--agent-amp-chip); }
+
+.amark {
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  color: var(--agent-chip, var(--text-primary));
+  background: var(--agent-bg, var(--bg-raised));
+  border: 1px solid var(--border-default);
+  flex: none;
+}
+.amark-lg { width: 32px; height: 32px; font-size: 12px; border-radius: 8px; }

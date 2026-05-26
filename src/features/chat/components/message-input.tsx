@@ -24,7 +24,7 @@ import type { ChatInput as ChatInputComponent, ChatInputHandle } from "./chat-in
 import type {
   MentionPicker as MentionPickerComponent,
   MentionPickerHandle,
-} from "./mention-picker";
+} from "@/features/mentions/components/mention-picker";
 import type {
   SlashCommandPicker as SlashCommandPickerComponent,
   SlashCommandPickerHandle,
@@ -44,8 +44,9 @@ import type { MentionData } from "../lib/mentions";
 // instance.
 const chatInputPromise: Promise<typeof import("./chat-input")> =
   import("./chat-input");
-const mentionPickerPromise: Promise<typeof import("./mention-picker")> =
-  import("./mention-picker");
+const mentionPickerPromise: Promise<
+  typeof import("@/features/mentions/components/mention-picker")
+> = import("@/features/mentions/components/mention-picker");
 const slashCommandPickerPromise: Promise<typeof import("./slash-command-picker")> =
   import("./slash-command-picker");
 

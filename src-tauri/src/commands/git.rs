@@ -37,7 +37,7 @@ pub struct GitBranch {
     pub is_current: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GitRef {
     pub name: String, // short ref name, e.g. "main", "feature/x", "v1.2"
     pub sha: String,
@@ -45,7 +45,7 @@ pub struct GitRef {
     pub is_current: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GitRefs {
     pub head: Option<String>,
     pub head_ref: Option<String>,

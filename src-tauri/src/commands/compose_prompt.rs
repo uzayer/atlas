@@ -156,11 +156,15 @@ pub async fn compose_prompt(
 fn render_block(m: &MentionSpec) -> Option<String> {
     match m {
         MentionSpec::File { abs_path, .. } => {
-            let body = match std::fs::read_to_string(abs_path) {
-                Ok(s) => clip_body(&s),
-                Err(e) => format!("(failed to read: {e})"),
-            };
-            Some(format!("## {sf}\n\n```\n{body}\n```", sf = m.short_form()))
+            // Reference the file by path — let the agent read it via
+            // its own filesystem tools instead of inlining the body.
+            // Inlining a 5000-line file blows up the context for every
+            // turn forever; pointing at the path is one line and the
+            // agent can pull just what it needs.
+            Some(format!(
+                "## {sf}\n\nFile at `{abs_path}`. Use your filesystem tools to read it.",
+                sf = m.short_form()
+            ))
         }
         MentionSpec::Folder { abs_path, .. } => Some(format!(
             "## {sf}\n\nDirectory at `{abs_path}`. Use your filesystem tools to explore.",

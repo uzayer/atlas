@@ -149,6 +149,63 @@ pub async fn create_knowledge_dir(project_path: String, dir_name: String) -> Res
     .map_err(|e| e.to_string())?
 }
 
+/// Copy a chosen image into `<project>/.atlas/knowledge/covers/` so the
+/// cover ships with the project and survives moves. Returns the new
+/// path relative to `.atlas/knowledge/` (e.g. `covers/<entryId>.jpg`)
+/// suitable for storing in `_meta.json::pages[id].cover`.
+#[tauri::command]
+pub async fn knowledge_cover_upload(
+    project_path: String,
+    entry_id: String,
+    src_path: String,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let src = Path::new(&src_path);
+        if !src.exists() {
+            return Err("source file not found".to_string());
+        }
+        let ext = src
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("jpg")
+            .to_lowercase();
+        // Flatten the entry id so a nested note (`folder/note-123`) still
+        // gets a flat filename safe for the covers directory.
+        let safe_name = entry_id.replace('/', "__");
+        let rel = format!("covers/{}.{}", safe_name, ext);
+        let dest = Path::new(&project_path)
+            .join(".atlas")
+            .join("knowledge")
+            .join(&rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        Ok(rel)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Resolve a cover ref (relative path or `gradient:*` synthetic) to a
+/// readable string. Gradients pass through; relative paths become
+/// `convertFileSrc()`-friendly absolute paths the frontend turns into
+/// asset:// URLs.
+#[tauri::command]
+pub async fn knowledge_cover_resolve(
+    project_path: String,
+    cover: String,
+) -> Result<String, String> {
+    if cover.starts_with("gradient:") {
+        return Ok(cover);
+    }
+    let abs = Path::new(&project_path)
+        .join(".atlas")
+        .join("knowledge")
+        .join(&cover);
+    Ok(abs.to_string_lossy().to_string())
+}
+
 /// Append an interaction log entry for context building
 #[tauri::command]
 pub async fn log_interaction(

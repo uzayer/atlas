@@ -57,6 +57,13 @@ export const useKnowledgeStore = createSelectors(
             editContent: activeStillExists?.content
               ?? newEntries[0]?.content ?? "",
           });
+          // Mirror the new entry set into the Rust mention cache so
+          // the @-picker doesn't have to ship the full knowledge
+          // array on every keystroke. Lazy import to avoid a circular
+          // module cycle (chat/lib/mentions imports this store).
+          void import("@/features/chat/lib/mentions").then((m) =>
+            m.publishKnowledgeToMentionCache(),
+          );
         } catch {
           set({ loading: false });
         }

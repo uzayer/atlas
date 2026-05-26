@@ -9,6 +9,9 @@ use commands::claude::ClaudeSessionIndex;
 use commands::cli::CliLaunchState;
 use commands::fileindex::FileIndexState;
 use commands::git_watcher::GitWatcherState;
+use commands::knowledge_links::KnowledgeLinksState;
+use commands::knowledge_meta::KnowledgeMetaState;
+use commands::mention_search::MentionCacheState;
 use commands::recent_files::RecentFilesState;
 use commands::papers::SavedPapersIndex;
 use commands::sessions_watch::SessionsWatchState;
@@ -77,6 +80,9 @@ pub fn run() {
         .manage(FileIndexState::new())
         .manage(GitWatcherState::new())
         .manage(RecentFilesState::new())
+        .manage(MentionCacheState::new())
+        .manage(Arc::new(KnowledgeMetaState::new()))
+        .manage(Arc::new(KnowledgeLinksState::new()))
         .manage(CliLaunchState::new(initial_project))
         .manage(SessionsWatchState::new())
         .manage(ClaudeSessionIndex::new())
@@ -108,6 +114,9 @@ pub fn run() {
             commands::git_watcher::git_watch_stop,
             commands::git_watcher::git_watch_status,
             commands::mention_search::mention_search,
+            commands::mention_search::mention_cache_set_knowledge,
+            commands::mention_search::mention_cache_set_symbols,
+            commands::mention_search::mention_cache_clear,
             commands::recent_files::recent_files_open_project,
             commands::recent_files::recent_files_close_project,
             commands::recent_files::recent_files_push,
@@ -142,6 +151,17 @@ pub fn run() {
             commands::knowledge::save_editor_state,
             commands::knowledge::load_editor_state,
             commands::knowledge::fetch_readable,
+            commands::knowledge::knowledge_cover_upload,
+            commands::knowledge::knowledge_cover_resolve,
+            commands::knowledge_meta::knowledge_meta_load,
+            commands::knowledge_meta::knowledge_meta_patch,
+            commands::knowledge_meta::knowledge_meta_delete,
+            commands::knowledge_meta::knowledge_meta_drop_project,
+            commands::knowledge_links::knowledge_backlinks,
+            commands::knowledge_links::knowledge_forwardlinks,
+            commands::knowledge_links::knowledge_link_counts,
+            commands::knowledge_links::knowledge_links_invalidate,
+            commands::knowledge_links::knowledge_links_drop_project,
             commands::canvas::load_canvas,
             commands::canvas::save_canvas,
             commands::log::load_pinned_log,

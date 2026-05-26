@@ -38,6 +38,13 @@ pub struct FileMatch {
 struct ProjectIndex {
     root: PathBuf,
     files: Arc<RwLock<Vec<IndexedFile>>>,
+    /// Derived unique-parent-directories list, cached. Lazily built
+    /// on first folder query (or first `snapshot_folders` call) and
+    /// invalidated in lockstep with `files` via `apply_events`. For
+    /// a 5k-file project the derivation walks ~25k parent paths and
+    /// does that many HashSet ops; doing it per @-mention keystroke
+    /// was a meaningful chunk of the picker's perceived lag.
+    folders: Arc<RwLock<Option<Vec<(String, PathBuf)>>>>,
     /// `notify_debouncer_full` returns the debouncer guard; keeping it alive
     /// keeps the OS-level watch active. We never read from it.
     _debouncer: notify_debouncer_full::Debouncer<
@@ -61,7 +68,7 @@ impl FileIndexState {
     /// their own ranking over the same data the Cmd+P palette uses.
     /// Returns `(rel paths + absolute paths, project root)` or `None`
     /// when no project is indexed yet.
-    pub fn snapshot_files(&self) -> Option<(Vec<(String, std::path::PathBuf)>, std::path::PathBuf)> {
+    pub fn snapshot_files(&self) -> Option<(Vec<(String, PathBuf)>, PathBuf)> {
         let guard = self.current.read();
         guard.as_ref().map(|p| {
             let files = p
@@ -73,6 +80,52 @@ impl FileIndexState {
             (files, p.root.clone())
         })
     }
+
+    /// Snapshot the derived unique-folder list. Lazily built on first
+    /// access (cost: ~O(files × depth)), cached, invalidated by the
+    /// fs watcher on the next file-set change. After warmup this is
+    /// a constant-time clone of a small vec (~100s of entries for a
+    /// typical project) — what makes the @-mention picker's folder
+    /// kind sub-millisecond per keystroke.
+    pub fn snapshot_folders(&self) -> Option<Vec<(String, PathBuf)>> {
+        let guard = self.current.read();
+        let project = guard.as_ref()?;
+        if let Some(cached) = project.folders.read().as_ref() {
+            return Some(cached.clone());
+        }
+        // Cache miss — derive once, store, return. Drop the read
+        // lock around the (heavy) derivation so concurrent searches
+        // don't pile up; worst case is two derivations land and the
+        // second overwrites the first with the same data.
+        let files = project.files.read().clone();
+        let root = project.root.clone();
+        let derived = derive_folders(&files, &root);
+        *project.folders.write() = Some(derived.clone());
+        Some(derived)
+    }
+}
+
+/// Walk each file's parent chain, collect unique relative folders.
+/// Pulled out as a free function so the lazy-cache path in
+/// `snapshot_folders` can call it without holding the project lock.
+fn derive_folders(files: &[IndexedFile], root: &Path) -> Vec<(String, PathBuf)> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    for f in files {
+        let mut cur = Path::new(&f.rel).parent();
+        while let Some(p) = cur {
+            let rel = p.to_string_lossy();
+            if rel.is_empty() {
+                break;
+            }
+            let rel = rel.into_owned();
+            if seen.insert(rel.clone()) {
+                out.push((rel, root.join(p)));
+            }
+            cur = p.parent();
+        }
+    }
+    out
 }
 
 /// Open (or replace) the indexed project. Returns once the initial walk
@@ -101,8 +154,9 @@ pub async fn fileindex_open_project(
     // path tree before returning a stream handle.
     let root_for_task = root.clone();
     let app_for_task = app.clone();
-    let (files, debouncer): (
+    let (files, folders, debouncer): (
         Arc<RwLock<Vec<IndexedFile>>>,
+        Arc<RwLock<Option<Vec<(String, PathBuf)>>>>,
         notify_debouncer_full::Debouncer<
             notify::RecommendedWatcher,
             notify_debouncer_full::RecommendedCache,
@@ -110,8 +164,13 @@ pub async fn fileindex_open_project(
     ) = tokio::task::spawn_blocking(move || -> Result<_, String> {
         let walked = walk_project(&root_for_task);
         let files = Arc::new(RwLock::new(walked));
+        // Folder cache starts empty — first folder query fills it.
+        // The watcher callback flushes it on any file-set change so
+        // the next derivation pass sees fresh data.
+        let folders: Arc<RwLock<Option<Vec<(String, PathBuf)>>>> = Arc::new(RwLock::new(None));
 
         let files_for_watch = files.clone();
+        let folders_for_watch = folders.clone();
         let root_for_watch = root_for_task.clone();
         let app_for_watch = app_for_task.clone();
 
@@ -130,6 +189,9 @@ pub async fn fileindex_open_project(
                     let (dirs_touched, full_refresh) = summarise_events(&events);
 
                     apply_events(&root_for_watch, &files_for_watch, events);
+                    // Files just changed — drop the derived folder
+                    // cache so the next mention_search rebuilds it.
+                    *folders_for_watch.write() = None;
                     let _ = app_for_watch.emit(
                         "atlas:fileindex:updated",
                         serde_json::json!({ "count": files_for_watch.read().len() }),
@@ -162,7 +224,7 @@ pub async fn fileindex_open_project(
             .watch(&root_for_task, RecursiveMode::Recursive)
             .map_err(|e| format!("failed to watch {}: {e}", root_for_task.display()))?;
 
-        Ok((files, debouncer))
+        Ok((files, folders, debouncer))
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -171,6 +233,7 @@ pub async fn fileindex_open_project(
     *state.current.write() = Some(ProjectIndex {
         root,
         files,
+        folders,
         _debouncer: debouncer,
     });
 

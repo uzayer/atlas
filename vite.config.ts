@@ -58,6 +58,34 @@ export default defineConfig(async () => ({
       "@radix-ui/react-popover",
       "@radix-ui/react-dialog",
       "@radix-ui/react-context-menu",
+      // Pre-bundle the Tiptap stack so opening the Knowledge tab for
+      // the first time doesn't trigger Vite's "new dependencies
+      // optimized → reloading" cycle (which dumps editor state and
+      // looks like a full app reload to the user).
+      "@tiptap/core",
+      // NOTE: @tiptap/pm has no root export — it's only accessed via
+      // subpaths (@tiptap/pm/state, /view, etc.) which Vite picks up
+      // through the dep walker automatically. Including the bare name
+      // here errors with "Missing '.' specifier".
+      "@tiptap/react",
+      "@tiptap/starter-kit",
+      "@tiptap/extension-task-list",
+      "@tiptap/extension-task-item",
+      "@tiptap/extension-link",
+      "@tiptap/extension-placeholder",
+      "@tiptap/extension-typography",
+      "@tiptap/extension-highlight",
+      "@tiptap/extension-underline",
+      "@tiptap/extension-table",
+      "@tiptap/extension-table-row",
+      "@tiptap/extension-table-header",
+      "@tiptap/extension-table-cell",
+      "@tiptap/extension-code-block-lowlight",
+      "@tiptap/extension-mention",
+      "@tiptap/extension-bubble-menu",
+      "@tiptap/suggestion",
+      "tiptap-markdown",
+      "lowlight",
     ],
   },
   build: {

@@ -270,45 +270,74 @@ export function toShortForm(m: MentionData): string {
 }
 
 /** Unified mention search — runs in Rust. Replaces the per-provider
- *  JS fan-out + `rankMention` blending in `mention-picker.tsx`. Pass
- *  knowledge + symbols from the JS stores (Rust doesn't cache them
- *  yet); files / folders / repos / papers / branches come from
- *  Rust-owned state. Returns already-ranked top-N results.
+ *  JS fan-out + `rankMention` blending in `mention-picker.tsx`.
+ *
+ *  Rust owns the data for every kind:
+ *   - file / folder via `FileIndexState` (live, watcher-updated)
+ *   - repo via `list_cloned_repos` (cheap disk walk)
+ *   - paper via `SavedPapersIndex` (mtime cache)
+ *   - branch via watcher-invalidated `git_refs_cache`
+ *   - knowledge / symbol via `MentionCacheState`, populated by the
+ *     publishers below (`publishKnowledgeToMentionCache` etc.) when
+ *     the JS stores hydrate or mutate. Per keystroke we DON'T ship
+ *     these arrays anymore — that was the source of the picker's
+ *     typing lag on large projects (100-500 KB JSON encode + IPC
+ *     per keystroke).
  *
  *  Past-message is not handled here — it has its own two-level
- *  pick-session-then-search flow. The picker calls listPastSessions /
- *  listMessagesInPastSession directly for that scope. */
+ *  pick-session-then-search flow. */
 export async function searchMentions(
   query: string,
   scope: MentionKind | null,
   ctx: MentionContext,
 ): Promise<MentionData[]> {
   if (scope === "past_message") return [];
-  const knowledge = useKnowledgeStore.getState().entries.map((e) => ({
-    id: e.id,
-    title: e.title,
-    source: e.source,
-    filePath: e.file_path,
-  }));
-  const symbols = useAnalysisStore.getState().symbols.map((s) => ({
-    name: s.name,
-    kind: s.kind,
-    filePath: s.file_path,
-    line: s.line,
-    signature: s.signature,
-  }));
   try {
     const results = await invoke<MentionData[]>("mention_search", {
       query: stripCategoryAlias(query, scope ?? "file"),
       scope,
       projectPath: ctx.projectPath,
-      inputs: { knowledge, symbols },
     });
     return results;
   } catch (e) {
     console.warn("mention_search invoke failed:", e);
     return [];
   }
+}
+
+/** Push knowledge entries into the Rust mention cache. Call from
+ *  the JS knowledge store whenever `entries` is replaced or mutated. */
+export function publishKnowledgeToMentionCache(): void {
+  const items = useKnowledgeStore.getState().entries.map((e) => ({
+    id: e.id,
+    title: e.title,
+    source: e.source,
+    filePath: e.file_path,
+  }));
+  void invoke("mention_cache_set_knowledge", { items }).catch((err) =>
+    console.warn("mention_cache_set_knowledge failed:", err),
+  );
+}
+
+/** Push symbols into the Rust mention cache. Call from the analysis
+ *  store whenever a fresh `analyze_project` result lands. */
+export function publishSymbolsToMentionCache(): void {
+  const items = useAnalysisStore.getState().symbols.map((s) => ({
+    name: s.name,
+    kind: s.kind,
+    filePath: s.file_path,
+    line: s.line,
+    signature: s.signature,
+  }));
+  void invoke("mention_cache_set_symbols", { items }).catch((err) =>
+    console.warn("mention_cache_set_symbols failed:", err),
+  );
+}
+
+/** Drop both caches — call on project close so the next project's
+ *  picker doesn't briefly show the previous project's symbols. */
+export function clearMentionCache(): void {
+  void invoke("mention_cache_clear").catch(() => {});
 }
 
 /** Build the final prompt sent to the agent. Pure pass-through to a
