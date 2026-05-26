@@ -3,6 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "@/lib/utils";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { KbdCombo } from "@/ui/kbd";
 import {
   MessageSquare,
   Map,
@@ -289,11 +290,7 @@ export function CommandPalette({
                 >
                   <Icon size={14} className="shrink-0 text-[var(--text-tertiary)]" />
                   <span className="flex-1 truncate">{cmd.label}</span>
-                  {cmd.shortcut && (
-                    <span className="text-[10px] text-[var(--text-tertiary)] font-mono">
-                      {cmd.shortcut}
-                    </span>
-                  )}
+                  {cmd.shortcut && <KbdCombo combo={cmd.shortcut} />}
                 </button>
               );
             })}

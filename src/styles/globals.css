@@ -88,6 +88,23 @@
   }
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+   Global focus-outline opt-out.
+   The browser's default blue / system focus ring looks like a bug against
+   Atlas's monochrome chrome — and on `role="tab"` / `tabIndex=0` host
+   elements (custom tabs, accordion headers, etc.) it sticks around after
+   a click and reads as a stuck selection.
+   Disable everywhere by default. Surfaces that genuinely need a focus
+   indicator (form inputs, accessibility-critical buttons) opt in with
+   Tailwind's `focus-visible:ring-…` / `focus:ring-…` utilities, which
+   declare `box-shadow` rather than `outline` so they're unaffected by
+   this rule.
+   ────────────────────────────────────────────────────────────────────────── */
+:focus,
+:focus-visible {
+  outline: none;
+}
+
 /* ── Chat input — CodeMirror host + mention chips ────────────────────────────
    The chat composer mounts a CodeMirror EditorView inside `.atlas-chat-cm-host`.
    These rules size the host, hide CM's default editor chrome that doesn't make

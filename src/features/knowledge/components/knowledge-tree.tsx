@@ -7,6 +7,9 @@ import { ROW_HEIGHT } from "@/features/explorer/lib/tree-constants";
 export interface KnowledgeTreeEntry {
   id: string;
   title: string;
+  /** Optional per-page emoji/glyph — when set, rendered as the leaf
+   *  icon in place of the default file glyph. Fed from `meta.icon`. */
+  icon?: string | null;
 }
 
 interface KnowledgeNode {
@@ -69,7 +72,10 @@ export function KnowledgeTree({
         ensure(here);
         parent = here;
       }
-      ensure(dirParts.join("/")).files.push({ ...entry, title: entry.title || fileName });
+      ensure(dirParts.join("/")).files.push({
+        ...entry,
+        title: entry.title || fileName,
+      });
     }
     return map;
   }, [entries]);
@@ -137,6 +143,13 @@ export function KnowledgeTree({
               name={node.name}
               title={node.key}
               leafIcon={FileText}
+              leafIconNode={
+                node.entry?.icon ? (
+                  <span style={{ fontSize: 12, lineHeight: 1 }}>
+                    {node.entry.icon}
+                  </span>
+                ) : undefined
+              }
               onClick={() => {
                 if (node.isDir) toggleDir(node.key);
                 else onSelect(node.key);

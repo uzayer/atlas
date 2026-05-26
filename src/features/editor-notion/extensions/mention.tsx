@@ -1,6 +1,7 @@
 import { Mention as TiptapMention } from "@tiptap/extension-mention";
 import Suggestion from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
+import type { Editor } from "@tiptap/core";
 import { createRoot } from "react-dom/client";
 import { createRef } from "react";
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -25,6 +26,7 @@ import type { MentionData } from "@/features/chat/lib/mentions";
  */
 
 const MentionPluginKey = new PluginKey("atlas-mention");
+const KnowledgeMentionPluginKey = new PluginKey("atlas-mention-knowledge");
 
 const HOST_SELECTORS = [".atlas-tiptap"];
 
@@ -36,6 +38,8 @@ interface PopupState {
   anchor: { x: number; y: number } | null;
   command: ((m: MentionData) => void) | null;
   close: () => void;
+  /** When set, the picker opens locked to this kind (used by `#`). */
+  initialScope: "knowledge" | null;
 }
 
 function buildExcludeIds(): Set<string> {
@@ -46,7 +50,7 @@ function buildExcludeIds(): Set<string> {
   return id ? new Set([`knowledge:${id}`]) : new Set();
 }
 
-function createPopup(): PopupState {
+function createPopup(initialScope: "knowledge" | null = null): PopupState {
   const el = document.createElement("div");
   el.className = "atlas-mention-popup-host";
   document.body.appendChild(el);
@@ -59,6 +63,7 @@ function createPopup(): PopupState {
     anchor: null,
     command: null,
     close: () => {},
+    initialScope,
   };
 }
 
@@ -78,6 +83,7 @@ function renderPopup(popup: PopupState) {
       projectPath={projectPath}
       excludeIds={buildExcludeIds()}
       hostSelectors={HOST_SELECTORS}
+      initialScope={popup.initialScope}
       onSelect={(m) => popup.command?.(m)}
       onClose={() => popup.close()}
     />,
@@ -138,101 +144,125 @@ export const AtlasMention = TiptapMention.extend({
   },
   addProseMirrorPlugins() {
     const editor = this.editor;
-    let popup: PopupState | null = null;
     return [
-      Suggestion({
-        editor,
-        pluginKey: MentionPluginKey,
+      // `@` — universal mention picker (files, folders, knowledge,
+      // symbols, repos, branches, past messages, etc.).
+      buildSuggestion(editor, {
         char: "@",
-        allowSpaces: false,
-        // The universal picker calls Rust directly for results, so we
-        // don't need to return items here. Return an empty array to
-        // satisfy the suggestion contract; the picker handles search.
-        items: () => [],
-        command: ({ editor: ed, range, props }) => {
-          const m = props as unknown as MentionData;
-          const label = mentionLabel(m);
-          ed
-            .chain()
-            .focus()
-            .insertContentAt(range, [
-              {
-                type: "mention",
-                attrs: { id: m.id, kind: m.kind, label },
-              },
-              { type: "text", text: " " },
-            ])
-            .run();
-        },
-        render: () => ({
-          onStart: (props) => {
-            popup = createPopup();
-            popup.query = props.query;
-            const rect = props.clientRect?.();
-            popup.anchor = rect ? { x: rect.left, y: rect.top } : null;
-            popup.command = (m) => props.command(m as unknown as never);
-            popup.close = () => {
-              // Tiptap doesn't expose a public "cancel suggestion" — we
-              // fake it by removing the trigger char from the doc so
-              // the suggestion plugin's tracker resets.
-              try {
-                editor
-                  .chain()
-                  .focus()
-                  .deleteRange({ from: props.range.from, to: props.range.to })
-                  .run();
-              } catch { /* ignore */ }
-            };
-            renderPopup(popup);
-          },
-          onUpdate: (props) => {
-            if (!popup) return;
-            popup.query = props.query;
-            const rect = props.clientRect?.();
-            popup.anchor = rect ? { x: rect.left, y: rect.top } : null;
-            popup.command = (m) => props.command(m as unknown as never);
-            renderPopup(popup);
-          },
-          onKeyDown: (props) => {
-            const handle = popup?.pickerRef.current;
-            if (!handle) return false;
-            switch (props.event.key) {
-              case "ArrowDown":
-                handle.moveDown();
-                return true;
-              case "ArrowUp":
-                handle.moveUp();
-                return true;
-              case "Enter":
-              case "Tab":
-                return handle.commit();
-              case "Escape":
-                if (handle.goBack()) return true;
-                if (popup) {
-                  destroyPopup(popup);
-                  popup = null;
-                }
-                return true;
-              case "Backspace":
-                // Let the editor handle the deletion. If the user
-                // backspaces the trigger char, suggestion's onExit will
-                // fire and tear the popup down.
-                return false;
-              default:
-                return false;
-            }
-          },
-          onExit: () => {
-            if (popup) {
-              destroyPopup(popup);
-              popup = null;
-            }
-          },
-        }),
+        pluginKey: MentionPluginKey,
+        initialScope: null,
+      }),
+      // `~` — knowledge-only quick picker. Skips the categories view
+      // and goes straight to filtered knowledge results. `#` would
+      // collide with the H1 markdown shortcut, so we use `~` instead.
+      buildSuggestion(editor, {
+        char: "~",
+        pluginKey: KnowledgeMentionPluginKey,
+        initialScope: "knowledge",
       }),
     ];
   },
 });
+
+/**
+ * Builds one Suggestion plugin instance. Same render lifecycle for
+ * every trigger; `initialScope` is the only thing that varies. Each
+ * trigger gets its own PluginKey + its own popup instance so a stale
+ * one from one trigger can't leak into the other.
+ */
+function buildSuggestion(
+  editor: Editor,
+  config: {
+    char: string;
+    pluginKey: PluginKey;
+    initialScope: "knowledge" | null;
+  },
+) {
+  let popup: PopupState | null = null;
+  return Suggestion({
+    editor,
+    pluginKey: config.pluginKey,
+    char: config.char,
+    allowSpaces: false,
+    // The universal picker calls Rust directly for results, so we
+    // don't need to return items here.
+    items: () => [],
+    command: ({ editor: ed, range, props }) => {
+      const m = props as unknown as MentionData;
+      const label = mentionLabel(m);
+      ed
+        .chain()
+        .focus()
+        .insertContentAt(range, [
+          {
+            type: "mention",
+            attrs: { id: m.id, kind: m.kind, label },
+          },
+          { type: "text", text: " " },
+        ])
+        .run();
+    },
+    render: () => ({
+      onStart: (props) => {
+        popup = createPopup(config.initialScope);
+        popup.query = props.query;
+        const rect = props.clientRect?.();
+        popup.anchor = rect ? { x: rect.left, y: rect.top } : null;
+        popup.command = (m) => props.command(m as unknown as never);
+        popup.close = () => {
+          try {
+            editor
+              .chain()
+              .focus()
+              .deleteRange({ from: props.range.from, to: props.range.to })
+              .run();
+          } catch { /* ignore */ }
+        };
+        renderPopup(popup);
+      },
+      onUpdate: (props) => {
+        if (!popup) return;
+        popup.query = props.query;
+        const rect = props.clientRect?.();
+        popup.anchor = rect ? { x: rect.left, y: rect.top } : null;
+        popup.command = (m) => props.command(m as unknown as never);
+        renderPopup(popup);
+      },
+      onKeyDown: (props) => {
+        const handle = popup?.pickerRef.current;
+        if (!handle) return false;
+        switch (props.event.key) {
+          case "ArrowDown":
+            handle.moveDown();
+            return true;
+          case "ArrowUp":
+            handle.moveUp();
+            return true;
+          case "Enter":
+          case "Tab":
+            return handle.commit();
+          case "Escape":
+            if (handle.goBack()) return true;
+            if (popup) {
+              destroyPopup(popup);
+              popup = null;
+            }
+            return true;
+          case "Backspace":
+            return false;
+          default:
+            return false;
+        }
+      },
+      onExit: () => {
+        if (popup) {
+          destroyPopup(popup);
+          popup = null;
+        }
+      },
+    }),
+  });
+}
 
 function mentionLabel(m: MentionData): string {
   switch (m.kind) {

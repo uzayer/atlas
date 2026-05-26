@@ -7,6 +7,7 @@ import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 import { tags } from "@lezer/highlight";
 import { useEditorStore } from "../stores/editor-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronRight } from "lucide-react";
 import { logEvent } from "@/features/log/lib/log";
@@ -172,29 +173,77 @@ interface EditorPanelProps {
   containerHeight: number;
 }
 
-export function EditorPanel({ filePath, containerHeight }: EditorPanelProps) {
+export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelProps) {
   const path = filePath ?? "";
+  const isUntitled = path.startsWith("untitled:");
   const buffer = useEditorStore((s) => s.buffers[path]);
   const { openBuffer, setDirty, markSaved } = useEditorStore.use.actions();
   const projectPath = useProjectStore.use.currentProject()?.path ?? "";
+  const layoutActions = useLayoutStore.use.actions();
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onSaveRef = useRef<() => void>(() => {});
   const dirtyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load file content from disk
+  // Load file content from disk — unless this is an untitled scratch
+  // buffer (Cmd+N), in which case we seed an empty buffer in-memory
+  // and skip the IPC. The synthetic `untitled:<ts>` key keeps each
+  // unsaved tab's buffer separate in the store.
   useEffect(() => {
     if (!path || buffer) return;
+    if (isUntitled) {
+      openBuffer(path, "");
+      return;
+    }
     invoke<string>("read_file_content", { path })
       .then((content) => openBuffer(path, content))
       .catch(() => openBuffer(path, `// Failed to read: ${path}`));
-  }, [path, buffer, openBuffer]);
+  }, [path, buffer, openBuffer, isUntitled]);
 
-  // Save: read content directly from CodeMirror, not from store
+  // Save: read content directly from CodeMirror, not from store.
+  // Untitled buffers open the OS save dialog first; on commit we
+  // write the file, replace the untitled tab with a real-path tab,
+  // and migrate the buffer key so the new tab picks up the content
+  // immediately without a disk round-trip.
   const handleSave = useCallback(async () => {
     const view = viewRef.current;
     if (!view) return;
     const content = view.state.doc.toString();
+    if (isUntitled) {
+      try {
+        const { save: saveDialog } = await import("@tauri-apps/plugin-dialog");
+        const chosen = await saveDialog({
+          defaultPath: projectPath || undefined,
+          title: "Save File",
+        });
+        if (!chosen) return; // user cancelled
+        const newPath = chosen as string;
+        await invoke("write_file_content", { path: newPath, content });
+        // Carry the freshly-saved content over to the new buffer key.
+        openBuffer(newPath, content);
+        markSaved(newPath, content);
+        // Swap the tab in place: close untitled, open real-path tab
+        // with the same activation behavior addTab gives.
+        layoutActions.closeTab(tabId);
+        layoutActions.addTab({
+          id: `editor-${newPath}`,
+          type: "editor",
+          title: newPath.split("/").pop() ?? newPath,
+          closable: true,
+          dirty: false,
+          data: { filePath: newPath },
+        });
+        logEvent({
+          source: "editor",
+          kind: "save",
+          summary: newPath.split("/").pop() ?? newPath,
+          payload: { path: newPath, bytes: content.length },
+        });
+      } catch (err) {
+        console.error("Save-as failed:", err);
+      }
+      return;
+    }
     try {
       await invoke("write_file_content", { path, content });
       markSaved(path, content);
@@ -207,7 +256,7 @@ export function EditorPanel({ filePath, containerHeight }: EditorPanelProps) {
     } catch (err) {
       console.error("Save failed:", err);
     }
-  }, [path, markSaved]);
+  }, [path, markSaved, isUntitled, projectPath, openBuffer, layoutActions, tabId]);
 
   onSaveRef.current = handleSave;
 

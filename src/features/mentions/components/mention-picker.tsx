@@ -92,6 +92,11 @@ export interface MentionPickerProps {
    *  `.atlas-chat-cm-host` and `.atlas-mention-picker`; callers in
    *  other surfaces (Tiptap, future composers) add their own. */
   hostSelectors?: string[];
+  /** Lock the picker to a single kind from the moment it opens —
+   *  skips the "Recents + Browse categories" empty view and goes
+   *  straight to filtered results. Used by the kb editor's `#`
+   *  trigger to scope the picker to knowledge notes only. */
+  initialScope?: MentionKind | null;
 }
 
 // ── Internal model ───────────────────────────────────────────────────────────
@@ -120,11 +125,12 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       onClose,
       excludeIds,
       hostSelectors,
+      initialScope,
     },
     ref
   ) {
     const recentFiles = useRecentFilesStore.use.items();
-    const [scope, setScope] = useState<MentionKind | null>(null);
+    const [scope, setScope] = useState<MentionKind | null>(initialScope ?? null);
     /** When scope === "past_message" and no `pastSession` is locked, the
      *  picker shows a sessions list (level 1). Once `pastSession` is set,
      *  it shows messages inside that session (level 2). */
@@ -134,16 +140,18 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
     const [active, setActive] = useState(0);
 
     // Reset transient state when the popover (re-)opens.
+    // When `initialScope` is set, lock to that scope — the picker
+    // then renders as if the user had drilled into that category.
     useEffect(() => {
       if (open) {
-        setScope(null);
+        setScope(initialScope ?? null);
         setPastSession(null);
         setActive(0);
       } else {
         setResults([]);
         setPastSessions([]);
       }
-    }, [open]);
+    }, [open, initialScope]);
 
     // Run providers on every (query, scope, pastSession, projectPath)
     // change. Each provider gets its own AbortSignal so stale results
@@ -328,7 +336,9 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
             setActive(0);
             return true;
           }
-          if (scope) {
+          // When a scope was locked from the outside (initialScope),
+          // there's no "above" level to drop to — let the parent close.
+          if (scope && !initialScope) {
             setScope(null);
             setActive(0);
             return true;
@@ -336,7 +346,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
           return false;
         },
       }),
-      [activeRow, navIndices.length, pastSession, scope]
+      [activeRow, navIndices.length, pastSession, scope, initialScope]
     );
 
     // Dismiss on click outside the picker AND outside the host editor.
@@ -367,18 +377,31 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
 
     if (!open || !anchor) return null;
 
-    // Position: float the picker so its **bottom-left** corner sits a few
-    // pixels above the caret. That keeps it from covering the line the
-    // user is typing on, and lets it grow upward inside its max-height.
-    // We use viewport-fixed coords from `view.coordsAtPos`, which return
-    // values relative to the viewport — those line up with `position:
-    // fixed` straightforwardly, no matter how many sidebars / resizable
-    // panels sit between the editor and the document root.
+    // Position: prefer below the caret so it doesn't cover lines above
+    // the cursor (the common case for mid-page editors like the
+    // knowledge note editor). Fall back to above when there isn't
+    // enough room below — that's the chat composer's case since it
+    // sits flush at the bottom of the viewport.
+    //
+    // Coords come from `view.coordsAtPos` which is viewport-relative,
+    // so `position: fixed` lines up cleanly regardless of sidebars or
+    // resizable panels in between.
     const PICKER_WIDTH = 420;
+    const PICKER_MAX_HEIGHT = 360;
     const GAP = 6;
     const vw = window.innerWidth;
+    const vh = window.innerHeight;
     const left = Math.max(8, Math.min(anchor.x, vw - PICKER_WIDTH - 8));
-    const bottom = Math.max(8, window.innerHeight - anchor.y + GAP);
+    // anchor.y is the caret's TOP. We need the line's height so the
+    // popup sits just under the active line — we don't have it here,
+    // so use a sensible default (matches the chat composer's caret).
+    const LINE_HEIGHT = 20;
+    const caretBottom = anchor.y + LINE_HEIGHT;
+    const roomBelow = vh - caretBottom - 8;
+    const placeBelow = roomBelow >= PICKER_MAX_HEIGHT;
+    const positionStyle: React.CSSProperties = placeBelow
+      ? { top: Math.max(8, caretBottom + GAP) }
+      : { bottom: Math.max(8, vh - anchor.y + GAP) };
 
     return createPortal(
       <div
@@ -394,9 +417,9 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         style={{
           position: "fixed",
           left,
-          bottom,
+          ...positionStyle,
           width: PICKER_WIDTH,
-          maxHeight: 360,
+          maxHeight: PICKER_MAX_HEIGHT,
           zIndex: 9999,
         }}
       >

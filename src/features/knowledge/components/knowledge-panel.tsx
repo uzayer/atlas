@@ -9,6 +9,7 @@ import {
   useReferencesLabel,
 } from "../stores/knowledge-links-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import {
   TiptapEditor,
   type TiptapEditorHandle,
@@ -273,10 +274,14 @@ export function KnowledgePanel() {
   const metaPages = useKnowledgeMetaStore.use.pages();
   const sidebarEntries = useMemo(
     () =>
-      entries.map((e) => ({
-        id: e.id,
-        title: metaPages[e.id]?.title?.trim() || e.title,
-      })),
+      entries.map((e) => {
+        const meta = metaPages[e.id];
+        return {
+          id: e.id,
+          title: meta?.title?.trim() || e.title,
+          icon: meta?.icon ?? null,
+        };
+      }),
     [entries, metaPages],
   );
 
@@ -294,6 +299,16 @@ export function KnowledgePanel() {
         onRefresh={() => loadEntries(currentProject.path)}
         onNewFolder={() => setShowFolderInput((v) => !v)}
         onNewNote={() => createEntry(currentProject.path)}
+        onOpenGraph={() =>
+          useLayoutStore.getState().actions.addTab({
+            id: "knowledge-graph",
+            type: "knowledge-graph",
+            title: "Graph",
+            closable: true,
+            dirty: false,
+            data: {},
+          })
+        }
         onSelectRepo={handleSelectRepo}
         folderInputOpen={showFolderInput}
         folderInputValue={newFolderName}

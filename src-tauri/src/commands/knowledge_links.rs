@@ -44,12 +44,45 @@ pub struct LinkCounts {
     pub forwardlinks: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphNode {
+    pub id: String,
+    pub title: String,
+    pub in_degree: u32,
+    pub out_degree: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
 #[derive(Debug, Default, Clone)]
 struct LinkGraph {
     /// `target_id → [Backlink]` (where target = the page being referenced).
     backlinks: HashMap<String, Vec<Backlink>>,
     /// `from_id → [target_id]` (everything the page references).
     forwardlinks: HashMap<String, Vec<String>>,
+    /// Every note walked off disk, in (id, title) order. Used by
+    /// `knowledge_links_graph` so the graph view can surface isolated
+    /// notes (no incoming or outgoing references) as standalone nodes.
+    notes: Vec<NoteSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct NoteSummary {
+    id: String,
+    title: String,
 }
 
 #[derive(Default)]
@@ -82,6 +115,10 @@ fn build_graph(project_path: &str) -> LinkGraph {
 
     let mut graph = LinkGraph::default();
     for (from_id, from_title, body) in &docs {
+        graph.notes.push(NoteSummary {
+            id: from_id.clone(),
+            title: from_title.clone(),
+        });
         let mut targets: Vec<String> = Vec::new();
         for hit in find_refs(body) {
             // Skip self-references — a page can't backlink to itself.
@@ -392,4 +429,76 @@ pub async fn knowledge_links_drop_project(
     let mut by_proj = state.by_project.write();
     by_proj.remove(&project_path);
     Ok(())
+}
+
+/// Project-wide graph projection for the Obsidian-style graph view.
+/// Surfaces every note as a node (including isolated ones) so the
+/// canvas isn't sparse for fresh projects, and dedupes A→B / B→A into
+/// a single undirected edge for layout purposes (the picker / inspector
+/// keep the directed `LinkGraph` for their own needs).
+#[tauri::command]
+pub async fn knowledge_links_graph(
+    project_path: String,
+    state: State<'_, Arc<KnowledgeLinksState>>,
+) -> Result<ProjectGraph, String> {
+    let state = Arc::clone(state.inner());
+    tokio::task::spawn_blocking(move || {
+        ensure_graph(&state, &project_path);
+        let by_proj = state.by_project.read();
+        let graph = match by_proj.get(&project_path) {
+            Some(Some(g)) => g,
+            _ => return Ok(ProjectGraph::default()),
+        };
+
+        // Collect every known id from notes + both link sides.
+        // Notes-walk gives us isolated ones; the maps catch any
+        // referenced-but-not-on-disk ids (shouldn't happen, but safe).
+        let mut titles: HashMap<String, String> = HashMap::new();
+        for n in &graph.notes {
+            titles.insert(n.id.clone(), n.title.clone());
+        }
+        for id in graph.backlinks.keys() {
+            titles.entry(id.clone()).or_insert_with(|| id.clone());
+        }
+        for id in graph.forwardlinks.keys() {
+            titles.entry(id.clone()).or_insert_with(|| id.clone());
+        }
+
+        // Dedupe edges as undirected pairs.
+        let mut edges: Vec<GraphEdge> = Vec::new();
+        let mut seen_pairs: std::collections::HashSet<(String, String)> = Default::default();
+        for (from, targets) in &graph.forwardlinks {
+            for to in targets {
+                if from == to { continue; }
+                let key = if from < to { (from.clone(), to.clone()) } else { (to.clone(), from.clone()) };
+                if seen_pairs.insert(key) {
+                    edges.push(GraphEdge { from: from.clone(), to: to.clone() });
+                }
+            }
+        }
+
+        // Degrees from the directed graph: out = forwardlinks count,
+        // in = backlinks count. Used by the renderer to scale hub nodes
+        // bigger.
+        let mut nodes: Vec<GraphNode> = titles
+            .into_iter()
+            .map(|(id, title)| {
+                let out_degree = graph
+                    .forwardlinks
+                    .get(&id)
+                    .map(|v| v.len() as u32)
+                    .unwrap_or(0);
+                let in_degree = graph
+                    .backlinks
+                    .get(&id)
+                    .map(|v| v.len() as u32)
+                    .unwrap_or(0);
+                GraphNode { id, title, in_degree, out_degree }
+            })
+            .collect();
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(ProjectGraph { nodes, edges })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

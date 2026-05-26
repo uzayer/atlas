@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { AppLayout } from "@/features/layout/components/app-layout";
 import { AppContextMenu } from "@/components/app-context-menu";
 import { CommandPalette } from "@/components/command-palette";
+import { NewTabPalette } from "@/components/new-tab-palette";
 import { SearchOverlay } from "@/components/search-overlay";
 import { useHotkeys } from "@/hooks/use-hotkey";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
@@ -131,6 +132,7 @@ export function App() {
   }, []);
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [newTabPaletteOpen, setNewTabPaletteOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const {
@@ -542,6 +544,30 @@ export function App() {
         }),
     },
     {
+      // ⌘N — new untitled editor. The synthetic `untitled:<ts>` path
+      // tells the editor to start with an empty buffer and to fall
+      // into the save-as flow on ⌘S (see `editor-panel.tsx`).
+      combo: { key: "n", meta: true },
+      action: () => {
+        const ts = Date.now();
+        addTab({
+          id: `editor-untitled-${ts}`,
+          type: "editor",
+          title: "Untitled",
+          closable: true,
+          dirty: false,
+          data: { filePath: `untitled:${ts}` },
+        });
+      },
+    },
+    {
+      // ⌘⌥N — open the new-tab palette (keyboard-first equivalent of
+      // the `+` button's dropdown). Lists every module type and lets
+      // the user open one without touching the mouse.
+      combo: { key: "n", meta: true, alt: true },
+      action: () => setNewTabPaletteOpen(true),
+    },
+    {
       combo: { key: "t", meta: true, shift: true },
       action: () =>
         addTab({
@@ -577,6 +603,10 @@ export function App() {
       <CommandPalette
         open={commandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
+      />
+      <NewTabPalette
+        open={newTabPaletteOpen}
+        onOpenChange={setNewTabPaletteOpen}
       />
       <SearchOverlay open={searchOpen} onOpenChange={setSearchOpen} />
       <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />

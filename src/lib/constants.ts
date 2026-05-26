@@ -15,6 +15,7 @@ export const TAB_TYPES = [
   "editor",
   "research",
   "knowledge",
+  "knowledge-graph",
   "terminal",
   "diff",
   "settings",

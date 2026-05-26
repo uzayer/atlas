@@ -162,6 +162,7 @@ pub fn run() {
             commands::knowledge_links::knowledge_link_counts,
             commands::knowledge_links::knowledge_links_invalidate,
             commands::knowledge_links::knowledge_links_drop_project,
+            commands::knowledge_links::knowledge_links_graph,
             commands::canvas::load_canvas,
             commands::canvas::save_canvas,
             commands::log::load_pinned_log,

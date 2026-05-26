@@ -49,8 +49,18 @@ export function IconPicker({ value, anchorRect, onPick, onClose }: IconPickerPro
       if (!popRef.current) return;
       if (!popRef.current.contains(e.target as Node)) onClose();
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
     window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [onClose]);
 
   if (!anchorRect) return null;

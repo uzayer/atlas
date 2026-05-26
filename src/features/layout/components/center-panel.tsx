@@ -19,6 +19,7 @@ const BrowserPanel = lazy(() => import("@/features/browser/components/browser-pa
 const MediaViewer = lazy(() => import("@/features/media/components/media-viewer").then(m => ({ default: m.MediaViewer })));
 const CanvasPanel = lazy(() => import("@/features/canvas/components/canvas-panel").then(m => ({ default: m.CanvasPanel })));
 const KnowledgePanel = lazy(() => import("@/features/knowledge/components/knowledge-panel").then(m => ({ default: m.KnowledgePanel })));
+const KnowledgeGraph = lazy(() => import("@/features/knowledge/components/knowledge-graph").then(m => ({ default: m.KnowledgeGraph })));
 const ResearchPanel = lazy(() => import("@/features/research/components/research-panel").then(m => ({ default: m.ResearchPanel })));
 const SettingsPanel = lazy(() => import("@/features/settings/components/settings-panel").then(m => ({ default: m.SettingsPanel })));
 const LogPanel = lazy(() => import("@/features/log/components/log-panel").then(m => ({ default: m.LogPanel })));
@@ -33,6 +34,7 @@ import {
   Code,
   BookOpen,
   Brain,
+  Network,
   Terminal,
   GitCompare,
   Settings,
@@ -53,6 +55,7 @@ const tabIcons: Record<TabType, React.ElementType> = {
   editor: Code,
   research: BookOpen,
   knowledge: Brain,
+  "knowledge-graph": Network,
   terminal: Terminal,
   diff: GitCompare,
   settings: Settings,
@@ -156,10 +159,17 @@ export function CenterPanel() {
                   onClick={() => setActiveTab(tab.id)}
                   onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setActiveTab(tab.id); }}
                   className={cn(
-                    "group flex items-center gap-1.5 px-3 h-full text-[12px] font-medium shrink-0 cursor-pointer select-none border-r border-border-default transition-colors",
+                    "group relative flex items-center gap-1.5 pl-3 h-full text-[12px] font-medium shrink-0 cursor-pointer select-none border-r border-border-default",
+                    "transition-[padding-right,background-color,color] duration-150",
+                    // Reserve right padding only on hover so the close
+                    // button has room without claiming any space at
+                    // rest. Title text shifts left by ~16px during the
+                    // fade — reads as one motion together with the X
+                    // fading in.
+                    tab.closable ? "pr-3 hover:pr-7" : "pr-3",
                     isActive
                       ? "text-text-primary bg-bg-surface"
-                      : "text-text-tertiary bg-bg-base hover:text-text-secondary hover:bg-bg-hover"
+                      : "text-text-tertiary bg-bg-base hover:text-text-secondary hover:bg-bg-hover",
                   )}
                 >
                   {isRunning ? (
@@ -176,14 +186,27 @@ export function CenterPanel() {
                     {tab.title}
                   </span>
                   {tab.closable && (
+                    // Absolute-positioned: the button claims no inline
+                    // space at rest, stays vertically centered on the
+                    // tab's midline regardless of font metrics, and
+                    // fades in via opacity (no width animation to
+                    // drift the icon during reveal).
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
                         closeTab(tab.id);
                       }}
-                      className="inline-flex items-center justify-center w-4 h-4 rounded opacity-0 group-hover:opacity-100 hover:bg-[#ffffff10] hover:text-text-primary shrink-0"
+                      title="Close tab"
+                      className={cn(
+                        "absolute right-1.5 top-1/2 -translate-y-1/2",
+                        "inline-flex items-center justify-center w-4 h-4 rounded-full",
+                        "text-text-tertiary opacity-0",
+                        "group-hover:opacity-100",
+                        "hover:bg-[#ffffff22] hover:text-text-primary",
+                        "transition-opacity duration-150",
+                      )}
                     >
-                      <X size={9} />
+                      <X size={10} strokeWidth={2.2} />
                     </button>
                   )}
                 </div>
@@ -299,6 +322,8 @@ function TabContent({ tab }: { tab: Tab }) {
       return <CanvasPanel />;
     case "knowledge":
       return <KnowledgePanel />;
+    case "knowledge-graph":
+      return <KnowledgeGraph />;
     case "research":
       return <ResearchPanel />;
     case "browser":

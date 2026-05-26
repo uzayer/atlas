@@ -86,6 +86,12 @@ export default defineConfig(async () => ({
       "@tiptap/suggestion",
       "tiptap-markdown",
       "lowlight",
+      // Pre-bundle the graph view's renderer + physics stack for the
+      // same reason as Tiptap — first open of the Graph tab would
+      // otherwise trigger a "new dependencies optimized → reloading"
+      // cycle and dump in-progress state.
+      "pixi.js",
+      "matter-js",
     ],
   },
   build: {

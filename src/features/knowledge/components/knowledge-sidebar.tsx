@@ -7,6 +7,7 @@ import {
   FolderPlus,
   FilePlus,
   GitBranch,
+  Network,
   Trash2,
 } from "lucide-react";
 import { KnowledgeTree } from "./knowledge-tree";
@@ -14,7 +15,7 @@ import { KnowledgeTree } from "./knowledge-tree";
 interface KnowledgeSidebarProps {
   projectPath: string;
   loading: boolean;
-  entries: Array<{ id: string; title: string }>;
+  entries: Array<{ id: string; title: string; icon?: string | null }>;
   activeEntryId: string | null;
   activeRepoName: string | null;
   recentIds: string[];
@@ -24,6 +25,7 @@ interface KnowledgeSidebarProps {
   onRefresh: () => void;
   onNewFolder: () => void;
   onNewNote: () => void;
+  onOpenGraph: () => void;
   onSelectRepo: (name: string) => void;
   /** True while the inline folder-name input is open. Rendered just
    *  under the sidebar header so it doesn't overlap tree rows. */
@@ -46,6 +48,7 @@ export function KnowledgeSidebar({
   onRefresh,
   onNewFolder,
   onNewNote,
+  onOpenGraph,
   onSelectRepo,
   folderInputOpen,
   folderInputValue = "",
@@ -123,6 +126,14 @@ export function KnowledgeSidebar({
         <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider truncate flex-1">
           Knowledge
         </span>
+        <button
+          onClick={onOpenGraph}
+          className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors cursor-pointer"
+          title="Open graph view"
+          style={{ width: 22, height: 22 }}
+        >
+          <Network size={12} />
+        </button>
         <button
           onClick={onRefresh}
           className={cn(
