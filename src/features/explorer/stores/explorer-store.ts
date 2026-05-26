@@ -23,6 +23,14 @@ interface ExplorerState {
   rootPath: string | null;
   tree: TreeNode[];
   loading: boolean;
+  /** Cut/Copy clipboard for paste. `null` when nothing's queued. */
+  clipboard: { path: string; isCut: boolean } | null;
+  /** Path of the row currently in inline-rename mode (`null` = none). */
+  pendingRenamePath: string | null;
+  /** Pending New File / New Folder ghost row, scoped to a parent dir.
+   *  When set, the file-tree renders an extra input row inside
+   *  `parentDir` for the user to type a filename. */
+  pendingNewEntry: { parentDir: string; isDir: boolean } | null;
 }
 
 interface ExplorerActions {
@@ -40,6 +48,18 @@ interface ExplorerActions {
      *  reports an opaque event (`fullRefresh: true`) that can't be
      *  pinned to a specific dir, OR programmatically when needed. */
     refresh: () => Promise<void>;
+    /** Force a folder open if not already loaded. Used before a "New
+     *  File" ghost row so the user sees the input inside the target
+     *  folder. */
+    ensureExpanded: (dirPath: string) => Promise<void>;
+    /** Collapse every expanded folder in the tree (root stays mounted). */
+    collapseAll: () => void;
+    setClipboard: (path: string, isCut: boolean) => void;
+    clearClipboard: () => void;
+    beginRename: (path: string) => void;
+    endRename: () => void;
+    beginNewEntry: (parentDir: string, isDir: boolean) => void;
+    endNewEntry: () => void;
   };
 }
 
@@ -49,6 +69,9 @@ export const useExplorerStore = createSelectors(
       rootPath: null,
       tree: [],
       loading: false,
+      clipboard: null,
+      pendingRenamePath: null,
+      pendingNewEntry: null,
       actions: {
         openFolder: async (path: string) => {
           set((s) => {
@@ -159,10 +182,70 @@ export const useExplorerStore = createSelectors(
             }
           }
         },
+        ensureExpanded: async (dirPath: string) => {
+          const root = get().rootPath;
+          if (root === dirPath) return;
+          const node = findNode(get().tree, dirPath);
+          if (!node || !node.entry.is_dir) return;
+          if (node.expanded && node.children !== null) return;
+          await get().actions.toggleExpand(dirPath);
+          // Defensive: if it ended up collapsed (the toggle is a
+          // flip), force-expand.
+          set((s) => {
+            const n = findNode(s.tree, dirPath);
+            if (n && !n.expanded && n.children !== null) {
+              n.expanded = true;
+            }
+          });
+        },
+        collapseAll: () => {
+          set((s) => {
+            collapseAllNodes(s.tree);
+          });
+        },
+        setClipboard: (path, isCut) => {
+          set((s) => {
+            s.clipboard = { path, isCut };
+          });
+        },
+        clearClipboard: () => {
+          set((s) => {
+            s.clipboard = null;
+          });
+        },
+        beginRename: (path) => {
+          set((s) => {
+            s.pendingRenamePath = path;
+            s.pendingNewEntry = null;
+          });
+        },
+        endRename: () => {
+          set((s) => {
+            s.pendingRenamePath = null;
+          });
+        },
+        beginNewEntry: (parentDir, isDir) => {
+          set((s) => {
+            s.pendingNewEntry = { parentDir, isDir };
+            s.pendingRenamePath = null;
+          });
+        },
+        endNewEntry: () => {
+          set((s) => {
+            s.pendingNewEntry = null;
+          });
+        },
       },
     }))
   )
 );
+
+function collapseAllNodes(nodes: TreeNode[]): void {
+  for (const n of nodes) {
+    if (n.expanded) n.expanded = false;
+    if (n.children) collapseAllNodes(n.children);
+  }
+}
 
 function findNode(nodes: TreeNode[], path: string): TreeNode | undefined {
   for (const node of nodes) {

@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import {
   ChevronRight,
   File as FileIcon,
@@ -31,6 +31,15 @@ interface TreeRowProps {
   /** Optional trailing slot rendered at the row's right edge.
    *  Useful for hover-revealed actions (delete, new-file, etc.). */
   trailing?: ReactNode;
+  /** When set, the name span renders as an input for inline rename /
+   *  new-file flows. `onCommit(name)` fires on Enter/blur (with the
+   *  trimmed value); `onCancel()` fires on Esc or empty commit. */
+  editingMode?: "rename" | "new";
+  initialValue?: string;
+  onCommit?: (name: string) => void;
+  onCancel?: () => void;
+  /** Dim the row when its source path is on the clipboard via Cut. */
+  isCut?: boolean;
 }
 
 /**
@@ -50,16 +59,62 @@ export function TreeRow({
   leafIcon: LeafIcon = FileIcon,
   leafIconNode,
   trailing,
+  editingMode,
+  initialValue,
+  onCommit,
+  onCancel,
+  isCut,
 }: TreeRowProps) {
+  const isEditing = !!editingMode;
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Pre-select the basename (no extension) so renames feel like
+  // Finder/VS Code — the user can immediately overwrite the stem.
+  // Defer through rAF so Radix's ContextMenu focus-restore-to-trigger
+  // (which runs synchronously on `onSelect`) has already happened by
+  // the time we steal focus back to our input.
+  useEffect(() => {
+    if (!isEditing) return;
+    let cancelled = false;
+    const focusAndSelect = () => {
+      if (cancelled) return;
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      const value = el.value;
+      if (editingMode === "rename" && value) {
+        const dot = value.lastIndexOf(".");
+        const end = dot > 0 ? dot : value.length;
+        try {
+          el.setSelectionRange(0, end);
+        } catch {
+          el.select();
+        }
+      } else {
+        el.select();
+      }
+    };
+    // Double-rAF to clear React's commit + Radix's focus restoration.
+    const raf1 = window.requestAnimationFrame(() => {
+      const raf2 = window.requestAnimationFrame(focusAndSelect);
+      // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+      void raf2;
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(raf1);
+    };
+  }, [isEditing, editingMode]);
   // Rendered as a div (not <button>) so the optional `trailing` slot
   // can host real <button> children — nested buttons are invalid HTML
   // and trigger a React DOM-nesting error.
   return (
     <div
       role="button"
-      tabIndex={0}
-      onClick={onClick}
+      tabIndex={isEditing ? -1 : 0}
+      onClick={isEditing ? undefined : onClick}
       onKeyDown={(e) => {
+        if (isEditing) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onClick();
@@ -68,11 +123,13 @@ export function TreeRow({
       title={title}
       className={cn(
         "absolute left-0 right-0 flex items-center gap-1.5 text-left rounded-md mx-1",
-        "transition-colors cursor-pointer group select-none",
+        "transition-colors group select-none",
+        isEditing ? "cursor-text" : "cursor-pointer",
         "focus:outline-none focus-visible:ring-1 focus-visible:ring-border-focus",
         isActive
           ? "bg-[var(--bg-elevated)] text-text-primary"
           : "text-text-secondary hover:bg-bg-hover hover:text-text-primary",
+        isCut && "opacity-50",
       )}
       style={{
         height: ROW_HEIGHT - 2,
@@ -127,16 +184,45 @@ export function TreeRow({
         />
       )}
 
-      <span
-        className={cn(
-          "truncate font-mono text-[12px] leading-none flex-1 min-w-0",
-          isDir && "text-text-primary",
-        )}
-      >
-        {name}
-      </span>
+      {isEditing ? (
+        <input
+          ref={inputRef}
+          defaultValue={initialValue ?? name}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              e.preventDefault();
+              const v = (e.currentTarget.value ?? "").trim();
+              if (v) onCommit?.(v);
+              else onCancel?.();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              onCancel?.();
+            }
+          }}
+          onBlur={(e) => {
+            const v = (e.currentTarget.value ?? "").trim();
+            if (v && v !== (initialValue ?? name)) onCommit?.(v);
+            else onCancel?.();
+          }}
+          className={cn(
+            "flex-1 min-w-0 font-mono text-[12px] leading-none bg-bg-input border border-border-default rounded px-1 py-0.5",
+            "text-text-primary outline-none focus:border-border-focus",
+          )}
+        />
+      ) : (
+        <span
+          className={cn(
+            "truncate font-mono text-[12px] leading-none flex-1 min-w-0",
+            isDir && "text-text-primary",
+          )}
+        >
+          {name}
+        </span>
+      )}
 
-      {trailing ? (
+      {trailing && !isEditing ? (
         <span className="shrink-0 flex items-center gap-0.5">{trailing}</span>
       ) : null}
     </div>
