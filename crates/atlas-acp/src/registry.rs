@@ -467,6 +467,7 @@ fn apply_cheap_path_extras() {
         extras.push(format!("{home}/.local/bin"));
         extras.push(format!("{home}/.bun/bin"));
         extras.push(format!("{home}/.cargo/bin"));
+        extras.push(format!("{home}/.local/share/fnm/aliases/default/bin"));
     }
     extras.push("/opt/homebrew/bin".into());
     extras.push("/opt/homebrew/sbin".into());
