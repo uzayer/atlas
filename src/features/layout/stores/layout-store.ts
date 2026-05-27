@@ -187,17 +187,38 @@ export const useLayoutStore = createSelectors(
             const tab = s.tabs[idx];
             if (!tab.closable) return;
             s.tabs.splice(idx, 1);
+            // Never leave an empty tab strip — the welcome chat is the
+            // permanent first-tab fallback.
+            if (s.tabs.length === 0) {
+              s.tabs.push({
+                id: "welcome-chat",
+                type: "chat",
+                title: "Chat",
+                closable: false,
+                dirty: false,
+                data: {},
+              });
+            }
             if (s.activeTabId === id) {
-              s.activeTabId = s.tabs[Math.min(idx, s.tabs.length - 1)]?.id ?? null;
+              // Prefer the neighbour at the same slot; fall back to the
+              // first tab (always present after the guard above).
+              s.activeTabId = s.tabs[Math.min(idx, s.tabs.length - 1)]?.id
+                ?? s.tabs[0].id;
             }
           }),
         setActiveTab: (id) =>
           set((s) => {
-            if (s.activeTabId === id) return;
-            s.activeTabId = id;
+            // Defensive: if the caller hands us an id that no longer
+            // exists in the tab list, route to the first tab instead
+            // of letting `activeTabId` point at nothing.
+            const target = s.tabs.find((t) => t.id === id)
+              ? id
+              : s.tabs[0]?.id ?? null;
+            if (target === null || s.activeTabId === target) return;
+            s.activeTabId = target;
             // Truncate forward history (typical browser-style) and push.
             s.tabHistory = s.tabHistory.slice(0, s.tabHistoryIndex + 1);
-            s.tabHistory.push(id);
+            s.tabHistory.push(target);
             s.tabHistoryIndex = s.tabHistory.length - 1;
           }),
         toggleTabBar: () =>

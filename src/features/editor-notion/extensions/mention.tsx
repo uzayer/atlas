@@ -184,6 +184,12 @@ function buildSuggestion(
     pluginKey: config.pluginKey,
     char: config.char,
     allowSpaces: false,
+    // Don't fire when the editor isn't focused. Opening a note can put
+    // the caret next to an existing `@chip` and would otherwise show a
+    // stuck picker the user never asked for; clicking into the editor
+    // both focuses it AND moves the caret elsewhere, so the only path
+    // that pops the picker is the user actually typing `@` or `~`.
+    allow: () => editor.isFocused,
     // The universal picker calls Rust directly for results, so we
     // don't need to return items here.
     items: () => [],

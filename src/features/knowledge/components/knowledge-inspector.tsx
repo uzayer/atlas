@@ -16,6 +16,8 @@ interface KnowledgeInspectorProps {
   /** Optional current entry id so the Backlinks tab can query for it. */
   entryId?: string | null;
   onJumpToEntry?: (entryId: string) => void;
+  /** Width in px (parent owns the resizable state). */
+  width?: number;
 }
 
 /**
@@ -32,6 +34,7 @@ export function KnowledgeInspector({
   pageStats,
   entryId,
   onJumpToEntry,
+  width = 280,
 }: KnowledgeInspectorProps) {
   const [tab, setTab] = useState<"outline" | "links">("outline");
   const backlinks = useBacklinks(entryId ?? null);
@@ -44,7 +47,7 @@ export function KnowledgeInspector({
   return (
     <aside
       className="flex flex-col min-h-0 shrink-0 border-l border-border-subtle"
-      style={{ width: 280, background: "var(--bg-base)" }}
+      style={{ width, background: "var(--bg-base)" }}
     >
       {/* Pill-style tab strip — active tab gets a full rounded white
           background, inactive tabs are plain text. Matches the

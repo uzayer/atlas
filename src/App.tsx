@@ -158,6 +158,11 @@ export function App() {
     setActiveTab(list[next].id);
   };
 
+  const isKnowledgeTabActive = () => {
+    const s = useLayoutStore.getState();
+    return s.tabs.find((t) => t.id === s.activeTabId)?.type === "knowledge";
+  };
+
   // Remember the last non-terminal tab so cmd+j can toggle back to it.
   const lastNonTerminalTabRef = useRef<string | null>(null);
   useEffect(() => {
@@ -525,11 +530,19 @@ export function App() {
     },
     {
       combo: { key: "[", meta: true, shift: true },
-      action: () => cycleTab(-1),
+      action: () => {
+        // KB tab owns Cmd+{ / Cmd+} for its own sidebar/inspector
+        // toggles. Skip the global tab-cycle so its handler wins.
+        if (isKnowledgeTabActive()) return;
+        cycleTab(-1);
+      },
     },
     {
       combo: { key: "]", meta: true, shift: true },
-      action: () => cycleTab(1),
+      action: () => {
+        if (isKnowledgeTabActive()) return;
+        cycleTab(1);
+      },
     },
     {
       combo: { key: "t", meta: true },

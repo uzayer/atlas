@@ -34,6 +34,7 @@ import {
   Copy,
   ExternalLink,
   GitBranch,
+  PanelLeft,
   PanelRight,
 } from "lucide-react";
 
@@ -62,6 +63,43 @@ export function KnowledgePanel() {
     Array<{ name: string; path: string; has_readme: boolean }>
   >([]);
   const [showInspector, setShowInspector] = useState(true);
+  const [showSidebar, setShowSidebar] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(260);
+  const [inspectorWidth, setInspectorWidth] = useState(280);
+
+  // Drag-resize helpers. Each handle is a 4px-wide invisible strip on
+  // the panel border; mousedown captures pointer + listens for global
+  // mousemove until release. `from` is the side being resized.
+  const startResize = useCallback(
+    (
+      e: React.MouseEvent,
+      from: "sidebar" | "inspector",
+    ) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = from === "sidebar" ? sidebarWidth : inspectorWidth;
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        if (from === "sidebar") {
+          setSidebarWidth(Math.max(180, Math.min(560, startW + dx)));
+        } else {
+          // Inspector grows when dragged LEFT, so flip the delta.
+          setInspectorWidth(Math.max(220, Math.min(560, startW - dx)));
+        }
+      };
+      const onUp = () => {
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [sidebarWidth, inspectorWidth],
+  );
   const [recentIds, setRecentIds] = useState<string[]>([]);
   const [editorInstance, setEditorInstance] = useState<Editor | null>(null);
   const [wordCount, setWordCount] = useState(0);
@@ -135,6 +173,26 @@ export function KnowledgePanel() {
     // the new state.
     void invalidateLinks();
   }, [currentProject, setEditContent, saveEntry, invalidateLinks]);
+
+  // Cmd+{ / Cmd+} — toggle KB sidebar / inspector. App.tsx already
+  // binds these to tab-cycle globally; that handler now skips when
+  // the active tab is a knowledge tab so this one wins.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const isLeftBrace = e.key === "{" || (e.shiftKey && e.key === "[");
+      const isRightBrace = e.key === "}" || (e.shiftKey && e.key === "]");
+      if (isLeftBrace) {
+        e.preventDefault();
+        setShowSidebar((v) => !v);
+      } else if (isRightBrace) {
+        e.preventDefault();
+        setShowInspector((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   // Cmd+S
   useEffect(() => {
@@ -296,36 +354,48 @@ export function KnowledgePanel() {
 
   return (
     <div className="h-full flex" style={{ background: "var(--bg-canvas)" }}>
-      <KnowledgeSidebar
-        projectPath={currentProject.path}
-        entries={sidebarEntries}
-        activeEntryId={activeEntryId}
-        activeRepoName={activeRepoName}
-        recentIds={recentIds}
-        onSelectEntry={handleSelectEntry}
-        onDeleteEntry={handleDeleteEntry}
-        onNewFolder={() => setShowFolderInput((v) => !v)}
-        onNewNote={() => createEntry(currentProject.path)}
-        onOpenGraph={() =>
-          useLayoutStore.getState().actions.addTab({
-            id: "knowledge-graph",
-            type: "knowledge-graph",
-            title: "Graph",
-            closable: true,
-            dirty: false,
-            data: {},
-          })
-        }
-        onSelectRepo={handleSelectRepo}
-        folderInputOpen={showFolderInput}
-        folderInputValue={newFolderName}
-        onFolderInputChange={setNewFolderName}
-        onFolderInputCommit={handleCreateFolder}
-        onFolderInputCancel={() => {
-          setShowFolderInput(false);
-          setNewFolderName("");
-        }}
-      />
+      {showSidebar && (
+        <>
+          <KnowledgeSidebar
+            projectPath={currentProject.path}
+            entries={sidebarEntries}
+            activeEntryId={activeEntryId}
+            activeRepoName={activeRepoName}
+            recentIds={recentIds}
+            onSelectEntry={handleSelectEntry}
+            onDeleteEntry={handleDeleteEntry}
+            onNewFolder={() => setShowFolderInput((v) => !v)}
+            onNewNote={() => createEntry(currentProject.path)}
+            onOpenGraph={() =>
+              useLayoutStore.getState().actions.addTab({
+                id: "knowledge-graph",
+                type: "knowledge-graph",
+                title: "Graph",
+                closable: true,
+                dirty: false,
+                data: {},
+              })
+            }
+            onSelectRepo={handleSelectRepo}
+            folderInputOpen={showFolderInput}
+            folderInputValue={newFolderName}
+            onFolderInputChange={setNewFolderName}
+            onFolderInputCommit={handleCreateFolder}
+            onFolderInputCancel={() => {
+              setShowFolderInput(false);
+              setNewFolderName("");
+            }}
+            width={sidebarWidth}
+            onCollapse={() => setShowSidebar(false)}
+          />
+          {/* 4px col-resize hit area; invisible until hover. */}
+          <div
+            onMouseDown={(e) => startResize(e, "sidebar")}
+            className="shrink-0 cursor-col-resize hover:bg-border-focus/60 transition-colors"
+            style={{ width: 4, marginLeft: -2, marginRight: -2, zIndex: 5 }}
+          />
+        </>
+      )}
 
       {/* Main */}
       <main
@@ -337,6 +407,8 @@ export function KnowledgePanel() {
             <RepoTopbar
               name={activeRepoName}
               path={clonedRepos.find((r) => r.name === activeRepoName)?.path ?? ""}
+              onToggleSidebar={() => setShowSidebar((v) => !v)}
+              sidebarHidden={!showSidebar}
               onToggleInspector={() => setShowInspector((v) => !v)}
             />
             {repoReadme ? (
@@ -363,6 +435,8 @@ export function KnowledgePanel() {
               icon={activeMeta.icon ?? "📄"}
               kind="NOTE"
               isDirty={isDirty}
+              onToggleSidebar={() => setShowSidebar((v) => !v)}
+              sidebarHidden={!showSidebar}
               onToggleInspector={() => setShowInspector((v) => !v)}
             />
             {/* One scroller wraps cover + page header + properties + editor +
@@ -500,19 +574,27 @@ export function KnowledgePanel() {
       </main>
 
       {showInspector && activeEntry && !activeRepoName && (
-        <KnowledgeInspector
-          outline={outline.map((h) => ({ id: h.id, label: h.label, level: h.level }))}
-          activeHeadingId={activeHeadingId}
-          onJumpToHeading={(id) => {
-            if (!editorInstance) return;
-            const heading = outline.find((h) => h.id === id);
-            if (!heading) return;
-            jumpToHeading(editorInstance, heading.pos);
-          }}
-          pageStats={pageStats}
-          entryId={activeEntryId}
-          onJumpToEntry={(id) => void handleSelectEntry(id)}
-        />
+        <>
+          <div
+            onMouseDown={(e) => startResize(e, "inspector")}
+            className="shrink-0 cursor-col-resize hover:bg-border-focus/60 transition-colors"
+            style={{ width: 4, marginLeft: -2, marginRight: -2, zIndex: 5 }}
+          />
+          <KnowledgeInspector
+            outline={outline.map((h) => ({ id: h.id, label: h.label, level: h.level }))}
+            activeHeadingId={activeHeadingId}
+            onJumpToHeading={(id) => {
+              if (!editorInstance) return;
+              const heading = outline.find((h) => h.id === id);
+              if (!heading) return;
+              jumpToHeading(editorInstance, heading.pos);
+            }}
+            pageStats={pageStats}
+            entryId={activeEntryId}
+            onJumpToEntry={(id) => void handleSelectEntry(id)}
+            width={inspectorWidth}
+          />
+        </>
       )}
     </div>
   );
@@ -711,10 +793,14 @@ function PageHeaderWithIcon({
 function RepoTopbar({
   name,
   path,
+  onToggleSidebar,
+  sidebarHidden,
   onToggleInspector,
 }: {
   name: string;
   path: string;
+  onToggleSidebar?: () => void;
+  sidebarHidden?: boolean;
   onToggleInspector: () => void;
 }) {
   return (
@@ -722,6 +808,16 @@ function RepoTopbar({
       className="flex items-center shrink-0 border-b border-border-subtle"
       style={{ height: 36, gap: 8, padding: "0 14px", background: "var(--bg-canvas)" }}
     >
+      {sidebarHidden && onToggleSidebar && (
+        <button
+          onClick={onToggleSidebar}
+          className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors"
+          title="Show sidebar"
+          style={{ width: 22, height: 22, marginLeft: -6 }}
+        >
+          <PanelLeft size={12} />
+        </button>
+      )}
       <GitBranch size={12} className="text-text-tertiary shrink-0" />
       <span
         className="font-mono text-text-secondary truncate flex-1 min-w-0"

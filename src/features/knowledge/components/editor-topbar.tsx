@@ -1,4 +1,4 @@
-import { ChevronRight, Folder, PanelRight } from "lucide-react";
+import { ChevronRight, Folder, PanelLeft, PanelRight } from "lucide-react";
 
 interface EditorTopbarProps {
   /** Folder/segment trail (empty for root-level pages). */
@@ -11,6 +11,9 @@ interface EditorTopbarProps {
   kind?: string;
   /** Show a small dirty dot before the inspector toggle. */
   isDirty?: boolean;
+  /** Toggle the left sidebar; the open button only shows when hidden. */
+  onToggleSidebar?: () => void;
+  sidebarHidden?: boolean;
   /** Toggle the right inspector panel. */
   onToggleInspector?: () => void;
 }
@@ -26,6 +29,8 @@ export function EditorTopbar({
   icon,
   kind = "NOTE",
   isDirty,
+  onToggleSidebar,
+  sidebarHidden,
   onToggleInspector,
 }: EditorTopbarProps) {
   return (
@@ -38,6 +43,16 @@ export function EditorTopbar({
         background: "var(--bg-canvas)",
       }}
     >
+      {sidebarHidden && onToggleSidebar && (
+        <button
+          onClick={onToggleSidebar}
+          className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors"
+          title="Show sidebar"
+          style={{ width: 22, height: 22, marginLeft: -6 }}
+        >
+          <PanelLeft size={12} />
+        </button>
+      )}
       {/* Breadcrumbs */}
       <div
         className="flex items-center min-w-0"

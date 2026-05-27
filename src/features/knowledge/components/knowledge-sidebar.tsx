@@ -7,6 +7,7 @@ import {
   FilePlus,
   GitBranch,
   Network,
+  PanelLeft,
   Trash2,
 } from "lucide-react";
 import { KnowledgeTree } from "./knowledge-tree";
@@ -31,6 +32,10 @@ interface KnowledgeSidebarProps {
   onFolderInputChange?: (v: string) => void;
   onFolderInputCommit?: () => void;
   onFolderInputCancel?: () => void;
+  /** Current resolved width in px (parent owns the resizable state). */
+  width?: number;
+  /** Hide the panel entirely (parent collapses it). */
+  onCollapse?: () => void;
 }
 
 export function KnowledgeSidebar({
@@ -50,6 +55,8 @@ export function KnowledgeSidebar({
   onFolderInputChange,
   onFolderInputCommit,
   onFolderInputCancel,
+  width = 260,
+  onCollapse,
 }: KnowledgeSidebarProps) {
   const [clonedRepos, setClonedRepos] = useState<
     Array<{ name: string; path: string; has_readme: boolean }>
@@ -112,7 +119,7 @@ export function KnowledgeSidebar({
   return (
     <aside
       className="flex flex-col min-h-0 shrink-0 border-r border-border-subtle"
-      style={{ width: 260, background: "var(--bg-rail)" }}
+      style={{ width, background: "var(--bg-rail)" }}
     >
       {/* Header — matches the project file-tree's typography
           (10px / semibold / tracking-wider, UI font) so the two
@@ -121,6 +128,16 @@ export function KnowledgeSidebar({
         <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider truncate flex-1">
           Knowledge
         </span>
+        {onCollapse && (
+          <button
+            onClick={onCollapse}
+            className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors cursor-pointer"
+            title="Hide sidebar"
+            style={{ width: 22, height: 22 }}
+          >
+            <PanelLeft size={12} />
+          </button>
+        )}
         <button
           onClick={onOpenGraph}
           className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors cursor-pointer"

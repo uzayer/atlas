@@ -177,6 +177,8 @@ pub fn run() {
             commands::knowledge_export::knowledge_export_workspace_md,
             commands::knowledge_export::knowledge_export_workspace_html,
             commands::knowledge_export::knowledge_export_server,
+            commands::knowledge_graph_layout::knowledge_graph_layout_load,
+            commands::knowledge_graph_layout::knowledge_graph_layout_save,
             commands::canvas::load_canvas,
             commands::canvas::save_canvas,
             commands::log::load_pinned_log,

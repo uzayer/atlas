@@ -5,6 +5,7 @@ import {
   useImperativeHandle,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import "../tiptap.css";
@@ -71,13 +72,25 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
     );
     const loadedIdRef = useRef<string | null>(null);
     const dirtyRef = useRef(false);
-    const swappingRef = useRef(false);
+    // Seed `swapping` true: tiptap dispatches an initial transaction
+    // during the view-mount that fires onUpdate BEFORE onCreate runs,
+    // so a parent setState there would land mid-render. onCreate
+    // flips it false on the next microtask.
+    const swappingRef = useRef(true);
     const onDirtyRef = useRef(onDirty);
     onDirtyRef.current = onDirty;
+    // BubbleMenu reads `editor.view.dom` in a layout effect that runs
+    // before EditorContent's view-mount layout effect (React commits
+    // children bottom-up). Gate it until we know the view exists.
+    const [viewReady, setViewReady] = useState(false);
 
     const editor = useEditor({
       extensions,
       editable,
+      // Open notes without focus so the suggestion plugin can't
+      // activate from a cursor that landed near an `@` chip. User has
+      // to click into the editor to focus + reposition the caret.
+      autofocus: false,
       content: getInitialContent(documentId, initialMarkdown),
       onCreate: ({ editor }) => {
         // Stamp the id so onUpdate knows which entry to cache against.
@@ -89,6 +102,7 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
         rehydrateMentions(editor);
         cacheCurrentDoc(editor, documentId);
         queueMicrotask(() => { swappingRef.current = false; });
+        queueMicrotask(() => setViewReady(true));
       },
       onUpdate: ({ editor }) => {
         if (swappingRef.current) return;
@@ -97,7 +111,10 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
         }
         if (!dirtyRef.current) {
           dirtyRef.current = true;
-          onDirtyRef.current?.();
+          // Defer — onUpdate can fire synchronously during the parent's
+          // first commit, and a synchronous setState there violates
+          // React's render rules.
+          queueMicrotask(() => onDirtyRef.current?.());
         }
       },
     });
@@ -175,7 +192,7 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
     return (
       <div className={cn("atlas-tiptap", className)} style={{ position: "relative" }}>
         <EditorContent editor={editor} />
-        {editable && editor && <AtlasBubbleMenu editor={editor} />}
+        {editable && editor && viewReady && <AtlasBubbleMenu editor={editor} />}
       </div>
     );
   },

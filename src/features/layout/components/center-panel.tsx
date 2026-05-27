@@ -239,6 +239,7 @@ export function CenterPanel() {
 
 function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
   const tabs = useLayoutStore.use.tabs();
+  const { setActiveTab } = useLayoutStore.use.actions();
   const ref = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState(0);
 
@@ -256,18 +257,34 @@ function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
     return () => ro.disconnect();
   }, []);
 
+  // If we somehow lost the active tab (stale id, fresh project switch,
+  // a close that didn't pick a successor), snap to the first tab —
+  // welcome-chat is the permanent fallback the layout store guarantees
+  // is always present.
+  useEffect(() => {
+    if (!activeTab && tabs.length > 0) {
+      setActiveTab(tabs[0].id);
+    }
+  }, [activeTab, tabs, setActiveTab]);
+
   if (!activeTab) {
     return (
-      <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden" }}>
-        <div className="h-full flex items-center justify-center text-text-tertiary text-sm">
-          No tabs open
-        </div>
-      </div>
+      <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden" }} />
     );
   }
 
-  // Keep editor, terminal, and browser instances alive across tab switches
-  const persistentTabs = tabs.filter((t) => t.type === "editor" || t.type === "terminal" || t.type === "browser");
+  // Keep editor, terminal, browser, and knowledge-graph instances alive
+  // across tab switches. The graph in particular is expensive to rebuild
+  // (Pixi WebGL init + Matter physics + force-layout warmup ~hundreds of
+  // ms on a moderate-sized graph), so unmounting it on every tab swap
+  // makes the IDE feel sluggish.
+  const persistentTabs = tabs.filter(
+    (t) =>
+      t.type === "editor" ||
+      t.type === "terminal" ||
+      t.type === "browser" ||
+      t.type === "knowledge-graph",
+  );
   const activeIsNonPersistent = !persistentTabs.find((t) => t.id === activeTab.id);
 
   return (
@@ -295,6 +312,8 @@ function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
                 />
               ) : tab.type === "browser" ? (
                 <BrowserPanel initialUrl={tab.data.url as string | undefined} />
+              ) : tab.type === "knowledge-graph" ? (
+                <KnowledgeGraph />
               ) : (
                 <TerminalPanel tabId={tab.id} />
               )}
