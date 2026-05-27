@@ -17,12 +17,10 @@ Atlas wraps a code editor, a multi-session AI chat (with first-class Claude Code
   - [High-level layout](#high-level-layout)
   - [Frontend (React + Zustand)](#frontend-react--zustand)
   - [Backend (Tauri + Rust)](#backend-tauri--rust)
-  - [The Claude Code integration](#the-claude-code-integration)
+  - [Agent integration (ACP)](#agent-integration-acp)
   - [State, persistence, and IPC](#state-persistence-and-ipc)
 - [Project structure](#project-structure)
 - [Contributing](#contributing)
-- [Credits](#credits)
-- [License](#license)
 
 ---
 
@@ -42,7 +40,7 @@ Concretely:
 
 | Area | What's there |
 |------|--------------|
-| **Chat / Agent** | Multi-session Claude Code with stop-button, message queue, permission-mode cycling (⇧⇥), tri-state send button (send / queue / stop), per-tab session sidebar, bash-call history panel, in-chat search (⌘F). Falls back to direct LLM API (Anthropic / OpenAI / Google) when Claude Code CLI isn't installed. |
+| **Chat / Agent** | Multi-session, multi-agent chat over [ACP (Agent Client Protocol)](https://github.com/zed-industries/agent-client-protocol). First-class support for Claude Code; the same transport plugs into any other ACP-speaking agent. Stop-button, message queue, permission-mode cycling (⇧⇥), tri-state send button (send / queue / stop), per-tab session sidebar, bash-call history panel, in-chat search (⌘F). |
 | **Editor** | CodeMirror 6 with language support for JS/TS, Python, Rust, Go, Java, C++, JSON, YAML, Markdown, SQL, CSS, HTML, XML. Cmd+S writes to disk and emits an editor save event picked up by the log. |
 | **Terminal** | xterm.js v6 + Rust `portable-pty` backend. Splits, persistent buffers, RAF-batched output, multi-attempt fit on visibility change. |
 | **Git** | Real commit graph (custom SVG lane-assignment), stage/unstage/commit, branch list with checkout / create / delete, file-level diff. |
@@ -125,10 +123,10 @@ The bundled app lands under `src-tauri/target/release/bundle/macos/Atlas.app`. T
 │  │  (WKWebView on macOS)      │◀──▶│  (tokio + tauri 2)       │  │
 │  │                            │ IPC│                          │  │
 │  │  • Zustand stores          │    │  • commands/ — IPC verbs │  │
-│  │  • CodeMirror, xterm,      │    │  • atlas-terminal (PTY)  │  │
-│  │    ReactFlow, TanStack     │    │  • atlas-agents          │  │
-│  │  • Tailwind v4             │    │  • spawn_blocking for    │  │
-│  │                            │    │    subprocess streams    │  │
+│  │  • CodeMirror, xterm,      │    │  • atlas-acp (JSON-RPC)  │  │
+│  │    Tiptap, Pixi, TanStack  │    │  • atlas-agents (sessions│  │
+│  │  • Tailwind v4             │    │  • atlas-terminal (PTY)  │  │
+│  │                            │    │  • spawn_blocking I/O    │  │
 │  └────────────────────────────┘    └──────────────────────────┘  │
 │                                                                  │
 │  Persistence:                                                    │
@@ -154,7 +152,7 @@ State management uses **Zustand + Immer** with a shared `createSelectors` helper
 
 Key feature stores and their responsibilities:
 
-- `chat/stores/chat-store.ts` — sessions per tab, queues, `runningArchive` (a parking lot for streams whose tab navigated away to a different history item — see [the agent integration section](#the-claude-code-integration)).
+- `chat/stores/chat-store.ts` — per-tab UI state (queues, draft, scroll). The authoritative session state (messages, tool calls, status) lives in Rust under `atlas-agents`; the store only mirrors deltas streamed over the `atlas:agents` event channel. See [the agent integration section](#agent-integration-acp).
 - `project/stores/project-store.ts` — current project, recent projects, project metadata.
 - `editor/stores/editor-store.ts` — open files, dirty flags. **CodeMirror owns the document text** — the store only holds metadata so editor performance doesn't degrade with file size.
 - `git/stores/git-store.ts` — branch, status, commits, lane-assigned graph.
@@ -184,57 +182,60 @@ LeftPanel        CenterPanel                RightPanel
 
 | Module | Responsibility |
 |--------|----------------|
-| `chat.rs` | Direct LLM call (Anthropic / OpenAI / Google) via `reqwest`. |
-| `claude.rs` | Spawn the `claude` CLI as a subprocess; stream JSONL stdout back as `claude-stream` Tauri events; PID registry for stop-generation. Also reads `~/.claude/projects/.../session.jsonl` for history. |
+| `agents.rs` | ACP agent lifecycle — plugin discovery, spawn/kill, new/load session, send/cancel, model + mode switching, permission responses. Stream deltas reach the frontend via `atlas:agents` Tauri events. |
+| `claude.rs` | History readers — lists, reads, and deletes Claude Code session JSONL files in `~/.claude/projects/<slug>/`. Session spawn + streaming go through ACP (`agents.rs`), not this module. |
+| `claude_setup.rs` | Detects / installs the Claude Code CLI on the user's PATH. |
 | `terminal.rs` | PTY lifecycle (`terminal_create`, `_write`, `_resize`, `_close`) backed by the `atlas-terminal` workspace crate (`portable-pty`). |
-| `fs.rs` | Directory listing, file read / write. |
-| `git.rs` | Shells out to `git` for status, log, diff, stage, unstage, commit, branch ops, refs. |
-| `github.rs` | GitHub search via REST, repo clone via `git clone` into `~/.atlas/clones/`. |
+| `fs.rs` | Directory listing, file read/write, create/rename/delete/copy/duplicate, reveal-in-Finder, open-in-terminal, gitignore appends. |
+| `git.rs` + `git_graph.rs` + `git_watcher.rs` | Status, log, diff, stage/unstage, commit, branch ops, real commit-graph lane assignment, fs-watcher for live refresh. |
+| `github.rs` | GitHub search via REST, repo clone via `git clone` into `<project>/.atlas/repos/`. |
 | `analysis.rs` | Whole-project file/line/language counts and symbol indexing. |
 | `search.rs` | Fast in-files text search. |
-| `research.rs` | arXiv + Semantic Scholar API calls, PDF download, paper → knowledge persistence. |
-| `knowledge.rs` | Read/write `.atlas/knowledge/`, `.atlas/interactions.jsonl`, editor state, readability fetch. |
+| `fileindex.rs` | Cmd+P file-picker index. |
+| `mention_search.rs` | Unified `@`-mention search (files, folders, knowledge, symbols, repos, papers, …). |
+| `research.rs` + `papers.rs` | arXiv + Semantic Scholar API calls, PDF download, saved-papers index. |
+| `knowledge.rs` + `knowledge_meta.rs` + `knowledge_links.rs` + `knowledge_export.rs` | Knowledge notes CRUD, page metadata in `_meta.json`, backlinks/forward-links scanner + graph, exporters (md/html, workspace, self-contained server binary). |
 | `canvas.rs` | Read/write `.atlas/canvas.json`. |
+| `pomodoro.rs` | Read/write `.atlas/pomodoro.json` for the focus-timer feature. |
 | `log.rs` | Append-only pinned log at `~/.atlas/log/pinned.jsonl`. |
+| `app_state.rs`, `cli.rs`, `recent_files.rs`, `sessions_watch.rs`, `compose_prompt.rs` | Bootstrap, `atlas <path>` CLI helper, recent files, session JSONL watcher, prompt composition for ACP sends. |
 
 All long-running or blocking operations (`Command::output`, `Command::spawn` + line reads, file I/O on big trees) run inside `tokio::task::spawn_blocking` so the Tauri command runtime never blocks the UI's IPC channel.
 
-There are two workspace crates under `crates/` that are imported as path dependencies from `src-tauri/Cargo.toml`:
+Workspace crates under `crates/` (all wired in from `src-tauri/Cargo.toml`):
 
-- `atlas-terminal` — wraps `portable-pty` and bridges PTY bytes to Tauri events.
-- `atlas-agents` — agent abstractions for future non-Claude-Code adapters.
+- **`atlas-acp`** — ACP (Agent Client Protocol) transport. Speaks JSON-RPC to any ACP-speaking agent binary (Claude Code today, others on the way), forwards permission prompts, tool calls, and content blocks.
+- **`atlas-agents`** — Per-session runtime: `AgentManager` owns the registry, one `SessionWorker` task per session owns the message log, queue, and stream subscribers. Emits `atlas:agents` deltas to the frontend.
+- **`atlas-terminal`** — Wraps `portable-pty` and bridges PTY bytes to Tauri events.
+- **`atlas-kb-server`** — Standalone self-contained static-server binary produced by the knowledge-base "Export server" action. Embeds the exported HTML/CSS via `include_dir!` and serves it on `localhost:4747`.
 
-The remaining `crates/` directories (`atlas-analysis`, `atlas-background`, `atlas-core`, `atlas-git`, `atlas-lsp`, `atlas-mcp`, `atlas-memory`, `atlas-monitor`, `atlas-research`) are scaffolds for an in-progress migration of logic out of the monolithic `commands/` modules. They are not currently wired in.
+### Agent integration (ACP)
 
-### The Claude Code integration
+Atlas talks to agents over [ACP — the Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol), the open JSON-RPC protocol that originated in Zed. Any binary that speaks ACP can plug in; the bundled default is the official `claude-code-acp` bridge in front of Anthropic's Claude Code CLI.
 
-This is the most non-obvious part of the system, so it gets its own section.
+The integration is split across two Rust crates and one IPC surface:
 
-Atlas does **not** use ACP (Agent Client Protocol). It invokes the public `claude` CLI directly:
+**`atlas-acp`** — the transport. It spawns the agent binary, handles the JSON-RPC framing, forwards ACP method calls (`initialize`, `newSession`, `loadSession`, `prompt`, `cancel`, `setSessionMode`, `setSessionModel`, …), and surfaces permission prompts and tool-call updates back to the host.
 
-```
-claude --print --output-format stream-json --verbose [--resume <sid>] [--permission-mode <m>] <prompt>
-```
+**`atlas-agents`** — the per-session runtime that sits between ACP and the UI:
 
-Each invocation streams newline-delimited JSON to stdout. The Rust side spawns the process, reads stdout line by line in a blocking thread, parses each line, and re-emits it as a `claude-stream` Tauri event with payload:
+- `AgentManager` owns the global registry — which agent plugins are installed, which sessions are running, which one belongs to which UI tab.
+- A `SessionWorker` task is spawned per session. It owns the canonical message log, the user's queued prompts, the run status, and the broadcast channel that fans deltas out to subscribers.
+- All session state lives here, in Rust. The frontend store is a view-only mirror.
 
-```ts
-{ session_id: string; event_type: "session" | "text" | "tool_use" | "tool_result" | "done" | "error"; content: string }
-```
+**`commands/agents.rs`** — the Tauri IPC verbs the frontend calls: `agents_list_plugins`, `agents_new_session`, `agents_load_session`, `agents_send`, `agents_cancel`, `agents_set_mode`, `agents_set_model`, `agents_respond_permission`, etc. Deltas come back over a single Tauri event channel: **`atlas:agents`**, payload-typed by `kind` (`message_appended`, `content_block_delta`, `tool_call`, `permission_request`, `status`, `error`, `done`).
 
-Two design decisions matter here:
+Two design properties matter:
 
-**1. The `session_id` is per-send, not per-tab.**
-Each call to `handleSend()` in `chat-panel.tsx` mints a fresh `streamId` like `${tabId}-${ts36}-${rand6}` and passes it as the Rust `session_id`. The Rust backend keys its PID registry by this `streamId`, so two concurrent streams in the same tab don't collide, and the stop button always targets exactly one PID. The frontend listener also filters on `streamId`, so streams can't cross-contaminate each other's assistant message.
+**1. The `acpSessionId` is the single source of truth.**
+It is both the ACP-protocol session id used on the wire *and* the filename stem under `~/.claude/projects/<slug>/<acpSessionId>.jsonl`. The frontend never splits or rewrites it — UI tabs, history rows, and the on-disk log all key off the same string.
 
-**2. Streams survive tab navigation via a "running archive".**
-When the user clicks a different history item in the session sidebar while a stream is running, `chat-store.archiveCurrent(tabId)` deep-copies the in-flight session into `runningArchive[claudeSessionId]`. The stream listener writes to whichever container currently holds its `streamId` — the tab if the user is still there, or the archive if they've moved on. When the stream finishes, the archive is dropped (the on-disk JSONL is now authoritative); when the user navigates back, `restoreArchive()` swaps it back into the tab.
+**2. Streams are tab-independent.**
+Because `SessionWorker` owns the message log in Rust and broadcasts deltas, you can fire off three concurrent Claude Code prompts in three different tabs, switch freely between them and the history sidebar, and each one keeps streaming. Switching back to a tab just resubscribes to the worker's broadcast — no in-flight state is lost.
 
-The result is that you can fire off three Claude Code requests in three tabs, switch freely between them and the history list, and each one keeps streaming independently with a working stop button.
+**History.** The history sidebar reads session JSONL files directly from `~/.claude/projects/<slug>/`. Resuming a past conversation is a `loadSession` ACP call against the same id.
 
-History rendering reads from `~/.claude/projects/<slug>/<session-id>.jsonl` directly, since Claude Code persists every session there. The `claude_run` command also accepts a `--resume` flag to continue prior conversations.
-
-In production builds, `claude.rs` falls back to a login-shell `which` resolution because macOS GUI apps get a stripped `PATH` — without this, the bundled `.app` can't find any user-installed CLI.
+**PATH resolution.** In production builds, `claude_setup.rs` resolves `claude` via a login-shell `which` because macOS GUI apps get a stripped `PATH`. Without this, the bundled `.app` can't find any user-installed CLI.
 
 ### State, persistence, and IPC
 
@@ -287,9 +288,10 @@ atlas/
 │   └── Cargo.toml
 │
 ├── crates/                       Rust workspace crates
-│   ├── atlas-terminal            PTY (wired in)
-│   ├── atlas-agents              agent abstractions (wired in)
-│   └── atlas-{core,git,lsp,...}  scaffolds for future extraction
+│   ├── atlas-acp                 ACP (Agent Client Protocol) transport
+│   ├── atlas-agents              per-session runtime + AgentManager
+│   ├── atlas-terminal            PTY (portable-pty)
+│   └── atlas-kb-server           self-contained KB static-server binary
 │
 ├── index.html
 ├── package.json
@@ -335,7 +337,7 @@ For UI work you can sometimes get away with `npm run dev` (Vite-only, no Tauri c
 ### Areas where help is especially welcome
 
 - Linux / Windows testing of the production bundle (terminal font, PATH resolution, GUI quirks).
-- LSP support — there's an `atlas-lsp` crate scaffold waiting for an implementation.
-- MCP server integration — `atlas-mcp` scaffold likewise.
-- Non-Claude-Code agent adapters via the `atlas-agents` crate.
+- Additional ACP agent plugins beyond Claude Code (Gemini CLI, Codex, etc.) — `atlas-acp` already speaks the wire format; mostly a matter of plugin discovery + auth flow.
+- LSP support — would slot into the editor for diagnostics / go-to-definition.
+- MCP server integration for tool-call extensibility.
 - Theme system / additional color palettes.
