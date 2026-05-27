@@ -1,6 +1,6 @@
 # Atlas landing site
 
-Static landing page for [atlas.antarys.ai](https://atlas.antarys.ai). Pure
+Static landing page for [tryatlas.cc](https://www.tryatlas.cc/). Pure
 HTML + CSS + a tiny inline script, no build step, no framework, no Node
 dependency. The whole folder is what Vercel uploads.
 
