@@ -15,15 +15,12 @@ export function PomodoroPanel() {
   const isRunning = usePomodoroStore.use.isRunning();
   const { tick, hydrate, openSheet } = usePomodoroStore.use.actions();
 
-  // Hydrate once per project + attach persistence.
   useEffect(() => {
     if (!currentProject?.path) return;
     hydrate(currentProject.path);
-    const unsub = attachPersistence(currentProject.path);
-    return unsub;
+    return attachPersistence(currentProject.path);
   }, [currentProject?.path, hydrate]);
 
-  // Tick driver — single interval at the panel root.
   useEffect(() => {
     if (!isRunning) return;
     const id = setInterval(() => tick(), 1000);

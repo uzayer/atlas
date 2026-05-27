@@ -1,0 +1,20 @@
+[package]
+name = "atlas-kb-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "atlas-kb-server"
+path = "src/main.rs"
+
+[dependencies]
+include_dir = "0.7"
+tiny_http = "0.12"
+webbrowser = "1"
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+panic = "abort"

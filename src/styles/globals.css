@@ -331,6 +331,7 @@
     color: #555;
   }
 
+
   /* xterm.js — force monospace font in production. The DOM renderer normally
      injects a <style> tag with our `fontFamily` option, but in the bundled
      macOS app the rows and char-measure element were inheriting the body's
@@ -441,5 +442,194 @@
 }
 .atlas-pill-in {
   animation: atlas-pill-in 200ms ease-out both;
+}
+
+/* Atlas-themed CodeMirror Find/Replace panel (Cmd+F). These rules sit
+   OUTSIDE `@layer base` so they outrank any unlayered @codemirror/view
+   StyleModule injections — layered styles always lose to unlayered. The
+   `!important` annotations cover the few properties StyleModule sets
+   inline-equivalent (button height, input padding). */
+.cm-panels {
+  background-color: var(--bg-elevated) !important;
+  color: var(--text-primary) !important;
+  border-top: 1px solid var(--border-default) !important;
+}
+.cm-panel.cm-search {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  padding: 4px 10px !important;
+  background: var(--bg-elevated) !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  font-size: 12px !important;
+  color: var(--text-secondary) !important;
+  position: relative !important;
+}
+/* Search input — mirrors the Pomodoro DayRail filter: rounded `bg-input`
+   container with an inline lucide search icon on the left (baked as a
+   data-URI background so we don't need extra DOM that CodeMirror won't
+   give us). The icon's stroke colour is hard-coded to match
+   `--text-tertiary` (#737373). */
+.cm-panel.cm-search input[type="text"] {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  background-color: var(--bg-input) !important;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/></svg>") !important;
+  background-repeat: no-repeat !important;
+  background-position: 8px center !important;
+  background-size: 12px 12px !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--border-default) !important;
+  border-radius: 999px !important;
+  padding: 0 12px 0 26px !important;
+  height: 22px !important;
+  font-size: 12px !important;
+  font-family: inherit !important;
+  outline: none !important;
+  min-width: 200px !important;
+  margin: 0 !important;
+  transition: border-color 120ms, background-color 120ms !important;
+}
+.cm-panel.cm-search input[type="text"]:hover {
+  background-color: var(--bg-hover) !important;
+}
+.cm-panel.cm-search input[type="text"]:focus {
+  border-color: var(--border-focus, var(--accent-primary)) !important;
+  background-color: var(--bg-input) !important;
+}
+.cm-panel.cm-search input[type="text"]::placeholder {
+  color: var(--text-tertiary) !important;
+}
+/* Action buttons rendered as a grouped segmented control. CodeMirror
+   tags them via `name=` so we can position-style without extra DOM.
+   - Find group:   next | prev | select  (the "all" button)
+   - Replace group: replace | replaceAll
+   Outer rounding only on first/last; shared center border. */
+.cm-panel.cm-search button:not([name="close"]) {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  background: var(--bg-elevated) !important;
+  color: var(--text-secondary) !important;
+  border: 1px solid var(--border-default) !important;
+  border-radius: 0 !important;
+  padding: 0 10px !important;
+  height: 22px !important;
+  font-size: 11.5px !important;
+  font-family: inherit !important;
+  font-weight: 500 !important;
+  cursor: pointer !important;
+  transition: background-color 120ms, color 120ms !important;
+  text-transform: none !important;
+  margin: 0 !important;
+  box-shadow: none !important;
+}
+.cm-panel.cm-search button:not([name="close"]):hover {
+  background: var(--bg-hover) !important;
+  color: var(--text-primary) !important;
+  z-index: 1 !important;
+  position: relative !important;
+}
+/* Find group: next | prev | select */
+.cm-panel.cm-search button[name="next"] {
+  border-top-left-radius: 999px !important;
+  border-bottom-left-radius: 999px !important;
+  padding-left: 12px !important;
+}
+.cm-panel.cm-search button[name="prev"] {
+  border-left-width: 0 !important;
+  margin-left: -6px !important; /* cancel the parent's flex `gap` */
+}
+.cm-panel.cm-search button[name="select"] {
+  border-left-width: 0 !important;
+  border-top-right-radius: 999px !important;
+  border-bottom-right-radius: 999px !important;
+  padding-right: 12px !important;
+  margin-left: -6px !important;
+}
+/* Replace group: replace | replaceAll */
+.cm-panel.cm-search button[name="replace"] {
+  border-top-left-radius: 999px !important;
+  border-bottom-left-radius: 999px !important;
+  padding-left: 12px !important;
+}
+.cm-panel.cm-search button[name="replaceAll"] {
+  border-left-width: 0 !important;
+  border-top-right-radius: 999px !important;
+  border-bottom-right-radius: 999px !important;
+  padding-right: 12px !important;
+  margin-left: -6px !important;
+}
+.cm-panel.cm-search label {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  font-size: 11.5px !important;
+  color: var(--text-secondary) !important;
+  cursor: pointer !important;
+  padding: 0 4px !important;
+  user-select: none !important;
+}
+.cm-panel.cm-search label input[type="checkbox"] {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  width: 12px !important;
+  height: 12px !important;
+  border: 1px solid var(--border-default) !important;
+  border-radius: 3px !important;
+  background: var(--bg-input) !important;
+  cursor: pointer !important;
+  position: relative !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  transition: background-color 120ms, border-color 120ms !important;
+  flex-shrink: 0 !important;
+}
+.cm-panel.cm-search label input[type="checkbox"]:checked {
+  background: var(--text-primary) !important;
+  border-color: var(--text-primary) !important;
+}
+.cm-panel.cm-search label input[type="checkbox"]:checked::after {
+  content: "" !important;
+  position: absolute !important;
+  left: 3px !important;
+  top: 0px !important;
+  width: 4px !important;
+  height: 7px !important;
+  border: solid var(--bg-primary) !important;
+  border-width: 0 1.5px 1.5px 0 !important;
+  transform: rotate(45deg) !important;
+}
+.cm-panel.cm-search br {
+  flex-basis: 100% !important;
+  height: 0 !important;
+  margin: 0 !important;
+}
+.cm-panel.cm-search button[name="close"] {
+  position: absolute !important;
+  top: 6px !important;
+  right: 8px !important;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-tertiary) !important;
+  font-size: 16px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  height: auto !important;
+}
+.cm-panel.cm-search button[name="close"]:hover {
+  background: var(--bg-hover) !important;
+  color: var(--text-primary) !important;
+}
+.cm-searchMatch {
+  background: rgba(249, 115, 22, 0.18) !important;
+  outline: 1px solid rgba(249, 115, 22, 0.35) !important;
+  border-radius: 2px !important;
+}
+.cm-searchMatch-selected {
+  background: rgba(249, 115, 22, 0.45) !important;
+  outline-color: rgba(249, 115, 22, 0.7) !important;
 }
 

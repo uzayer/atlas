@@ -488,7 +488,8 @@ export function KnowledgePanel() {
             <EditorFooter
               wordCount={wordCount}
               charCount={charCount}
-              status="pending"
+              projectPath={currentProject.path}
+              entryId={activeEntryId}
             />
           </>
         ) : (

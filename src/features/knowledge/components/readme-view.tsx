@@ -10,20 +10,16 @@ interface Props {
 }
 
 /**
- * Read-only README viewer for the KB git/repo section. Distinct from the
- * shared `<Markdown>` helper (which is tuned for chat bubbles with tight
- * spacing): this one targets long-form documentation with proper heading
- * scale, image rendering, and raw-HTML support since most GitHub READMEs
- * lean heavily on `<h1 align="center">`, `<details>`, `<img>`, etc.
+ * Read-only README viewer for the KB repo section. The shared `<Markdown>`
+ * helper is tuned for chat bubbles; this one renders long-form docs at
+ * doc-scale and via `rehype-raw` allows the raw HTML (`<h1 align="...">`,
+ * `<details>`, `<img>`, …) that most GitHub READMEs depend on.
  */
 export const ReadmeView = memo(function ReadmeView({ source }: Props) {
   return (
     <div className="atlas-readme text-[14px] leading-relaxed text-[var(--text-primary)] break-words select-text">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        // `rehype-raw` lets <h1>, <p>, <a>, <img>, <details>, etc. that
-        // appear inline in the markdown actually render as HTML. Without
-        // it ReactMarkdown escapes the tags and you see the source.
         rehypePlugins={[rehypeRaw, rehypeHighlight]}
         components={{
           h1: (p) => (
@@ -55,7 +51,7 @@ export const ReadmeView = memo(function ReadmeView({ source }: Props) {
           ol: (p) => <ol className="list-decimal pl-6 space-y-1 my-3">{p.children}</ol>,
           li: (p) => <li className="leading-relaxed">{p.children}</li>,
           img: (p) => (
-            // eslint-disable-next-line @next/next/no-img-element, jsx-a11y/alt-text
+            // eslint-disable-next-line jsx-a11y/alt-text
             <img
               {...p}
               className="inline-block max-w-full h-auto rounded my-1 align-middle"

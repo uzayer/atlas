@@ -60,8 +60,6 @@ export function ActiveTimer() {
 
   return (
     <aside className="border-l border-border-subtle bg-bg-secondary overflow-auto min-h-0 flex flex-col">
-      {/* Sticky header — matches DayRail / DayTimeline so all three
-          panels' bottom borders align horizontally. */}
       <div className="sticky top-0 z-[2] bg-bg-secondary border-b border-border-subtle h-[104px] px-5 pt-6 shrink-0">
         <div className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider">
           Active session

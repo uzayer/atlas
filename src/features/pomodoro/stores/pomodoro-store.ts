@@ -49,8 +49,6 @@ interface PomodoroState {
     setActiveDay(i: number): void;
     openSheet(): void;
     closeSheet(): void;
-    addTag(name: string): void;
-    removeTag(name: string): void;
     quickStart(): void;
     clearAll(): void;
     hydrate(projectPath: string): Promise<void>;
@@ -256,17 +254,6 @@ export const usePomodoroStore = createSelectors(
             s.sheetOpen = false;
           }),
 
-        addTag: (name) =>
-          set((s) => {
-            const n = name.trim();
-            if (!n) return;
-            if (!s.knownTags.includes(n)) s.knownTags.push(n);
-          }),
-        removeTag: (name) =>
-          set((s) => {
-            s.knownTags = s.knownTags.filter((t) => t !== name);
-          }),
-
         quickStart: () => {
           get().actions.startSession({
             task: "Quick focus",
@@ -321,7 +308,6 @@ export const usePomodoroStore = createSelectors(
   ),
 );
 
-// ── Selectors ────────────────────────────────────────────────────────────
 export function selectDisplayClock(s: PomodoroState): string {
   if (s.phase === "idle") return `${String(s.focusMin).padStart(2, "0")}:00`;
   const phaseTotalSec = (s.phase === "focus" ? s.focusMin : s.breakMin) * 60;
@@ -329,7 +315,6 @@ export function selectDisplayClock(s: PomodoroState): string {
   return fmtClock(remain);
 }
 
-// ── Notifications (lazy) ─────────────────────────────────────────────────
 async function fireNotification(title: string, body: string) {
   try {
     const mod = await import("@tauri-apps/plugin-notification");
@@ -337,11 +322,10 @@ async function fireNotification(title: string, body: string) {
     const ok = granted || (await mod.requestPermission()) === "granted";
     if (ok) mod.sendNotification({ title, body });
   } catch {
-    // plugin missing or denied — silent
+    // plugin denied or unavailable
   }
 }
 
-// ── Persistence ──────────────────────────────────────────────────────────
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let lastSig = "";
 export function attachPersistence(projectPath: string) {

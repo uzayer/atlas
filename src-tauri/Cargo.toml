@@ -1,6 +1,6 @@
 [package]
 name = "atlas"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 
 [lib]
@@ -77,6 +77,10 @@ mimalloc = { version = "0.1", default-features = false }
 # the cold-launch white flash by making the WKWebView transparent over a
 # blurred dark surface from frame one.
 window-vibrancy = "0.6"
+# CommonMark + GFM parser used by `commands::knowledge_export` to render
+# notes to HTML (single-note export, workspace export, and the standalone
+# server crate template).
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # Release profile — Atlas previously shipped with Cargo defaults
 # (lto = false, codegen-units = 16, no strip), which means the bundled .app

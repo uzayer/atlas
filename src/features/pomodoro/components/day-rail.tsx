@@ -19,8 +19,6 @@ export function DayRail() {
 
   return (
     <aside className="border-r border-border-subtle bg-bg-secondary overflow-auto min-h-0 min-w-0 flex flex-col">
-      {/* Sticky header — fixed height so the bottom border aligns with the
-          DayTimeline's sticky header bottom border. */}
       <div className="sticky top-0 z-[2] bg-bg-secondary border-b border-border-subtle h-[104px] px-5 pt-6">
         <div className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider">
           History

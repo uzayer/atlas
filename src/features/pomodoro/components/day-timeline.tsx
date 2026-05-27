@@ -21,9 +21,8 @@ export function DayTimeline({ day, blocks, nowMin, onNewSession }: Props) {
     day: "numeric",
   });
 
-  // Auto-fit: start with the default work-hours range, then expand to include
-  // every block and the current time so a session at 23:50 or 06:00 still
-  // renders. Without this, blocks outside 8-21 are silently dropped.
+  // Auto-fit the hour gutter to the work-hours range, expanding to cover
+  // any block or the current time outside it.
   let startHour = DEFAULT_START_HOUR;
   let endHour = DEFAULT_END_HOUR;
   for (const b of blocks) {
@@ -43,8 +42,7 @@ export function DayTimeline({ day, blocks, nowMin, onNewSession }: Props) {
 
   return (
     <div className="bg-bg-primary min-h-full">
-      {/* Sticky header — height matches DayRail's so the bottom borders
-          align horizontally across the two panels. */}
+      {/* Header height matches DayRail's so bottom borders align. */}
       <div className="sticky top-0 z-[3] bg-bg-primary border-b border-border-subtle h-[104px] px-6 pt-6 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider">
@@ -163,51 +161,51 @@ function TimelineBlock({
       )}
       <div className="relative h-full p-2.5 flex flex-col justify-between min-h-0">
         <div>
-        <div className="flex items-baseline justify-between gap-2 min-w-0">
-          <div className="flex items-baseline gap-1.5 min-w-0 flex-1 flex-wrap">
-            <span
+          <div className="flex items-baseline justify-between gap-2 min-w-0">
+            <div className="flex items-baseline gap-1.5 min-w-0 flex-1 flex-wrap">
+              <span
+                className={cn(
+                  "text-[11px] leading-none",
+                  isFocus ? "text-text-primary/80" : "text-text-tertiary",
+                )}
+              >
+                {isFocus ? `Cycle ${block.cycle ?? 1}` : "Break"}
+              </span>
+              {block.current && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-px rounded-full bg-[var(--status-success)]/15 text-[var(--status-success)] text-[10px] leading-none translate-y-px">
+                  <span className="w-1 h-1 rounded-full bg-[var(--status-success)] animate-pulse" />
+                  Live
+                </span>
+              )}
+            </div>
+            <span className="text-[11px] font-mono text-text-tertiary tabular-nums leading-none shrink-0">
+              {fmtHM(block.startMin)}
+              <span className="text-text-tertiary/50"> · {totalMin}m</span>
+            </span>
+          </div>
+
+          {block.title && (
+            <div
               className={cn(
-                "text-[11px] leading-none",
-                isFocus ? "text-text-primary/80" : "text-text-tertiary",
+                "text-[12.5px] font-medium leading-tight truncate mt-1",
+                isFocus ? "text-text-primary" : "text-text-secondary",
               )}
             >
-              {isFocus ? `Cycle ${block.cycle ?? 1}` : "Break"}
-            </span>
-            {block.current && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-px rounded-full bg-[var(--status-success)]/15 text-[var(--status-success)] text-[10px] leading-none translate-y-px">
-                <span className="w-1 h-1 rounded-full bg-[var(--status-success)] animate-pulse" />
-                Live
-              </span>
-            )}
-          </div>
-          <span className="text-[11px] font-mono text-text-tertiary tabular-nums leading-none shrink-0">
-            {fmtHM(block.startMin)}
-            <span className="text-text-tertiary/50"> · {totalMin}m</span>
-          </span>
-        </div>
-
-        {block.title && (
-          <div
-            className={cn(
-              "text-[12.5px] font-medium leading-tight truncate mt-1",
-              isFocus ? "text-text-primary" : "text-text-secondary",
-            )}
-          >
-            {block.title}
-          </div>
-        )}
-        {isFocus && block.tags && block.tags.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-1">
-            {block.tags.map((t) => (
-              <span
-                key={t}
-                className="inline-flex items-center px-1.5 py-px rounded text-[10px] text-text-tertiary bg-bg-secondary border border-border-subtle"
-              >
-                {t}
-              </span>
-            ))}
-          </div>
-        )}
+              {block.title}
+            </div>
+          )}
+          {isFocus && block.tags && block.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {block.tags.map((t) => (
+                <span
+                  key={t}
+                  className="inline-flex items-center px-1.5 py-px rounded text-[10px] text-text-tertiary bg-bg-secondary border border-border-subtle"
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         {isFocus && (block.distractions ?? 0) > 0 && (
           <div className="text-[10px] text-text-tertiary">
