@@ -23,6 +23,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as AsyncCommand;
+use tokio::time::{timeout, Duration};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // claude_status
@@ -38,13 +39,23 @@ pub struct ClaudeStatus {
 
 /// Fast probe — runs `claude --version` and `claude auth status` in parallel.
 /// Always returns a populated struct; never errors (an absent binary just
-/// surfaces as `installed: false`).
+/// surfaces as `installed: false`). Each subprocess is capped at 8 s so a
+/// hung claude process never freezes the setup banner indefinitely.
 #[tauri::command]
 pub async fn claude_status() -> ClaudeStatus {
-    let version_fut = AsyncCommand::new("claude").arg("--version").output();
-    let auth_fut = AsyncCommand::new("claude").args(["auth", "status"]).output();
+    let version_fut = timeout(
+        Duration::from_secs(8),
+        AsyncCommand::new("claude").arg("--version").output(),
+    );
+    let auth_fut = timeout(
+        Duration::from_secs(8),
+        AsyncCommand::new("claude").args(["auth", "status"]).output(),
+    );
 
     let (version_res, auth_res) = tokio::join!(version_fut, auth_fut);
+    // Flatten the timeout layer: Err(_) on either timeout or spawn failure.
+    let version_res = version_res.unwrap_or_else(|_| Err(std::io::Error::other("timeout")));
+    let auth_res = auth_res.unwrap_or_else(|_| Err(std::io::Error::other("timeout")));
 
     let (installed, version) = match version_res {
         Ok(out) if out.status.success() => {
