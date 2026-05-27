@@ -63,10 +63,14 @@ Concretely:
 
 ### Prerequisites
 
+**To run the app (production .dmg):**
+- **Claude Code CLI** — install per [Anthropic's instructions](https://docs.anthropic.com/en/docs/claude-code). Must be on your `PATH` (typically `~/.local/bin/claude`). Required for the AI agent — the app checks for it on every launch.
+- **Node.js 18+** — required at runtime to spawn the ACP bridge (`npx -y @agentclientprotocol/claude-agent-acp`). On first launch the bridge package is downloaded and cached; subsequent launches are instant. If you installed Node via `nvm`, make sure at least one version is active.
+
+**To build from source (additional):**
 - **Node.js 20+** and a package manager (`pnpm`, `npm`, or `bun` — `bun` is the one wired into `tauri.conf.json` by default).
 - **Rust toolchain** (stable). Install via [rustup](https://rustup.rs/).
 - **Tauri prerequisites** for your OS. See the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/). On macOS this is just Xcode Command Line Tools.
-- **(Optional) Claude Code CLI** if you want the agent. Install per Anthropic's instructions and make sure `claude` is on your `PATH`.
 
 ### Install and run in dev
 
@@ -210,31 +214,38 @@ The remaining `crates/` directories (`atlas-analysis`, `atlas-background`, `atla
 
 This is the most non-obvious part of the system, so it gets its own section.
 
-Atlas does **not** use ACP (Agent Client Protocol). It invokes the public `claude` CLI directly:
+Atlas uses **ACP (Agent Client Protocol)** — a structured stdio-based protocol for host apps to communicate with AI agents. Instead of spawning a new process per message, Atlas launches one persistent bridge process and exchanges JSON messages with it for the lifetime of the session.
+
+The bridge is the npm package `@agentclientprotocol/claude-agent-acp`. Atlas spawns it via:
 
 ```
-claude --print --output-format stream-json --verbose [--resume <sid>] [--permission-mode <m>] <prompt>
+npx -y @agentclientprotocol/claude-agent-acp
 ```
 
-Each invocation streams newline-delimited JSON to stdout. The Rust side spawns the process, reads stdout line by line in a blocking thread, parses each line, and re-emits it as a `claude-stream` Tauri event with payload:
+On first launch the package is downloaded and cached by npm. Every subsequent launch resolves instantly from the local cache. The bridge itself wraps the `claude` CLI and translates between ACP messages and Claude Code's own protocol.
 
-```ts
-{ session_id: string; event_type: "session" | "text" | "tool_use" | "tool_result" | "done" | "error"; content: string }
+**The full stack:**
+
+```
+Atlas (Rust/Tauri)
+  ↕  JSON over stdio (ACP)
+@agentclientprotocol/claude-agent-acp   ← Node.js bridge (spawned via npx)
+  ↕  spawns and manages
+claude CLI
 ```
 
-Two design decisions matter here:
+**How a session works:**
 
-**1. The `session_id` is per-send, not per-tab.**
-Each call to `handleSend()` in `chat-panel.tsx` mints a fresh `streamId` like `${tabId}-${ts36}-${rand6}` and passes it as the Rust `session_id`. The Rust backend keys its PID registry by this `streamId`, so two concurrent streams in the same tab don't collide, and the stop button always targets exactly one PID. The frontend listener also filters on `streamId`, so streams can't cross-contaminate each other's assistant message.
+1. When a chat tab opens, `ensureBound()` in `chat-panel.tsx` spawns the bridge via `agents_spawn("claude-code-ts")` in Rust. The `atlas-acp` crate handles the ACP handshake — the bridge responds with its capabilities (auth methods, permission modes, supported models).
+2. The user's message is sent as an ACP `run` request. The bridge streams back structured deltas: text chunks, thinking blocks, tool calls, tool results.
+3. When Claude Code wants to run a bash command or edit a file, it sends a `permission_request` event over ACP. Atlas surfaces the approval modal, waits for the user's click, and sends the decision back. This is what enables the per-tool permission UI — it's a first-class protocol event, not a heuristic parse of stdout.
+4. The bridge process stays alive across messages in the same tab. Spawning it once amortises the `npx` cold-start cost across the whole session.
 
-**2. Streams survive tab navigation via a "running archive".**
-When the user clicks a different history item in the session sidebar while a stream is running, `chat-store.archiveCurrent(tabId)` deep-copies the in-flight session into `runningArchive[claudeSessionId]`. The stream listener writes to whichever container currently holds its `streamId` — the tab if the user is still there, or the archive if they've moved on. When the stream finishes, the archive is dropped (the on-disk JSONL is now authoritative); when the user navigates back, `restoreArchive()` swaps it back into the tab.
+**Session IDs:**
+Each ACP session has a `session_id` minted by the bridge on `new_session`. The Rust layer routes all incoming deltas by `(agent_id, session_id)` to the right tab's store slice. Multiple tabs each have their own session, so three concurrent Claude Code streams never cross-contaminate.
 
-The result is that you can fire off three Claude Code requests in three tabs, switch freely between them and the history list, and each one keeps streaming independently with a working stop button.
-
-History rendering reads from `~/.claude/projects/<slug>/<session-id>.jsonl` directly, since Claude Code persists every session there. The `claude_run` command also accepts a `--resume` flag to continue prior conversations.
-
-In production builds, `claude.rs` falls back to a login-shell `which` resolution because macOS GUI apps get a stripped `PATH` — without this, the bundled `.app` can't find any user-installed CLI.
+**PATH resolution:**
+macOS GUI apps launch with a stripped `PATH` (only `/usr/bin:/bin:/usr/sbin:/sbin`). Atlas calls `sanitize_host_env()` at boot (`crates/atlas-acp/src/registry.rs`) to prepend `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`, and nvm-managed Node paths before any subprocess is spawned. This is why `claude` and `npx` resolve correctly inside the `.app` bundle even though they aren't on the system `PATH`.
 
 ### State, persistence, and IPC
 
