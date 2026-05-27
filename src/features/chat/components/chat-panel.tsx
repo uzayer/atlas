@@ -27,7 +27,7 @@ const MessagesList = lazy(() =>
   import("./messages-list").then((m) => ({ default: m.MessagesList }))
 );
 import type { MessagesListHandle } from "./messages-list";
-import { Sparkles, User, TerminalSquare, ListFilter, Search, Loader2, ChevronDown } from "lucide-react";
+import { Sparkles, User, TerminalSquare, ListFilter, Search, Loader2, ChevronDown, TriangleAlert, RefreshCw } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
@@ -54,6 +54,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   const [roleFilter, setRoleFilter] = useState<"all" | "user" | "assistant">("all");
   const [bashPanelOpen, setBashPanelOpen] = useState(false);
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
+  const [bindError, setBindError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Scroll-to-bottom state is owned here so the floating button can live
@@ -86,6 +87,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     const ensureBound = async () => {
       if (cancelled || pending) return;
       pending = true;
+      setBindError(null);
       try {
         const agent = await ensureDefaultAgent();
         if (cancelled) return;
@@ -109,6 +111,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         }
       } catch (err) {
         console.warn("Agent session creation failed:", err);
+        if (!cancelled) setBindError(String(err));
       } finally {
         pending = false;
       }
@@ -424,6 +427,12 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             running={session.status === "running"}
             showJumpToBottom={showJumpToBottom}
             onScrollToBottom={() => messagesListRef.current?.scrollToBottom()}
+            bindError={bindError}
+            onRetryBind={() =>
+              window.dispatchEvent(
+                new CustomEvent("atlas:chat-input-focused", { detail: { tabId } })
+              )
+            }
           />
         </div>
       </div>
@@ -472,9 +481,12 @@ function LoadingTranscriptState() {
 
 /**
  * Composer wrapper: the setup banner + login dialog + the real `MessageInput`.
- * Subscribes to the Claude-Code setup phase from `useClaudeSetupStore` and
- * hard-disables the input when Claude isn't installed/authed so we don't
- * surface confusing failures from inside the ACP spawn path.
+ * Handles two blocking states above the input:
+ *   1. Claude Code not ready (`useClaudeSetupStore` phase ≠ `ready`) — hard-disables
+ *      the input and shows the setup/install/auth pill.
+ *   2. ACP agent bind failed (`bindError`) — Claude Code is ready but the bridge
+ *      process couldn't spawn. Shows a retry pill without disabling the input so
+ *      the user can still read previous messages.
  */
 function ChatComposer({
   tabId,
@@ -483,6 +495,8 @@ function ChatComposer({
   running,
   showJumpToBottom,
   onScrollToBottom,
+  bindError,
+  onRetryBind,
 }: {
   tabId: string;
   onSend: (message: string, mentions: MentionData[]) => void;
@@ -490,22 +504,27 @@ function ChatComposer({
   running: boolean;
   showJumpToBottom: boolean;
   onScrollToBottom: () => void;
+  bindError: string | null;
+  onRetryBind: () => void;
 }) {
   const phase = useClaudeSetupStore.use.phase();
   const disabled = phase !== "ready";
   const disabledReason =
-    phase === "not-installed"
-      ? "Install Claude Code to start chatting"
-      : phase === "not-authed"
-        ? "Sign in to Claude Code to start chatting"
-        : phase === "installing"
-          ? "Installing Claude Code…"
-          : phase === "authing"
-            ? "Finishing sign-in…"
-            : undefined;
+    phase === "checking"
+      ? "Checking Claude Code…"
+      : phase === "not-installed"
+        ? "Install Claude Code to start chatting"
+        : phase === "not-authed"
+          ? "Sign in to Claude Code to start chatting"
+          : phase === "installing"
+            ? "Installing Claude Code…"
+            : phase === "authing"
+              ? "Finishing sign-in…"
+              : undefined;
 
   const setupVisible = phase !== "ready";
-  const showRow = setupVisible || showJumpToBottom;
+  const agentErrorVisible = phase === "ready" && !!bindError;
+  const showRow = setupVisible || showJumpToBottom || agentErrorVisible;
 
   return (
     <>
@@ -521,6 +540,23 @@ function ChatComposer({
                 <span key={`setup-${phase}`} className="atlas-pill-in">
                   <ClaudeSetupBanner />
                 </span>
+              )}
+              {agentErrorVisible && (
+                <button
+                  key="agent-error"
+                  onClick={onRetryBind}
+                  style={{ backdropFilter: "blur(4px)" }}
+                  className={cn(
+                    "atlas-pill-in inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full",
+                    "border text-[11px] leading-none font-medium cursor-pointer transition-colors",
+                    "shadow-[0_2px_8px_rgba(0,0,0,0.35)]",
+                    "border-[var(--status-error)]/40 bg-[var(--status-error)]/15 text-[var(--status-error)] hover:bg-[var(--status-error)]/25",
+                  )}
+                >
+                  <TriangleAlert size={11} />
+                  <span>Couldn't connect to agent — Retry</span>
+                  <RefreshCw size={11} className="ml-1 opacity-70" />
+                </button>
               )}
               {showJumpToBottom && (
                 <button

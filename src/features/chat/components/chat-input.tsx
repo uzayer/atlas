@@ -18,7 +18,7 @@ import {
   useMemo,
   useRef,
 } from "react";
-import { EditorState, Prec, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
 import {
   drawSelection,
   EditorView,
@@ -117,6 +117,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
+    const placeholderCompartment = useMemo(() => new Compartment(), []);
 
     // Keep the latest callbacks in refs so the extensions captured at mount
     // can always reach the current handler without us tearing down the view
@@ -245,7 +246,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
             EditorView.lineWrapping,
             submitKeymap,
             keymap.of([...historyKeymap, ...defaultKeymap]),
-            cmPlaceholder(placeholder),
+            placeholderCompartment.of(cmPlaceholder(placeholder)),
             theme,
             EditorView.contentAttributes.of({
               "aria-label": "Chat message",
@@ -285,11 +286,16 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
         view.destroy();
         viewRef.current = null;
       };
-      // `placeholder` / `theme` / `extensionsKey` are stable enough not to
-      // bounce the view; if a caller needs to change them at runtime they
-      // can call `.setValue("")` after a remount instead.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    useEffect(() => {
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({
+        effects: placeholderCompartment.reconfigure(cmPlaceholder(placeholder)),
+      });
+    }, [placeholder]);
 
     useImperativeHandle(
       ref,
