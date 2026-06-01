@@ -20,7 +20,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
-import { Markdown } from "@/lib/markdown";
+import { CachedMarkdown } from "@/lib/markdown-cache";
 
 const FILE_PATH_KEYS = ["file_path", "path", "filename", "filePath"];
 
@@ -183,7 +183,7 @@ export const MessageItem = memo(function MessageItem({
             </pre>
           ) : null}
           {prose && !streaming && (
-            <Markdown className="text-sm">{prose}</Markdown>
+            <CachedMarkdown source={prose} className="text-sm" />
           )}
 
           {/* Heavy @-mention bodies (files / folders / repo READMEs / notes /
@@ -315,7 +315,7 @@ function ActionButton({
   );
 }
 
-function AtlasContextAccordion({
+const AtlasContextAccordion = memo(function AtlasContextAccordion({
   context,
   blockCount,
 }: {
@@ -347,15 +347,16 @@ function AtlasContextAccordion({
         </span>
       </summary>
       <div className="border-t border-[var(--border-default)] px-3 py-2">
-        <Markdown className="text-[12px] text-[var(--text-tertiary)]">
-          {context}
-        </Markdown>
+        <CachedMarkdown
+          source={context}
+          className="text-[12px] text-[var(--text-tertiary)]"
+        />
       </div>
     </details>
   );
-}
+});
 
-function ThinkingAccordion({
+const ThinkingAccordion = memo(function ThinkingAccordion({
   thinking,
   streaming,
 }: {
@@ -397,9 +398,13 @@ function ThinkingAccordion({
       </div>
     </details>
   );
-}
+});
 
-function ToolCallCard({ toolCall }: { toolCall: ChatMessage["toolCalls"][number] }) {
+const ToolCallCard = memo(function ToolCallCard({
+  toolCall,
+}: {
+  toolCall: ChatMessage["toolCalls"][number];
+}) {
   const [copied, setCopied] = useState(false);
 
   const args = toolCall.arguments as Record<string, unknown>;
@@ -488,9 +493,13 @@ function ToolCallCard({ toolCall }: { toolCall: ChatMessage["toolCalls"][number]
       )}
     </div>
   );
-}
+});
 
-function FileChangeCard({ change }: { change: ChatMessage["fileChanges"][number] }) {
+const FileChangeCard = memo(function FileChangeCard({
+  change,
+}: {
+  change: ChatMessage["fileChanges"][number];
+}) {
   const statusColors = {
     added: "text-[var(--diff-added-text)]",
     modified: "text-[var(--status-warning)]",
@@ -519,9 +528,13 @@ function FileChangeCard({ change }: { change: ChatMessage["fileChanges"][number]
       )}
     </button>
   );
-}
+});
 
-function PlanCard({ steps }: { steps: ChatMessage["plan"] }) {
+const PlanCard = memo(function PlanCard({
+  steps,
+}: {
+  steps: ChatMessage["plan"];
+}) {
   if (!steps) return null;
   const completed = steps.filter((s) => s.status === "completed").length;
 
@@ -555,4 +568,4 @@ function PlanCard({ steps }: { steps: ChatMessage["plan"] }) {
       ))}
     </div>
   );
-}
+});

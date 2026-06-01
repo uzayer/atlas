@@ -216,6 +216,23 @@ impl AgentManager {
         self.handle_for(key)?.send(SessionCommand::SetModel(model_id))
     }
 
+    /// Resolve a pending permission request.
+    ///
+    /// MUST bypass the worker's command queue. The worker spends an
+    /// in-flight turn `await`ing `send_prompt`, and `send_prompt` won't
+    /// return until *this* permission is resolved on the registry side —
+    /// queueing the response would deadlock the turn (the worker can't
+    /// pop the command until send_prompt returns, send_prompt can't
+    /// return until the permission is responded). Same reasoning the
+    /// worker.rs comment documents for `cancel`.
+    ///
+    /// Side effects:
+    ///   - Hit the registry directly so the driver's oneshot wakes up
+    ///     and `send_prompt` resumes streaming.
+    ///   - Emit `PermissionResolved` via the manager's sink so any
+    ///     cold-attach observer sees the resolution land (the chat
+    ///     panel already pops its local queue optimistically on click,
+    ///     so the live UI doesn't depend on this).
     pub fn respond_permission(
         &self,
         agent_id: AgentId,
@@ -227,10 +244,17 @@ impl AgentManager {
             agent_id,
             session_id: session_id.to_string(),
         };
-        self.handle_for(&key)?.send(SessionCommand::RespondPermission {
-            request_id,
-            decision,
-        })
+        let handle = self.handle_for(&key)?;
+        self.inner
+            .acp
+            .respond_permission(agent_id, request_id, decision)?;
+        let envelope = SessionDeltaEnvelope {
+            agent_id: handle.agent_id,
+            session_id: handle.acp_session_id.to_string(),
+            delta: SessionDelta::PermissionResolved { request_id },
+        };
+        self.inner.sink.emit(envelope);
+        Ok(())
     }
 
     fn handle_for(&self, key: &SessionKey) -> Result<Arc<SessionHandle>> {

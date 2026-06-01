@@ -633,3 +633,102 @@
   outline-color: rgba(249, 115, 22, 0.7) !important;
 }
 
+/* Chat markdown styling. The old <Markdown> component attached Tailwind
+   utilities to each tag via react-markdown's `components` override; the
+   cached pipeline emits bare HTML, so the same rules live as plain CSS
+   here. Tokens match the values that were inline. */
+.prose-chat h1 { font-size: 1rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
+.prose-chat h2 { font-size: 0.875rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
+.prose-chat h3 { font-size: 0.875rem; font-weight: 600; margin: 0.5rem 0 0.25rem; }
+.prose-chat p { margin: 0.375rem 0; }
+.prose-chat ul { list-style-type: disc; padding-left: 1.25rem; margin: 0.5rem 0; }
+.prose-chat ol { list-style-type: decimal; padding-left: 1.25rem; margin: 0.5rem 0; }
+.prose-chat li + li { margin-top: 0.125rem; }
+.prose-chat blockquote {
+  border-left: 2px solid var(--border-default);
+  padding-left: 0.75rem;
+  margin: 0.5rem 0;
+  color: var(--text-secondary);
+}
+.prose-chat pre {
+  border: 1px solid var(--border-default);
+  background: var(--bg-secondary);
+  padding: 0.75rem;
+  border-radius: 0.375rem;
+  margin: 0.5rem 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+}
+.prose-chat code {
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.25rem;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.prose-chat pre code {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+}
+.prose-chat a {
+  color: var(--accent-primary);
+  text-decoration: underline;
+}
+.prose-chat a:hover { opacity: 0.8; }
+.prose-chat strong { font-weight: 600; }
+.prose-chat em { font-style: italic; }
+.prose-chat hr {
+  border: none;
+  border-top: 1px solid var(--border-default);
+  margin: 0.75rem 0;
+}
+.prose-chat table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 0.75rem 0;
+  border: 1px solid var(--border-default);
+  border-radius: 0.375rem;
+  overflow: hidden;
+}
+.prose-chat thead { background: var(--bg-elevated); }
+.prose-chat th {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-default);
+  border-right: 1px solid var(--border-default);
+}
+.prose-chat th:last-child { border-right: none; }
+.prose-chat tr { border-bottom: 1px solid var(--border-subtle); }
+.prose-chat tbody tr:last-child { border-bottom: none; }
+.prose-chat td {
+  padding: 0.5rem 0.75rem;
+  vertical-align: top;
+  font-size: 12px;
+  color: var(--text-primary);
+  border-right: 1px solid var(--border-subtle);
+  word-break: break-word;
+}
+.prose-chat td:last-child { border-right: none; }
+/* Task list items (remark-gfm output) — drop the disc bullet so the
+   checkbox stands alone. */
+.prose-chat li.task-list-item,
+.prose-chat li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.25rem;
+}
+.prose-chat li input[type="checkbox"] {
+  margin-right: 0.375rem;
+  accent-color: var(--accent-primary);
+}
+

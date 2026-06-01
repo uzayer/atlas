@@ -38,10 +38,43 @@ function timeAgo(iso: string): string {
 }
 
 export function InboxPanel({ onClose }: { onClose: () => void }) {
-  const sessions = useChatStore.use.sessions();
   const { setActiveTab } = useLayoutStore.use.actions();
 
+  // Narrow signature subscription — same pattern as session-sidebar.
+  // The full `sessions` map gets a new identity on every streaming
+  // chunk (immer rewrites the tail message), and InboxPanel doesn't
+  // care about chunk-level previews. The fields the UI actually shows
+  // (title, status, last message id, updatedAt) are stable per chunk
+  // because the chat-store deliberately does NOT bump `updatedAt` on
+  // text deltas. So we gate re-renders on a string signature of just
+  // those fields and read the rich session data non-reactively below.
+  const sessionsSignature = useChatStore((s) => {
+    const keys = Object.keys(s.sessions).sort();
+    let sig = "";
+    for (const k of keys) {
+      const x = s.sessions[k];
+      const last = x.messages[x.messages.length - 1];
+      sig +=
+        k +
+        "|" +
+        x.title +
+        "|" +
+        x.status +
+        "|" +
+        x.updatedAt +
+        "|" +
+        (x.acpSessionId ?? "") +
+        "|" +
+        (last?.id ?? "") +
+        "|" +
+        (last?.role ?? "") +
+        "\n";
+    }
+    return sig;
+  });
+
   const items = useMemo<InboxItem[]>(() => {
+    const sessions = useChatStore.getState().sessions;
     return Object.values(sessions)
       .map((s) => {
         const last = s.messages[s.messages.length - 1];
@@ -56,7 +89,10 @@ export function InboxPanel({ onClose }: { onClose: () => void }) {
         };
       })
       .sort((a, b) => (b.lastUpdated > a.lastUpdated ? 1 : -1));
-  }, [sessions]);
+    // The signature is what gates recomputation; getState() above
+    // just gives us the rich object form.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionsSignature]);
 
   const grouped = useMemo(() => {
     const running = items.filter((i) => i.status === "running");

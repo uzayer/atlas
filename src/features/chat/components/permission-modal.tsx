@@ -16,12 +16,25 @@ interface PermissionModalProps {
  * `cancelled` on the wire so the agent backs off correctly.
  */
 export function PermissionModal({ tabId }: PermissionModalProps) {
-  const session = useChatStore.use.sessions()[tabId];
-  const all = useChatStore.use.pendingPermissions();
+  // Narrow subscription: we only care about this tab's acpSessionId
+  // and the head of its permission queue. The previous broad
+  // `useChatStore.use.sessions()` + `useChatStore.use.pendingPermissions()`
+  // pair re-rendered this modal on every streaming chunk because the
+  // top-level `sessions` map identity flips on each tail mutation.
+  // Subscribing to only the values we read keeps the modal idle until
+  // a permission actually arrives.
+  const acpSessionId = useChatStore(
+    (s) => s.sessions[tabId]?.acpSessionId,
+  );
+  const current = useChatStore((s) => {
+    if (!acpSessionId) return undefined;
+    return s.pendingPermissions[acpSessionId]?.[0];
+  });
+  const queueLength = useChatStore((s) => {
+    if (!acpSessionId) return 0;
+    return s.pendingPermissions[acpSessionId]?.length ?? 0;
+  });
   const popPermission = useChatStore.use.actions().popPermission;
-  const acpSessionId = session?.acpSessionId;
-  const queue = acpSessionId ? all[acpSessionId] : undefined;
-  const current: PendingPermission | undefined = queue?.[0];
 
   if (!current) return null;
 
@@ -80,9 +93,9 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
             </div>
           </div>
 
-          {queue && queue.length > 1 && (
+          {queueLength > 1 && (
             <div className="border-b border-border-default bg-bg-base px-4 py-1.5 text-[11px] text-text-secondary">
-              {queue.length - 1} more pending after this
+              {queueLength - 1} more pending after this
             </div>
           )}
 

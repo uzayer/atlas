@@ -5,10 +5,9 @@
 use std::sync::Arc;
 
 use agent_client_protocol::schema::SessionId;
-use atlas_acp::{AgentId, AgentRegistry, PermissionDecision};
+use atlas_acp::{AgentId, AgentRegistry};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
@@ -17,20 +16,20 @@ use crate::session::{SessionState, SessionStatus, new_user_message};
 /// Commands the worker accepts. All entry points (Tauri commands) drop into
 /// this enum so the worker can serialise turn execution against state changes.
 ///
-/// Note: there is intentionally no `Cancel` variant. Cancel cannot go
-/// through this queue because the worker spends most of its time
-/// `await`ing `send_prompt` for an in-flight turn — a queued cancel
-/// would only get processed after the turn it was meant to stop has
-/// naturally ended. `AgentManager::cancel` instead calls the registry
-/// directly so the driver's cancellation guard is set immediately.
+/// Note: there is intentionally no `Cancel` or `RespondPermission`
+/// variant. Both must bypass this queue because the worker spends most
+/// of its time `await`ing `send_prompt` for an in-flight turn — a
+/// queued cancel would only fire after the turn naturally ended, and a
+/// queued permission response would deadlock the turn (`send_prompt`
+/// can't return until the permission is resolved on the registry, but
+/// the worker can't pop the command until `send_prompt` returns).
+/// `AgentManager::cancel` and `AgentManager::respond_permission` both
+/// hit `AgentRegistry` directly so the driver's oneshot / cancellation
+/// guard fires immediately.
 pub enum SessionCommand {
     SendPrompt(String),
     SetMode(String),
     SetModel(String),
-    RespondPermission {
-        request_id: Uuid,
-        decision: PermissionDecision,
-    },
 }
 
 pub struct SessionWorker {
@@ -72,17 +71,6 @@ impl SessionWorker {
                     st.touch();
                     drop(st);
                     self.emit(SessionDelta::ModelChanged { model_id });
-                }
-                SessionCommand::RespondPermission {
-                    request_id,
-                    decision,
-                } => {
-                    if let Err(e) =
-                        self.registry.respond_permission(self.agent_id, request_id, decision)
-                    {
-                        tracing::warn!(target: "atlas_agents::worker", "respond_permission failed: {e}");
-                    }
-                    self.emit(SessionDelta::PermissionResolved { request_id });
                 }
             }
         }

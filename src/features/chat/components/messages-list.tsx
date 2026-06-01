@@ -42,6 +42,17 @@ interface CachedScroll {
   isAtBottom: boolean;
 }
 const scrollPositionCache = new Map<string, CachedScroll>();
+
+// Persist measured row heights per message id across remounts/scrolls.
+// When a message scrolls off-screen and back into view the virtualizer
+// would otherwise start from the 200-px estimate and snap to the real
+// height once measureElement fires, producing a visible jump. Keyed by
+// stable message id, so the first `estimateSize` call after a remount
+// returns the real height instantly. Module-level so it survives the
+// entire app session — typical thread sizes (few hundred messages × ~80
+// bytes per entry) make this trivially small.
+const measuredHeights = new Map<string, number>();
+const DEFAULT_ROW_ESTIMATE = 200;
 // Wider than it looks like it should be: a streaming assistant message
 // grows in chunks of several lines per RAF. If the user is within ~one
 // screen of the bottom, treat them as "following" and keep pinning.
@@ -90,6 +101,21 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   // `thinking` blocks that arrive with `thinking: ""`). They render
   // nothing but still pay the MessageItem wrapper's vertical padding,
   // which used to show up as a mystery gap in the thread.
+  // Stabilize `filtered` array identity when only the trailing message
+  // mutated. During streaming, immer rewrites `session.messages` on
+  // every chunk (new array ref + new tail message), while messages
+  // 0..N-1 keep their object identity via structural sharing. A naive
+  // useMemo would still allocate a fresh `filt` array per chunk and
+  // force the virtualizer's reconciliation pass over every visible
+  // item. The ref-based memo below reuses the prior `filtered` array
+  // when shape + ids are unchanged — only the tail slot is swapped in
+  // when its object identity changed. The virtualizer's id-keyed
+  // measurement cache then keeps non-tail rows from re-measuring, and
+  // memo'd MessageItems skip rendering for unchanged props.
+  const prevFilteredRef = useRef<{
+    filtered: ChatMessage[];
+    indexMap: number[];
+  } | null>(null);
   const { filtered, indexMap } = useMemo(() => {
     const filt: ChatMessage[] = [];
     const idx: number[] = [];
@@ -105,18 +131,72 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
       filt.push(m);
       idx.push(i);
     }
-    return { filtered: filt, indexMap: idx };
+    const prev = prevFilteredRef.current;
+    if (prev && prev.filtered.length === filt.length) {
+      // Check id-shape parity. We expect either:
+      //   (a) every element identical (no change) → reuse prev as-is.
+      //   (b) every element identical except the last → swap the tail
+      //       in place into the previous array so the reference is
+      //       stable but content is up to date.
+      let allSameRef = true;
+      let allSameId = true;
+      for (let i = 0; i < filt.length; i++) {
+        if (filt[i] !== prev.filtered[i]) allSameRef = false;
+        if (filt[i].id !== prev.filtered[i].id) {
+          allSameId = false;
+          break;
+        }
+      }
+      if (allSameId) {
+        if (allSameRef) {
+          return prev;
+        }
+        // Determine which slots changed identity. Common case during
+        // streaming: only the last slot. Mutate prev in place so the
+        // outer array reference is stable; React keys by message.id so
+        // mutation is safe across the diff.
+        for (let i = 0; i < filt.length; i++) {
+          if (filt[i] !== prev.filtered[i]) prev.filtered[i] = filt[i];
+        }
+        return prev;
+      }
+    }
+    const next = { filtered: filt, indexMap: idx };
+    prevFilteredRef.current = next;
+    return next;
   }, [messages, roleFilter, isStreaming]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 200,
-    overscan: 3,
+    estimateSize: (i) => {
+      // Consult the cross-remount height cache first — when a message
+      // scrolls back into view we want the row to occupy its real
+      // height immediately instead of starting from the default
+      // estimate and snapping after measureElement fires (visible
+      // jump). Falls back to the static estimate on first sight.
+      const id = filtered[i]?.id;
+      if (id) {
+        const cached = measuredHeights.get(id);
+        if (cached !== undefined) return cached;
+      }
+      return DEFAULT_ROW_ESTIMATE;
+    },
+    // Higher overscan keeps fast scrolls inside DOM-mounted territory
+    // — items don't unmount/remount as the user flicks through the
+    // thread, which kills both the markdown re-parse cost and the
+    // first-paint estimate jump. Memory cost on a typical thread (a
+    // few hundred messages × ~2 KB DOM) is trivial.
+    overscan: 12,
     getItemKey: (i) => filtered[i]?.id ?? i,
     measureElement:
       typeof window !== "undefined" && !navigator.userAgent.includes("Firefox")
-        ? (el) => el?.getBoundingClientRect().height ?? 200
+        ? (el) => {
+            const h = el?.getBoundingClientRect().height ?? DEFAULT_ROW_ESTIMATE;
+            const id = el?.getAttribute("data-message-id");
+            if (id) measuredHeights.set(id, h);
+            return h;
+          }
         : undefined,
   });
 
@@ -311,6 +391,7 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
                   key={message.id}
                   ref={virtualizer.measureElement}
                   data-index={vItem.index}
+                  data-message-id={message.id}
                   style={{
                     position: "absolute",
                     top: 0,
