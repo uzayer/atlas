@@ -31,6 +31,7 @@ import {
   listenClaudeInstallProgress,
   type ClaudeStatus,
 } from "../lib/claude-setup-api";
+import { logEvent } from "@/features/log/lib/log";
 
 export type ClaudeSetupPhase =
   | "checking"
@@ -46,6 +47,14 @@ export type ClaudeSetupPhase =
 const LOG_LINE_CAP = 50;
 /** How long the green "Installed ✓" flash lingers before re-checking. */
 const SUCCESS_FLASH_MS = 800;
+
+/** After the sign-in subprocess exits successfully, `claude auth status`
+ *  sometimes still reports unauthenticated for a beat — the vendored CLI
+ *  has written credentials but the OS (Keychain on macOS, filesystem
+ *  fsync elsewhere) hasn't made them visible to a sibling process yet.
+ *  We retry a handful of times before declaring failure. */
+const POST_AUTH_PROBE_ATTEMPTS = 5;
+const POST_AUTH_PROBE_DELAY_MS = 400;
 
 /** Status of the in-flight auth subprocess. The dialog reads this to
  *  render: chooser (`idle`), waiting (`running`), or failure (`failed`).
@@ -142,8 +151,27 @@ export const useClaudeSetupStore = createSelectors(
       try {
         const status = await claudeSetup.status();
         await applyStatus(status);
+        logEvent({
+          source: "atlas",
+          kind: "claude-status",
+          summary: `claude status: installed=${status.installed} authed=${status.authenticated} (${status.auth_summary ?? "no detail"})`,
+          status: status.installed && status.authenticated ? "success" : "failure",
+          payload: {
+            installed: status.installed,
+            authenticated: status.authenticated,
+            version: status.version,
+            authSummary: status.auth_summary,
+          },
+        });
       } catch (e) {
         console.warn("claude_status invoke failed:", e);
+        logEvent({
+          source: "atlas",
+          kind: "claude-status-invoke-failed",
+          summary: `claude_status invoke failed: ${String(e)}`,
+          status: "failure",
+          payload: { error: String(e) },
+        });
         set({
           phase: "not-installed",
           version: null,
@@ -262,6 +290,13 @@ export const useClaudeSetupStore = createSelectors(
         phase: "authing",
         authRun: { phase: "running", methodId },
       });
+      logEvent({
+        source: "atlas",
+        kind: "claude-signin-started",
+        summary: `Sign-in started: ${methodId}`,
+        status: "pending",
+        payload: { methodId },
+      });
 
       // Dev override: skip the real spawn, flash a brief running state,
       // then mark ready so the post-auth UI is exercisable.
@@ -281,6 +316,13 @@ export const useClaudeSetupStore = createSelectors(
       const doneUnlisten = await listenAuthRunDone((p) => {
         clearAuthListeners();
         if (!p.success) {
+          logEvent({
+            source: "atlas",
+            kind: "claude-signin-subprocess-failed",
+            summary: p.message ?? "Sign-in subprocess didn't complete successfully.",
+            status: "failure",
+            payload: { methodId, message: p.message },
+          });
           set({
             phase: "not-authed",
             authRun: {
@@ -291,35 +333,86 @@ export const useClaudeSetupStore = createSelectors(
           });
           return;
         }
-        // Re-probe status. The subprocess wrote credentials to disk
-        // before exiting, so the next `claude_status` should report
-        // authenticated.
+        logEvent({
+          source: "atlas",
+          kind: "claude-signin-subprocess-done",
+          summary: "Sign-in subprocess exited successfully; probing claude_status…",
+          status: "success",
+          payload: { methodId },
+        });
+        // Re-probe status. The subprocess wrote credentials before
+        // exiting, but `claude auth status` can lag behind that write
+        // (Keychain visibility, fsync) so we retry a few times before
+        // giving up.
         void (async () => {
-          try {
-            const status = await claudeSetup.status();
-            await applyStatus(status);
-            if (get().phase === "ready") {
-              set({
-                loginDialogOpen: false,
-                authRun: { phase: "idle" },
-              });
-            } else {
-              set({
-                authRun: {
-                  phase: "failed",
-                  message:
-                    "Sign-in finished but the CLI still reports unauthenticated. Try again.",
-                },
-              });
+          let lastStatus: ClaudeStatus | null = null;
+          let lastError: unknown = null;
+          for (let attempt = 0; attempt < POST_AUTH_PROBE_ATTEMPTS; attempt++) {
+            if (attempt > 0) {
+              await new Promise((r) => setTimeout(r, POST_AUTH_PROBE_DELAY_MS));
             }
-          } catch (e) {
+            try {
+              lastStatus = await claudeSetup.status();
+              await applyStatus(lastStatus);
+              if (get().phase === "ready") {
+                logEvent({
+                  source: "atlas",
+                  kind: "claude-signin-verified",
+                  summary: `Authenticated: ${lastStatus.auth_summary ?? "(no detail)"}`,
+                  status: "success",
+                  payload: {
+                    methodId,
+                    attempts: attempt + 1,
+                    authSummary: lastStatus.auth_summary,
+                    version: lastStatus.version,
+                  },
+                });
+                set({
+                  loginDialogOpen: false,
+                  authRun: { phase: "idle" },
+                });
+                return;
+              }
+            } catch (e) {
+              lastError = e;
+            }
+          }
+          if (lastError && !lastStatus) {
+            logEvent({
+              source: "atlas",
+              kind: "claude-signin-verify-error",
+              summary: `Couldn't verify status: ${String(lastError)}`,
+              status: "failure",
+              payload: { methodId, error: String(lastError) },
+            });
             set({
               authRun: {
                 phase: "failed",
-                message: `Couldn't verify status: ${String(e)}`,
+                message: `Couldn't verify status: ${String(lastError)}`,
               },
             });
+            return;
           }
+          const detail = lastStatus?.auth_summary?.trim();
+          logEvent({
+            source: "atlas",
+            kind: "claude-signin-still-unauthenticated",
+            summary: `Sign-in subprocess succeeded but \`claude auth status\` reports unauthenticated. Detail: ${detail ?? "(none)"}`,
+            status: "failure",
+            payload: {
+              methodId,
+              authSummary: detail,
+              version: lastStatus?.version,
+            },
+          });
+          set({
+            authRun: {
+              phase: "failed",
+              message: detail
+                ? `Sign-in finished but \`claude auth status\` still reports unauthenticated: ${detail}. Try again, or check that the \`claude\` CLI on your PATH is up to date.`
+                : "Sign-in finished but `claude auth status` still reports unauthenticated. Make sure the `claude` CLI on your PATH is recent enough to support `auth status`, then try again.",
+            },
+          });
         })();
       });
       authUnlistens = [doneUnlisten];

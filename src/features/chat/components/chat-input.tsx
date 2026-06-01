@@ -230,6 +230,11 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
         parent,
         state: EditorState.create({
           doc: initialValue,
+          // Seed the caret at the end of the seeded document so a draft
+          // restored on tab switch doesn't drop the user at position 0.
+          // CodeMirror's default is { anchor: 0 } which feels broken when
+          // the composer remounts with prior typing.
+          selection: { anchor: initialValue.length },
           extensions: [
             history(),
             // CM-managed caret + selection rendering. Pairs with

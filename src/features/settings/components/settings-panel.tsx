@@ -132,6 +132,15 @@ function GeneralSettings() {
         />
       </SettingRow>
       <SettingRow
+        label="Enable Atlas Logs"
+        description="Record Atlas-internal events (sign-in, agent start/finish, browser/file open, etc.) into the Logs tab under the `atlas` source. Default ON so when something goes wrong you can open the Logs tab, filter by `atlas`, and share a timeline. Turn off if the noise bothers you."
+      >
+        <Toggle
+          checked={settings.enableAtlasLogs}
+          onChange={(next) => updateSettings({ enableAtlasLogs: next })}
+        />
+      </SettingRow>
+      <SettingRow
         label="atlas terminal helper"
         description={`Adds an \`atlas\` command to your shell — type \`atlas .\` in any terminal to open the current folder as a project. Refreshed automatically on every launch so an older copy never lingers. ${cliInstalledLine}.`}
       >
@@ -214,6 +223,14 @@ function KeybindingsSettings() {
         { action: "Cycle permission mode", keys: "⇧⇥" },
       ],
     },
+    {
+      title: "Knowledge Base",
+      bindings: [
+        { action: "Toggle KB Sidebar", keys: "⌘;" },
+        { action: "Toggle KB Inspector", keys: "⌘'" },
+        { action: "Save note", keys: "⌘S" },
+      ],
+    },
   ];
 
   return (
@@ -290,7 +307,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.6 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.7 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">

@@ -42,9 +42,9 @@ export function DayCard({ day, active, onClick }: Props) {
           <span className="text-text-tertiary/50">·</span>
           <span>{day.sessions} session{day.sessions === 1 ? "" : "s"}</span>
         </div>
-        {day.sessions === 0 && day.summary && (
+        {day.sessions === 0 && (
           <p className="text-[11px] text-text-secondary leading-snug line-clamp-2">
-            {day.summary}
+            {day.today ? "No sessions yet today." : "No sessions on this day."}
           </p>
         )}
       </div>

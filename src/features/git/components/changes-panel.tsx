@@ -4,7 +4,7 @@ import * as Popover from "@radix-ui/react-popover";
 import { useGitStore } from "../stores/git-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
-import { ExternalLink, RefreshCw, Settings, Search, MoreHorizontal, ArrowDownWideNarrow, Code } from "lucide-react";
+import { ExternalLink, RefreshCw, Settings, Search, MoreHorizontal, ArrowDownWideNarrow, Code, FoldVertical, UnfoldVertical } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface DiffFile {
@@ -184,6 +184,33 @@ export function ChangesPanel() {
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-semibold text-text-secondary">Changes</span>
           <div className="flex items-center gap-0.5">
+            <button
+              onClick={() => {
+                // If anything is still expanded, collapse all. Otherwise
+                // expand everything back. Computed against the filtered
+                // file list so the button matches what the user sees.
+                const anyExpanded = filteredFiles.some(
+                  (f) => !collapsedFiles.has(f.path),
+                );
+                setCollapsedFiles(
+                  anyExpanded
+                    ? new Set(filteredFiles.map((f) => f.path))
+                    : new Set(),
+                );
+              }}
+              className="p-1 rounded hover:bg-bg-hover text-text-tertiary cursor-pointer"
+              title={
+                filteredFiles.some((f) => !collapsedFiles.has(f.path))
+                  ? "Collapse all"
+                  : "Expand all"
+              }
+            >
+              {filteredFiles.some((f) => !collapsedFiles.has(f.path)) ? (
+                <FoldVertical size={10} />
+              ) : (
+                <UnfoldVertical size={10} />
+              )}
+            </button>
             <button onClick={loadDiff} className="p-1 rounded hover:bg-bg-hover text-text-tertiary cursor-pointer" title="Refresh"><RefreshCw size={10} /></button>
             <FileListPopover files={filteredFiles} onOpen={openFile} />
           </div>

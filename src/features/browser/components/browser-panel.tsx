@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { logEvent } from "@/features/log/lib/log";
 import {
   Globe,
   ExternalLink,
@@ -89,8 +90,22 @@ export function BrowserPanel({ initialUrl }: BrowserPanelProps) {
     try {
       const { openUrl } = await import("@tauri-apps/plugin-opener");
       await openUrl(url);
-    } catch {
+      logEvent({
+        source: "atlas",
+        kind: "browser-open-external",
+        summary: `Opened ${url} in system browser`,
+        status: "success",
+        payload: { url },
+      });
+    } catch (e) {
       window.open(url, "_blank");
+      logEvent({
+        source: "atlas",
+        kind: "browser-open-external-fallback",
+        summary: `Tauri opener failed; fell back to window.open: ${url}`,
+        status: "failure",
+        payload: { url, error: String(e) },
+      });
     }
   };
 

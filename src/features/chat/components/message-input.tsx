@@ -99,8 +99,24 @@ export function MessageInput({
   // submit button can react to emptiness without round-tripping through
   // CodeMirror on every keystroke. CodeMirror owns the document; this is a
   // shallow shadow for the submit button.
-  const [value, setValue] = useState("");
+  //
+  // Initial seed reads the per-tab draft from chat-store so switching tabs
+  // (which unmounts this component) doesn't drop what the user was typing.
+  // `useState`'s lazy initializer runs once per mount with the tabId that
+  // was current at mount time — that's exactly what we want.
+  const [value, setValue] = useState(
+    () => useChatStore.getState().drafts[tabId] ?? "",
+  );
   const inputRef = useRef<ChatInputHandle>(null);
+
+  // Mirror every doc change into the per-tab draft slot. Using an
+  // effect (rather than wrapping each setValue callsite) means every
+  // path that updates the composer — typing, slash insertion, queue
+  // recall — keeps the store in sync without having to remember.
+  const { setDraft } = useChatStore.use.actions();
+  useEffect(() => {
+    setDraft(tabId, value);
+  }, [value, tabId, setDraft]);
 
   // The CM chunk started downloading at module-eval time (see the top of this
   // file). Mirror the resolution into component state so React re-renders
@@ -339,6 +355,9 @@ export function MessageInput({
     }
     inputRef.current?.clear();
     setValue("");
+    // The value→draft sync effect will collapse the empty value into a
+    // `delete s.drafts[tabId]` on the next commit, so no explicit
+    // clearDraft call is needed.
   }, [value, running, onSend, onStop, enqueueMessage, tabId, disabled]);
 
   const trimmed = value.trim();

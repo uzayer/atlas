@@ -5,6 +5,7 @@ import { createSelectors } from "@/lib/create-selectors";
 import { useProjectStore } from "@/features/project/stores/project-store";
 
 export type LogSource =
+  | "atlas"
   | "agent"
   | "chat"
   | "git"

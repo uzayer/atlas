@@ -32,6 +32,7 @@ import { useLogStore, type LogEntry, type LogSource } from "../stores/log-store"
 import { useProjectStore } from "@/features/project/stores/project-store";
 
 const SOURCES: LogSource[] = [
+  "atlas",
   "agent",
   "chat",
   "git",
@@ -94,6 +95,11 @@ const SOURCE_COLOR: Record<LogSource, { text: string; bg: string; border: string
     text: "text-[var(--text-tertiary)]",
     bg: "bg-[var(--bg-elevated)]",
     border: "border-[var(--border-default)]",
+  },
+  atlas: {
+    text: "text-[var(--accent-primary)]",
+    bg: "bg-[var(--accent-primary-muted)]",
+    border: "border-[var(--accent-primary)]/30",
   },
 };
 

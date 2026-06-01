@@ -52,6 +52,12 @@ interface PomodoroState {
     quickStart(): void;
     clearAll(): void;
     hydrate(projectPath: string): Promise<void>;
+    /** If `days[0]` no longer matches the current local date — Atlas was
+     *  left running past midnight or woke from sleep on a new day —
+     *  prepend a fresh "today" entry and shift `activeDayIdx` so the
+     *  user's current selection follows. No-op if the date hasn't
+     *  changed. */
+    rolloverDay(): void;
   };
 }
 
@@ -287,10 +293,19 @@ export const usePomodoroStore = createSelectors(
             set((s) => {
               const today = todayIso();
               const persistedDays = file?.days ?? [];
-              const hasToday = persistedDays.find((d) => d.date === today);
+              const hasToday = persistedDays.some((d) => d.date === today);
+              // Always remap `today` against the current date — the
+              // persisted flag is whatever was true when the file was
+              // last written, which is stale the moment the clock
+              // crosses midnight.
+              const normalized = persistedDays.map((d) => ({
+                ...d,
+                today: d.date === today,
+              }));
               s.days = hasToday
-                ? persistedDays.map((d) => ({ ...d, today: d.date === today }))
-                : [{ ...emptyToday(), today: true }, ...persistedDays];
+                ? normalized
+                : [{ ...emptyToday(), today: true }, ...normalized];
+              s.activeDayIdx = 0;
               s.blocks = (file?.blocks ?? []).map((b) => ({ ...b, current: false }));
               s.knownTags = file?.knownTags ?? [];
               s.hydrated = true;
@@ -303,6 +318,36 @@ export const usePomodoroStore = createSelectors(
             });
           }
         },
+
+        rolloverDay: () =>
+          set((s) => {
+            const today = todayIso();
+            if (s.days.length > 0 && s.days[0].date === today) {
+              // Defensive: ensure exactly one day has today: true.
+              for (let i = 0; i < s.days.length; i++) {
+                s.days[i].today = i === 0;
+              }
+              return;
+            }
+            // Demote any stale today flags.
+            for (const d of s.days) d.today = false;
+            // Drop any in-flight session — it belongs to the previous
+            // day. Blocks from yesterday stay in the persisted history.
+            s.blocks = [];
+            s.isRunning = false;
+            s.phase = "idle";
+            s.secElapsed = 0;
+            s.cycleIdx = 0;
+            s.currentTask = null;
+            s.currentTags = [];
+            s.days.unshift({ ...emptyToday(), today: true });
+            // Keep the user's selection pointing at the same logical day
+            // they had picked before the rollover. activeDayIdx was 0
+            // means "today" — slide it to the new today (still 0).
+            // Anything else means a historical day; shift by one to keep
+            // pointing at the same date entry.
+            if (s.activeDayIdx > 0) s.activeDayIdx += 1;
+          }),
       },
     })),
   ),

@@ -31,8 +31,21 @@ export interface MessagesListHandle {
 }
 
 // Persist scroll position per (tab, on-disk-session) across remounts.
-const scrollPositionCache = new Map<string, number>();
-const NEAR_BOTTOM_PX = 100;
+// We cache distance-from-bottom rather than raw scrollTop because the
+// virtualizer doesn't know item sizes on remount — for a few frames
+// scrollHeight is the estimate-based total, then it grows as each
+// MessageItem reports its real height. Re-applying an absolute scrollTop
+// against the wrong total leaves the user at a near-random position;
+// re-applying distance-from-bottom stays correct as the total grows.
+interface CachedScroll {
+  distanceFromBottom: number;
+  isAtBottom: boolean;
+}
+const scrollPositionCache = new Map<string, CachedScroll>();
+// Wider than it looks like it should be: a streaming assistant message
+// grows in chunks of several lines per RAF. If the user is within ~one
+// screen of the bottom, treat them as "following" and keep pinning.
+const NEAR_BOTTOM_PX = 320;
 
 /** A message is "empty" — would render nothing visible — when it has
  *  no prose, no thinking text, no tool calls, no file changes, and no
@@ -107,16 +120,38 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
         : undefined,
   });
 
-  // Restore cached scroll on mount / session switch.
+  // Restore cached scroll on mount / session switch. We apply the
+  // distance-from-bottom over several frames because the virtualizer
+  // grows scrollHeight as it measures each item the first time it
+  // renders — a single restore against the initial estimate-based
+  // total lands at the wrong absolute position.
   useLayoutEffect(() => {
     const el = parentRef.current;
     if (!el) return;
     const cached = scrollPositionCache.get(cacheKey);
-    if (cached !== undefined) {
-      el.scrollTop = cached;
-    } else {
-      el.scrollTop = el.scrollHeight;
-    }
+    const apply = () => {
+      const node = parentRef.current;
+      if (!node) return;
+      if (!cached || cached.isAtBottom) {
+        node.scrollTop = node.scrollHeight;
+      } else {
+        node.scrollTop = Math.max(
+          0,
+          node.scrollHeight - node.clientHeight - cached.distanceFromBottom,
+        );
+      }
+    };
+    apply();
+    // Re-apply across the next few frames as MessageItems measure their
+    // real heights (the virtualizer ResizeObserver bumps total size on
+    // each measurement). Six frames is roughly 100 ms — enough for the
+    // typical ~30-message viewport to settle.
+    let rafs = 0;
+    const tick = () => {
+      apply();
+      if (++rafs < 6) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
   }, [cacheKey]);
 
   // Save scroll continuously + on unmount. Publishes the "scrolled up"
@@ -128,14 +163,22 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     const el = parentRef.current;
     if (!el) return;
     const onScroll = () => {
-      scrollPositionCache.set(cacheKey, el.scrollTop);
       const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-      setShowJumpToBottom(distance > NEAR_BOTTOM_PX);
+      const isAtBottom = distance <= NEAR_BOTTOM_PX;
+      scrollPositionCache.set(cacheKey, {
+        distanceFromBottom: distance,
+        isAtBottom,
+      });
+      setShowJumpToBottom(!isAtBottom);
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => {
-      scrollPositionCache.set(cacheKey, el.scrollTop);
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      scrollPositionCache.set(cacheKey, {
+        distanceFromBottom: distance,
+        isAtBottom: distance <= NEAR_BOTTOM_PX,
+      });
       el.removeEventListener("scroll", onScroll);
     };
   }, [cacheKey]);
@@ -153,6 +196,21 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // `virtualizer.scrollToIndex(..., {align: "end"})` computes its
+  // target from the items' currently estimated/measured sizes. During
+  // streaming the trailing message keeps growing past that estimate,
+  // so the viewport is left a few hundred px above the true bottom.
+  // Pinning directly to `scrollHeight` on the next frame always lands
+  // at the actual bottom regardless of measurement state.
+  const pinToBottom = useCallback(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      if (!parentRef.current) return;
+      parentRef.current.scrollTop = parentRef.current.scrollHeight;
+    });
+  }, []);
+
   // Auto-follow new messages only when already near bottom.
   const prevLenRef = useRef(filtered.length);
   useEffect(() => {
@@ -163,9 +221,9 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     if (!grew) return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distance <= NEAR_BOTTOM_PX) {
-      virtualizer.scrollToIndex(filtered.length - 1, { align: "end" });
+      pinToBottom();
     }
-  }, [filtered.length, virtualizer]);
+  }, [filtered.length, pinToBottom]);
 
   // Auto-follow STREAMING content. The effect above only fires when a new
   // message is appended; during a streaming turn the agent mutates the
@@ -184,7 +242,7 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     if (!el) return;
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distance <= NEAR_BOTTOM_PX) {
-      virtualizer.scrollToIndex(filtered.length - 1, { align: "end" });
+      pinToBottom();
     }
   }, [
     isStreaming,
@@ -192,13 +250,13 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     trailingThinkingLen,
     trailingToolCount,
     filtered.length,
-    virtualizer,
+    pinToBottom,
   ]);
 
   const scrollToBottom = useCallback(() => {
     if (filtered.length === 0) return;
-    virtualizer.scrollToIndex(filtered.length - 1, { align: "end" });
-  }, [filtered.length, virtualizer]);
+    pinToBottom();
+  }, [filtered.length, pinToBottom]);
 
   useImperativeHandle(
     ref,

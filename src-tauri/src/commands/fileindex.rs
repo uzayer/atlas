@@ -237,6 +237,15 @@ pub async fn fileindex_open_project(
         _debouncer: debouncer,
     });
 
+    // Tell the frontend the index is now searchable. Mirrors the event
+    // the watcher fires on file-set changes — palette + mention picker
+    // both already listen for it, so a re-query lands the user's first
+    // results the instant the walk finishes (no manual reopen needed).
+    let _ = app.emit(
+        "atlas:fileindex:updated",
+        serde_json::json!({ "count": count }),
+    );
+
     Ok(count)
 }
 

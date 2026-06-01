@@ -72,6 +72,12 @@ pub struct AppSettings {
     /// `.atlas/` that don't belong in version control.
     #[serde(default = "default_true")]
     pub auto_add_atlas_gitignore: bool,
+    /// Record Atlas-internal events (sign-in, agent start/finish,
+    /// browser/file open, etc.) into the Logs panel under the `atlas`
+    /// source. Default ON so early users can share their logs without
+    /// flipping a flag first.
+    #[serde(default = "default_true")]
+    pub enable_atlas_logs: bool,
 }
 
 fn default_true() -> bool {
@@ -82,6 +88,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             auto_add_atlas_gitignore: true,
+            enable_atlas_logs: true,
         }
     }
 }

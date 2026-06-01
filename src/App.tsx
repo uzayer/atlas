@@ -28,6 +28,12 @@ import {
   type RecentFile,
 } from "@/features/chat/stores/recent-files-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
+import { logEvent } from "@/features/log/lib/log";
 import { Toaster } from "sonner";
 
 export function App() {
@@ -60,9 +66,24 @@ export function App() {
     void invoke<string | null>("cli_take_initial_project_path")
       .then((path) => {
         if (cancelled || !path) return;
+        logEvent({
+          source: "atlas",
+          kind: "cli-launch-open-project",
+          summary: `Opening project from CLI argv: ${path}`,
+          status: "success",
+          payload: { path },
+        });
         void useProjectStore.getState().actions.openProject(path);
       })
-      .catch(() => {});
+      .catch((e) => {
+        logEvent({
+          source: "atlas",
+          kind: "cli-launch-open-project-failed",
+          summary: `cli_take_initial_project_path failed: ${String(e)}`,
+          status: "failure",
+          payload: { error: String(e) },
+        });
+      });
     return () => {
       cancelled = true;
     };
@@ -158,11 +179,6 @@ export function App() {
     setActiveTab(list[next].id);
   };
 
-  const isKnowledgeTabActive = () => {
-    const s = useLayoutStore.getState();
-    return s.tabs.find((t) => t.id === s.activeTabId)?.type === "knowledge";
-  };
-
   // Remember the last non-terminal tab so cmd+j can toggle back to it.
   const lastNonTerminalTabRef = useRef<string | null>(null);
   useEffect(() => {
@@ -242,6 +258,44 @@ export function App() {
     const pendingDeltas: AgentDelta[] = [];
     const toolDeltaPos = new Map<string, number>(); // dedup key → index in pendingDeltas
     let rafId: number | null = null;
+
+    // Window focus is tracked here (not via document.hasFocus()) because
+    // WKWebView returns stale results for that on macOS Tauri builds.
+    // We start optimistic; the first blur corrects us.
+    let windowFocused = document.hasFocus();
+    const onFocus = () => {
+      windowFocused = true;
+    };
+    const onBlur = () => {
+      windowFocused = false;
+    };
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+
+    // Lazy permission prompt — only ask the OS the first time we actually
+    // want to fire a notification. Some platforms (Windows toast, Linux
+    // notify) prompt synchronously; deferring keeps app boot clean.
+    let permissionState: "unknown" | "granted" | "denied" = "unknown";
+    const notifyAgentDone = async () => {
+      if (windowFocused) return;
+      try {
+        if (permissionState === "unknown") {
+          const granted = (await isPermissionGranted())
+            ? true
+            : (await requestPermission()) === "granted";
+          permissionState = granted ? "granted" : "denied";
+        }
+        if (permissionState !== "granted") return;
+        const proj = useProjectStore.getState().currentProject;
+        const projectName = proj?.name ?? "Atlas";
+        sendNotification({
+          title: `Atlas — ${projectName}`,
+          body: "Agent task finished.",
+        });
+      } catch (e) {
+        console.warn("agent-done notification failed:", e);
+      }
+    };
 
     const flush = () => {
       rafId = null;
@@ -327,6 +381,36 @@ export function App() {
           flush();
           actions.clearPermissionsForAgent(env.agent_id);
           resetDefaultAgent();
+          logEvent({
+            source: "atlas",
+            kind: "agent-disconnected",
+            summary: "Agent process disconnected; default agent handle reset",
+            status: "failure",
+            payload: { agentId: env.agent_id },
+          });
+          return;
+        case "turn_finished":
+          // Still pass through to the chat-store so session.status
+          // flips back to "idle" (see chat-store.ts:591).
+          bufferDelta(env);
+          schedule();
+          logEvent({
+            source: "atlas",
+            kind: "agent-turn-finished",
+            summary: `Agent turn finished (${env.stop_reason})`,
+            status: env.stop_reason === "cancelled" ? "failure" : "success",
+            payload: {
+              agentId: env.agent_id,
+              sessionId: env.session_id,
+              stopReason: env.stop_reason,
+            },
+          });
+          // Fire OS notification if the window isn't focused. Skip
+          // user-cancelled turns — that's a click the user just made,
+          // they don't need to be told about it.
+          if (env.stop_reason !== "cancelled") {
+            void notifyAgentDone();
+          }
           return;
         default:
           bufferDelta(env);
@@ -349,6 +433,8 @@ export function App() {
     return () => {
       cancelled = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
       unlisten?.();
     };
   }, []);
@@ -530,19 +616,11 @@ export function App() {
     },
     {
       combo: { key: "[", meta: true, shift: true },
-      action: () => {
-        // KB tab owns Cmd+{ / Cmd+} for its own sidebar/inspector
-        // toggles. Skip the global tab-cycle so its handler wins.
-        if (isKnowledgeTabActive()) return;
-        cycleTab(-1);
-      },
+      action: () => cycleTab(-1),
     },
     {
       combo: { key: "]", meta: true, shift: true },
-      action: () => {
-        if (isKnowledgeTabActive()) return;
-        cycleTab(1);
-      },
+      action: () => cycleTab(1),
     },
     {
       combo: { key: "t", meta: true },

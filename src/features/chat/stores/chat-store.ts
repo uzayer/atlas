@@ -44,6 +44,14 @@ interface ChatState {
    * the agent is still streaming; auto-drained when the stream finishes.
    */
   queues: Record<string, string[]>;
+  /**
+   * Per-tab composer draft. Mirrors the CodeMirror text body so a tab
+   * switch (which unmounts MessageInput) doesn't drop what the user was
+   * typing. Cleared on submit. Plain text only — mentions live in the
+   * editor's document and rebind to fresh chip nodes when the draft
+   * reloads on remount.
+   */
+  drafts: Record<string, string>;
   activeSessionId: string | null;
 }
 
@@ -85,6 +93,10 @@ interface ChatActions {
         toolCalls?: Array<{ toolName: string; arguments: Record<string, unknown> }>;
       }>
     ) => void;
+    /** Mirror the composer's plain text into the per-tab draft slot. */
+    setDraft: (tabId: string, text: string) => void;
+    /** Drop a draft (on submit, or when its tab closes). */
+    clearDraft: (tabId: string) => void;
     enqueueMessage: (sessionId: string, text: string) => void;
     removeQueueItem: (sessionId: string, index: number) => void;
     editQueueItem: (sessionId: string, index: number, text: string) => void;
@@ -224,6 +236,7 @@ export const useChatStore = createSelectors(
       sessions: {},
       pendingPermissions: {},
       queues: {},
+      drafts: {},
       activeSessionId: null,
       actions: {
         createSession: (tabId) =>
@@ -401,6 +414,7 @@ export const useChatStore = createSelectors(
         removeSession: (sessionId) =>
           set((s) => {
             delete s.sessions[sessionId];
+            delete s.drafts[sessionId];
             if (s.activeSessionId === sessionId) {
               const keys = Object.keys(s.sessions);
               s.activeSessionId = keys.length > 0 ? keys[0] : null;
@@ -410,8 +424,18 @@ export const useChatStore = createSelectors(
           set((s) => {
             s.sessions = {};
             s.queues = {};
+            s.drafts = {};
             s.pendingPermissions = {};
             s.activeSessionId = null;
+          }),
+        setDraft: (tabId, text) =>
+          set((s) => {
+            if (text.length === 0) delete s.drafts[tabId];
+            else s.drafts[tabId] = text;
+          }),
+        clearDraft: (tabId) =>
+          set((s) => {
+            delete s.drafts[tabId];
           }),
         enqueueMessage: (sessionId, text) =>
           set((s) => {

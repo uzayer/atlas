@@ -1,4 +1,5 @@
 import { StarterKit } from "@tiptap/starter-kit";
+import { Bold } from "@tiptap/extension-bold";
 import { TaskList } from "@tiptap/extension-task-list";
 import { TaskItem } from "@tiptap/extension-task-item";
 import { Link } from "@tiptap/extension-link";
@@ -42,6 +43,19 @@ export function buildExtensions(opts: BuildExtensionsOpts = {}) {
     StarterKit.configure({
       codeBlock: false,
       link: false, // override with our own Link config below
+      // Disable StarterKit's Bold so we can re-register it without the
+      // Cmd+B / Ctrl+B keyboard shortcut — Cmd+B is reserved app-wide
+      // for the left panel toggle and users were accidentally bolding
+      // KB notes while toggling the sidebar.
+      bold: false,
+    }),
+    // Re-add Bold so the mark + toolbar button still work; just no
+    // keyboard shortcut. Users can still bold via the toolbar or by
+    // typing the markdown `**...**` shortcut (handled by inputRules).
+    Bold.extend({
+      addKeyboardShortcuts() {
+        return {};
+      },
     }),
     // Atlas-customized code block: lowlight syntax highlighting wrapped
     // in a React NodeView that adds the design's header strip (language

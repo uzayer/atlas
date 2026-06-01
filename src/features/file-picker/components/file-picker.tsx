@@ -30,6 +30,10 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<FileMatch[]>([]);
   const [selected, setSelected] = useState(0);
+  /** True until the Rust FileIndex finishes its initial walk. Drives the
+   *  "Indexing files…" hint so users don't see a misleading "No matches"
+   *  when they open Cmd+P before the walk completes. */
+  const [indexing, setIndexing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -38,8 +42,19 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
     if (!open) return;
     setQuery("");
     setSelected(0);
-    // Initial population — empty query returns the first N files.
-    fileIndex.search("", RESULT_LIMIT).then(setResults).catch(() => setResults([]));
+    // Initial population — empty query returns the first N files. We
+    // also probe `status()` so the empty-results case can distinguish
+    // "index not loaded yet" from "loaded but empty". If the project's
+    // walk is still in progress, mark as indexing; the
+    // `atlas:fileindex:updated` listener below will re-query the moment
+    // it completes (Rust emits the event after the initial walk lands).
+    Promise.all([
+      fileIndex.search("", RESULT_LIMIT).catch(() => [] as FileMatch[]),
+      fileIndex.status().catch(() => ({ indexed: false, count: 0, root: null })),
+    ]).then(([r, status]) => {
+      setResults(r);
+      setIndexing(!status.indexed);
+    });
     // Focus after the dialog mounts.
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [open]);
@@ -59,15 +74,18 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
     return () => window.clearTimeout(t);
   }, [query, open]);
 
-  // Live re-query when the backend reports an index change (fs watcher
-  // surfaced an add/remove/rename) while the palette is open. The actual
-  // matching is cheap; this keeps results in sync without manual refresh.
+  // Live re-query when the backend reports an index change. Fired by:
+  //   (a) the fs-watch debouncer on add/remove/rename, and
+  //   (b) `fileindex_open_project` once the initial walk completes —
+  //       this is what flips the palette from "Indexing files…" to real
+  //       results when the user opened Cmd+P early.
   useEffect(() => {
     if (!open) return;
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     listen<{ count: number }>("atlas:fileindex:updated", () => {
       if (cancelled) return;
+      setIndexing(false);
       fileIndex.search(query, RESULT_LIMIT).then(setResults).catch(() => {});
     }).then((un) => {
       if (cancelled) un();
@@ -141,7 +159,11 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
           <div ref={scrollRef} className="max-h-[420px] overflow-y-auto hide-scrollbar">
             {showEmpty ? (
               <div className="px-4 py-3 text-[11px] text-[var(--text-tertiary)]">
-                {project ? "No matches." : "Open a project to enable Cmd+P."}
+                {!project
+                  ? "Open a project to enable Cmd+P."
+                  : indexing
+                    ? "Indexing files… results will appear here."
+                    : "No matches."}
               </div>
             ) : (
               <div

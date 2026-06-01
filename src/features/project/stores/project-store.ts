@@ -29,10 +29,14 @@ interface RecentProject {
 export interface AppSettings {
   /** Auto-add `.atlas/` to each opened git project's `.gitignore`. */
   autoAddAtlasGitignore: boolean;
+  /** Record Atlas-internal events (sign-in, agent lifecycle, etc.) into
+   *  the Logs panel under the `atlas` source. */
+  enableAtlasLogs: boolean;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   autoAddAtlasGitignore: true,
+  enableAtlasLogs: true,
 };
 
 /**
@@ -133,6 +137,15 @@ export const useProjectStore = createSelectors(
           source: "project",
           kind: "open",
           summary: name,
+          projectPath: path,
+          projectName: name,
+          payload: { path },
+        });
+        logEvent({
+          source: "atlas",
+          kind: "project-open",
+          summary: `Opened project: ${name}`,
+          status: "success",
           projectPath: path,
           projectName: name,
           payload: { path },

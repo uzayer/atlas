@@ -174,18 +174,17 @@ export function KnowledgePanel() {
     void invalidateLinks();
   }, [currentProject, setEditContent, saveEntry, invalidateLinks]);
 
-  // Cmd+{ / Cmd+} — toggle KB sidebar / inspector. App.tsx already
-  // binds these to tab-cycle globally; that handler now skips when
-  // the active tab is a knowledge tab so this one wins.
+  // Cmd+; / Cmd+' — toggle KB sidebar / inspector. Picked over the old
+  // Cmd+{ / Cmd+} bindings because those conflicted with the global
+  // Cmd+Shift+[ / Cmd+Shift+] tab-cycle shortcut.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
-      const isLeftBrace = e.key === "{" || (e.shiftKey && e.key === "[");
-      const isRightBrace = e.key === "}" || (e.shiftKey && e.key === "]");
-      if (isLeftBrace) {
+      if (e.shiftKey || e.altKey) return;
+      if (e.key === ";") {
         e.preventDefault();
         setShowSidebar((v) => !v);
-      } else if (isRightBrace) {
+      } else if (e.key === "'") {
         e.preventDefault();
         setShowInspector((v) => !v);
       }

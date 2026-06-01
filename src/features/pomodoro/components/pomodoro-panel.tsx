@@ -13,7 +13,8 @@ export function PomodoroPanel() {
   const activeDayIdx = usePomodoroStore.use.activeDayIdx();
   const blocks = usePomodoroStore.use.blocks();
   const isRunning = usePomodoroStore.use.isRunning();
-  const { tick, hydrate, openSheet } = usePomodoroStore.use.actions();
+  const { tick, hydrate, openSheet, rolloverDay } =
+    usePomodoroStore.use.actions();
 
   useEffect(() => {
     if (!currentProject?.path) return;
@@ -26,6 +27,22 @@ export function PomodoroPanel() {
     const id = setInterval(() => tick(), 1000);
     return () => clearInterval(id);
   }, [isRunning, tick]);
+
+  // Day rollover: if Atlas was left open across midnight (or the laptop
+  // woke on a new day), the in-memory `days[0]` is stale. Re-check on
+  // mount, every minute, and any time the window comes back into focus.
+  useEffect(() => {
+    rolloverDay();
+    const id = setInterval(() => rolloverDay(), 60_000);
+    const onFocusOrVisible = () => rolloverDay();
+    window.addEventListener("focus", onFocusOrVisible);
+    document.addEventListener("visibilitychange", onFocusOrVisible);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("focus", onFocusOrVisible);
+      document.removeEventListener("visibilitychange", onFocusOrVisible);
+    };
+  }, [rolloverDay]);
 
   const day = days[activeDayIdx] ?? days[0];
 
