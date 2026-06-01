@@ -294,6 +294,7 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "nucleo-matcher",
+ "objc2",
  "parking_lot",
  "pulldown-cmark",
  "reqwest 0.12.28",

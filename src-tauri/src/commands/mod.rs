@@ -26,3 +26,4 @@ pub mod research;
 pub mod search;
 pub mod sessions_watch;
 pub mod terminal;
+pub mod window;

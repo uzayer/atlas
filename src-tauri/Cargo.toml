@@ -93,6 +93,10 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 # logged no-op rather than a crash.
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-plugin-macos-fps = "0.1"
+# Native NSWindow access for the titlebar double-click "zoom" (AppKit
+# performZoom:), which Tauri's cross-platform maximize API doesn't cover.
+# Already in the tree transitively; pinned here for the direct msg_send.
+objc2 = "0.6"
 
 # Release profile — Atlas previously shipped with Cargo defaults
 # (lto = false, codegen-units = 16, no strip), which means the bundled .app

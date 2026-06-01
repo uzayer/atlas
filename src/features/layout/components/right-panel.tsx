@@ -45,7 +45,7 @@ export function RightPanel() {
   const { setRightSection } = useLayoutStore.use.actions();
 
   return (
-    <div className="h-full flex flex-col bg-bg-sidebar">
+    <div className="atlas-vibrant-panel h-full flex flex-col bg-[color-mix(in_srgb,var(--bg-sidebar)_93%,transparent)]">
       <div className="flex items-center border-b border-border-default px-1 h-[29px] shrink-0 gap-0.5">
         {sections.map((s) => (
           <button

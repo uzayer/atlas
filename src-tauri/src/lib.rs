@@ -100,6 +100,7 @@ pub fn run() {
         .manage(ClaudeSessionIndex::new())
         .manage(SavedPapersIndex::new())
         .invoke_handler(tauri::generate_handler![
+            commands::window::window_zoom,
             commands::terminal::terminal_create,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,

@@ -192,7 +192,13 @@
     font-size: 13px;
     line-height: 1.45;
     color: var(--text-primary);
-    background: var(--bg-base);
+    /* Transparent so the native NSVisualEffectView (HudWindow vibrancy,
+       applied in lib.rs) shows through wherever the React tree is also
+       translucent — currently just the left/right side panels (Xcode
+       look). Every always-solid surface (titlebar, status bar, center
+       panel, welcome screen) paints its own opaque background, so only
+       the side panels reveal the blur. */
+    background: transparent;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     letter-spacing: -0.01em;
@@ -206,6 +212,28 @@
   pre, code {
     user-select: text;
     -webkit-user-select: text;
+  }
+
+  /* Film grain for the vibrant side panels (CSS-Tricks "grainy gradients"
+     feTurbulence technique). A static fractal-noise tile sits above the
+     translucent tint + native window blur to add subtle texture/depth so
+     the panels don't read as flat glass. `pointer-events: none` keeps it
+     click-through; `isolation: isolate` keeps the blend local to the
+     panel. Tune via `opacity` (intensity) and `baseFrequency` (grain
+     size — higher = finer). */
+  .atlas-vibrant-panel {
+    position: relative;
+    isolation: isolate;
+  }
+  .atlas-vibrant-panel::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    opacity: 0.2;
+    mix-blend-mode: soft-light;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   }
 
   /* macOS-native overlay scrollbars */

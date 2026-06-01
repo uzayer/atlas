@@ -49,7 +49,7 @@ export function LeftPanel() {
   const { setLeftSection, toggleGitPanel } = useLayoutStore.use.actions();
 
   return (
-    <div className="h-full flex flex-col bg-bg-sidebar">
+    <div className="atlas-vibrant-panel h-full flex flex-col bg-[color-mix(in_srgb,var(--bg-sidebar)_90%,transparent)]">
       {/* Icon-only tabs (horizontal, like VS Code) */}
       <div className="flex items-center border-b border-border-default px-2 h-[29px] shrink-0 gap-1.5">
         {sections.map((s) => (

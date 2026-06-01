@@ -1,13 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   X,
   MessageSquare,
   Terminal,
   Search,
   PanelLeftClose,
-  ListFilter,
   Plus,
   Loader2,
 } from "lucide-react";
@@ -62,7 +60,6 @@ function timeAgo(iso: string | null): string {
   return new Date(iso).toLocaleDateString();
 }
 
-type FilterKind = "all" | "agent" | "chat";
 
 interface SidebarItem {
   id: string; // acpSessionId for agent rows, tabId for chat rows
@@ -178,7 +175,6 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   } = useLayoutStore.use.actions();
 
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<FilterKind>("all");
 
   const queryKey = ["claude-sessions", cwd] as const;
 
@@ -312,13 +308,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return items.filter((it) => {
-      if (filter === "agent" && it.kind !== "agent") return false;
-      if (filter === "chat" && it.kind !== "chat") return false;
-      if (q && !it.title.toLowerCase().includes(q)) return false;
-      return true;
-    });
-  }, [items, filter, search]);
+    if (!q) return items;
+    return items.filter((it) => it.title.toLowerCase().includes(q));
+  }, [items, search]);
 
   const handleNewChat = () => {
     // ACP sessions are owned by the agent process; clearing the tab just
@@ -536,7 +528,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       style={{ width: chatSidebar.width }}
       className="relative shrink-0 h-full flex flex-col border-r border-[var(--border-default)] bg-[var(--bg-sidebar)]"
     >
-      {/* Search + filter menu — full-width row matching the GitHub panel's search */}
+      {/* Search — full-width row matching the GitHub panel's search */}
       <div className="flex items-center gap-1.5 h-[32px] shrink-0 border-b border-border-default bg-bg-primary px-3">
         <Search size={11} className="text-text-tertiary shrink-0" />
         <input
@@ -545,40 +537,6 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
           placeholder="Search…"
           className="flex-1 bg-transparent outline-none text-[11px] text-text-primary placeholder:text-text-tertiary min-w-0"
         />
-        <DropdownMenu.Root>
-          <DropdownMenu.Trigger asChild>
-            <button
-              className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-primary cursor-pointer outline-none transition-colors shrink-0"
-              title={`Filter: ${filter}`}
-            >
-              <ListFilter size={11} />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
-              align="end"
-              sideOffset={4}
-              className="rounded-md border border-[var(--border-default)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)] py-1 min-w-[140px]"
-              style={{ zIndex: 9999 }}
-            >
-              {(["all", "agent", "chat"] as const).map((f) => (
-                <DropdownMenu.Item
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={cn(
-                    "flex items-center justify-between gap-2 px-3 h-[26px] text-[11px] cursor-default outline-none capitalize",
-                    filter === f
-                      ? "text-[var(--text-primary)] bg-[var(--bg-selected)]"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
-                  )}
-                >
-                  <span>{f}</span>
-                  {filter === f && <span className="text-[10px] text-[var(--text-tertiary)]">●</span>}
-                </DropdownMenu.Item>
-              ))}
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
       </div>
 
       {/* List */}
@@ -590,10 +548,6 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
           <div className="text-[11px] text-[var(--text-tertiary)] px-3 py-3 leading-relaxed">
             {search.trim()
               ? "No sessions match your search."
-              : filter === "agent"
-              ? "No agent sessions yet."
-              : filter === "chat"
-              ? "No general chats yet."
               : "No prior sessions for this project."}
           </div>
         )}

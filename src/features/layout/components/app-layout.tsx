@@ -22,7 +22,7 @@ export function AppLayout() {
   const showStatus = bottomPanel.visible;
 
   return (
-    <div className="flex flex-col h-screen bg-bg-base">
+    <div className="flex flex-col h-screen">
       <Titlebar />
 
       <div className="flex-1 min-h-0">

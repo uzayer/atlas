@@ -7,6 +7,7 @@ import { useChatStore } from "@/features/chat/stores/chat-store";
 import { InboxPanel } from "@/features/chat/components/inbox-panel";
 import { ChevronDown, Folder, FolderOpen, X, PanelLeft, PanelRight, Plus, Search, Inbox } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { invoke } from "@tauri-apps/api/core";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
 
 function useTauriWindow() {
@@ -48,10 +49,40 @@ export function Titlebar() {
     p.path.toLowerCase().includes(search.toLowerCase())
   );
 
+  const isTitlebarSurface = (target: EventTarget | null) => {
+    const el = target as HTMLElement | null;
+    return !el?.closest("button, a, input, select, textarea, [role='menuitem']");
+  };
+
+  // Drag the window manually (the `data-tauri-drag-region` CSS hook
+  // doesn't work in this app — see memory). Calling `startDragging()`
+  // straight from mousedown hands the event stream to the OS drag
+  // session and swallows the double-click, so instead we only begin the
+  // drag once the pointer actually moves past a small threshold. A
+  // stationary click / double-click then flows through to onDoubleClick.
   const handleDrag = (e: React.MouseEvent) => {
-    const target = e.target as HTMLElement;
-    if (target.closest("button, a, input, select, textarea, [role='menuitem']")) return;
-    windowRef.current?.startDragging();
+    if (e.button !== 0 || !isTitlebarSurface(e.target)) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const onMove = (ev: MouseEvent) => {
+      if (Math.hypot(ev.clientX - startX, ev.clientY - startY) > 4) {
+        cleanup();
+        void windowRef.current?.startDragging();
+      }
+    };
+    const cleanup = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", cleanup);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", cleanup);
+  };
+
+  // macOS double-click-to-zoom. Tauri's `toggleMaximize()` doesn't map to
+  // AppKit's zoom, so we call a native `performZoom:` command instead.
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    if (!isTitlebarSurface(e.target)) return;
+    void invoke("window_zoom").catch(() => {});
   };
 
   const handleOpenFolder = async () => {
@@ -65,6 +96,7 @@ export function Titlebar() {
   return (
     <div
       onMouseDown={handleDrag}
+      onDoubleClick={handleDoubleClick}
       className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[#000] border-b border-border-default ${isFullscreen ? "pl-3" : "pl-[72px]"}`}
     >
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
