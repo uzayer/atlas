@@ -124,25 +124,40 @@ export const MessageItem = memo(function MessageItem({
       )}
     >
       <div className="flex gap-4 max-w-[760px] mx-auto">
-        {/* Avatar — circular. Hidden in compact mode (preserve indentation). */}
-        <div
-          className={cn(
-            "w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5",
-            compact && "invisible",
-            isUser
-              ? "bg-[var(--accent-primary-muted)]"
-              : "bg-[var(--bg-elevated)] border border-[var(--border-default)]"
-          )}
-        >
-          {isUser ? (
-            <User size={14} className="text-[var(--accent-primary)]" />
-          ) : (
-            <Sparkles size={14} className="text-[var(--text-secondary)]" />
-          )}
-        </div>
+        {/* Avatar gutter. For grouped (compact) sub-blocks we replace the
+            avatar with a thin vertical rail centered in the same column,
+            so a multi-block turn reads as one connected unit (Zed-style)
+            without shifting the content. */}
+        {compact ? (
+          <div className="w-8 shrink-0 flex justify-center" aria-hidden>
+            <div className="w-px h-full bg-[var(--border-subtle)]" />
+          </div>
+        ) : (
+          <div
+            className={cn(
+              "w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5",
+              isUser
+                ? "bg-[var(--accent-primary-muted)]"
+                : "bg-[var(--bg-elevated)] border border-[var(--border-default)]"
+            )}
+          >
+            {isUser ? (
+              <User size={14} className="text-[var(--accent-primary)]" />
+            ) : (
+              <Sparkles size={14} className="text-[var(--text-secondary)]" />
+            )}
+          </div>
+        )}
 
         {/* Content */}
-        <div className="flex-1 min-w-0 space-y-3">
+        <div className="relative flex-1 min-w-0 space-y-3">
+          {/* Quick actions — revealed on row hover (Zed/Linear style),
+              available on every settled message rather than only the
+              last of a group. Floats at the top-right of the content
+              column so it never reflows the text. */}
+          {!streaming && message.content && (
+            <MessageActions message={message} />
+          )}
           {!compact && (
             <div className="flex items-center gap-2">
               <span className="text-[11px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">
@@ -163,9 +178,9 @@ export const MessageItem = memo(function MessageItem({
             !message.content &&
             message.toolCalls.length === 0 &&
             !message.thinking && (
-              <div className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
-                <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
-                <span>Thinking…</span>
+              <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--text-secondary)]">
+                <Loader2 size={13} className="animate-spin text-[var(--accent-primary)]" />
+                <span>Working…</span>
               </div>
             )}
 
@@ -180,6 +195,9 @@ export const MessageItem = memo(function MessageItem({
           {prose && streaming ? (
             <pre className="text-sm text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words select-text font-sans">
               {prose}
+              {/* Blinking caret so a live turn reads like a terminal
+                  cursor — the clearest "this is generating now" cue. */}
+              <span className="atlas-stream-caret" aria-hidden />
             </pre>
           ) : null}
           {prose && !streaming && (
@@ -218,11 +236,6 @@ export const MessageItem = memo(function MessageItem({
             <PlanCard steps={message.plan} />
           )}
 
-          {/* Action row — only on the last message of a same-role group so
-              Reply/Save/Copy doesn't repeat between every grouped sub-block. */}
-          {!streaming && message.content && isLastInGroup && (
-            <MessageActions message={message} />
-          )}
         </div>
       </div>
     </div>
@@ -278,18 +291,32 @@ function MessageActions({ message }: { message: ChatMessage }) {
   };
 
   return (
-    <div className="flex items-center gap-1 pt-1">
+    <div
+      className={cn(
+        "absolute right-0 -top-1 z-10 flex items-center gap-0.5 rounded-md",
+        "border border-[var(--border-default)] bg-[var(--bg-elevated)] p-0.5",
+        "shadow-[var(--shadow-sm)]",
+        // Hidden until the message row is hovered (the `.group` wrapper
+        // lives on MessageItem). Fade only — no layout shift.
+        "opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100",
+      )}
+    >
+      <ActionButton onClick={handleCopy} title="Copy markdown">
+        {copied ? (
+          <Check size={12} className="text-[var(--text-primary)] animate-scale-in" />
+        ) : (
+          <Copy size={12} />
+        )}
+      </ActionButton>
       <ActionButton onClick={handleReply} title="Reply with this as reference">
-        <CornerUpLeft size={11} />
-        Reply
+        <CornerUpLeft size={12} />
       </ActionButton>
       <ActionButton onClick={handleSave} title="Save to knowledge base">
-        {saved ? <Check size={11} /> : <Bookmark size={11} />}
-        {saved ? "Saved" : "Save"}
-      </ActionButton>
-      <ActionButton onClick={handleCopy} title="Copy markdown">
-        {copied ? <Check size={11} /> : <Copy size={11} />}
-        {copied ? "Copied" : "Copy"}
+        {saved ? (
+          <Check size={12} className="text-[var(--text-primary)] animate-scale-in" />
+        ) : (
+          <Bookmark size={12} />
+        )}
       </ActionButton>
     </div>
   );
@@ -308,7 +335,7 @@ function ActionButton({
     <button
       onClick={onClick}
       title={title}
-      className="flex items-center gap-1 px-2 h-6 rounded text-[10px] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
+      className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
     >
       {children}
     </button>
@@ -412,10 +439,14 @@ const ToolCallCard = memo(function ToolCallCard({
   const filePath = getFilePathFromInput(args);
 
   // Status icon — check for success, cross for failure, spinner while running.
+  const isRunning =
+    toolCall.status === "running" || toolCall.status === "pending";
+  const statusLabel =
+    toolCall.status === "failed" ? "Failed" : isRunning ? "Running" : "Done";
   const statusIcon =
     toolCall.status === "failed" ? (
       <XCircle size={12} className="text-[var(--status-error)]" />
-    ) : toolCall.status === "running" || toolCall.status === "pending" ? (
+    ) : isRunning ? (
       <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
     ) : (
       <CheckCircle2 size={12} className="text-[var(--status-success)]" />
@@ -443,6 +474,7 @@ const ToolCallCard = memo(function ToolCallCard({
       : `${toolCall.toolName} ${JSON.stringify(args)}${toolCall.result ? `\n\n${toolCall.result}` : ""}`;
     try {
       await navigator.clipboard.writeText(payload);
+      toast.success("Copied", { duration: 1200 });
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -459,10 +491,14 @@ const ToolCallCard = memo(function ToolCallCard({
   return (
     <div
       className={cn(
-        "rounded-md border bg-[var(--bg-secondary)] overflow-hidden",
-        showError
-          ? "border-[var(--status-error)]/40"
-          : "border-[var(--border-default)]"
+        // A status-tinted left edge (Zed-style run block): accent while
+        // running, error red on failure, quiet otherwise.
+        "rounded-md border border-l-2 bg-[var(--bg-secondary)] overflow-hidden",
+        toolCall.status === "failed"
+          ? "border-[var(--status-error)]/40 border-l-[var(--status-error)]"
+          : isRunning
+            ? "border-[var(--border-default)] border-l-[var(--accent-primary)]"
+            : "border-[var(--border-default)] border-l-[var(--border-strong)]"
       )}
     >
       <div
@@ -472,7 +508,9 @@ const ToolCallCard = memo(function ToolCallCard({
           filePath && "cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
         )}
       >
-        <span className="shrink-0">{statusIcon}</span>
+        <span className="shrink-0" title={statusLabel} aria-label={statusLabel}>
+          {statusIcon}
+        </span>
         <span className="text-[11px] font-mono text-[var(--text-secondary)] flex-1 min-w-0 truncate">
           {title}
         </span>
@@ -481,7 +519,11 @@ const ToolCallCard = memo(function ToolCallCard({
           className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors shrink-0"
           title="Copy Command + Output"
         >
-          {copied ? <Check size={11} /> : <Copy size={11} />}
+          {copied ? (
+            <Check size={11} className="text-[var(--text-primary)] animate-scale-in" />
+          ) : (
+            <Copy size={11} />
+          )}
         </button>
       </div>
       {showError && (

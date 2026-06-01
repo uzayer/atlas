@@ -27,7 +27,7 @@ const MessagesList = lazy(() =>
   import("./messages-list").then((m) => ({ default: m.MessagesList }))
 );
 import type { MessagesListHandle } from "./messages-list";
-import { Sparkles, User, TerminalSquare, ListFilter, Search, Loader2, ChevronDown } from "lucide-react";
+import { Sparkles, User, TerminalSquare, ListFilter, Search, Loader2, ChevronDown, ArrowRight } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
@@ -576,12 +576,22 @@ function WelcomeState() {
             "Create a new feature",
             "Review recent changes",
             "Write tests for...",
-          ].map((prompt) => (
+          ].map((prompt, i) => (
             <button
               key={prompt}
-              className="px-3 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors text-left"
+              onClick={() =>
+                window.dispatchEvent(
+                  new CustomEvent("atlas:chat-prefill", { detail: { text: prompt } }),
+                )
+              }
+              style={{ animationDelay: `${i * 40}ms` }}
+              className="group atlas-fade-in flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors text-left cursor-pointer"
             >
-              {prompt}
+              <span className="truncate">{prompt}</span>
+              <ArrowRight
+                size={11}
+                className="shrink-0 text-[var(--text-tertiary)] opacity-0 -translate-x-1 transition-all group-hover:opacity-100 group-hover:translate-x-0"
+              />
             </button>
           ))}
         </div>

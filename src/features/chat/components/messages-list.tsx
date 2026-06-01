@@ -227,29 +227,23 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     getItemKey: (i) => filtered[i]?.id ?? i,
     measureElement:
       typeof window !== "undefined" && !navigator.userAgent.includes("Firefox")
-        ? (el, _entry, instance) => {
+        ? (el) => {
             // Round to an integer so re-measures of unchanged content
             // return the exact same value and the virtualizer treats
             // them as no-ops (no offset recompute, no scrollTop nudge).
+            //
+            // NB: we ALWAYS report the freshly-measured height. An earlier
+            // optimization skipped re-measuring while scrolling up (reuse
+            // cached size, TanStack #659) to avoid upward stutter — but
+            // Atlas message rows change height after first measure
+            // (streaming <pre> → rendered markdown, accordions toggling,
+            // images/code blocks settling), so a stale cached height left
+            // tall rows too short and the next row overlapped them. Always
+            // measuring is the correctness-first choice; the integer
+            // rounding + average-estimate already keep scrolling smooth.
             const raw = el?.getBoundingClientRect().height ?? averageHeight();
             const h = Math.round(raw);
             const id = el?.getAttribute("data-message-id");
-            // While the user is actively scrolling UP, committing a
-            // changed height for a row *above* the viewport makes the
-            // virtualizer recompute offsets and correct scrollTop —
-            // that's the upward-scroll stutter (TanStack Virtual #659).
-            // Reuse the cached height instead. `isScrolling` is false
-            // during resize/idle, so those re-measures still go through
-            // (keeps the panel-resize fix intact — rows re-measure at
-            // the new width).
-            if (
-              instance.isScrolling &&
-              instance.scrollDirection === "backward" &&
-              id
-            ) {
-              const cached = measuredHeights.get(id);
-              if (cached !== undefined) return cached;
-            }
             if (id) recordHeight(id, h);
             return h;
           }

@@ -331,6 +331,20 @@ export function MessageInput({
     return () => window.removeEventListener("atlas:chat-reply", handler);
   }, []);
 
+  // Prefill the composer with raw text (empty-state prompt chips). Unlike
+  // "reply" this replaces the value verbatim (no quote block) and focuses.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ text: string }>).detail;
+      if (!detail?.text) return;
+      inputRef.current?.setValue(detail.text);
+      setValue(detail.text);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
+    window.addEventListener("atlas:chat-prefill", handler);
+    return () => window.removeEventListener("atlas:chat-prefill", handler);
+  }, []);
+
   const submit = useCallback(() => {
     // Hard gate: Claude Code missing or not authed — sending would just
     // surface a confusing ACP spawn error. The banner above tells the user
@@ -412,12 +426,19 @@ export function MessageInput({
           className={cn(
             "rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)]",
             "shadow-[0_8px_24px_rgba(0,0,0,0.35)]",
-            "focus-within:border-[var(--border-focus)] transition-colors",
+            // Soft macOS-style "active field" glow on focus — a faint
+            // accent ring on top of the border shift (the border alone is
+            // near-invisible against the black surface).
+            "transition-[border-color,box-shadow] duration-150",
+            "focus-within:border-[var(--border-focus)]",
+            "focus-within:ring-1 focus-within:ring-[var(--accent-primary)]/20",
             // Hard-disable when Claude Code isn't ready. `pointer-events-none`
             // also blocks the focus event so we never trigger the agent-bind
             // listener (which would try to spawn a session against a CLI
-            // that isn't ready).
-            disabled && "opacity-60 pointer-events-none",
+            // that isn't ready). The error tint makes the dead input
+            // obviously dead rather than just dimmed on black.
+            disabled &&
+              "opacity-70 pointer-events-none border-[var(--status-error)]/25 bg-[var(--status-error)]/[0.04]",
           )}
           onFocusCapture={handleFocusCapture}
         >

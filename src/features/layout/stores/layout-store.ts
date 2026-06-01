@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
 import { createSelectors } from "@/lib/create-selectors";
 import { invoke } from "@tauri-apps/api/core";
@@ -137,7 +138,8 @@ const initialState: LayoutState = {
 
 export const useLayoutStore = createSelectors(
   create<LayoutState & LayoutActions>()(
-    immer((set) => ({
+    persist(
+      immer((set) => ({
       ...initialState,
       actions: {
         toggleLeftPanel: () =>
@@ -369,6 +371,41 @@ export const useLayoutStore = createSelectors(
           }
         },
       },
-    }))
+      })),
+      {
+        // Persist only durable UI layout preferences across app
+        // restarts — panel visibility/widths, the KB panel layout, etc.
+        // Tabs/history/actions are session- or project-scoped and are
+        // restored separately (saveEditorState / project bootstrap), so
+        // they're deliberately excluded.
+        name: "atlas-layout-prefs",
+        version: 1,
+        partialize: (s) => ({
+          leftPanel: s.leftPanel,
+          rightPanel: s.rightPanel,
+          knowledgePanel: s.knowledgePanel,
+          bottomPanel: s.bottomPanel,
+          chatSidebar: s.chatSidebar,
+          bashPanel: s.bashPanel,
+          tabBarVisible: s.tabBarVisible,
+        }),
+        // One-level-deep merge so persisted slices overlay the defaults
+        // without dropping any fields added in newer versions (the
+        // default shallow merge would replace whole slices).
+        merge: (persisted, current) => {
+          const p = (persisted ?? {}) as Partial<LayoutState>;
+          return {
+            ...current,
+            ...p,
+            leftPanel: { ...current.leftPanel, ...(p.leftPanel ?? {}) },
+            rightPanel: { ...current.rightPanel, ...(p.rightPanel ?? {}) },
+            knowledgePanel: { ...current.knowledgePanel, ...(p.knowledgePanel ?? {}) },
+            bottomPanel: { ...current.bottomPanel, ...(p.bottomPanel ?? {}) },
+            chatSidebar: { ...current.chatSidebar, ...(p.chatSidebar ?? {}) },
+            bashPanel: { ...current.bashPanel, ...(p.bashPanel ?? {}) },
+          };
+        },
+      },
+    )
   )
 );
