@@ -55,6 +55,9 @@ export interface MentionKnowledge {
   kind: "knowledge";
   id: string;            // entry id — path under `.atlas/knowledge/`, may include "/"
   displayName: string;   // title
+  /** Per-note emoji/glyph from `_meta.json` (same source the knowledge
+   *  tree uses). Null when the note has no custom icon. */
+  icon: string | null;
   filePath: string;
   source: string;        // "note" | "paper" | "chat" | ...
   /** Parent folder portion of `id` (e.g. "Adib" for "Adib/weekly-notes").
@@ -318,6 +321,8 @@ export function publishKnowledgeToMentionCache(): void {
       // Prefer the page-header title set via `_meta.json`; falls back
       // to the wire title (now just the filename) for untitled notes.
       title: override || e.title,
+      // Same emoji the knowledge tree renders (meta.icon).
+      icon: pages[e.id]?.icon ?? null,
       source: e.source,
       filePath: e.file_path,
     };

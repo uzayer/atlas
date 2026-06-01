@@ -43,11 +43,11 @@ export function EditorTopbar({
         background: "var(--bg-canvas)",
       }}
     >
-      {sidebarHidden && onToggleSidebar && (
+      {onToggleSidebar && (
         <button
           onClick={onToggleSidebar}
           className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors"
-          title="Show sidebar"
+          title={sidebarHidden ? "Show sidebar" : "Hide sidebar"}
           style={{ width: 22, height: 22, marginLeft: -6 }}
         >
           <PanelLeft size={12} />

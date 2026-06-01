@@ -7,6 +7,7 @@ import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { useGitStore } from "@/features/git/stores/git-store";
 import { useSessionStore } from "./session-store";
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
+import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-meta-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { logEvent } from "@/features/log/lib/log";
 
@@ -161,13 +162,22 @@ export const useProjectStore = createSelectors(
           useAnalysisStore.getState().actions.analyzeProject(path).catch((e) => console.error("Analysis failed:", e)),
           useGitStore.getState().actions.loadStatus(path).catch((e) => console.error("Git failed:", e)),
           useSessionStore.getState().actions.loadSession(path).catch((e) => console.error("Session load failed:", e)),
-          useKnowledgeStore.getState().actions.loadEntries(path).catch((e) => console.error("Knowledge load failed:", e)),
+          // Bind the KB meta store BEFORE loading entries so the entries
+          // publish to the @-/~ mention cache already carries the
+          // page-header titles + emoji from `_meta.json`. Previously meta
+          // only bound when the Knowledge panel first mounted, so the
+          // mention picker showed raw note-ids until the user opened KB.
+          (async () => {
+            await useKnowledgeMetaStore.getState().actions.bind(path);
+            await useKnowledgeStore.getState().actions.loadEntries(path);
+          })().catch((e) => console.error("Knowledge load failed:", e)),
           useLayoutStore.getState().actions.loadEditorState(path).catch((e) => console.error("Editor state load failed:", e)),
         ]);
       },
       closeProject: () => {
         useLayoutStore.getState().actions.resetForProjectSwitch();
         useChatStore.getState().actions.resetSessions();
+        useKnowledgeMetaStore.getState().actions.unbind();
         set({ currentProject: null });
         scheduleSave(get());
       },
@@ -217,7 +227,10 @@ export const useProjectStore = createSelectors(
           useAnalysisStore.getState().actions.analyzeProject(path).catch(() => {});
           useGitStore.getState().actions.loadStatus(path).catch(() => {});
           useSessionStore.getState().actions.loadSession(path).catch(() => {});
-          useKnowledgeStore.getState().actions.loadEntries(path).catch(() => {});
+          void (async () => {
+            await useKnowledgeMetaStore.getState().actions.bind(path);
+            await useKnowledgeStore.getState().actions.loadEntries(path);
+          })().catch(() => {});
         }
       },
     },

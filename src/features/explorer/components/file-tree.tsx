@@ -6,11 +6,15 @@ import {
   useExplorerStore,
   flattenTree,
   type FileEntry,
+  type TreeNode,
 } from "../stores/explorer-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
-import { FolderPlus } from "lucide-react";
+import { FolderPlus, FoldVertical, UnfoldVertical } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { TreeRow } from "./tree-row";
+import { useFileTreeDragDrop, ROOT_DROP } from "../hooks/use-file-tree-drag-drop";
+import { useExternalFileDrop } from "../hooks/use-external-file-drop";
 import { ROW_HEIGHT } from "../lib/tree-constants";
 import {
   ContextMenu,
@@ -37,14 +41,20 @@ export function FileTree() {
   const rootPath = useExplorerStore.use.rootPath();
   const loading = useExplorerStore.use.loading();
   const clipboard = useExplorerStore.use.clipboard();
+  const selectedPaths = useExplorerStore.use.selectedPaths();
+  const selectionAnchor = useExplorerStore.use.selectionAnchor();
   const pendingRenamePath = useExplorerStore.use.pendingRenamePath();
   const pendingNewEntry = useExplorerStore.use.pendingNewEntry();
   const {
     toggleExpand,
     reconcileDirectory,
     collapseAll,
+    expandAllLoaded,
     setClipboard,
     clearClipboard,
+    setSelection,
+    toggleSelection,
+    clearSelection,
     beginRename,
     endRename,
     beginNewEntry,
@@ -56,7 +66,7 @@ export function FileTree() {
   const tabs = useLayoutStore.use.tabs();
   const { addTab, closeTab } = useLayoutStore.use.actions();
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [deleteTarget, setDeleteTarget] = useState<{ path: string; name: string; isDir: boolean } | null>(null);
+  const [deleteTargets, setDeleteTargets] = useState<{ path: string; name: string; isDir: boolean }[] | null>(null);
 
   // Active editor tab's file path — used to highlight the matching
   // row in the tree (pill style like the screenshot).
@@ -120,6 +130,41 @@ export function FileTree() {
       });
     },
     [addTab],
+  );
+
+  // Click handling with Finder/Zed-style multi-select:
+  //   • plain click → single-select + open/expand
+  //   • ⌘/Ctrl-click → toggle this row in the selection (no open)
+  //   • ⇧-click → range-select from the anchor to here (no open)
+  const handleRowClick = useCallback(
+    (node: TreeNode, e?: React.MouseEvent) => {
+      const path = node.entry.path;
+      if (e && (e.metaKey || e.ctrlKey)) {
+        toggleSelection(path);
+        return;
+      }
+      if (e && e.shiftKey && selectionAnchor) {
+        // Range over the currently-visible (flattened) rows.
+        const paths = flat
+          .filter((r): r is FlatRow & { node: TreeNode } => r.node != null)
+          .map((r) => r.node.entry.path);
+        const a = paths.indexOf(selectionAnchor);
+        const b = paths.indexOf(path);
+        if (a !== -1 && b !== -1) {
+          const [lo, hi] = a < b ? [a, b] : [b, a];
+          setSelection(paths.slice(lo, hi + 1), selectionAnchor);
+          return;
+        }
+      }
+      // Plain click: collapse selection to this row, then act on it.
+      setSelection([path], path);
+      if (node.entry.is_dir) {
+        void toggleExpand(path);
+      } else {
+        handleOpenFile(path, node.entry.name);
+      }
+    },
+    [flat, selectionAnchor, toggleSelection, setSelection, toggleExpand, handleOpenFile],
   );
 
   const handlePickFolder = async () => {
@@ -194,59 +239,135 @@ export function FileTree() {
     }
   };
 
-  const handleDelete = async (entry: FileEntry) => {
+  const handleDelete = async (entries: FileEntry[]) => {
     try {
-      await invoke("fs_delete", { path: entry.path });
-      await reconcileDirectory(dirOfPath(entry.path));
-      // Close any open editor tab pointing at this file.
-      const openTab = tabs.find(
-        (t) => t.type === "editor" && (t.data as { filePath?: string }).filePath === entry.path,
-      );
-      if (openTab) closeTab(openTab.id);
-      if (clipboard?.path === entry.path) clearClipboard();
+      for (const entry of entries) {
+        await invoke("fs_delete", { path: entry.path });
+        await reconcileDirectory(dirOfPath(entry.path));
+        // Close any open editor tab pointing at this file.
+        const openTab = tabs.find(
+          (t) => t.type === "editor" && (t.data as { filePath?: string }).filePath === entry.path,
+        );
+        if (openTab) closeTab(openTab.id);
+      }
     } catch (e) {
       toast.error(String(e));
     } finally {
-      setDeleteTarget(null);
+      const deleted = new Set(entries.map((e) => e.path));
+      if (clipboard?.paths.some((p) => deleted.has(p))) clearClipboard();
+      clearSelection();
+      setDeleteTargets(null);
     }
   };
 
   const handlePaste = async (destDir: string) => {
     if (!clipboard) return;
-    const baseName = basenameOfPath(clipboard.path);
-    let destPath = `${destDir}/${baseName}`;
-    // Collision: suffix " copy" then " copy N".
     try {
-      let n = 0;
-      // Probe up to 50 candidate names. Cheap; happens once per paste.
-      while (await pathExists(destPath)) {
-        n += 1;
-        const dot = baseName.lastIndexOf(".");
-        if (n === 1) {
-          destPath =
-            dot > 0
-              ? `${destDir}/${baseName.slice(0, dot)} copy${baseName.slice(dot)}`
-              : `${destDir}/${baseName} copy`;
+      // Each source resolves its own collision suffix inside destDir.
+      for (const src of clipboard.paths) {
+        const destPath = await resolveCollision(src, destDir);
+        if (clipboard.isCut) {
+          await invoke("fs_rename", { from: src, to: destPath });
+          await reconcileDirectory(dirOfPath(src));
         } else {
-          destPath =
-            dot > 0
-              ? `${destDir}/${baseName.slice(0, dot)} copy ${n}${baseName.slice(dot)}`
-              : `${destDir}/${baseName} copy ${n}`;
+          await invoke("fs_copy", { from: src, to: destPath });
         }
-        if (n > 50) break;
       }
-      if (clipboard.isCut) {
-        await invoke("fs_rename", { from: clipboard.path, to: destPath });
-        await reconcileDirectory(dirOfPath(clipboard.path));
-        clearClipboard();
-      } else {
-        await invoke("fs_copy", { from: clipboard.path, to: destPath });
-      }
+      if (clipboard.isCut) clearClipboard();
       await reconcileDirectory(destDir);
     } catch (e) {
       toast.error(String(e));
     }
   };
+
+  // Resolve a destination path for `src` inside `destDir`, suffixing
+  // " copy" / " copy N" on collision (mirrors paste behavior).
+  const resolveCollision = useCallback(async (src: string, destDir: string) => {
+    const baseName = basenameOfPath(src);
+    let destPath = `${destDir}/${baseName}`;
+    let n = 0;
+    while (await pathExists(destPath)) {
+      n += 1;
+      const dot = baseName.lastIndexOf(".");
+      if (n === 1) {
+        destPath =
+          dot > 0
+            ? `${destDir}/${baseName.slice(0, dot)} copy${baseName.slice(dot)}`
+            : `${destDir}/${baseName} copy`;
+      } else {
+        destPath =
+          dot > 0
+            ? `${destDir}/${baseName.slice(0, dot)} copy ${n}${baseName.slice(dot)}`
+            : `${destDir}/${baseName} copy ${n}`;
+      }
+      if (n > 50) break;
+    }
+    return destPath;
+  }, []);
+
+  const handleMove = useCallback(
+    async (src: string, destDir: string) => {
+      // No-op: dropping onto own parent dir.
+      const parent = dirOfPath(src);
+      if (parent === destDir) return;
+      // No-op: dropping a folder onto itself or a descendant.
+      if (destDir === src || destDir.startsWith(src + "/")) {
+        toast.error("Can't move a folder into itself");
+        return;
+      }
+      try {
+        const destPath = await resolveCollision(src, destDir);
+        await invoke("fs_rename", { from: src, to: destPath });
+        // Refresh both ends — the source's old parent loses the entry
+        // and the destination gains it. The fs-watcher would catch
+        // both eventually but the user expects an immediate update.
+        await Promise.all([
+          reconcileDirectory(parent),
+          reconcileDirectory(destDir),
+        ]);
+      } catch (e) {
+        toast.error(String(e));
+      }
+    },
+    [resolveCollision, reconcileDirectory],
+  );
+
+  // Pointer-based drag-and-drop (Zed/Athas style). Owns the floating
+  // filename preview + destination hit-testing; delegates the actual
+  // move to `handleMove` and auto-expand to `ensureExpanded`.
+  const { dragState, onContainerMouseDown } = useFileTreeDragDrop({
+    rootPath,
+    onMove: handleMove,
+    onAutoExpand: ensureExpanded,
+  });
+
+  // Copy files dragged in from Finder/Explorer into the hovered folder.
+  const handleExternalDrop = useCallback(
+    async (paths: string[], destDir: string) => {
+      let copied = 0;
+      for (const src of paths) {
+        try {
+          const destPath = await resolveCollision(src, destDir);
+          await invoke("fs_copy", { from: src, to: destPath });
+          copied += 1;
+        } catch (e) {
+          const name = src.slice(src.lastIndexOf("/") + 1);
+          toast.error(`Couldn't import ${name}: ${String(e)}`);
+        }
+      }
+      if (copied > 0) await reconcileDirectory(destDir);
+    },
+    [resolveCollision, reconcileDirectory],
+  );
+
+  const { externalDropPath } = useExternalFileDrop({
+    rootPath,
+    onDropFiles: handleExternalDrop,
+  });
+
+  // Unified drop target for highlighting: the internal pointer-drag
+  // destination takes precedence, otherwise the external OS-drop one.
+  const dropTargetPath = dragState.dragOverPath ?? externalDropPath;
 
   const handleDuplicate = async (path: string) => {
     try {
@@ -283,16 +404,16 @@ export function FileTree() {
     }
   };
 
-  const handleCopyPath = (path: string) => {
-    void navigator.clipboard.writeText(path).catch(() => {});
+  const handleCopyPath = (paths: string[]) => {
+    void navigator.clipboard.writeText(paths.join("\n")).catch(() => {});
   };
-  const handleCopyRelativePath = (path: string) => {
-    if (projectPath && path.startsWith(projectPath)) {
-      const rel = path.slice(projectPath.length + 1);
-      void navigator.clipboard.writeText(rel).catch(() => {});
-    } else {
-      void navigator.clipboard.writeText(path).catch(() => {});
-    }
+  const handleCopyRelativePath = (paths: string[]) => {
+    const rels = paths.map((path) =>
+      projectPath && path.startsWith(projectPath)
+        ? path.slice(projectPath.length + 1)
+        : path,
+    );
+    void navigator.clipboard.writeText(rels.join("\n")).catch(() => {});
   };
 
   const handleAddToGitignore = async (path: string) => {
@@ -310,8 +431,36 @@ export function FileTree() {
 
   /* ── Render ────────────────────────────────────────────────── */
 
+  // Resolve the current selection to FileEntry objects (via the visible
+  // flattened rows; synthesize a minimal entry for any selected path no
+  // longer in view, e.g. after its folder was collapsed).
+  const selectionEntries = (): FileEntry[] => {
+    const byPath = new Map(
+      flat.filter((r) => r.node).map((r) => [r.node!.entry.path, r.node!.entry] as const),
+    );
+    return selectedPaths.map(
+      (p) =>
+        byPath.get(p) ?? {
+          name: basenameOfPath(p),
+          path: p,
+          is_dir: false,
+          is_symlink: false,
+          size: 0,
+          extension: null,
+        },
+    );
+  };
+
   const rowMenuItems = (entry: FileEntry) => {
     const isDir = entry.is_dir;
+    // When the right-clicked row is part of a multi-selection, the
+    // batchable actions (cut/copy/delete/copy-path) operate on the whole
+    // selection; single-row actions (rename/duplicate/new/paste) always
+    // act on `entry`.
+    const multi = selectedPaths.length > 1 && selectedPaths.includes(entry.path);
+    const targets = multi ? selectionEntries() : [entry];
+    const targetPaths = targets.map((t) => t.path);
+    const countSuffix = multi ? ` (${targets.length})` : "";
     return (
       <>
         {isDir ? (
@@ -349,12 +498,12 @@ export function FileTree() {
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => setClipboard(entry.path, true)}>
-          Cut
+        <ContextMenuItem onSelect={() => setClipboard(targetPaths, true)}>
+          Cut{countSuffix}
           <ContextMenuShortcut><KbdCombo combo="⌘X" /></ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => setClipboard(entry.path, false)}>
-          Copy
+        <ContextMenuItem onSelect={() => setClipboard(targetPaths, false)}>
+          Copy{countSuffix}
           <ContextMenuShortcut><KbdCombo combo="⌘C" /></ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuItem onSelect={() => void handleDuplicate(entry.path)}>
@@ -368,12 +517,12 @@ export function FileTree() {
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => handleCopyPath(entry.path)}>
-          Copy Path
+        <ContextMenuItem onSelect={() => handleCopyPath(targetPaths)}>
+          Copy Path{countSuffix}
           <ContextMenuShortcut><KbdCombo combo="⌥⌘C" /></ContextMenuShortcut>
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => handleCopyRelativePath(entry.path)}>
-          Copy Relative Path
+        <ContextMenuItem onSelect={() => handleCopyRelativePath(targetPaths)}>
+          Copy Relative Path{countSuffix}
           <ContextMenuShortcut><KbdCombo combo="⇧⌥⌘C" /></ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuSeparator />
@@ -385,9 +534,13 @@ export function FileTree() {
           <ContextMenuShortcut><KbdCombo combo="F2" /></ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuItem
-          onSelect={() => setDeleteTarget({ path: entry.path, name: entry.name, isDir: entry.is_dir })}
+          onSelect={() =>
+            setDeleteTargets(
+              targets.map((t) => ({ path: t.path, name: t.name, isDir: t.is_dir })),
+            )
+          }
         >
-          Delete
+          Delete{countSuffix}
           <ContextMenuShortcut>⌫</ContextMenuShortcut>
         </ContextMenuItem>
       </>
@@ -439,6 +592,11 @@ export function FileTree() {
           {rootPath ? rootPath.split("/").pop() : "Files"}
         </span>
         <div className="flex items-center gap-0.5">
+          <FoldExpandButton
+            tree={tree}
+            onCollapseAll={collapseAll}
+            onExpandAll={expandAllLoaded}
+          />
           <button
             onClick={handlePickFolder}
             className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-secondary transition-colors"
@@ -453,7 +611,22 @@ export function FileTree() {
         <ContextMenuTrigger asChild>
           <div
             ref={scrollRef}
-            className="flex-1 overflow-auto hide-scrollbar px-1.5 pb-2"
+            data-tree-root
+            className={cn(
+              "flex-1 overflow-auto hide-scrollbar px-1.5 pb-2 relative",
+              dropTargetPath === ROOT_DROP &&
+                "bg-[var(--accent-primary-muted)] ring-1 ring-inset ring-accent/40",
+            )}
+            onMouseDown={onContainerMouseDown}
+            // Esc clears the multi-selection (keydown bubbles up from the
+            // focused row). Only swallow it when there's something to clear.
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && selectedPaths.length > 0) {
+                e.preventDefault();
+                e.stopPropagation();
+                clearSelection();
+              }
+            }}
           >
             {loading ? (
               <div className="px-3 py-4 text-[11px] text-text-tertiary text-center">
@@ -496,19 +669,34 @@ export function FileTree() {
 
                   const node = row.node!;
                   const isDir = node.entry.is_dir;
+                  const isSelected = selectedPaths.includes(node.entry.path);
                   const isActive = !isDir && node.entry.path === activeFilePath;
-                  const isCut = clipboard?.isCut === true && clipboard.path === node.entry.path;
+                  const isCut =
+                    clipboard?.isCut === true && clipboard.paths.includes(node.entry.path);
                   const isRenaming = pendingRenamePath === node.entry.path;
 
                   return (
                     <ContextMenu key={node.entry.path}>
                       <ContextMenuTrigger asChild>
-                        <div>
+                        <div
+                          // Right-clicking a row that isn't part of the
+                          // current multi-selection collapses the
+                          // selection to just that row (Finder behavior),
+                          // so the menu acts on what the user clicked.
+                          onContextMenu={() => {
+                            if (!selectedPaths.includes(node.entry.path)) {
+                              setSelection([node.entry.path], node.entry.path);
+                            }
+                          }}
+                        >
                           <TreeRow
                             depth={node.depth}
                             isDir={isDir}
                             isExpanded={node.expanded}
-                            isActive={isActive}
+                            // Selection fill wins; keep them mutually
+                            // exclusive so a row never shows two bgs.
+                            isActive={isActive && !isSelected}
+                            isSelected={isSelected}
                             name={node.entry.name}
                             title={node.entry.path}
                             editingMode={isRenaming ? "rename" : undefined}
@@ -516,13 +704,10 @@ export function FileTree() {
                             onCommit={(name) => void handleRenameCommit(node.entry.path, name)}
                             onCancel={endRename}
                             isCut={isCut}
-                            onClick={() => {
-                              if (isDir) {
-                                toggleExpand(node.entry.path);
-                              } else {
-                                handleOpenFile(node.entry.path, node.entry.name);
-                              }
-                            }}
+                            dataPath={node.entry.path}
+                            isDropTarget={isDir && dropTargetPath === node.entry.path}
+                            isDragging={dragState.draggedItem?.path === node.entry.path}
+                            onClick={(e) => handleRowClick(node, e)}
                             style={{ transform: `translateY(${virtualRow.start}px)` }}
                           />
                         </div>
@@ -538,28 +723,65 @@ export function FileTree() {
         {emptyAreaMenu}
       </ContextMenu>
 
-      {deleteTarget && (
+      {deleteTargets && deleteTargets.length > 0 && (
         <FileTreeConfirmDelete
-          open={!!deleteTarget}
-          name={deleteTarget.name}
-          isDir={deleteTarget.isDir}
+          open={deleteTargets.length > 0}
+          name={deleteTargets[0].name}
+          isDir={deleteTargets[0].isDir}
+          count={deleteTargets.length}
           onConfirm={() => {
-            const t = deleteTarget;
-            if (!t) return;
-            void handleDelete({
-              name: t.name,
-              path: t.path,
-              is_dir: t.isDir,
-              is_symlink: false,
-              size: 0,
-              extension: null,
-            });
+            const ts = deleteTargets;
+            if (!ts) return;
+            void handleDelete(
+              ts.map((t) => ({
+                name: t.name,
+                path: t.path,
+                is_dir: t.isDir,
+                is_symlink: false,
+                size: 0,
+                extension: null,
+              })),
+            );
           }}
-          onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+          onOpenChange={(open) => { if (!open) setDeleteTargets(null); }}
         />
       )}
     </div>
   );
+}
+
+/**
+ * Header button that toggles between "collapse all" and "expand all"
+ * depending on whether anything is currently expanded. Mirrors the
+ * pattern shipped in `changes-panel.tsx` for the Changes header.
+ */
+function FoldExpandButton({
+  tree,
+  onCollapseAll,
+  onExpandAll,
+}: {
+  tree: TreeNode[];
+  onCollapseAll: () => void;
+  onExpandAll: () => void;
+}) {
+  const anyExpanded = useMemo(() => hasAnyExpanded(tree), [tree]);
+  return (
+    <button
+      onClick={anyExpanded ? onCollapseAll : onExpandAll}
+      className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-secondary transition-colors"
+      title={anyExpanded ? "Collapse all" : "Expand all"}
+    >
+      {anyExpanded ? <FoldVertical size={11} /> : <UnfoldVertical size={11} />}
+    </button>
+  );
+}
+
+function hasAnyExpanded(nodes: TreeNode[]): boolean {
+  for (const n of nodes) {
+    if (n.expanded) return true;
+    if (n.children && hasAnyExpanded(n.children)) return true;
+  }
+  return false;
 }
 
 // Cheap exists check via read_directory probe — Tauri doesn't expose

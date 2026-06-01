@@ -12,7 +12,7 @@ export interface FileEntry {
   extension: string | null;
 }
 
-interface TreeNode {
+export interface TreeNode {
   entry: FileEntry;
   children: TreeNode[] | null; // null = not loaded, [] = empty
   expanded: boolean;
@@ -23,8 +23,17 @@ interface ExplorerState {
   rootPath: string | null;
   tree: TreeNode[];
   loading: boolean;
-  /** Cut/Copy clipboard for paste. `null` when nothing's queued. */
-  clipboard: { path: string; isCut: boolean } | null;
+  /** Cut/Copy clipboard for paste. Holds one or more paths so a
+   *  multi-selection can be cut/copied at once. `null` when empty. */
+  clipboard: { paths: string[]; isCut: boolean } | null;
+  /** Multi-selection (Finder/Zed-style). The set of rows the user has
+   *  selected via plain / ⌘-click / ⇧-click. Context-menu actions
+   *  (cut/copy/delete/copy-path) operate on this set when the
+   *  right-clicked row is part of it. */
+  selectedPaths: string[];
+  /** Anchor row for ⇧-click range selection (the last plain/⌘-clicked
+   *  row). `null` when there's no selection. */
+  selectionAnchor: string | null;
   /** Path of the row currently in inline-rename mode (`null` = none). */
   pendingRenamePath: string | null;
   /** Pending New File / New Folder ghost row, scoped to a parent dir.
@@ -54,8 +63,18 @@ interface ExplorerActions {
     ensureExpanded: (dirPath: string) => Promise<void>;
     /** Collapse every expanded folder in the tree (root stays mounted). */
     collapseAll: () => void;
-    setClipboard: (path: string, isCut: boolean) => void;
+    /** Expand every directory whose children are already loaded. We
+     *  intentionally don't fetch new directories — a full deep walk on
+     *  a large repo can be expensive. Folders the user hasn't visited
+     *  yet stay closed; subsequent click opens them normally. */
+    expandAllLoaded: () => void;
+    setClipboard: (paths: string[], isCut: boolean) => void;
     clearClipboard: () => void;
+    /** Replace the selection with `paths`; sets the range anchor. */
+    setSelection: (paths: string[], anchor?: string | null) => void;
+    /** Toggle a single path in/out of the selection (⌘-click). */
+    toggleSelection: (path: string) => void;
+    clearSelection: () => void;
     beginRename: (path: string) => void;
     endRename: () => void;
     beginNewEntry: (parentDir: string, isDir: boolean) => void;
@@ -70,6 +89,8 @@ export const useExplorerStore = createSelectors(
       tree: [],
       loading: false,
       clipboard: null,
+      selectedPaths: [],
+      selectionAnchor: null,
       pendingRenamePath: null,
       pendingNewEntry: null,
       actions: {
@@ -203,14 +224,43 @@ export const useExplorerStore = createSelectors(
             collapseAllNodes(s.tree);
           });
         },
-        setClipboard: (path, isCut) => {
+        expandAllLoaded: () => {
           set((s) => {
-            s.clipboard = { path, isCut };
+            expandAllLoadedNodes(s.tree);
+          });
+        },
+        setClipboard: (paths, isCut) => {
+          set((s) => {
+            s.clipboard = paths.length > 0 ? { paths, isCut } : null;
           });
         },
         clearClipboard: () => {
           set((s) => {
             s.clipboard = null;
+          });
+        },
+        setSelection: (paths, anchor) => {
+          set((s) => {
+            s.selectedPaths = paths;
+            // Default the anchor to the last path when not given.
+            s.selectionAnchor =
+              anchor !== undefined ? anchor : (paths[paths.length - 1] ?? null);
+          });
+        },
+        toggleSelection: (path) => {
+          set((s) => {
+            if (s.selectedPaths.includes(path)) {
+              s.selectedPaths = s.selectedPaths.filter((p) => p !== path);
+            } else {
+              s.selectedPaths.push(path);
+            }
+            s.selectionAnchor = path;
+          });
+        },
+        clearSelection: () => {
+          set((s) => {
+            s.selectedPaths = [];
+            s.selectionAnchor = null;
           });
         },
         beginRename: (path) => {
@@ -244,6 +294,13 @@ function collapseAllNodes(nodes: TreeNode[]): void {
   for (const n of nodes) {
     if (n.expanded) n.expanded = false;
     if (n.children) collapseAllNodes(n.children);
+  }
+}
+
+function expandAllLoadedNodes(nodes: TreeNode[]): void {
+  for (const n of nodes) {
+    if (n.entry.is_dir && n.children !== null && !n.expanded) n.expanded = true;
+    if (n.children) expandAllLoadedNodes(n.children);
   }
 }
 

@@ -3,10 +3,13 @@ import { cn } from "@/lib/utils";
 
 interface ConfirmDeleteProps {
   open: boolean;
-  /** Display name in the prompt — file/folder basename. */
+  /** Display name in the prompt — file/folder basename (first item when
+   *  deleting several). */
   name: string;
   /** Whether the target is a directory (changes the warning copy). */
   isDir: boolean;
+  /** Number of items being deleted. >1 switches to the batch wording. */
+  count?: number;
   onConfirm: () => void;
   onOpenChange: (open: boolean) => void;
 }
@@ -20,9 +23,11 @@ export function FileTreeConfirmDelete({
   open,
   name,
   isDir,
+  count = 1,
   onConfirm,
   onOpenChange,
 }: ConfirmDeleteProps) {
+  const multi = count > 1;
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -44,12 +49,22 @@ export function FileTreeConfirmDelete({
           }}
         >
           <Dialog.Title className="text-[13px] font-semibold text-text-primary">
-            Delete {isDir ? "folder" : "file"}?
+            {multi ? `Delete ${count} items?` : `Delete ${isDir ? "folder" : "file"}?`}
           </Dialog.Title>
           <p className="text-[12px] text-text-secondary leading-relaxed">
-            <span className="font-mono text-text-primary">{name}</span> will be
-            permanently {isDir ? "removed along with everything inside it" : "deleted"}.
-            This can't be undone.
+            {multi ? (
+              <>
+                <span className="font-mono text-text-primary">{name}</span> and{" "}
+                {count - 1} other {count - 1 === 1 ? "item" : "items"} will be
+                permanently deleted. This can't be undone.
+              </>
+            ) : (
+              <>
+                <span className="font-mono text-text-primary">{name}</span> will be
+                permanently {isDir ? "removed along with everything inside it" : "deleted"}.
+                This can't be undone.
+              </>
+            )}
           </p>
           <div className="flex items-center justify-end gap-2 mt-1">
             <button

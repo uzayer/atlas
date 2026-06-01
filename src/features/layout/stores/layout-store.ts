@@ -19,11 +19,22 @@ interface LayoutState {
     width: number;
     activeSection: "files" | "knowledge" | "git-graph";
     gitPanelHeight: number;
+    /** Show the "Git" changed-files strip below the file tree in the
+     *  left panel. Toggled by the chevron in its header. */
+    gitPanelVisible: boolean;
   };
   rightPanel: {
     visible: boolean;
     width: number;
     activeSection: "changes" | "analysis" | "explore" | "github";
+  };
+  /** Per-app KB tab layout — survives tab switches (each KB tab gets the
+   *  same panel layout, matching the global-left/right model). */
+  knowledgePanel: {
+    showSidebar: boolean;
+    showInspector: boolean;
+    sidebarWidth: number;
+    inspectorWidth: number;
   };
   bottomPanel: {
     visible: boolean;
@@ -51,6 +62,11 @@ interface LayoutActions {
     toggleRightPanel: () => void;
     toggleBottomPanel: () => void;
     toggleChatSidebar: () => void;
+    toggleGitPanel: () => void;
+    toggleKnowledgeSidebar: () => void;
+    toggleKnowledgeInspector: () => void;
+    setKnowledgeSidebarWidth: (width: number) => void;
+    setKnowledgeInspectorWidth: (width: number) => void;
     setChatSidebarWidth: (width: number) => void;
     setBashPanelWidth: (width: number) => void;
     setLeftSection: (section: LayoutState["leftPanel"]["activeSection"]) => void;
@@ -79,11 +95,18 @@ const initialState: LayoutState = {
     width: 240,
     activeSection: "files",
     gitPanelHeight: 40,
+    gitPanelVisible: true,
   },
   rightPanel: {
     visible: true,
     width: 280,
     activeSection: "changes",
+  },
+  knowledgePanel: {
+    showSidebar: true,
+    showInspector: true,
+    sidebarWidth: 240,
+    inspectorWidth: 280,
   },
   bottomPanel: {
     visible: true,
@@ -132,6 +155,26 @@ export const useLayoutStore = createSelectors(
         toggleChatSidebar: () =>
           set((s) => {
             s.chatSidebar.visible = !s.chatSidebar.visible;
+          }),
+        toggleGitPanel: () =>
+          set((s) => {
+            s.leftPanel.gitPanelVisible = !s.leftPanel.gitPanelVisible;
+          }),
+        toggleKnowledgeSidebar: () =>
+          set((s) => {
+            s.knowledgePanel.showSidebar = !s.knowledgePanel.showSidebar;
+          }),
+        toggleKnowledgeInspector: () =>
+          set((s) => {
+            s.knowledgePanel.showInspector = !s.knowledgePanel.showInspector;
+          }),
+        setKnowledgeSidebarWidth: (width) =>
+          set((s) => {
+            s.knowledgePanel.sidebarWidth = Math.max(180, Math.min(width, 480));
+          }),
+        setKnowledgeInspectorWidth: (width) =>
+          set((s) => {
+            s.knowledgePanel.inspectorWidth = Math.max(220, Math.min(width, 520));
           }),
         setChatSidebarWidth: (width) =>
           set((s) => {

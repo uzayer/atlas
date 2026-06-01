@@ -662,8 +662,10 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         })}
       </div>
 
-      {/* Bottom mini-bar */}
-      <div className="flex items-center justify-between px-1.5 h-7 border-t border-[var(--border-default)] bg-[var(--bg-sidebar)]">
+      {/* Bottom mini-bar. Height matches the left panel's collapsed Git
+          strip (a 28px button + its 1px top border = 29px) so this
+          footer's top border lines up horizontally with the Git strip's. */}
+      <div className="flex items-center justify-between px-1.5 h-[29px] border-t border-[var(--border-default)] bg-[var(--bg-sidebar)]">
         <button
           onClick={toggleChatSidebar}
           className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"

@@ -515,6 +515,7 @@ export function MessageInput({
           open={trigger !== null}
           query={trigger?.query ?? ""}
           anchor={trigger?.anchor ?? null}
+          initialScope={trigger?.scope ?? null}
           projectPath={projectPath}
           onSelect={handleMentionSelect}
           onClose={() => setTrigger(null)}

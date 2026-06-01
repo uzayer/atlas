@@ -61,14 +61,37 @@ function ensureGitStatusFreshListener(): void {
 
   // Live updates from the git watcher (commands/git_watcher.rs) —
   // commit / checkout / branch / fetch all fire `atlas:git-changed`.
-  // Refresh status + branch list so the Changes panel and branch
-  // chip reflect on-disk truth without polling.
+  // Refresh status + branch list + diff so the Changes panel reflects
+  // on-disk truth without polling.
   void listen<{ project: string }>("atlas:git-changed", (e) => {
     const current = useGitStore.getState().repoPath;
     if (!current || current !== e.payload.project) return;
     const actions = useGitStore.getState().actions;
     void actions.loadStatus(current).catch(() => {});
     void actions.listBranches().catch(() => {});
+    void actions.loadDiff().catch(() => {});
+  });
+
+  // Workspace edits — any time a file changes in the project (agent
+  // write, user save, terminal touch, etc.) the diff content can
+  // shift even when the set of changed files doesn't. The explorer's
+  // fs-watcher already broadcasts `atlas:explorer:changed` on every
+  // batch; piggyback on it to refresh git status + diff. Debounced
+  // because a single agent turn can produce dozens of writes in
+  // bursts and we don't want to thrash `git status` / `git diff`.
+  let workspaceDebounce: ReturnType<typeof setTimeout> | null = null;
+  void listen("atlas:explorer:changed", () => {
+    const current = useGitStore.getState().repoPath;
+    if (!current) return;
+    if (workspaceDebounce) clearTimeout(workspaceDebounce);
+    workspaceDebounce = setTimeout(() => {
+      workspaceDebounce = null;
+      const repoPath = useGitStore.getState().repoPath;
+      if (!repoPath) return;
+      const actions = useGitStore.getState().actions;
+      void actions.loadStatus(repoPath).catch(() => {});
+      void actions.loadDiff().catch(() => {});
+    }, 250);
   });
 }
 

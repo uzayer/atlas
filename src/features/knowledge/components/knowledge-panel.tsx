@@ -62,10 +62,20 @@ export function KnowledgePanel() {
   const [clonedRepos, setClonedRepos] = useState<
     Array<{ name: string; path: string; has_readme: boolean }>
   >([]);
-  const [showInspector, setShowInspector] = useState(true);
-  const [showSidebar, setShowSidebar] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(260);
-  const [inspectorWidth, setInspectorWidth] = useState(280);
+  // KB panel layout is hoisted into layout-store so tab switches don't
+  // reset sidebar/inspector visibility or column widths — same model the
+  // global left/right panels use. All KB tabs share one layout (matches
+  // how a user thinks about "did I hide the sidebar?").
+  const showSidebar = useLayoutStore((s) => s.knowledgePanel.showSidebar);
+  const showInspector = useLayoutStore((s) => s.knowledgePanel.showInspector);
+  const sidebarWidth = useLayoutStore((s) => s.knowledgePanel.sidebarWidth);
+  const inspectorWidth = useLayoutStore((s) => s.knowledgePanel.inspectorWidth);
+  const {
+    toggleKnowledgeSidebar,
+    toggleKnowledgeInspector,
+    setKnowledgeSidebarWidth,
+    setKnowledgeInspectorWidth,
+  } = useLayoutStore.use.actions();
 
   // Drag-resize helpers. Each handle is a 4px-wide invisible strip on
   // the panel border; mousedown captures pointer + listens for global
@@ -81,10 +91,10 @@ export function KnowledgePanel() {
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
         if (from === "sidebar") {
-          setSidebarWidth(Math.max(180, Math.min(560, startW + dx)));
+          setKnowledgeSidebarWidth(startW + dx);
         } else {
           // Inspector grows when dragged LEFT, so flip the delta.
-          setInspectorWidth(Math.max(220, Math.min(560, startW - dx)));
+          setKnowledgeInspectorWidth(startW - dx);
         }
       };
       const onUp = () => {
@@ -98,7 +108,7 @@ export function KnowledgePanel() {
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
     },
-    [sidebarWidth, inspectorWidth],
+    [sidebarWidth, inspectorWidth, setKnowledgeSidebarWidth, setKnowledgeInspectorWidth],
   );
   const [recentIds, setRecentIds] = useState<string[]>([]);
   const [editorInstance, setEditorInstance] = useState<Editor | null>(null);
@@ -183,15 +193,15 @@ export function KnowledgePanel() {
       if (e.shiftKey || e.altKey) return;
       if (e.key === ";") {
         e.preventDefault();
-        setShowSidebar((v) => !v);
+        toggleKnowledgeSidebar();
       } else if (e.key === "'") {
         e.preventDefault();
-        setShowInspector((v) => !v);
+        toggleKnowledgeInspector();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [toggleKnowledgeSidebar, toggleKnowledgeInspector]);
 
   // Cmd+S
   useEffect(() => {
@@ -385,7 +395,6 @@ export function KnowledgePanel() {
               setNewFolderName("");
             }}
             width={sidebarWidth}
-            onCollapse={() => setShowSidebar(false)}
           />
           {/* 4px col-resize hit area; invisible until hover. */}
           <div
@@ -406,9 +415,9 @@ export function KnowledgePanel() {
             <RepoTopbar
               name={activeRepoName}
               path={clonedRepos.find((r) => r.name === activeRepoName)?.path ?? ""}
-              onToggleSidebar={() => setShowSidebar((v) => !v)}
+              onToggleSidebar={toggleKnowledgeSidebar}
               sidebarHidden={!showSidebar}
-              onToggleInspector={() => setShowInspector((v) => !v)}
+              onToggleInspector={toggleKnowledgeInspector}
             />
             {repoReadme ? (
               // README is read-only — a full Tiptap instance is wrong here.
@@ -434,9 +443,9 @@ export function KnowledgePanel() {
               icon={activeMeta.icon ?? "📄"}
               kind="NOTE"
               isDirty={isDirty}
-              onToggleSidebar={() => setShowSidebar((v) => !v)}
+              onToggleSidebar={toggleKnowledgeSidebar}
               sidebarHidden={!showSidebar}
-              onToggleInspector={() => setShowInspector((v) => !v)}
+              onToggleInspector={toggleKnowledgeInspector}
             />
             {/* One scroller wraps cover + page header + properties + editor +
                 backlinks footer so they all share the 780/72 alignment column
@@ -807,11 +816,11 @@ function RepoTopbar({
       className="flex items-center shrink-0 border-b border-border-subtle"
       style={{ height: 36, gap: 8, padding: "0 14px", background: "var(--bg-canvas)" }}
     >
-      {sidebarHidden && onToggleSidebar && (
+      {onToggleSidebar && (
         <button
           onClick={onToggleSidebar}
           className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors"
-          title="Show sidebar"
+          title={sidebarHidden ? "Show sidebar" : "Hide sidebar"}
           style={{ width: 22, height: 22, marginLeft: -6 }}
         >
           <PanelLeft size={12} />

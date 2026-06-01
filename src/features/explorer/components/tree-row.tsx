@@ -19,7 +19,11 @@ interface TreeRowProps {
   name: string;
   /** Tooltip on hover (commonly the full path). */
   title?: string;
-  onClick: () => void;
+  /** Receives the raw mouse event so callers can read ⌘/⇧ modifiers for
+   *  multi-select. Keyboard activation calls it with no argument. */
+  onClick: (e?: React.MouseEvent) => void;
+  /** Part of a multi-selection — painted with the selection fill. */
+  isSelected?: boolean;
   /** Absolute-positioning style from the virtualizer. */
   style?: CSSProperties;
   /** Optional leaf icon override (defaults to lucide `File`). Folders
@@ -40,6 +44,15 @@ interface TreeRowProps {
   onCancel?: () => void;
   /** Dim the row when its source path is on the clipboard via Cut. */
   isCut?: boolean;
+  /** Hit-testing attributes for the pointer-based drag system. The
+   *  drag hook resolves the hovered row via `document.elementFromPoint`
+   *  + `closest("[data-tree-path]")`, so the path must live on the DOM
+   *  node rather than being captured in a React closure. */
+  dataPath?: string;
+  /** Highlight this row as the active drop target. */
+  isDropTarget?: boolean;
+  /** Dim this row while it's the active drag source. */
+  isDragging?: boolean;
 }
 
 /**
@@ -64,6 +77,10 @@ export function TreeRow({
   onCommit,
   onCancel,
   isCut,
+  dataPath,
+  isSelected,
+  isDropTarget,
+  isDragging,
 }: TreeRowProps) {
   const isEditing = !!editingMode;
   const inputRef = useRef<HTMLInputElement>(null);
@@ -112,7 +129,9 @@ export function TreeRow({
     <div
       role="button"
       tabIndex={isEditing ? -1 : 0}
-      onClick={isEditing ? undefined : onClick}
+      data-tree-path={dataPath}
+      data-tree-is-dir={dataPath ? isDir : undefined}
+      onClick={isEditing ? undefined : (e) => onClick(e)}
       onKeyDown={(e) => {
         if (isEditing) return;
         if (e.key === "Enter" || e.key === " ") {
@@ -126,9 +145,20 @@ export function TreeRow({
         "transition-colors group select-none",
         isEditing ? "cursor-text" : "cursor-pointer",
         "focus:outline-none focus-visible:ring-1 focus-visible:ring-border-focus",
-        isActive
-          ? "bg-[var(--bg-elevated)] text-text-primary"
-          : "text-text-secondary hover:bg-bg-hover hover:text-text-primary",
+        // Selection fill (multi-select) takes visual priority over the
+        // active-file pill; callers make the two mutually exclusive.
+        isSelected
+          ? "bg-bg-selected text-text-primary"
+          : isActive
+            ? "bg-[var(--bg-elevated)] text-text-primary"
+            : "text-text-secondary hover:bg-bg-hover hover:text-text-primary",
+        // Drop-target highlight — kept deliberately subtle to match
+        // Atlas's monochromatic surfaces: a muted accent fill with a
+        // hairline inset accent ring, not a heavy outline.
+        isDropTarget &&
+          "bg-[var(--accent-primary-muted)] ring-1 ring-inset ring-accent/40 text-text-primary",
+        // Source row dimmed while drag is in flight.
+        isDragging && "opacity-40",
         isCut && "opacity-50",
       )}
       style={{

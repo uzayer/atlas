@@ -297,6 +297,31 @@ export function App() {
       }
     };
 
+    // Sibling of notifyAgentDone — fires when the agent issues a
+    // permission_request and the window isn't focused. Shares the
+    // permission state machine and focus tracker above so we never
+    // double-prompt for OS notification access.
+    const notifyPermissionRequested = async (toolTitle: string) => {
+      if (windowFocused) return;
+      try {
+        if (permissionState === "unknown") {
+          const granted = (await isPermissionGranted())
+            ? true
+            : (await requestPermission()) === "granted";
+          permissionState = granted ? "granted" : "denied";
+        }
+        if (permissionState !== "granted") return;
+        const proj = useProjectStore.getState().currentProject;
+        const projectName = proj?.name ?? "Atlas";
+        sendNotification({
+          title: `Atlas — ${projectName} needs permission`,
+          body: `Approve "${toolTitle}" to continue.`,
+        });
+      } catch (e) {
+        console.warn("permission-request notification failed:", e);
+      }
+    };
+
     const flush = () => {
       rafId = null;
       if (
@@ -354,7 +379,7 @@ export function App() {
           );
           schedule();
           return;
-        case "permission_request":
+        case "permission_request": {
           // Permission requests block the agent waiting for the user
           // — apply synchronously so the modal opens on the very next
           // tick, not the next RAF (which can be ~16 ms away or more
@@ -366,7 +391,17 @@ export function App() {
             toolCall: env.tool_call as PendingPermission["toolCall"],
             options: env.options as PendingPermission["options"],
           });
+          // OS notification so the user sees the request even with
+          // Atlas in the background. Matches the PermissionModal's own
+          // title-extraction logic.
+          const tc = env.tool_call as Record<string, unknown> | undefined;
+          const toolTitle =
+            (typeof tc?.title === "string" && tc.title) ||
+            (typeof tc?.kind === "string" && tc.kind) ||
+            "tool call";
+          void notifyPermissionRequested(toolTitle);
           return;
+        }
         case "permission_resolved":
           actions.popPermission(env.session_id, env.request_id);
           return;
@@ -605,7 +640,15 @@ export function App() {
     },
     ...Array.from({ length: 9 }, (_, i) => ({
       combo: { key: String(i + 1), meta: true },
-      action: () => activateTabByIndex(i),
+      // ⌘9 always jumps to the LAST tab (browser convention), regardless
+      // of how many tabs there are; ⌘1–8 select by index.
+      action:
+        i === 8
+          ? () => {
+              const n = useLayoutStore.getState().tabs.length;
+              if (n > 0) activateTabByIndex(n - 1);
+            }
+          : () => activateTabByIndex(i),
     })),
     {
       combo: { key: "w", meta: true },

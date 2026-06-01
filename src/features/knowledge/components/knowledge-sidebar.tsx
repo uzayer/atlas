@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { logEvent } from "@/features/log/lib/log";
 import {
   FolderPlus,
   FilePlus,
+  FoldVertical,
   GitBranch,
   Network,
-  PanelLeft,
   Trash2,
+  UnfoldVertical,
 } from "lucide-react";
-import { KnowledgeTree } from "./knowledge-tree";
+import { KnowledgeTree, type KnowledgeTreeHandle } from "./knowledge-tree";
 
 interface KnowledgeSidebarProps {
   projectPath: string;
@@ -34,8 +35,6 @@ interface KnowledgeSidebarProps {
   onFolderInputCancel?: () => void;
   /** Current resolved width in px (parent owns the resizable state). */
   width?: number;
-  /** Hide the panel entirely (parent collapses it). */
-  onCollapse?: () => void;
 }
 
 export function KnowledgeSidebar({
@@ -56,11 +55,16 @@ export function KnowledgeSidebar({
   onFolderInputCommit,
   onFolderInputCancel,
   width = 260,
-  onCollapse,
 }: KnowledgeSidebarProps) {
   const [clonedRepos, setClonedRepos] = useState<
     Array<{ name: string; path: string; has_readme: boolean }>
   >([]);
+
+  // Imperative handle on the KnowledgeTree so the header can drive
+  // collapse-all / expand-all without lifting the tree's expanded set
+  // into the sidebar (matches the explorer's collapseAll pattern).
+  const treeRef = useRef<KnowledgeTreeHandle>(null);
+  const [treeExpandedCount, setTreeExpandedCount] = useState(0);
 
   const loadRepos = useCallback(() => {
     invoke<Array<{ name: string; path: string; has_readme: boolean }>>(
@@ -128,16 +132,22 @@ export function KnowledgeSidebar({
         <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider truncate flex-1">
           Knowledge
         </span>
-        {onCollapse && (
-          <button
-            onClick={onCollapse}
-            className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors cursor-pointer"
-            title="Hide sidebar"
-            style={{ width: 22, height: 22 }}
-          >
-            <PanelLeft size={12} />
-          </button>
-        )}
+        <button
+          onClick={() =>
+            treeExpandedCount > 0
+              ? treeRef.current?.collapseAll()
+              : treeRef.current?.expandAll()
+          }
+          className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors cursor-pointer"
+          title={treeExpandedCount > 0 ? "Collapse all" : "Expand all"}
+          style={{ width: 22, height: 22 }}
+        >
+          {treeExpandedCount > 0 ? (
+            <FoldVertical size={12} />
+          ) : (
+            <UnfoldVertical size={12} />
+          )}
+        </button>
         <button
           onClick={onOpenGraph}
           className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors cursor-pointer"
@@ -190,10 +200,12 @@ export function KnowledgeSidebar({
       {/* Tree (scrollable middle) */}
       <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
         <KnowledgeTree
+          ref={treeRef}
           entries={entries}
           activeEntryId={activeRepoName ? null : activeEntryId}
           onSelect={onSelectEntry}
           onDelete={onDeleteEntry}
+          onExpandedCountChange={setTreeExpandedCount}
         />
 
         {/* Recently opened */}

@@ -37,7 +37,9 @@
       }
     }
   },
-  "plugins": {},
+  "plugins": {
+    "macos-fps": {}
+  },
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],

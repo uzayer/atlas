@@ -43,7 +43,10 @@ const sections = [
 
 export function LeftPanel() {
   const activeSection = useLayoutStore.use.leftPanel().activeSection;
-  const { setLeftSection } = useLayoutStore.use.actions();
+  const gitPanelVisible = useLayoutStore(
+    (s) => s.leftPanel.gitPanelVisible,
+  );
+  const { setLeftSection, toggleGitPanel } = useLayoutStore.use.actions();
 
   return (
     <div className="h-full flex flex-col bg-bg-sidebar">
@@ -95,19 +98,40 @@ export function LeftPanel() {
 
       {/* Git panel (bottom) — hidden when the dedicated Git Graph tab is active */}
       {activeSection !== "git-graph" && (
-        <div className="border-t border-border-default flex flex-col min-h-[180px] max-h-[50%]">
-          <div className="flex items-center justify-between px-3 h-[28px] shrink-0">
+        <div
+          className={cn(
+            "border-t border-border-default flex flex-col shrink-0",
+            // When collapsed the section is just the header strip; when
+            // visible it gets a reasonable min/max so it doesn't crowd
+            // the file tree but stays usable.
+            gitPanelVisible ? "min-h-[180px] max-h-[50%]" : "",
+          )}
+        >
+          <button
+            type="button"
+            onClick={toggleGitPanel}
+            className="flex items-center justify-between px-3 h-[28px] shrink-0 cursor-pointer hover:bg-bg-hover transition-colors"
+            title={gitPanelVisible ? "Collapse Git" : "Expand Git"}
+          >
             <div className="flex items-center gap-1.5 text-[11px] font-medium text-text-secondary">
               <GitBranch size={12} />
               <span>Git</span>
             </div>
-            <ChevronDown size={12} className="text-text-tertiary" />
-          </div>
-          <div className="flex-1 min-h-0 overflow-hidden">
-            <Suspense fallback={<PanelSkeleton rows={3} />}>
-              <GitPanel />
-            </Suspense>
-          </div>
+            <ChevronDown
+              size={12}
+              className={cn(
+                "text-text-tertiary transition-transform",
+                !gitPanelVisible && "-rotate-90",
+              )}
+            />
+          </button>
+          {gitPanelVisible && (
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <Suspense fallback={<PanelSkeleton rows={3} />}>
+                <GitPanel />
+              </Suspense>
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -35,7 +35,18 @@ pub fn run() {
     // Triggered by the `atlas <path>` shell helper at ~/.local/bin/atlas.
     let initial_project = commands::cli::parse_initial_project();
 
-    tauri::Builder::default()
+    // Unlock the WKWebView frame-rate cap on macOS so the UI scrolls at
+    // the display's native refresh (120Hz) rather than WebKit's default
+    // ~60fps lock. Registered before the rest of the chain so it applies
+    // as each webview becomes ready. macOS-only; no-op elsewhere.
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_plugin_macos_fps::init());
+    }
+
+    builder
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 // Transparent NSWindow + NSVisualEffectView blur. Combined

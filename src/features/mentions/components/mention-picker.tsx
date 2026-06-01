@@ -623,7 +623,11 @@ function VirtualizedRows({
               title={mentionTitle(m)}
             >
               <span className="opacity-75 w-4 flex items-center justify-center">
-                <CategoryIcon kind={m.kind} />
+                {m.kind === "knowledge" && m.icon ? (
+                  <span style={{ fontSize: 12, lineHeight: 1 }}>{m.icon}</span>
+                ) : (
+                  <CategoryIcon kind={m.kind} />
+                )}
               </span>
               <span className="truncate min-w-0 flex-shrink-0">
                 {primaryLabel(m)}

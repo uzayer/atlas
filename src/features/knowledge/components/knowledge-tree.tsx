@@ -1,8 +1,22 @@
-import { useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Trash2, FileText } from "lucide-react";
 import { TreeRow } from "@/features/explorer/components/tree-row";
 import { ROW_HEIGHT } from "@/features/explorer/lib/tree-constants";
+
+/** Imperative handle exposed to the sidebar so its header buttons can
+ *  drive collapse-all / expand-all without lifting `expanded` state. */
+export interface KnowledgeTreeHandle {
+  collapseAll(): void;
+  expandAll(): void;
+}
 
 export interface KnowledgeTreeEntry {
   id: string;
@@ -27,6 +41,9 @@ interface KnowledgeTreeProps {
   activeEntryId: string | null;
   onSelect: (id: string) => void;
   onDelete?: (id: string) => void;
+  /** Fired whenever the set of expanded directories changes so the
+   *  sidebar can flip its collapse-all/expand-all button icon. */
+  onExpandedCountChange?: (count: number) => void;
 }
 
 /**
@@ -38,14 +55,21 @@ interface KnowledgeTreeProps {
  * Visually identical to the project explorer: same row height, indent,
  * chevron, hover/active states. See plans/lexical-wibbling-elephant.md.
  */
-export function KnowledgeTree({
-  entries,
-  activeEntryId,
-  onSelect,
-  onDelete,
-}: KnowledgeTreeProps) {
+export const KnowledgeTree = forwardRef<KnowledgeTreeHandle, KnowledgeTreeProps>(
+  function KnowledgeTree(
+    { entries, activeEntryId, onSelect, onDelete, onExpandedCountChange },
+    ref,
+  ) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Surface the expanded count so the sidebar header can flip its
+  // FoldVertical / UnfoldVertical icon between collapse-all and
+  // expand-all without us lifting the whole `expanded` set into the
+  // parent.
+  useEffect(() => {
+    onExpandedCountChange?.(expanded.size);
+  }, [expanded, onExpandedCountChange]);
 
   // Build directory map: folder path → { dirs: Set, files: entries[] }.
   // Dedupe entries by id — `list_knowledge` can occasionally surface
@@ -108,6 +132,26 @@ export function KnowledgeTree({
     estimateSize: () => ROW_HEIGHT,
     overscan: 15,
   });
+
+  // Every directory key that exists in the dirMap (excluding the
+   // virtual root ""). Used by `expandAll()`.
+  const allDirKeys = useMemo(() => {
+    const keys: string[] = [];
+    for (const key of dirMap.keys()) {
+      if (key === "") continue;
+      keys.push(key);
+    }
+    return keys;
+  }, [dirMap]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      collapseAll: () => setExpanded(new Set()),
+      expandAll: () => setExpanded(new Set(allDirKeys)),
+    }),
+    [allDirKeys],
+  );
 
   const toggleDir = (key: string) =>
     setExpanded((s) => {
@@ -176,4 +220,5 @@ export function KnowledgeTree({
       </div>
     </div>
   );
-}
+  },
+);

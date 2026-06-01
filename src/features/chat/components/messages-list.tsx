@@ -45,14 +45,47 @@ const scrollPositionCache = new Map<string, CachedScroll>();
 
 // Persist measured row heights per message id across remounts/scrolls.
 // When a message scrolls off-screen and back into view the virtualizer
-// would otherwise start from the 200-px estimate and snap to the real
-// height once measureElement fires, producing a visible jump. Keyed by
-// stable message id, so the first `estimateSize` call after a remount
-// returns the real height instantly. Module-level so it survives the
-// entire app session — typical thread sizes (few hundred messages × ~80
-// bytes per entry) make this trivially small.
+// would otherwise start from the estimate and snap to the real height
+// once measureElement fires, producing a visible jump. Keyed by stable
+// message id, so the first `estimateSize` call after a remount returns
+// the real height instantly. Module-level so it survives the entire app
+// session — typical thread sizes (few hundred messages × ~80 bytes per
+// entry) make this trivially small.
+//
+// Heights are stored as INTEGERS. `getBoundingClientRect().height` is
+// fractional, and feeding fractional values back means a row re-mounting
+// at 92.33 vs a cached 92.34 reads as a size change — which makes the
+// virtualizer recompute offsets and nudge scrollTop on every remount.
+// Rounding turns repeated measurements of unchanged content into true
+// no-ops, eliminating that scroll-compensation churn (the dominant
+// source of fling jank).
 const measuredHeights = new Map<string, number>();
-const DEFAULT_ROW_ESTIMATE = 200;
+// Running aggregate of measured heights → used to estimate rows we
+// haven't seen yet. A flat estimate (e.g. 200) is wildly off for a
+// code-agent thread where most rows are ~40-90px tool cards: as those
+// rows measure in, the total height collapses and everything above
+// yanks upward (visible as big gaps mid-scroll). Estimating from the
+// observed average keeps the total close to reality, so the per-row
+// scroll correction stays tiny.
+let heightSum = 0;
+let heightCount = 0;
+const DEFAULT_ROW_ESTIMATE = 96;
+
+function recordHeight(id: string, h: number) {
+  const prev = measuredHeights.get(id);
+  if (prev === h) return;
+  if (prev === undefined) {
+    heightCount += 1;
+    heightSum += h;
+  } else {
+    heightSum += h - prev;
+  }
+  measuredHeights.set(id, h);
+}
+
+function averageHeight(): number {
+  return heightCount > 0 ? Math.round(heightSum / heightCount) : DEFAULT_ROW_ESTIMATE;
+}
 // Wider than it looks like it should be: a streaming assistant message
 // grows in chunks of several lines per RAF. If the user is within ~one
 // screen of the bottom, treat them as "following" and keep pinning.
@@ -174,13 +207,16 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
       // scrolls back into view we want the row to occupy its real
       // height immediately instead of starting from the default
       // estimate and snapping after measureElement fires (visible
-      // jump). Falls back to the static estimate on first sight.
+      // jump). For rows we haven't measured yet, estimate from the
+      // running average of measured rows rather than a flat constant —
+      // far closer to reality, so the total barely drifts as new rows
+      // measure in and the scroll correction stays imperceptible.
       const id = filtered[i]?.id;
       if (id) {
         const cached = measuredHeights.get(id);
         if (cached !== undefined) return cached;
       }
-      return DEFAULT_ROW_ESTIMATE;
+      return averageHeight();
     },
     // Higher overscan keeps fast scrolls inside DOM-mounted territory
     // — items don't unmount/remount as the user flicks through the
@@ -191,10 +227,30 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     getItemKey: (i) => filtered[i]?.id ?? i,
     measureElement:
       typeof window !== "undefined" && !navigator.userAgent.includes("Firefox")
-        ? (el) => {
-            const h = el?.getBoundingClientRect().height ?? DEFAULT_ROW_ESTIMATE;
+        ? (el, _entry, instance) => {
+            // Round to an integer so re-measures of unchanged content
+            // return the exact same value and the virtualizer treats
+            // them as no-ops (no offset recompute, no scrollTop nudge).
+            const raw = el?.getBoundingClientRect().height ?? averageHeight();
+            const h = Math.round(raw);
             const id = el?.getAttribute("data-message-id");
-            if (id) measuredHeights.set(id, h);
+            // While the user is actively scrolling UP, committing a
+            // changed height for a row *above* the viewport makes the
+            // virtualizer recompute offsets and correct scrollTop —
+            // that's the upward-scroll stutter (TanStack Virtual #659).
+            // Reuse the cached height instead. `isScrolling` is false
+            // during resize/idle, so those re-measures still go through
+            // (keeps the panel-resize fix intact — rows re-measure at
+            // the new width).
+            if (
+              instance.isScrolling &&
+              instance.scrollDirection === "backward" &&
+              id
+            ) {
+              const cached = measuredHeights.get(id);
+              if (cached !== undefined) return cached;
+            }
+            if (id) recordHeight(id, h);
             return h;
           }
         : undefined,
@@ -266,6 +322,71 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   useEffect(() => {
     onShowJumpChange?.(showJumpToBottom);
   }, [showJumpToBottom, onShowJumpChange]);
+
+  // Container resize (panel drag, window resize, sidebar toggle) reflows
+  // every message — their cached heights become wrong for the new width
+  // and `scrollTop` drifts because total height shifts under it. Snapshot
+  // distance-from-bottom on every width change and re-apply across a few
+  // frames as the virtualizer's ResizeObserver re-measures rows. Same
+  // mechanism as the mount/session-switch restore above, just driven by
+  // width changes instead of cache-key changes.
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let lastWidth = el.clientWidth;
+    let activeRaf: number | null = null;
+    const ro = new ResizeObserver(() => {
+      const node = parentRef.current;
+      if (!node) return;
+      const newWidth = node.clientWidth;
+      if (newWidth === lastWidth) return;
+      // Capture intent BEFORE the post-resize scroll has a chance to
+      // fire and overwrite our cached distance. Using current scrollTop
+      // here rather than the cached `distanceFromBottom` because the
+      // cache may be stale by one frame.
+      const distanceBefore = node.scrollHeight - node.scrollTop - node.clientHeight;
+      const wasAtBottom = distanceBefore <= NEAR_BOTTOM_PX;
+      lastWidth = newWidth;
+      // NB: do NOT clear the height cache here. A panel drag fires this
+      // observer continuously; wiping all heights every tick collapses
+      // the total to count×average and makes the scroll reapply fight a
+      // wildly wrong scrollHeight (visible as violent jumping). The
+      // visible rows whose width actually changed are re-measured
+      // automatically by the virtualizer's own per-row ResizeObserver;
+      // off-screen rows keep their (stale-width) height until revisited,
+      // which is a cheap one-time correction rather than a per-frame
+      // storm.
+      // Reapply for ~6 frames as item heights re-measure. Each pass
+      // corrects against the latest scrollHeight, so we converge as
+      // measurements settle.
+      if (activeRaf !== null) cancelAnimationFrame(activeRaf);
+      let rafs = 0;
+      const tick = () => {
+        const n = parentRef.current;
+        if (!n) return;
+        if (wasAtBottom) {
+          n.scrollTop = n.scrollHeight;
+        } else {
+          n.scrollTop = Math.max(
+            0,
+            n.scrollHeight - n.clientHeight - distanceBefore,
+          );
+        }
+        rafs += 1;
+        if (rafs < 6) {
+          activeRaf = requestAnimationFrame(tick);
+        } else {
+          activeRaf = null;
+        }
+      };
+      activeRaf = requestAnimationFrame(tick);
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      if (activeRaf !== null) cancelAnimationFrame(activeRaf);
+    };
+  }, []);
 
   // When this list unmounts (tab close, project change), make sure the
   // parent's "scrolled up" bit doesn't get stuck at `true`.
@@ -370,7 +491,10 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     <div className="relative flex-1 min-h-0">
       <div
         ref={parentRef}
-        className="h-full overflow-y-auto hide-scrollbar"
+        // `overflow-anchor: none` stops the browser's native scroll
+        // anchoring from competing with the virtualizer's own offset
+        // bookkeeping (a source of small scroll-position fights).
+        className="h-full overflow-y-auto hide-scrollbar [overflow-anchor:none]"
       >
         {filtered.length === 0 ? (
           <div className="h-full flex items-center justify-center text-[11px] text-[var(--text-tertiary)]">

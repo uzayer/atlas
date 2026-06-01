@@ -40,14 +40,18 @@ import { toShortForm } from "./mentions";
 // ── Trigger detection ────────────────────────────────────────────────────────
 
 export interface MentionTrigger {
-  /** Document position of the `@` (inclusive). */
+  /** Document position of the trigger char (inclusive). */
   from: number;
   /** Caret position (exclusive). Slice [from+1, to] is the typed query. */
   to: number;
-  /** What the user typed after the `@`. Empty if caret is right after `@`. */
+  /** What the user typed after the trigger char. Empty if caret is right after it. */
   query: string;
   /** Viewport coords of the caret — anchor for the floating popover. */
   anchor: { x: number; y: number };
+  /** Scope the picker opens locked to. `@` opens unscoped (all kinds);
+   *  `~` opens locked to knowledge notes (parity with the Tiptap KB
+   *  editor's `~` shortcut). */
+  scope: MentionKind | null;
 }
 
 /** Build a ViewPlugin that watches doc + selection state and reports the
@@ -111,6 +115,7 @@ function sameTrigger(a: MentionTrigger | null, b: MentionTrigger | null): boolea
     a.from === b.from &&
     a.to === b.to &&
     a.query === b.query &&
+    a.scope === b.scope &&
     a.anchor.x === b.anchor.x &&
     a.anchor.y === b.anchor.y
   );
@@ -127,7 +132,9 @@ function detectTrigger(view: EditorView): MentionTrigger | null {
   const lineBefore = view.state.doc.sliceString(line.from, caret);
   for (let i = lineBefore.length - 1; i >= 0; i--) {
     const ch = lineBefore[i];
-    if (ch === "@") {
+    // `@` → unscoped picker; `~` → knowledge-only (mirrors the Tiptap KB
+    // editor's `~` shortcut so chat and notes behave the same).
+    if (ch === "@" || ch === "~") {
       const prev = i > 0 ? lineBefore[i - 1] : "";
       if (prev && !/\s/.test(prev) && prev !== "(" && prev !== "[") {
         return null;
@@ -135,8 +142,8 @@ function detectTrigger(view: EditorView): MentionTrigger | null {
       const from = line.from + i;
       const query = lineBefore.slice(i + 1);
       if (query.includes("\n")) return null;
-      // Ignore @ that's already inside a mention range (we don't want to
-      // re-open the picker on a fresh chip).
+      // Ignore the trigger char if it's already inside a mention range (we
+      // don't want to re-open the picker on a fresh chip).
       const ranges = view.state.field(mentionField, false) ?? [];
       for (const r of ranges) {
         if (from >= r.from && from < r.to) return null;
@@ -148,6 +155,7 @@ function detectTrigger(view: EditorView): MentionTrigger | null {
         to: caret,
         query,
         anchor: { x: coords.left, y: coords.top },
+        scope: ch === "~" ? "knowledge" : null,
       };
     }
     if (/\s/.test(ch)) {

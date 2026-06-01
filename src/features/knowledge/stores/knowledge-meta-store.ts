@@ -70,6 +70,18 @@ interface KnowledgeMetaState {
 
 let unlisten: UnlistenFn | null = null;
 
+// Re-push knowledge titles + icons into the Rust mention cache so the
+// @-/~ picker shows real titles + emoji instead of note ids. Must run
+// after a bulk meta hydrate (not just single-title patches) — the
+// initial `entries` publish happens before `_meta.json` loads, so
+// without this the cache stays stuck on filename-style ids. Lazy import
+// avoids a static cycle with chat/lib/mentions (which imports this store).
+function republishMentionCache() {
+  void import("@/features/chat/lib/mentions").then((m) =>
+    m.publishKnowledgeToMentionCache(),
+  );
+}
+
 const store = create<KnowledgeMetaState>()((set, get) => ({
   projectPath: null,
   pages: {},
@@ -82,6 +94,7 @@ const store = create<KnowledgeMetaState>()((set, get) => ({
         try {
           const file = await invoke<MetaFile>("knowledge_meta_load", { projectPath });
           set({ pages: mapPages(file.pages) });
+          republishMentionCache();
         } catch {
           // ignore
         }
@@ -92,6 +105,7 @@ const store = create<KnowledgeMetaState>()((set, get) => ({
       try {
         const file = await invoke<MetaFile>("knowledge_meta_load", { projectPath });
         set({ pages: mapPages(file.pages), loading: false });
+        republishMentionCache();
       } catch {
         set({ loading: false });
       }
@@ -108,6 +122,7 @@ const store = create<KnowledgeMetaState>()((set, get) => ({
               projectPath: current,
             });
             set({ pages: mapPages(fresh.pages) });
+            republishMentionCache();
           } catch {
             // ignore
           }
@@ -148,14 +163,11 @@ const store = create<KnowledgeMetaState>()((set, get) => ({
           entryId,
           patch: toRustPatch(patch),
         });
-        // If this patch touched the page-header title, republish the
-        // mention cache so @-picker results immediately reflect the
-        // new label. Lazy-imported to avoid a static cycle with
-        // chat/lib/mentions, which imports this store.
-        if (patch.title !== undefined) {
-          void import("@/features/chat/lib/mentions").then((m) =>
-            m.publishKnowledgeToMentionCache(),
-          );
+        // If this patch touched the page-header title or icon, republish
+        // the mention cache so @-/~ picker results immediately reflect
+        // the new label/emoji.
+        if (patch.title !== undefined || patch.icon !== undefined) {
+          republishMentionCache();
         }
       } catch {
         // On error, restore the prior state.

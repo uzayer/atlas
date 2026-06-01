@@ -106,6 +106,10 @@ pub struct SymbolInput {
 pub struct KnowledgeInput {
     pub id: String,
     pub title: String,
+    /// Per-note emoji/glyph from `_meta.json`. `#[serde(default)]` so an
+    /// older publisher that omits it still deserializes (→ None).
+    #[serde(default)]
+    pub icon: Option<String>,
     pub source: String,
     pub file_path: String,
 }
@@ -139,6 +143,7 @@ pub enum MentionResult {
     Knowledge {
         id: String,
         display_name: String,
+        icon: Option<String>,
         source: String,
         file_path: String,
         folder: Option<String>,
@@ -587,6 +592,7 @@ fn rank_knowledge(query: &str, entries: Vec<KnowledgeInput>) -> Vec<MentionResul
                 MentionResult::Knowledge {
                     id: e.id,
                     display_name: e.title,
+                    icon: e.icon,
                     source: e.source,
                     file_path: e.file_path,
                     folder,
@@ -621,6 +627,7 @@ fn rank_knowledge(query: &str, entries: Vec<KnowledgeInput>) -> Vec<MentionResul
         .map(|(_, e, folder)| MentionResult::Knowledge {
             id: e.id,
             display_name: e.title,
+            icon: e.icon,
             source: e.source,
             file_path: e.file_path,
             folder,

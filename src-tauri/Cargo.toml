@@ -82,6 +82,18 @@ window-vibrancy = "0.6"
 # server crate template).
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
+# macOS-only: unlock WKWebView's >60fps cap on macOS 13-15 by flipping the
+# private WebKit pref `PreferPageRenderingUpdatesNear60FPSEnabled`, so the
+# UI renders/scrolls at the display's native refresh (120Hz ProMotion)
+# instead of being locked to 60. No-op on macOS 26+ (Apple removed the cap)
+# and on non-macOS (not compiled). Acceptable here: Atlas already enables
+# `macos-private-api` and ships via .dmg, not the Mac App Store (which is
+# the only distribution channel that rejects private APIs). The crate wraps
+# its unsafe ObjC in catch_unwind, so a future WebKit change degrades to a
+# logged no-op rather than a crash.
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-plugin-macos-fps = "0.1"
+
 # Release profile — Atlas previously shipped with Cargo defaults
 # (lto = false, codegen-units = 16, no strip), which means the bundled .app
 # binary was substantially larger and slower than necessary. Matches the
