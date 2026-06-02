@@ -192,13 +192,12 @@
     font-size: 13px;
     line-height: 1.45;
     color: var(--text-primary);
-    /* Transparent so the native NSVisualEffectView (HudWindow vibrancy,
-       applied in lib.rs) shows through wherever the React tree is also
-       translucent — currently just the left/right side panels (Xcode
-       look). Every always-solid surface (titlebar, status bar, center
-       panel, welcome screen) paints its own opaque background, so only
-       the side panels reveal the blur. */
-    background: transparent;
+    /* Opaque base black. The window is no longer transparent (the
+       NSVisualEffectView vibrancy was removed because its live backdrop
+       blur caused system-wide Mission Control lag), so the root paints the
+       app's base color. Side panels sit at ~90% opacity over this, which on
+       the pure-black base reads the same as before, minus the desktop blur. */
+    background: var(--bg-base);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     letter-spacing: -0.01em;

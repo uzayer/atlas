@@ -19,11 +19,11 @@
         "minWidth": 960,
         "minHeight": 600,
         "decorations": true,
-        "transparent": true,
+        "transparent": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "acceptFirstMouse": true,
-        "backgroundColor": [0, 0, 0, 0]
+        "backgroundColor": [0, 0, 0, 255]
       }
     ],
     "security": {
@@ -37,9 +37,7 @@
       }
     }
   },
-  "plugins": {
-    "macos-fps": {}
-  },
+  "plugins": {},
   "bundle": {
     "active": true,
     "targets": ["app", "dmg"],

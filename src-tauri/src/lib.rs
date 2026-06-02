@@ -35,45 +35,23 @@ pub fn run() {
     // Triggered by the `atlas <path>` shell helper at ~/.local/bin/atlas.
     let initial_project = commands::cli::parse_initial_project();
 
-    // Unlock the WKWebView frame-rate cap on macOS so the UI scrolls at
-    // the display's native refresh (120Hz) rather than WebKit's default
-    // ~60fps lock. Registered before the rest of the chain so it applies
-    // as each webview becomes ready. macOS-only; no-op elsewhere.
-    #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default();
-    #[cfg(target_os = "macos")]
-    {
-        builder = builder.plugin(tauri_plugin_macos_fps::init());
-    }
-
-    builder
+    tauri::Builder::default()
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
-                // Transparent NSWindow + NSVisualEffectView blur. Combined
-                // with `macos-private-api`, this propagates a transparent
-                // background to the WKWebView's content NSView, so the
-                // brief gap between window-shown and first React paint
-                // shows a dark macOS material instead of the WebKit
-                // default white. Mirrors Athas's
-                // `src-tauri/src/commands/ui/window.rs:157-176` pattern.
+                // Opaque dark window background. Fills the brief gap between
+                // window-shown and first React paint with the app's base
+                // black instead of the WebKit default white.
+                //
+                // This was previously a transparent NSWindow + HudWindow
+                // NSVisualEffectView blur (window_vibrancy). Removed: the live
+                // backdrop blur forced the macOS WindowServer to recomposite
+                // the whole window against everything behind it every frame,
+                // which made Mission Control / Spaces transitions lag
+                // system-wide whenever Atlas was the focused window. An opaque
+                // window can be snapshotted as a flat texture, so the OS
+                // animation stays smooth.
                 let _ = window
-                    .set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
-
-                #[cfg(target_os = "macos")]
-                {
-                    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-                    if let Err(e) = apply_vibrancy(
-                        &window,
-                        NSVisualEffectMaterial::HudWindow,
-                        None,
-                        None,
-                    ) {
-                        tracing::warn!(
-                            target: "atlas::boot",
-                            "apply_vibrancy failed: {e}"
-                        );
-                    }
-                }
+                    .set_background_color(Some(tauri::window::Color(0, 0, 0, 255)));
             }
             // Pre-load the Rust-owned `AppState` (currentProject + recents)
             // before the webview starts loading — paid in parallel with the
