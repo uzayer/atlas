@@ -70,8 +70,3 @@ export function classifyFile(path: string): FileKind {
   if (!ext && EXTENSIONLESS_TEXT_NAMES.has(base)) return "text";
   return "unsupported";
 }
-
-/** Convenience grouping for the tab-routing logic. */
-export function isMediaKind(kind: FileKind): kind is "image" | "video" | "audio" {
-  return kind === "image" || kind === "video" || kind === "audio";
-}

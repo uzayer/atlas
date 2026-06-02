@@ -11,23 +11,6 @@
 // These interfaces are the wire-shape projection of the Rust types
 // (see git_graph.rs). Keep them in sync field-for-field.
 
-/** Wire type returned by the `git_refs` Tauri command. Kept here
- *  (rather than in a dedicated git-types module) because the branch
- *  mention provider consumes it and it sits next to its sibling
- *  graph types. */
-export interface RawRef {
-  name: string;
-  sha: string;
-  kind: "branch" | "remote" | "tag" | string;
-  is_current: boolean;
-}
-
-export interface RawRefs {
-  head: string | null;
-  head_ref: string | null;
-  refs: RawRef[];
-}
-
 export interface RefBadge {
   name: string;
   kind: "branch" | "remote" | "tag" | string;
@@ -64,23 +47,6 @@ export interface BuiltGraph {
 }
 
 // Render-only constants — used by the panel + commit-node components.
-// Lane colors are duplicated on the Rust side (single source of truth
-// for the algorithm); these are only here so any pure-render code that
-// needs to reference a palette color (e.g. fallback styling) doesn't
-// have to invent its own.
 export const LANE_WIDTH = 14;
 export const ROW_HEIGHT = 28;
 export const GRAPH_LEFT_PAD = 14;
-
-export const LANE_COLORS = [
-  "#60a5fa", // blue
-  "#34d399", // emerald
-  "#f59e0b", // amber
-  "#a78bfa", // violet
-  "#f472b6", // pink
-  "#22d3ee", // cyan
-  "#fb7185", // rose
-  "#84cc16", // lime
-  "#eab308", // yellow
-  "#94a3b8", // slate
-];

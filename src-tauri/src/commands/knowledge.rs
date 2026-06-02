@@ -209,6 +209,47 @@ pub async fn knowledge_cover_resolve(
     Ok(abs.to_string_lossy().to_string())
 }
 
+/// Read a cover image and return it as a `data:` URL (base64). Covers live
+/// under the hidden `.atlas/` directory, which Tauri's asset-protocol scope
+/// won't serve (the webview 403s the `asset://` request). A data URL embeds
+/// the bytes directly so the cover renders identically in dev and bundled
+/// builds without depending on the asset protocol or its scope globs.
+/// Gradient refs (`gradient:*`) are returned untouched — they're CSS, not files.
+#[tauri::command]
+pub async fn knowledge_cover_data_url(
+    project_path: String,
+    cover: String,
+) -> Result<String, String> {
+    use base64::Engine;
+    if cover.starts_with("gradient:") {
+        return Ok(cover);
+    }
+    tokio::task::spawn_blocking(move || {
+        let abs = Path::new(&project_path)
+            .join(".atlas")
+            .join("knowledge")
+            .join(&cover);
+        let bytes = fs::read(&abs).map_err(|e| e.to_string())?;
+        let mime = match abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref()
+        {
+            Some("png") => "image/png",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            Some("svg") => "image/svg+xml",
+            Some("avif") => "image/avif",
+            _ => "image/jpeg",
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(format!("data:{};base64,{}", mime, b64))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Append an interaction log entry for context building
 #[tauri::command]
 pub async fn log_interaction(

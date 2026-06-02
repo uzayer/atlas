@@ -86,12 +86,6 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#39;");
 }
 
-/** Imperative entry — returns a `__html` payload ready for
- *  `dangerouslySetInnerHTML`. Cheap on cache hits (O(1) Map lookup). */
-export function renderMarkdownCached(src: string): { __html: string } {
-  return { __html: renderToHtml(src) };
-}
-
 interface CachedMarkdownProps {
   source: string;
   className?: string;

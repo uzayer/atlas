@@ -6,10 +6,21 @@ import { PanelSkeleton } from "@/components/panel-skeleton";
 import {
   Files,
   Brain,
-  GitBranch,
   Network,
+  BarChart3,
   ChevronDown,
+  RefreshCw,
 } from "lucide-react";
+import { useProjectStore } from "@/features/project/stores/project-store";
+import { useUsageReport } from "@/features/monitor/stores/usage-report-store";
+
+// The project "Usage" report (token/cost donut). Lazy — it reads the
+// on-disk Claude session stats only when the user expands it.
+const UsagePanel = lazy(() =>
+  import("@/features/monitor/components/usage-panel").then((m) => ({
+    default: m.UsagePanel,
+  }))
+);
 
 // xyflow + the layout pass are heavy; load only when the user opens the tab.
 const GitGraphPanel = lazy(() =>
@@ -25,15 +36,6 @@ const KnowledgeList = lazy(() =>
     default: m.KnowledgeList,
   }))
 );
-// `GitPanel` (bottom of the Files / Knowledge views) fires `git_status`
-// + `git_log` Tauri commands on mount. On a large repo or one with many
-// changes these can take a noticeable beat to come back — keep it lazy
-// so the file tree renders first.
-const GitPanel = lazy(() =>
-  import("@/features/git/components/git-panel").then((m) => ({
-    default: m.GitPanel,
-  }))
-);
 
 const sections = [
   { id: "files" as const, icon: Files, label: "Files" },
@@ -43,10 +45,11 @@ const sections = [
 
 export function LeftPanel() {
   const activeSection = useLayoutStore.use.leftPanel().activeSection;
-  const gitPanelVisible = useLayoutStore(
-    (s) => s.leftPanel.gitPanelVisible,
-  );
-  const { setLeftSection, toggleGitPanel } = useLayoutStore.use.actions();
+  const usagePanelVisible = useLayoutStore((s) => s.leftPanel.usagePanelVisible);
+  const { setLeftSection, toggleUsagePanel } = useLayoutStore.use.actions();
+  const cwd = useProjectStore((s) => s.currentProject?.path ?? null);
+  const loadUsage = useUsageReport((s) => s.load);
+  const usageLoading = useUsageReport((s) => s.loadingCwd === cwd);
 
   return (
     <div className="atlas-vibrant-panel h-full flex flex-col bg-[color-mix(in_srgb,var(--bg-sidebar)_90%,transparent)]">
@@ -96,39 +99,57 @@ export function LeftPanel() {
         )}
       </div>
 
-      {/* Git panel (bottom) — hidden when the dedicated Git Graph tab is active */}
+      {/* Project usage report — collapsible accordion at the bottom
+          (hidden on the Git Graph tab which owns its own scroll). */}
       {activeSection !== "git-graph" && (
         <div
           className={cn(
             "border-t border-border-default flex flex-col shrink-0",
-            // When collapsed the section is just the header strip; when
-            // visible it gets a reasonable min/max so it doesn't crowd
-            // the file tree but stays usable.
-            gitPanelVisible ? "min-h-[180px] max-h-[50%]" : "",
+            usagePanelVisible ? "min-h-[200px] max-h-[50%]" : "",
           )}
         >
-          <button
-            type="button"
-            onClick={toggleGitPanel}
-            className="flex items-center justify-between px-3 h-[28px] shrink-0 cursor-pointer hover:bg-bg-hover transition-colors"
-            title={gitPanelVisible ? "Collapse Git" : "Expand Git"}
-          >
-            <div className="flex items-center gap-1.5 text-[11px] font-medium text-text-secondary">
-              <GitBranch size={12} />
-              <span>Git</span>
+          <div className="flex items-center justify-between px-3 h-[28px] shrink-0 hover:bg-bg-hover transition-colors">
+            <button
+              type="button"
+              onClick={toggleUsagePanel}
+              className="flex items-center gap-1.5 flex-1 min-w-0 text-left text-[11px] font-medium text-text-secondary cursor-pointer"
+              title={usagePanelVisible ? "Collapse usage" : "Expand usage"}
+            >
+              <BarChart3 size={12} className="shrink-0" />
+              <span>Usage</span>
+            </button>
+            <div className="flex items-center gap-0.5 shrink-0">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (cwd) void loadUsage(cwd);
+                }}
+                className={cn(
+                  "p-0.5 rounded text-text-tertiary hover:text-text-secondary hover:bg-bg-active transition-colors",
+                  usageLoading && "animate-spin",
+                )}
+                title="Refresh usage"
+              >
+                <RefreshCw size={11} />
+              </button>
+              <button
+                type="button"
+                onClick={toggleUsagePanel}
+                className="p-0.5 rounded text-text-tertiary cursor-pointer"
+                title={usagePanelVisible ? "Collapse usage" : "Expand usage"}
+              >
+                <ChevronDown
+                  size={12}
+                  className={cn("transition-transform", !usagePanelVisible && "-rotate-90")}
+                />
+              </button>
             </div>
-            <ChevronDown
-              size={12}
-              className={cn(
-                "text-text-tertiary transition-transform",
-                !gitPanelVisible && "-rotate-90",
-              )}
-            />
-          </button>
-          {gitPanelVisible && (
+          </div>
+          {usagePanelVisible && (
             <div className="flex-1 min-h-0 overflow-hidden">
               <Suspense fallback={<PanelSkeleton rows={3} />}>
-                <GitPanel />
+                <UsagePanel />
               </Suspense>
             </div>
           )}

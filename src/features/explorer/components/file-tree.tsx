@@ -752,8 +752,7 @@ export function FileTree() {
 
 /**
  * Header button that toggles between "collapse all" and "expand all"
- * depending on whether anything is currently expanded. Mirrors the
- * pattern shipped in `changes-panel.tsx` for the Changes header.
+ * depending on whether anything is currently expanded.
  */
 function FoldExpandButton({
   tree,

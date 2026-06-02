@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { logEvent } from "@/features/log/lib/log";
 
-interface GitFileStatus {
+export interface GitFileStatus {
   path: string;
   status: string;
   staged: boolean;
@@ -24,15 +24,50 @@ interface GitBranch {
   is_current: boolean;
 }
 
+export interface BranchInfo {
+  name: string;
+  isCurrent: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  subject: string;
+  date: string;
+}
+
+export interface StashEntry {
+  index: number;
+  message: string;
+  branch: string;
+}
+
+export interface RemoteInfo {
+  name: string;
+  url: string;
+}
+
+export interface CommitDetail {
+  hash: string;
+  shortHash: string;
+  author: string;
+  email: string;
+  date: string;
+  subject: string;
+  body: string;
+  diff: string;
+}
+
+export interface InProgress {
+  merge: boolean;
+  rebase: boolean;
+  cherryPick: boolean;
+  revert: boolean;
+}
+
 /**
- * Subscribe once (lazily) to the Rust-side `atlas:git-status-fresh` event.
- * When fresh git status arrives in the background it patches the store, so
- * any UI that snapshotted the stale cache from the initial `git_status`
- * invoke gets the corrected data the moment git finishes its real walk.
- *
- * Path-gated: if the user switched projects between the initial invoke
- * and the fresh emit, the emit is ignored to avoid stomping the new
- * project's status with the old project's data.
+ * Subscribe once (lazily) to the Rust-side git events. `atlas:git-status-fresh`
+ * patches the stale-while-revalidate status; `atlas:git-changed` (fired by the
+ * watcher after any mutation, including our own `emit_synthetic_change`) drives
+ * a live refresh of the things that change frequently.
  */
 let gitStatusFreshListenerInit = false;
 function ensureGitStatusFreshListener(): void {
@@ -59,26 +94,23 @@ function ensureGitStatusFreshListener(): void {
     });
   });
 
-  // Live updates from the git watcher (commands/git_watcher.rs) —
-  // commit / checkout / branch / fetch all fire `atlas:git-changed`.
-  // Refresh status + branch list + diff so the Changes panel reflects
-  // on-disk truth without polling.
+  // Live updates from the git watcher — commit / checkout / branch / fetch /
+  // stage / push all fire `atlas:git-changed`. Refresh status, the rich
+  // branch list, diff and in-progress state. Stashes/remotes/tags change
+  // rarely and are loaded on demand (mount + the action that mutates them).
   void listen<{ project: string }>("atlas:git-changed", (e) => {
     const current = useGitStore.getState().repoPath;
     if (!current || current !== e.payload.project) return;
     const actions = useGitStore.getState().actions;
     void actions.loadStatus(current).catch(() => {});
     void actions.listBranches().catch(() => {});
+    void actions.loadBranchesFull().catch(() => {});
     void actions.loadDiff().catch(() => {});
+    void actions.loadInProgress().catch(() => {});
   });
 
-  // Workspace edits — any time a file changes in the project (agent
-  // write, user save, terminal touch, etc.) the diff content can
-  // shift even when the set of changed files doesn't. The explorer's
-  // fs-watcher already broadcasts `atlas:explorer:changed` on every
-  // batch; piggyback on it to refresh git status + diff. Debounced
-  // because a single agent turn can produce dozens of writes in
-  // bursts and we don't want to thrash `git status` / `git diff`.
+  // Workspace edits — refresh status + diff (debounced) so editor/agent
+  // writes show up without polling.
   let workspaceDebounce: ReturnType<typeof setTimeout> | null = null;
   void listen("atlas:explorer:changed", () => {
     const current = useGitStore.getState().repoPath;
@@ -99,6 +131,7 @@ interface GitState {
   isRepo: boolean;
   branch: string;
   branches: GitBranch[];
+  branchesFull: BranchInfo[];
   files: GitFileStatus[];
   log: GitLogEntry[];
   diff: string;
@@ -106,6 +139,11 @@ interface GitState {
   behind: number;
   loading: boolean;
   repoPath: string | null;
+  stashes: StashEntry[];
+  remotes: RemoteInfo[];
+  tags: string[];
+  selectedCommit: CommitDetail | null;
+  inProgress: InProgress | null;
 }
 
 interface GitActions {
@@ -114,151 +152,367 @@ interface GitActions {
     loadLog: (path: string) => Promise<void>;
     loadDiff: () => Promise<void>;
     listBranches: () => Promise<void>;
+    loadBranchesFull: () => Promise<void>;
+    loadStashes: () => Promise<void>;
+    loadRemotes: () => Promise<void>;
+    loadTags: () => Promise<void>;
+    loadInProgress: () => Promise<void>;
+    loadCommit: (sha: string) => Promise<void>;
+    clearSelectedCommit: () => void;
+    /** Load everything (mount / panel open). */
+    refreshAll: (path: string) => Promise<void>;
+    // mutations
     checkout: (branch: string) => Promise<void>;
     createBranch: (name: string) => Promise<void>;
-    deleteBranch: (name: string) => Promise<void>;
+    renameBranch: (oldName: string, newName: string) => Promise<void>;
+    deleteBranch: (name: string, force?: boolean) => Promise<void>;
+    mergeBranch: (branch: string) => Promise<void>;
     stageFiles: (paths: string[]) => Promise<void>;
     unstageFiles: (paths: string[]) => Promise<void>;
-    commit: (message: string) => Promise<void>;
+    discard: (paths: string[]) => Promise<void>;
+    commit: (summary: string, description?: string, amend?: boolean) => Promise<void>;
+    fetch: () => Promise<void>;
+    pull: (rebase: boolean) => Promise<void>;
+    push: (forceWithLease?: boolean, followTags?: boolean) => Promise<void>;
+    publishBranch: () => Promise<void>;
+    remoteAdd: (name: string, url: string) => Promise<void>;
+    remoteRemove: (name: string) => Promise<void>;
+    stashPush: (message?: string) => Promise<void>;
+    stashApply: (index: number) => Promise<void>;
+    stashPop: (index: number) => Promise<void>;
+    stashDrop: (index: number) => Promise<void>;
+    reset: (target: string, mode: "soft" | "mixed" | "hard") => Promise<void>;
+    revert: (sha: string) => Promise<void>;
+    cherryPick: (sha: string) => Promise<void>;
+    createTag: (name: string, target?: string, message?: string) => Promise<void>;
+    deleteTag: (name: string) => Promise<void>;
+    opControl: (
+      kind: "merge" | "rebase" | "cherry-pick" | "revert",
+      action: "abort" | "continue",
+    ) => Promise<void>;
   };
 }
 
 export const useGitStore = createSelectors(
   create<GitState & GitActions>()(
-    immer((set, get) => ({
-      isRepo: false,
-      branch: "",
-      branches: [],
-      files: [],
-      log: [],
-      diff: "",
-      ahead: 0,
-      behind: 0,
-      loading: false,
-      repoPath: null,
-      actions: {
-        loadStatus: async (path) => {
-          ensureGitStatusFreshListener();
-          set((s) => {
-            s.loading = true;
-            s.repoPath = path;
-          });
-          try {
-            // Stale-while-revalidate: Rust returns the cached result
-            // immediately and emits `atlas:git-status-fresh` when the
-            // background refresh completes. The listener below patches
-            // the fresh result into the store.
-            const status = await invoke<{
-              is_repo: boolean;
-              branch: string;
-              files: GitFileStatus[];
-              ahead: number;
-              behind: number;
-            }>("git_status", { path });
+    immer((set, get) => {
+      const repo = () => get().repoPath;
 
+      return {
+        isRepo: false,
+        branch: "",
+        branches: [],
+        branchesFull: [],
+        files: [],
+        log: [],
+        diff: "",
+        ahead: 0,
+        behind: 0,
+        loading: false,
+        repoPath: null,
+        stashes: [],
+        remotes: [],
+        tags: [],
+        selectedCommit: null,
+        inProgress: null,
+        actions: {
+          loadStatus: async (path) => {
+            ensureGitStatusFreshListener();
             set((s) => {
-              s.isRepo = status.is_repo;
-              s.branch = status.branch;
-              s.files = status.files;
-              s.ahead = status.ahead;
-              s.behind = status.behind;
-              s.loading = false;
+              s.loading = true;
+              s.repoPath = path;
             });
-          } catch {
+            try {
+              const status = await invoke<{
+                is_repo: boolean;
+                branch: string;
+                files: GitFileStatus[];
+                ahead: number;
+                behind: number;
+              }>("git_status", { path });
+              set((s) => {
+                s.isRepo = status.is_repo;
+                s.branch = status.branch;
+                s.files = status.files;
+                s.ahead = status.ahead;
+                s.behind = status.behind;
+                s.loading = false;
+              });
+            } catch {
+              set((s) => {
+                s.loading = false;
+              });
+            }
+          },
+          loadLog: async (path) => {
+            try {
+              const entries = await invoke<GitLogEntry[]>("git_log", { path, limit: 100 });
+              set((s) => {
+                s.log = entries;
+              });
+            } catch {
+              /* not a repo */
+            }
+          },
+          loadDiff: async () => {
+            const p = repo();
+            if (!p) return;
+            try {
+              const diff = await invoke<string>("git_diff_all", { path: p });
+              set((s) => {
+                s.diff = diff;
+              });
+            } catch {
+              /* ignore */
+            }
+          },
+          listBranches: async () => {
+            const p = repo();
+            if (!p) return;
+            try {
+              const branches = await invoke<GitBranch[]>("git_list_branches", { path: p });
+              set((s) => {
+                s.branches = branches;
+              });
+            } catch {
+              /* ignore */
+            }
+          },
+          loadBranchesFull: async () => {
+            const p = repo();
+            if (!p) return;
+            try {
+              const b = await invoke<BranchInfo[]>("git_branches_full", { path: p });
+              set((s) => {
+                s.branchesFull = b;
+              });
+            } catch {
+              /* ignore */
+            }
+          },
+          loadStashes: async () => {
+            const p = repo();
+            if (!p) return;
+            try {
+              const stashes = await invoke<StashEntry[]>("git_stash_list", { path: p });
+              set((s) => {
+                s.stashes = stashes;
+              });
+            } catch {
+              /* ignore */
+            }
+          },
+          loadRemotes: async () => {
+            const p = repo();
+            if (!p) return;
+            try {
+              const remotes = await invoke<RemoteInfo[]>("git_remotes", { path: p });
+              set((s) => {
+                s.remotes = remotes;
+              });
+            } catch {
+              /* ignore */
+            }
+          },
+          loadTags: async () => {
+            const p = repo();
+            if (!p) return;
+            try {
+              const tags = await invoke<string[]>("git_tags", { path: p });
+              set((s) => {
+                s.tags = tags;
+              });
+            } catch {
+              /* ignore */
+            }
+          },
+          loadInProgress: async () => {
+            const p = repo();
+            if (!p) return;
+            try {
+              const ip = await invoke<InProgress>("git_inprogress", { path: p });
+              set((s) => {
+                s.inProgress =
+                  ip.merge || ip.rebase || ip.cherryPick || ip.revert ? ip : null;
+              });
+            } catch {
+              /* ignore */
+            }
+          },
+          loadCommit: async (sha) => {
+            const p = repo();
+            if (!p) return;
+            try {
+              const detail = await invoke<CommitDetail>("git_show", { path: p, sha });
+              set((s) => {
+                s.selectedCommit = detail;
+              });
+            } catch {
+              /* ignore */
+            }
+          },
+          clearSelectedCommit: () =>
             set((s) => {
-              s.loading = false;
+              s.selectedCommit = null;
+            }),
+          refreshAll: async (path) => {
+            const a = get().actions;
+            await a.loadStatus(path);
+            await Promise.all([
+              a.loadBranchesFull(),
+              a.listBranches(),
+              a.loadDiff(),
+              a.loadStashes(),
+              a.loadRemotes(),
+              a.loadTags(),
+              a.loadInProgress(),
+              a.loadLog(path),
+            ]);
+          },
+
+          checkout: async (branch) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_checkout", { path: p, branch });
+            logEvent({ source: "git", kind: "checkout", summary: branch, payload: { branch } });
+          },
+          createBranch: async (name) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_create_branch", { path: p, name });
+            logEvent({ source: "git", kind: "branch-create", summary: name, payload: { name } });
+          },
+          renameBranch: async (oldName, newName) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_rename_branch", { path: p, oldName, newName });
+          },
+          deleteBranch: async (name, force = false) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_branch_delete", { path: p, name, force });
+            logEvent({ source: "git", kind: "branch-delete", summary: name, payload: { name } });
+          },
+          mergeBranch: async (branch) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_merge_branch", { path: p, branch });
+          },
+          stageFiles: async (paths) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_stage", { path: p, files: paths });
+          },
+          unstageFiles: async (paths) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_unstage", { path: p, files: paths });
+          },
+          discard: async (paths) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_discard", { path: p, files: paths });
+          },
+          commit: async (summary, description, amend = false) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_commit_ex", { path: p, summary, description: description ?? null, amend });
+            logEvent({ source: "git", kind: "commit", summary: summary.slice(0, 120), payload: {} });
+          },
+          fetch: async () => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_fetch", { path: p });
+          },
+          pull: async (rebase) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_pull", { path: p, rebase });
+          },
+          push: async (forceWithLease = false, followTags = false) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_push", { path: p, forceWithLease, followTags });
+          },
+          publishBranch: async () => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_publish_branch", { path: p });
+          },
+          remoteAdd: async (name, url) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_remote_add", { path: p, name, url });
+            await get().actions.loadRemotes();
+          },
+          remoteRemove: async (name) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_remote_remove", { path: p, name });
+            await get().actions.loadRemotes();
+          },
+          stashPush: async (message) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_stash_push", { path: p, message: message ?? null });
+            await get().actions.loadStashes();
+          },
+          stashApply: async (index) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_stash_apply", { path: p, index });
+          },
+          stashPop: async (index) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_stash_pop", { path: p, index });
+            await get().actions.loadStashes();
+          },
+          stashDrop: async (index) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_stash_drop", { path: p, index });
+            await get().actions.loadStashes();
+          },
+          reset: async (target, mode) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_reset", { path: p, target, mode });
+          },
+          revert: async (sha) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_revert", { path: p, sha });
+          },
+          cherryPick: async (sha) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_cherry_pick", { path: p, sha });
+          },
+          createTag: async (name, target, message) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_create_tag", {
+              path: p,
+              name,
+              target: target ?? null,
+              message: message ?? null,
             });
-          }
+            await get().actions.loadTags();
+          },
+          deleteTag: async (name) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_delete_tag", { path: p, name });
+            await get().actions.loadTags();
+          },
+          opControl: async (kind, action) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_op_control", { path: p, kind, action });
+          },
         },
-        loadLog: async (path) => {
-          try {
-            const entries = await invoke<GitLogEntry[]>("git_log", {
-              path,
-              limit: 50,
-            });
-            set((s) => {
-              s.log = entries;
-            });
-          } catch {
-            // not a git repo or error
-          }
-        },
-        loadDiff: async () => {
-          const repoPath = get().repoPath;
-          if (!repoPath) return;
-          try {
-            const diff = await invoke<string>("git_diff_all", { path: repoPath });
-            set((s) => { s.diff = diff; });
-          } catch {}
-        },
-        listBranches: async () => {
-          const repoPath = get().repoPath;
-          if (!repoPath) return;
-          try {
-            const branches = await invoke<GitBranch[]>("git_list_branches", { path: repoPath });
-            set((s) => { s.branches = branches; });
-          } catch {
-            // not a git repo
-          }
-        },
-        // Mutations no longer do explicit `loadStatus` / `listBranches`
-        // afterwards — the Rust git watcher (commands/git_watcher.rs)
-        // observes the resulting .git/HEAD, .git/refs/, .git/index
-        // change and fires `atlas:git-changed`, which the listener
-        // above translates into a refresh. One source of truth
-        // (filesystem) instead of two (explicit refresh + watcher).
-        checkout: async (branch) => {
-          const repoPath = get().repoPath;
-          if (!repoPath) return;
-          await invoke("git_checkout", { path: repoPath, branch });
-          logEvent({ source: "git", kind: "checkout", summary: branch, payload: { branch } });
-        },
-        createBranch: async (name) => {
-          const repoPath = get().repoPath;
-          if (!repoPath) return;
-          await invoke("git_create_branch", { path: repoPath, name });
-          logEvent({ source: "git", kind: "branch-create", summary: name, payload: { name } });
-        },
-        deleteBranch: async (name) => {
-          const repoPath = get().repoPath;
-          if (!repoPath) return;
-          await invoke("git_delete_branch", { path: repoPath, name });
-          logEvent({ source: "git", kind: "branch-delete", summary: name, payload: { name } });
-        },
-        stageFiles: async (paths) => {
-          const repoPath = get().repoPath;
-          if (!repoPath) return;
-          await invoke("git_stage", { path: repoPath, files: paths });
-          logEvent({
-            source: "git",
-            kind: "stage",
-            summary: paths.length === 1 ? paths[0] : `${paths.length} files`,
-            payload: { files: paths },
-          });
-        },
-        unstageFiles: async (paths) => {
-          const repoPath = get().repoPath;
-          if (!repoPath) return;
-          await invoke("git_unstage", { path: repoPath, files: paths });
-          logEvent({
-            source: "git",
-            kind: "unstage",
-            summary: paths.length === 1 ? paths[0] : `${paths.length} files`,
-            payload: { files: paths },
-          });
-        },
-        commit: async (message) => {
-          const repoPath = get().repoPath;
-          if (!repoPath) return;
-          await invoke("git_commit", { path: repoPath, message });
-          logEvent({
-            source: "git",
-            kind: "commit",
-            summary: message.slice(0, 120),
-            payload: { message },
-          });
-        },
-      },
-    }))
-  )
+      };
+    }),
+  ),
 );

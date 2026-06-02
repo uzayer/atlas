@@ -18,6 +18,10 @@ tauri-build = { version = "2", features = [] }
 # need to debug a production-only issue and accept the binary-size and
 # attack-surface cost.
 tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
+# Used to embed KB cover images as `data:` URLs (covers live under the
+# hidden `.atlas/` dir, which the asset protocol won't serve). Pinned to the
+# version already in the lockfile so no new resolution is pulled in.
+base64 = "0.21"
 # Plugin selection — only what JS actually invokes is kept. The Atlas
 # Rust command surface does all its own fs/shell/http work via the std,
 # reqwest, etc. directly; the JS side only touches: `dialog` (Open

@@ -18,28 +18,6 @@ function matchKey(e: KeyboardEvent, key: string) {
   return false;
 }
 
-export function useHotkey(combo: KeyCombo, callback: () => void) {
-  const callbackRef = useRef(callback);
-  callbackRef.current = callback;
-
-  useEffect(() => {
-    function handler(e: KeyboardEvent) {
-      const metaMatch = combo.meta ? e.metaKey || e.ctrlKey : true;
-      const shiftMatch = combo.shift ? e.shiftKey : !e.shiftKey;
-      const altMatch = combo.alt ? e.altKey : !e.altKey;
-      const keyMatch = matchKey(e, combo.key);
-
-      if (metaMatch && shiftMatch && altMatch && keyMatch) {
-        e.preventDefault();
-        callbackRef.current();
-      }
-    }
-
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [combo.key, combo.meta, combo.shift, combo.alt]);
-}
-
 export function useHotkeys(
   bindings: Array<{ combo: KeyCombo; action: () => void }>
 ) {

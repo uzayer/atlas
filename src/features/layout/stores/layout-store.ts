@@ -19,10 +19,10 @@ interface LayoutState {
     visible: boolean;
     width: number;
     activeSection: "files" | "knowledge" | "git-graph";
-    gitPanelHeight: number;
-    /** Show the "Git" changed-files strip below the file tree in the
-     *  left panel. Toggled by the chevron in its header. */
-    gitPanelVisible: boolean;
+    usagePanelHeight: number;
+    /** Show the project "Usage" report accordion below the file tree.
+     *  Toggled by the chevron in its header. */
+    usagePanelVisible: boolean;
   };
   rightPanel: {
     visible: boolean;
@@ -63,7 +63,7 @@ interface LayoutActions {
     toggleRightPanel: () => void;
     toggleBottomPanel: () => void;
     toggleChatSidebar: () => void;
-    toggleGitPanel: () => void;
+    toggleUsagePanel: () => void;
     toggleKnowledgeSidebar: () => void;
     toggleKnowledgeInspector: () => void;
     setKnowledgeSidebarWidth: (width: number) => void;
@@ -95,8 +95,8 @@ const initialState: LayoutState = {
     visible: true,
     width: 240,
     activeSection: "files",
-    gitPanelHeight: 40,
-    gitPanelVisible: true,
+    usagePanelHeight: 220,
+    usagePanelVisible: false,
   },
   rightPanel: {
     visible: true,
@@ -158,9 +158,9 @@ export const useLayoutStore = createSelectors(
           set((s) => {
             s.chatSidebar.visible = !s.chatSidebar.visible;
           }),
-        toggleGitPanel: () =>
+        toggleUsagePanel: () =>
           set((s) => {
-            s.leftPanel.gitPanelVisible = !s.leftPanel.gitPanelVisible;
+            s.leftPanel.usagePanelVisible = !s.leftPanel.usagePanelVisible;
           }),
         toggleKnowledgeSidebar: () =>
           set((s) => {

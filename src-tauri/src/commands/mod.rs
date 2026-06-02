@@ -10,6 +10,7 @@ pub mod claude;
 pub mod fs;
 pub mod git;
 pub mod git_graph;
+pub mod git_ops;
 pub mod git_watcher;
 pub mod github;
 pub mod knowledge;

@@ -29,7 +29,7 @@ export function AppLayout() {
         <PanelGroup direction="horizontal" autoSaveId="atlas-main-layout">
           {showLeft && (
             <>
-              <Panel defaultSize={15} minSize={10} maxSize={25} order={1}>
+              <Panel defaultSize={16} minSize={14} maxSize={28} order={1}>
                 <LeftPanel />
               </Panel>
               <PanelResizeHandle className="w-px bg-border-default hover:bg-accent data-[resize-handle-active]:bg-accent transition-colors cursor-col-resize" />

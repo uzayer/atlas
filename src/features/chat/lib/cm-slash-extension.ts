@@ -13,7 +13,7 @@
 //     across edits.
 
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
-import type { MentionKey, MentionKeyInterceptor } from "./cm-mention-extension";
+import type { MentionKeyInterceptor } from "./cm-mention-extension";
 
 export interface SlashTrigger {
   /** Document position of the `/` (inclusive). */
@@ -26,7 +26,6 @@ export interface SlashTrigger {
   anchor: { x: number; y: number };
 }
 
-export type SlashKey = MentionKey;
 export type SlashKeyInterceptor = MentionKeyInterceptor;
 
 export function slashTriggerPlugin(
@@ -107,26 +106,6 @@ function detectTrigger(view: EditorView): SlashTrigger | null {
     anchor: { x: coords.left, y: coords.top },
   };
 }
-
-/** Keymap that consumes Up/Down/Enter/Esc/Backspace when the picker is open.
- *  Identical shape to `mentionKeymap` — re-exported for symmetry. */
-export const slashKeymap = (
-  getInterceptor: () => SlashKeyInterceptor | null,
-) => {
-  const tryIntercept =
-    (key: SlashKey) =>
-    () => {
-      const fn = getInterceptor();
-      return fn ? fn(key) : false;
-    };
-  return [
-    { key: "ArrowDown", run: tryIntercept("Down") },
-    { key: "ArrowUp", run: tryIntercept("Up") },
-    { key: "Enter", run: tryIntercept("Enter") },
-    { key: "Escape", run: tryIntercept("Escape") },
-    { key: "Backspace", run: tryIntercept("Backspace") },
-  ];
-};
 
 /** Replace the doc range that holds the `/query` text with empty (used by
  *  the picker when an atlas-local command runs — we don't want the literal

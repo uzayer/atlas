@@ -286,6 +286,7 @@ dependencies = [
  "atlas-acp",
  "atlas-agents",
  "atlas-terminal",
+ "base64 0.21.7",
  "chrono",
  "dirs",
  "futures",

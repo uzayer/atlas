@@ -17,9 +17,18 @@ interface KnowledgeState {
   activeEntryId: string | null;
   editContent: string;
   loading: boolean;
+  /** A note the user asked to open from OUTSIDE the KB panel (e.g. the
+   *  left-panel quick list). The panel consumes this on mount/change and
+   *  routes it through its dirty-save-aware select, so opening a specific
+   *  note works even when the (lazy) panel isn't mounted yet. */
+  pendingOpenId: string | null;
   actions: {
     loadEntries: (projectPath: string) => Promise<void>;
     selectEntry: (id: string) => void;
+    /** Request the panel open a specific note (from the left-panel list). */
+    requestOpen: (id: string) => void;
+    /** Panel clears the pending request after handling it. */
+    consumePendingOpen: () => void;
     setEditContent: (content: string) => void;
     saveEntry: (projectPath: string) => Promise<void>;
     createEntry: (projectPath: string) => Promise<void>;
@@ -34,6 +43,7 @@ export const useKnowledgeStore = createSelectors(
     activeEntryId: null,
     editContent: "",
     loading: false,
+    pendingOpenId: null,
     actions: {
       loadEntries: async (projectPath) => {
         try {
@@ -75,6 +85,8 @@ export const useKnowledgeStore = createSelectors(
           editContent: entry?.content ?? "",
         });
       },
+      requestOpen: (id) => set({ pendingOpenId: id }),
+      consumePendingOpen: () => set({ pendingOpenId: null }),
       setEditContent: (content) => set({ editContent: content }),
       saveEntry: async (projectPath) => {
         const { activeEntryId, editContent } = get();

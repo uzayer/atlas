@@ -346,6 +346,65 @@ fn pricing_for(model: &str) -> (f64, f64, f64, f64) {
     }
 }
 
+/// Walk a session's JSONL and sum token usage + cost. Safe on a missing
+/// file (returns zeroed stats). Shared by `claude_session_stats` and the
+/// project-wide aggregate.
+fn compute_session_stats(path: &Path, session_id: &str) -> ClaudeSessionStats {
+    let mut stats = ClaudeSessionStats {
+        session_id: session_id.to_string(),
+        ..Default::default()
+    };
+    let Ok(file) = std::fs::File::open(path) else {
+        return stats;
+    };
+    let reader = BufReader::new(file);
+
+    for line in reader.lines().flatten() {
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        // Don't bill sub-agent warmup turns to the user-visible session.
+        if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+            continue;
+        }
+        let msg = match v.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+        if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
+            stats.model = Some(model.to_string());
+        }
+        let usage = match msg.get("usage") {
+            Some(u) => u,
+            None => continue,
+        };
+        stats.input_tokens += usage.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+        stats.output_tokens += usage.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+        stats.cache_creation_tokens += usage
+            .get("cache_creation_input_tokens")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0);
+        stats.cache_read_tokens += usage
+            .get("cache_read_input_tokens")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0);
+        stats.request_count += 1;
+    }
+
+    let model = stats.model.clone().unwrap_or_default();
+    let (p_in, p_out, p_cw, p_cr) = pricing_for(&model);
+    let m = 1_000_000.0;
+    stats.total_cost_usd = (stats.input_tokens as f64 / m) * p_in
+        + (stats.output_tokens as f64 / m) * p_out
+        + (stats.cache_creation_tokens as f64 / m) * p_cw
+        + (stats.cache_read_tokens as f64 / m) * p_cr;
+    stats
+}
+
 #[tauri::command]
 pub async fn claude_session_stats(
     cwd: String,
@@ -354,72 +413,110 @@ pub async fn claude_session_stats(
     tokio::task::spawn_blocking(move || -> Result<ClaudeSessionStats, String> {
         let folder = projects_dir()?.join(encode_cwd(&cwd));
         let path = folder.join(format!("{}.jsonl", session_id));
-        if !path.exists() {
-            return Ok(ClaudeSessionStats {
-                session_id,
-                ..Default::default()
-            });
-        }
-        let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-        let reader = BufReader::new(file);
+        Ok(compute_session_stats(&path, &session_id))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 
-        let mut stats = ClaudeSessionStats {
-            session_id: session_id.clone(),
-            ..Default::default()
+// ───────────────────────── Project-wide usage ─────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct SessionUsage {
+    #[serde(flatten)]
+    pub stats: ClaudeSessionStats,
+    /// File mtime in epoch milliseconds (formatted client-side).
+    pub last_modified: Option<u64>,
+    pub preview: String,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub request_count: u64,
+    pub total_cost_usd: f64,
+    pub session_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectUsage {
+    pub totals: UsageTotals,
+    pub sessions: Vec<SessionUsage>,
+}
+
+/// First non-injected user line of a session, truncated for a preview label.
+fn session_preview(path: &Path) -> String {
+    let Ok(file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    for line in BufReader::new(file).lines().flatten() {
+        if let Some(text) = extract_first_user_text(&line) {
+            let t: String = text.chars().take(80).collect();
+            return t;
+        }
+    }
+    String::new()
+}
+
+/// Aggregate token/cost usage across every Claude Code session of `cwd`.
+/// One batched call rather than N per-session round-trips.
+#[tauri::command]
+pub async fn project_usage_stats(cwd: String) -> Result<ProjectUsage, String> {
+    tokio::task::spawn_blocking(move || -> Result<ProjectUsage, String> {
+        let folder = projects_dir()?.join(encode_cwd(&cwd));
+        let mut sessions: Vec<SessionUsage> = Vec::new();
+        let mut totals = UsageTotals::default();
+
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            // No sessions yet for this project — empty report, not an error.
+            return Ok(ProjectUsage { totals, sessions });
         };
 
-        for line in reader.lines().flatten() {
-            let v: serde_json::Value = match serde_json::from_str(&line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            // Only assistant messages carry usage.
-            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            // Don't bill sub-agent warmup turns to the user-visible session.
-            if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let stats = compute_session_stats(&path, id);
+            // Skip empty sessions (no assistant turns) to keep the report tidy.
+            if stats.request_count == 0 {
                 continue;
             }
-            let msg = match v.get("message") {
-                Some(m) => m,
-                None => continue,
-            };
-            // Capture model (latest wins)
-            if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
-                stats.model = Some(model.to_string());
-            }
-            let usage = match msg.get("usage") {
-                Some(u) => u,
-                None => continue,
-            };
-            let input = usage.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
-            let output = usage.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
-            let cache_w = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0);
-            let cache_r = usage
-                .get("cache_read_input_tokens")
-                .and_then(|n| n.as_u64())
-                .unwrap_or(0);
+            totals.input_tokens += stats.input_tokens;
+            totals.output_tokens += stats.output_tokens;
+            totals.cache_creation_tokens += stats.cache_creation_tokens;
+            totals.cache_read_tokens += stats.cache_read_tokens;
+            totals.request_count += stats.request_count;
+            totals.total_cost_usd += stats.total_cost_usd;
+            totals.session_count += 1;
 
-            stats.input_tokens += input;
-            stats.output_tokens += output;
-            stats.cache_creation_tokens += cache_w;
-            stats.cache_read_tokens += cache_r;
-            stats.request_count += 1;
+            let last_modified = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+
+            sessions.push(SessionUsage {
+                preview: session_preview(&path),
+                last_modified,
+                stats,
+            });
         }
 
-        let model = stats.model.clone().unwrap_or_default();
-        let (p_in, p_out, p_cw, p_cr) = pricing_for(&model);
-        let m = 1_000_000.0;
-        stats.total_cost_usd = (stats.input_tokens as f64 / m) * p_in
-            + (stats.output_tokens as f64 / m) * p_out
-            + (stats.cache_creation_tokens as f64 / m) * p_cw
-            + (stats.cache_read_tokens as f64 / m) * p_cr;
+        sessions.sort_by(|a, b| {
+            b.stats
+                .total_cost_usd
+                .partial_cmp(&a.stats.total_cost_usd)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        Ok(stats)
+        Ok(ProjectUsage { totals, sessions })
     })
     .await
     .map_err(|e| e.to_string())?

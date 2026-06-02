@@ -29,7 +29,6 @@ import { KnowledgeInspector } from "./knowledge-inspector";
 import { PageProperties } from "./page-properties";
 import { IconPicker } from "./icon-picker";
 import { CoverPicker, gradientCss } from "./cover-picker";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   Copy,
   ExternalLink,
@@ -44,9 +43,11 @@ export function KnowledgePanel() {
   const entries = useKnowledgeStore.use.entries();
   const activeEntryId = useKnowledgeStore.use.activeEntryId();
   const editContent = useKnowledgeStore.use.editContent();
+  const pendingOpenId = useKnowledgeStore.use.pendingOpenId();
   const {
     loadEntries,
     selectEntry,
+    consumePendingOpen,
     setEditContent,
     saveEntry,
     createEntry,
@@ -237,6 +238,16 @@ export function KnowledgePanel() {
     },
     [isDirty, activeEntryId, flushAndSave, selectEntry],
   );
+
+  // Honor "open this note" requests from outside the panel (the left-panel
+  // quick list). Routed through `handleSelectEntry` so the current note's
+  // unsaved edits are flushed first. Works on first mount too, since the
+  // request is parked in the store until consumed here.
+  useEffect(() => {
+    if (!pendingOpenId) return;
+    void handleSelectEntry(pendingOpenId);
+    consumePendingOpen();
+  }, [pendingOpenId, handleSelectEntry, consumePendingOpen]);
 
   const handleDeleteEntry = useCallback(
     (id: string) => {
@@ -654,15 +665,30 @@ function PageHeaderWithIcon({
 
   const isGradientCover = cover?.startsWith("gradient:");
   const gradient = isGradientCover ? gradientCss(cover!) : null;
-  const coverUrl = cover && !isGradientCover
-    ? convertFileSrc(
-        // Resolve through the same path the Rust command would build.
-        // We can't await here; instead build the absolute path on the
-        // fly using a synchronous join — equivalent to what
-        // knowledge_cover_resolve does. Saves an IPC roundtrip.
-        `${projectPath}/.atlas/knowledge/${cover}`,
-      )
-    : null;
+
+  // Covers are stored under the hidden `.atlas/` directory, which Tauri's
+  // asset protocol refuses to serve (the webview 403s the asset:// request).
+  // Fetch the image as a base64 `data:` URL instead — it embeds the bytes
+  // directly, so the cover renders identically in dev and bundled builds
+  // without depending on the asset protocol or its scope globs.
+  const [coverUrl, setCoverUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!cover || isGradientCover) {
+      setCoverUrl(null);
+      return;
+    }
+    let alive = true;
+    void invoke<string>("knowledge_cover_data_url", { projectPath, cover })
+      .then((url) => {
+        if (alive) setCoverUrl(url);
+      })
+      .catch(() => {
+        if (alive) setCoverUrl(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [cover, isGradientCover, projectPath]);
 
   return (
     <div style={{ marginBottom: 14 }}>
@@ -680,7 +706,11 @@ function PageHeaderWithIcon({
             borderRadius: 10,
             border: "1px solid var(--border-subtle)",
             margin: "0 0 14px",
-            background: gradient ?? `center / cover no-repeat url("${coverUrl}")`,
+            background:
+              gradient ??
+              (coverUrl
+                ? `center / cover no-repeat url("${coverUrl}")`
+                : "var(--bg-elevated)"),
             position: "relative",
             cursor: "pointer",
           }}

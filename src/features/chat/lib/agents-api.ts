@@ -38,11 +38,6 @@ export interface AuthRunDone {
   message: string | null;
 }
 
-export interface AuthRunProgress {
-  stream: "stdout" | "stderr";
-  line: string;
-}
-
 export const agents = {
   listPlugins: () => invoke<PluginSpec[]>("agents_list_plugins"),
   listRunning: () => invoke<AgentInfo[]>("agents_list_running"),
@@ -85,11 +80,6 @@ export const agents = {
   runAuthMethod: (agentId: AgentId, methodId: string) =>
     invoke<void>("agents_run_auth_method", { agentId, methodId }),
 };
-
-export const listenAuthRunProgress = (
-  handler: (p: AuthRunProgress) => void,
-): Promise<UnlistenFn> =>
-  listen<AuthRunProgress>("atlas:auth-run:progress", (e) => handler(e.payload));
 
 export const listenAuthRunDone = (
   handler: (p: AuthRunDone) => void,

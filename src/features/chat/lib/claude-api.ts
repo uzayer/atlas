@@ -58,3 +58,29 @@ export function getClaudeSessionStats(
 ): Promise<ClaudeSessionStats> {
   return invoke<ClaudeSessionStats>("claude_session_stats", { cwd, sessionId });
 }
+
+export interface SessionUsage extends ClaudeSessionStats {
+  /** File mtime in epoch milliseconds. */
+  last_modified: number | null;
+  preview: string;
+}
+
+export interface UsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  request_count: number;
+  total_cost_usd: number;
+  session_count: number;
+}
+
+export interface ProjectUsage {
+  totals: UsageTotals;
+  sessions: SessionUsage[];
+}
+
+/** Aggregate token/cost usage across all Claude Code sessions of `cwd`. */
+export function getProjectUsage(cwd: string): Promise<ProjectUsage> {
+  return invoke<ProjectUsage>("project_usage_stats", { cwd });
+}

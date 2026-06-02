@@ -32,8 +32,6 @@ export function KnowledgeList() {
   const metaPages = useKnowledgeMetaStore.use.pages();
   const { loadEntries } = useKnowledgeStore.use.actions();
   const { addTab } = useLayoutStore.use.actions();
-  const activeTabId = useLayoutStore.use.activeTabId();
-  const tabs = useLayoutStore.use.tabs();
   const currentProject = useProjectStore.use.currentProject();
 
   const treeRef = useRef<KnowledgeTreeHandle>(null);
@@ -66,15 +64,12 @@ export function KnowledgeList() {
     [treeEntries],
   );
 
-  // Highlight the note that's open in the active tab.
-  const activeEntryId = useMemo(() => {
-    const t = tabs.find((tab) => tab.id === activeTabId);
-    if (t?.type !== "knowledge") return null;
-    const id = (t.data as { entryId?: string }).entryId;
-    return typeof id === "string" ? id : null;
-  }, [tabs, activeTabId]);
-
   const handleOpen = (id: string) => {
+    // Tell the KB panel which note to open. The knowledge tab dedupes by
+    // type, so `addTab` only focuses the (single) KB tab — the actual
+    // selection is driven through the store so it opens the RIGHT note,
+    // whether the panel is already mounted or about to mount.
+    useKnowledgeStore.getState().actions.requestOpen(id);
     addTab({
       id: `knowledge-${id}`,
       type: "knowledge",
@@ -219,7 +214,9 @@ export function KnowledgeList() {
       <KnowledgeTree
         ref={treeRef}
         entries={treeEntries}
-        activeEntryId={activeEntryId}
+        // The left-panel list is navigation-only — don't render a
+        // (stale) selected-row highlight; selection lives in the KB tab.
+        activeEntryId={null}
         onSelect={handleOpen}
         onExpandedCountChange={setExpandedCount}
       />
