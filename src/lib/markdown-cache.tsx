@@ -140,20 +140,69 @@ export function CachedMarkdown({ source, className }: CachedMarkdownProps) {
     };
   }, [source, html]);
 
+  // One delegated click handler: copy-code buttons + safe external links.
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
     const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
+      // Copy-code button (injected below).
+      const copyBtn = target?.closest?.(".atlas-code-copy");
+      if (copyBtn instanceof HTMLElement) {
+        e.preventDefault();
+        const pre = copyBtn.closest("pre");
+        const text = pre?.querySelector("code")?.textContent ?? pre?.textContent ?? "";
+        void navigator.clipboard.writeText(text).catch(() => {});
+        copyBtn.textContent = "Copied";
+        window.setTimeout(() => {
+          copyBtn.textContent = "Copy";
+        }, 1200);
+        return;
+      }
+      // External links: open in the system browser via the opener plugin
+      // rather than letting an `<a>` navigate the WKWebView away from Atlas.
       const anchor = target?.closest?.("a");
-      if (anchor && anchor instanceof HTMLAnchorElement && anchor.href) {
-        anchor.setAttribute("target", "_blank");
-        anchor.setAttribute("rel", "noopener noreferrer");
+      if (anchor instanceof HTMLAnchorElement && anchor.href && /^https?:/i.test(anchor.href)) {
+        e.preventDefault();
+        const href = anchor.href;
+        void import("@tauri-apps/plugin-opener")
+          .then((m) => m.openUrl(href))
+          .catch(() => {});
       }
     };
     node.addEventListener("click", onClick);
     return () => node.removeEventListener("click", onClick);
   }, []);
+
+  // Inject a language label + copy button into each code block once the
+  // cached HTML lands (and again whenever it changes).
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    node.querySelectorAll("pre").forEach((pre) => {
+      if ((pre as HTMLElement).dataset.enhanced) return;
+      (pre as HTMLElement).dataset.enhanced = "1";
+      const code = pre.querySelector("code");
+      const lang = Array.from(code?.classList ?? [])
+        .find((c) => c.startsWith("language-"))
+        ?.slice("language-".length);
+      const bar = document.createElement("div");
+      bar.className = "atlas-code-bar";
+      if (lang && lang !== "text" && lang !== "plaintext") {
+        const l = document.createElement("span");
+        l.className = "atlas-code-lang";
+        l.textContent = lang;
+        bar.appendChild(l);
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "atlas-code-copy";
+      btn.setAttribute("aria-label", "Copy code");
+      btn.textContent = "Copy";
+      bar.appendChild(btn);
+      pre.appendChild(bar);
+    });
+  }, [html]);
 
   return (
     <div

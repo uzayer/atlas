@@ -496,6 +496,16 @@
   animation: atlas-blink 1s steps(1, end) infinite;
 }
 
+/* Respect the OS "reduce motion" setting — hold the caret steady and
+   neutralize our entrance/blink animations (keep their end state). */
+@media (prefers-reduced-motion: reduce) {
+  .atlas-stream-caret { animation: none; }
+  .atlas-pill-in,
+  .atlas-fade-in { animation: none; }
+  .animate-scale-in,
+  .animate-fade-in { animation: none !important; }
+}
+
 /* Atlas-themed CodeMirror Find/Replace panel (Cmd+F). These rules sit
    OUTSIDE `@layer base` so they outrank any unlayered @codemirror/view
    StyleModule injections — layered styles always lose to unlayered. The
@@ -703,6 +713,7 @@
   color: var(--text-secondary);
 }
 .prose-chat pre {
+  position: relative;
   border: 1px solid var(--border-default);
   background: var(--bg-secondary);
   padding: 0.75rem;
@@ -714,6 +725,39 @@
   overflow-wrap: anywhere;
   overflow: hidden;
 }
+
+/* Code-block affordances injected by CachedMarkdown — a hover-revealed
+   language label + copy button floated at the top-right of each block. */
+.atlas-code-bar {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.prose-chat pre:hover .atlas-code-bar { opacity: 1; }
+.atlas-code-lang {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+.atlas-code-copy {
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 120ms ease-out, background 120ms ease-out;
+}
+.atlas-code-copy:hover { color: var(--text-primary); background: var(--bg-hover); }
 .prose-chat code {
   padding: 0.125rem 0.25rem;
   border-radius: 0.25rem;

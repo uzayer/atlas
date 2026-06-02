@@ -560,7 +560,25 @@ function appendTextToDraft(s: ChatDraft, acpSessionId: string, text: string): vo
   const tid = findTabByAcpSession(s.sessions, acpSessionId);
   if (!tid) return;
   const session = s.sessions[tid];
-  const last = session.messages[session.messages.length - 1];
+  // Find the last message that actually renders something, skipping the
+  // empty `thinking` markers claude-agent-acp emits between text chunks.
+  // Without this, one continuous narration split by such a marker becomes
+  // two text messages and the markdown between them (a bold span, a
+  // sentence, even mid-word) parses as two broken fragments.
+  let last: (typeof session.messages)[number] | undefined;
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const m = session.messages[i];
+    const rendersNothing =
+      !m.content?.trim() &&
+      !m.thinking?.trim() &&
+      m.toolCalls.length === 0 &&
+      m.fileChanges.length === 0 &&
+      !(m.plan && m.plan.length > 0);
+    if (!rendersNothing) {
+      last = m;
+      break;
+    }
+  }
   // Append into the trailing text-mode message; otherwise start a new
   // one so a preceding tool/thinking block isn't merged with unrelated
   // narration.

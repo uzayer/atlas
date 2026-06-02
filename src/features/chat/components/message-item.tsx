@@ -1,4 +1,5 @@
 import { useState, memo } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/types/agent";
 import {
@@ -15,6 +16,8 @@ import {
   Brain,
   ChevronRight,
   Paperclip,
+  Maximize2,
+  X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -76,10 +79,18 @@ export const MessageItem = memo(function MessageItem({
   dividerAbove = false,
   compact = false,
   isLastInGroup = true,
+  model,
+  timeGapAbove,
 }: {
   message: ChatMessage;
   streaming?: boolean;
   dividerAbove?: boolean;
+  /** Session model (e.g. "claude-opus-4-7") — shown as a subtle badge on
+   *  the assistant turn header so multi-model sessions are legible. */
+  model?: string | null;
+  /** When set (e.g. "2h"), render a faint time-gap divider above this
+   *  message to mark a real pause between turns. */
+  timeGapAbove?: string | null;
   /**
    * When true, suppress the avatar + role/timestamp header so consecutive
    * messages from the same role render as one continuous turn — matches
@@ -123,6 +134,15 @@ export const MessageItem = memo(function MessageItem({
         dividerAbove && "border-t border-dashed border-[var(--border-default)]"
       )}
     >
+      {/* Time-gap divider — marks a real pause between turns (iMessage
+          style) so a thread reads in sessions, not one endless scroll. */}
+      {timeGapAbove && (
+        <div className="flex items-center gap-2 max-w-[760px] mx-auto mb-4 text-[9px] uppercase tracking-wider text-[var(--text-tertiary)] select-none">
+          <span className="h-px flex-1 bg-[var(--border-subtle)]" />
+          <span>{timeGapAbove} ago</span>
+          <span className="h-px flex-1 bg-[var(--border-subtle)]" />
+        </div>
+      )}
       <div className="flex gap-4 max-w-[760px] mx-auto">
         {/* Avatar gutter. For grouped (compact) sub-blocks we replace the
             avatar with a thin vertical rail centered in the same column,
@@ -149,8 +169,11 @@ export const MessageItem = memo(function MessageItem({
           </div>
         )}
 
-        {/* Content */}
-        <div className="relative flex-1 min-w-0 space-y-3">
+        {/* Content. The actions cluster is rendered OUTSIDE the
+            `space-y-3` stack (as a sibling of it) — otherwise it counts
+            as the first space-y child and pushes a 12px top margin onto
+            the real first block of every message. */}
+        <div className="relative flex-1 min-w-0">
           {/* Quick actions — revealed on row hover (Zed/Linear style),
               available on every settled message rather than only the
               last of a group. Floats at the top-right of the content
@@ -158,6 +181,7 @@ export const MessageItem = memo(function MessageItem({
           {!streaming && message.content && (
             <MessageActions message={message} />
           )}
+          <div className="space-y-3">
           {!compact && (
             <div className="flex items-center gap-2">
               <span className="text-[11px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">
@@ -169,6 +193,14 @@ export const MessageItem = memo(function MessageItem({
                   minute: "2-digit",
                 })}
               </span>
+              {isAssistant && model && (
+                <span
+                  className="ml-auto shrink-0 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] px-1.5 py-px text-[9px] font-mono text-[var(--text-tertiary)]"
+                  title={`Model: ${model}`}
+                >
+                  {model}
+                </span>
+              )}
             </div>
           )}
 
@@ -235,7 +267,7 @@ export const MessageItem = memo(function MessageItem({
           {message.plan && message.plan.length > 0 && (
             <PlanCard steps={message.plan} />
           )}
-
+          </div>
         </div>
       </div>
     </div>
@@ -427,16 +459,176 @@ const ThinkingAccordion = memo(function ThinkingAccordion({
   );
 });
 
+// ── Edit-diff extraction ─────────────────────────────────────────────
+// Agent file edits arrive as tool arguments (Claude Code: Edit →
+// old_string/new_string, Write → content, MultiEdit → edits[]). We render
+// the diff straight from those args — no file read, no backend.
+const EDIT_TOOLS = new Set([
+  "edit",
+  "write",
+  "multiedit",
+  "create_file",
+  "create",
+  "str_replace",
+  "str_replace_editor",
+  "apply_patch",
+]);
+
+interface EditPart {
+  old: string;
+  neu: string;
+}
+
+const asStr = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+function getEditParts(toolName: string, args: Record<string, unknown>): EditPart[] {
+  const parts: EditPart[] = [];
+  const edits = args.edits;
+  if (Array.isArray(edits)) {
+    for (const e of edits) {
+      if (e && typeof e === "object") {
+        const o = e as Record<string, unknown>;
+        const old = asStr(o.old_string) ?? asStr(o.oldString) ?? asStr(o.old_str) ?? "";
+        const neu = asStr(o.new_string) ?? asStr(o.newString) ?? asStr(o.new_str) ?? "";
+        if (old || neu) parts.push({ old, neu });
+      }
+    }
+    if (parts.length) return parts;
+  }
+  const old = asStr(args.old_string) ?? asStr(args.oldString) ?? asStr(args.old_str);
+  const neu = asStr(args.new_string) ?? asStr(args.newString) ?? asStr(args.new_str);
+  if (old != null || neu != null) return [{ old: old ?? "", neu: neu ?? "" }];
+  // Whole-file write/create — only when the tool is actually an editor.
+  if (EDIT_TOOLS.has(toolName.toLowerCase())) {
+    const content =
+      asStr(args.content) ?? asStr(args.new_content) ?? asStr(args.text) ?? asStr(args.file_text);
+    if (content != null) return [{ old: "", neu: content }];
+  }
+  return parts;
+}
+
+interface DiffRow {
+  type: "context" | "add" | "remove";
+  text: string;
+}
+
+const DIFF_CONTEXT = 2;
+
+// Trim common leading/trailing lines so the diff shows the change plus a
+// little context, not the whole quoted block.
+function diffRows(oldStr: string, neu: string): DiffRow[] {
+  const o = oldStr.split("\n");
+  const n = neu.split("\n");
+  let start = 0;
+  while (start < o.length && start < n.length && o[start] === n[start]) start++;
+  let eo = o.length;
+  let en = n.length;
+  while (eo > start && en > start && o[eo - 1] === n[en - 1]) {
+    eo--;
+    en--;
+  }
+  const rows: DiffRow[] = [];
+  for (const t of o.slice(Math.max(start - DIFF_CONTEXT, 0), start))
+    rows.push({ type: "context", text: t });
+  for (let i = start; i < eo; i++) rows.push({ type: "remove", text: o[i] });
+  for (let i = start; i < en; i++) rows.push({ type: "add", text: n[i] });
+  for (const t of o.slice(eo, Math.min(eo + DIFF_CONTEXT, o.length)))
+    rows.push({ type: "context", text: t });
+  return rows;
+}
+
+function EditDiffView({ parts }: { parts: EditPart[] }) {
+  return (
+    <div className="border-t border-[var(--border-default)] max-h-[320px] overflow-auto hide-scrollbar">
+      {parts.map((p, i) => (
+        <div key={i}>
+          {parts.length > 1 && (
+            <div className="px-3 py-1 text-[9px] uppercase tracking-wider text-[var(--text-tertiary)] bg-[var(--bg-base)] sticky top-0">
+              Edit {i + 1}
+            </div>
+          )}
+          {diffRows(p.old, p.neu).map((r, j) => (
+            <div
+              key={j}
+              className={cn(
+                "flex font-mono text-[11px] leading-[18px]",
+                r.type === "add" && "bg-[#0d2211]",
+                r.type === "remove" && "bg-[#220d0d]",
+                r.type === "context" && "text-[var(--text-tertiary)]",
+              )}
+            >
+              <span className="w-4 shrink-0 text-center select-none text-[var(--text-tertiary)]">
+                {r.type === "add" ? "+" : r.type === "remove" ? "−" : ""}
+              </span>
+              <span className="flex-1 whitespace-pre-wrap break-words pr-2 select-text">
+                {r.text || " "}
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ToolOutputDialog({
+  open,
+  onOpenChange,
+  title,
+  result,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  result: string;
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          className={cn(
+            "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
+            "flex max-h-[80vh] w-[720px] max-w-[92vw] flex-col overflow-hidden rounded-md",
+            "border border-border-default bg-bg-elevated shadow-[var(--shadow-overlay)] animate-scale-in",
+          )}
+        >
+          <div className="flex items-center gap-2 border-b border-border-default px-4 py-2.5">
+            <Dialog.Title className="flex-1 min-w-0 truncate font-mono text-[12px] text-text-secondary">
+              {title}
+            </Dialog.Title>
+            <Dialog.Close
+              className="flex h-6 w-6 items-center justify-center rounded text-text-tertiary hover:bg-bg-hover hover:text-text-primary transition-colors"
+              aria-label="Close"
+            >
+              <X size={13} />
+            </Dialog.Close>
+          </div>
+          <pre className="flex-1 overflow-auto whitespace-pre-wrap break-words px-4 py-3 font-mono text-[11px] leading-snug text-text-secondary select-text">
+            {result}
+          </pre>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 const ToolCallCard = memo(function ToolCallCard({
   toolCall,
 }: {
   toolCall: ChatMessage["toolCalls"][number];
 }) {
   const [copied, setCopied] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(false);
+  const [outputOpen, setOutputOpen] = useState(false);
 
   const args = toolCall.arguments as Record<string, unknown>;
   const isBash = toolCall.toolName.toLowerCase() === "bash";
   const filePath = getFilePathFromInput(args);
+  const editParts = getEditParts(toolCall.toolName, args);
+  const hasDiff = editParts.length > 0;
+  const hasOutput = !!toolCall.result && toolCall.result.trim().length > 0;
 
   // Status icon — check for success, cross for failure, spinner while running.
   const isRunning =
@@ -514,6 +706,33 @@ const ToolCallCard = memo(function ToolCallCard({
         <span className="text-[11px] font-mono text-[var(--text-secondary)] flex-1 min-w-0 truncate">
           {title}
         </span>
+        {hasDiff && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setDiffOpen((v) => !v);
+            }}
+            className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors shrink-0"
+            title={diffOpen ? "Hide diff" : "Show diff"}
+          >
+            <ChevronRight
+              size={13}
+              className={cn("transition-transform", diffOpen && "rotate-90")}
+            />
+          </button>
+        )}
+        {hasOutput && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setOutputOpen(true);
+            }}
+            className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors shrink-0"
+            title="View output"
+          >
+            <Maximize2 size={11} />
+          </button>
+        )}
         <button
           onClick={handleCopy}
           className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors shrink-0"
@@ -526,12 +745,24 @@ const ToolCallCard = memo(function ToolCallCard({
           )}
         </button>
       </div>
+      {/* Inline diff — expands in the thread (the virtualizer re-measures
+          the row, so it stays correctly positioned). Bounded height so a
+          huge edit can't blow the row up. */}
+      {hasDiff && diffOpen && <EditDiffView parts={editParts} />}
       {showError && (
         <div className="border-t border-[var(--status-error)]/30 bg-[var(--status-error)]/5 px-3 py-1.5">
-          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-[var(--status-error)] select-text">
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-[var(--status-error)] select-text">
             {toolCall.result}
           </pre>
         </div>
+      )}
+      {hasOutput && (
+        <ToolOutputDialog
+          open={outputOpen}
+          onOpenChange={setOutputOpen}
+          title={title}
+          result={toolCall.result ?? ""}
+        />
       )}
     </div>
   );

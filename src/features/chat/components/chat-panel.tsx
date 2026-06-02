@@ -62,6 +62,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   // `onShowJumpChange` and exposes `scrollToBottom` via its ref.
   const messagesListRef = useRef<MessagesListHandle>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const [jumpCount, setJumpCount] = useState(0);
 
   const acpSessionId = session?.acpSessionId ?? "";
 
@@ -408,7 +409,10 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
               messages={session.messages}
               roleFilter={roleFilter}
               isStreaming={session.status === "running"}
-              onShowJumpChange={setShowJumpToBottom}
+              onShowJumpChange={(visible, count) => {
+                setShowJumpToBottom(visible);
+                setJumpCount(count ?? 0);
+              }}
             />
           </Suspense>
         )}
@@ -423,6 +427,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             onStop={handleStop}
             running={session.status === "running"}
             showJumpToBottom={showJumpToBottom}
+            jumpCount={jumpCount}
             onScrollToBottom={() => messagesListRef.current?.scrollToBottom()}
           />
         </div>
@@ -482,6 +487,7 @@ function ChatComposer({
   onStop,
   running,
   showJumpToBottom,
+  jumpCount,
   onScrollToBottom,
 }: {
   tabId: string;
@@ -489,6 +495,7 @@ function ChatComposer({
   onStop: () => void;
   running: boolean;
   showJumpToBottom: boolean;
+  jumpCount: number;
   onScrollToBottom: () => void;
 }) {
   const phase = useClaudeSetupStore.use.phase();
@@ -537,7 +544,11 @@ function ChatComposer({
                   )}
                 >
                   <ChevronDown size={11} />
-                  <span>Scroll to bottom</span>
+                  <span>
+                    {jumpCount > 0
+                      ? `${jumpCount} new message${jumpCount === 1 ? "" : "s"}`
+                      : "Scroll to bottom"}
+                  </span>
                 </button>
               )}
             </div>

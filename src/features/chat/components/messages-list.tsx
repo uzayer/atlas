@@ -11,7 +11,19 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatMessage } from "@/types/agent";
 import { MessageItem } from "./message-item";
+import { useChatStore } from "../stores/chat-store";
 import { cn } from "@/lib/utils";
+
+// Render a faint "· Xh ago ·" divider between turns separated by more
+// than this gap, so a long thread reads in sessions.
+const TURN_GAP_MS = 20 * 60 * 1000;
+function formatGap(ms: number): string {
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
 
 interface MessagesListProps {
   tabId: string;
@@ -21,7 +33,7 @@ interface MessagesListProps {
   isStreaming: boolean;
   /** Bubble up the "scrolled-up" state so the parent can render a
    *  centered scroll-to-bottom button alongside the Claude-setup pill. */
-  onShowJumpChange?: (visible: boolean) => void;
+  onShowJumpChange?: (visible: boolean, newCount?: number) => void;
 }
 
 /** Imperative handle exposed via `ref` — parent calls `scrollToBottom`
@@ -124,6 +136,13 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
       : null;
   const parentRef = useRef<HTMLDivElement>(null);
   const cacheKey = `${tabId}:${acpSessionId}`;
+
+  // Session model for the assistant turn badge (live model wins over the
+  // session default). Narrow selector so it only re-renders on change.
+  const sessionModel = useChatStore((s) => {
+    const sess = s.sessions[tabId];
+    return sess?.acpCurrentModel || sess?.model || null;
+  });
 
   // Apply role filter + map filtered→original indices in one pass. The old
   // implementation used `messages.findIndex` per filtered message, making
@@ -289,6 +308,13 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   // render the scroll-to-bottom pill centered alongside the Claude
   // setup pill (the parent owns the floating row above the input now).
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  // Count of messages that arrived while the user was scrolled up, shown
+  // on the scroll-to-bottom pill ("3 new"). `lastSeenLenRef` marks how
+  // many were visible the last time the user was at the bottom.
+  const [newCount, setNewCount] = useState(0);
+  const lastSeenLenRef = useRef(filtered.length);
+  const filteredLenRef = useRef(filtered.length);
+  filteredLenRef.current = filtered.length;
   useEffect(() => {
     const el = parentRef.current;
     if (!el) return;
@@ -300,6 +326,11 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
         isAtBottom,
       });
       setShowJumpToBottom(!isAtBottom);
+      if (isAtBottom) {
+        // Caught up — everything is seen.
+        lastSeenLenRef.current = filteredLenRef.current;
+        setNewCount((c) => (c === 0 ? c : 0));
+      }
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
@@ -314,8 +345,8 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   }, [cacheKey]);
 
   useEffect(() => {
-    onShowJumpChange?.(showJumpToBottom);
-  }, [showJumpToBottom, onShowJumpChange]);
+    onShowJumpChange?.(showJumpToBottom, showJumpToBottom ? newCount : 0);
+  }, [showJumpToBottom, newCount, onShowJumpChange]);
 
   // Container resize (panel drag, window resize, sidebar toggle) reflows
   // every message — their cached heights become wrong for the new width
@@ -417,6 +448,12 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (distance <= NEAR_BOTTOM_PX) {
       pinToBottom();
+      lastSeenLenRef.current = filtered.length;
+      setNewCount((c) => (c === 0 ? c : 0));
+    } else {
+      // New messages landed while the user is reading above — surface the
+      // unseen count on the scroll-to-bottom pill.
+      setNewCount(Math.max(0, filtered.length - lastSeenLenRef.current));
     }
   }, [filtered.length, pinToBottom]);
 
@@ -504,6 +541,13 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
           >
             {virtualizer.getVirtualItems().map((vItem) => {
               const message = filtered[vItem.index];
+              const prev = vItem.index > 0 ? filtered[vItem.index - 1] : null;
+              const gapMs = prev
+                ? new Date(message.timestamp).getTime() -
+                  new Date(prev.timestamp).getTime()
+                : 0;
+              const timeGapAbove =
+                prev && gapMs > TURN_GAP_MS ? formatGap(gapMs) : null;
               return (
                 <div
                   key={message.id}
@@ -521,6 +565,8 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
                   <MessageItem
                     message={message}
                     streaming={message.id === streamingId}
+                    model={message.role === "assistant" ? sessionModel : null}
+                    timeGapAbove={timeGapAbove}
                     dividerAbove={
                       vItem.index > 0 &&
                       filtered[vItem.index - 1].role !== message.role
