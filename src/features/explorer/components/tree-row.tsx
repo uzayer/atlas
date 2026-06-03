@@ -20,8 +20,11 @@ interface TreeRowProps {
   /** Tooltip on hover (commonly the full path). */
   title?: string;
   /** Receives the raw mouse event so callers can read ⌘/⇧ modifiers for
-   *  multi-select. Keyboard activation calls it with no argument. */
+   *  multi-select. Keyboard activation (Space) calls it with no argument. */
   onClick: (e?: React.MouseEvent) => void;
+  /** Enter on the focused row triggers this (macOS Finder rename
+   *  convention). When omitted, Enter falls back to `onClick`. */
+  onRename?: () => void;
   /** Part of a multi-selection — painted with the selection fill. */
   isSelected?: boolean;
   /** Absolute-positioning style from the virtualizer. */
@@ -53,6 +56,9 @@ interface TreeRowProps {
   isDropTarget?: boolean;
   /** Dim this row while it's the active drag source. */
   isDragging?: boolean;
+  /** When set, paints a small git-status dot in the left gutter (e.g. a
+   *  modified/added/untracked marker). Pass a CSS color string. */
+  gitColor?: string | null;
 }
 
 /**
@@ -68,6 +74,7 @@ export function TreeRow({
   name,
   title,
   onClick,
+  onRename,
   style,
   leafIcon: LeafIcon = FileIcon,
   leafIconNode,
@@ -81,6 +88,7 @@ export function TreeRow({
   isSelected,
   isDropTarget,
   isDragging,
+  gitColor,
 }: TreeRowProps) {
   const isEditing = !!editingMode;
   const inputRef = useRef<HTMLInputElement>(null);
@@ -134,7 +142,15 @@ export function TreeRow({
       onClick={isEditing ? undefined : (e) => onClick(e)}
       onKeyDown={(e) => {
         if (isEditing) return;
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.key === "Enter") {
+          // macOS Finder: Enter renames the focused row.
+          e.preventDefault();
+          if (onRename) onRename();
+          else onClick();
+          return;
+        }
+        if (e.key === " ") {
+          // Space still activates (open file / expand folder).
           e.preventDefault();
           onClick();
         }
@@ -172,7 +188,16 @@ export function TreeRow({
         ...style,
       }}
     >
-      {isDir ? (
+      {/* Left slot: chevron (folders) / spacer (files), OR a git-status dot.
+          A COLLAPSED folder with changes shows the dot IN PLACE of its right
+          chevron (so the dot never overlaps the arrow); expanding restores the
+          down chevron (its children then carry their own dots). A changed file
+          shows the dot in its (otherwise empty) gutter slot. */}
+      {!isEditing && gitColor && (!isDir || !isExpanded) ? (
+        <span className="w-3 shrink-0 flex items-center justify-center" aria-hidden>
+          <span className="rounded-full" style={{ width: 6, height: 6, background: gitColor }} />
+        </span>
+      ) : isDir ? (
         <ChevronRight
           size={12}
           className={cn(

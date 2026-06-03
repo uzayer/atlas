@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
 import { createSelectors } from "@/lib/create-selectors";
 import { invoke } from "@tauri-apps/api/core";
+import { useProjectStore } from "@/features/project/stores/project-store";
 
 export interface FileEntry {
   name: string;
@@ -17,6 +18,15 @@ export interface TreeNode {
   children: TreeNode[] | null; // null = not loaded, [] = empty
   expanded: boolean;
   depth: number;
+}
+
+/** Drop dotfiles/dot-dirs unless the user enabled "Show hidden files" in
+ *  Settings → General. The Rust `read_directory` command returns every
+ *  entry; visibility is purely a frontend concern. Read live so the next
+ *  directory fetch after a toggle reflects the new preference. */
+function applyHiddenFilter(entries: FileEntry[]): FileEntry[] {
+  const showHidden = useProjectStore.getState().settings.showHiddenFiles;
+  return showHidden ? entries : entries.filter((e) => !e.name.startsWith("."));
 }
 
 interface ExplorerState {
@@ -101,8 +111,7 @@ export const useExplorerStore = createSelectors(
           });
           try {
             const entries = await invoke<FileEntry[]>("read_directory", { path });
-            const nodes: TreeNode[] = entries
-              .filter((e) => !e.name.startsWith("."))
+            const nodes: TreeNode[] = applyHiddenFilter(entries)
               .map((e) => ({
                 entry: e,
                 children: e.is_dir ? null : [],
@@ -138,8 +147,7 @@ export const useExplorerStore = createSelectors(
               set((s) => {
                 const n = findNode(s.tree, path);
                 if (n) {
-                  n.children = entries
-                    .filter((e) => !e.name.startsWith("."))
+                  n.children = applyHiddenFilter(entries)
                     .map((e) => ({
                       entry: e,
                       children: e.is_dir ? null : [],
@@ -335,7 +343,7 @@ function reconcileChildren(
   fresh: FileEntry[],
   depth: number,
 ): TreeNode[] {
-  const filtered = fresh.filter((e) => !e.name.startsWith("."));
+  const filtered = applyHiddenFilter(fresh);
   const byPath = new Map<string, TreeNode>();
   for (const n of existing) byPath.set(n.entry.path, n);
   return filtered.map((e): TreeNode => {

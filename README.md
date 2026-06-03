@@ -341,3 +341,4 @@ For UI work you can sometimes get away with `npm run dev` (Vite-only, no Tauri c
 - LSP support — would slot into the editor for diagnostics / go-to-definition.
 - MCP server integration for tool-call extensibility.
 - Theme system / additional color palettes.
+

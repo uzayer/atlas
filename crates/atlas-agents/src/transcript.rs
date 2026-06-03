@@ -181,6 +181,22 @@ fn extract_user_message_text(v: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// Map a Claude Code tool name (as stored in the JSONL transcript) to the ACP
+/// `kind` the live stream would have set. Lets reloaded sessions recognise
+/// bash/execute calls the same way live ones do (the frontend's bash panel +
+/// bash-styled cards key off `kind == "execute"`).
+fn tool_kind_for(name: &str) -> Option<String> {
+    let k = match name {
+        "Bash" | "BashOutput" | "KillShell" => "execute",
+        "Read" | "NotebookRead" => "read",
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => "edit",
+        "Glob" | "Grep" => "search",
+        "WebFetch" | "WebSearch" => "fetch",
+        _ => return None,
+    };
+    Some(k.to_string())
+}
+
 fn extract_assistant_blocks(v: &serde_json::Value) -> (String, Vec<ToolCall>) {
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -212,11 +228,12 @@ fn extract_assistant_blocks(v: &serde_json::Value) -> (String, Vec<ToolCall>) {
                     .and_then(|s| s.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("tc-{}", uuid::Uuid::new_v4().simple()));
+                let kind = tool_kind_for(&name);
                 tool_calls.push(ToolCall {
                     id,
                     tool_name: name.clone(),
                     title: Some(name),
-                    kind: None,
+                    kind,
                     status: ToolCallStatus::Completed,
                     arguments: input,
                     result: None,

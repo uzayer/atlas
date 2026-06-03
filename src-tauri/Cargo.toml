@@ -1,6 +1,6 @@
 [package]
 name = "atlas"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 
 [lib]
@@ -33,6 +33,11 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-notification = "2"
+# Single-instance: forwards the argv of a second `atlas <path>` launch to the
+# already-running window so the CLI opens the target folder there instead of
+# spawning a duplicate window (or, worse, restoring the last project). See
+# `commands::cli` + the callback wired in `run()`.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

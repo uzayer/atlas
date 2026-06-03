@@ -102,6 +102,10 @@ export interface ChatMessage {
 export interface ToolCallDisplay {
   id: string;
   toolName: string;
+  /** ACP semantic class: "execute" | "read" | "edit" | "fetch" | … . The
+   *  reliable way to recognise a bash/shell call — `toolName` is the ACP
+   *  `title`, which for Bash is the command itself, not "bash". */
+  kind: string | null;
   arguments: Record<string, unknown>;
   result: string | null;
   status: "pending" | "running" | "completed" | "failed";

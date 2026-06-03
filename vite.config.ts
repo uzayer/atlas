@@ -30,6 +30,10 @@ export default defineConfig(async () => ({
       "@lezer/common",
       "@lezer/highlight",
       "@lezer/lr",
+      // Single pdfjs-dist instance: react-pdf re-exports `pdfjs`, and the
+      // worker is imported separately via `?url`. Two copies would mismatch
+      // the worker against the main-thread API version and fail to render.
+      "pdfjs-dist",
     ],
   },
   clearScreen: false,
@@ -92,7 +96,15 @@ export default defineConfig(async () => ({
       // cycle and dump in-progress state.
       "pixi.js",
       "matter-js",
+      // Pre-bundle the PDF stack so first open of a PDF tab doesn't trigger
+      // Vite's "new dependencies optimized → reloading" cycle.
+      "react-pdf",
+      "pdfjs-dist",
+      "pdf-lib",
     ],
+    // The worker is a separate ESM entry loaded via `?url`; pre-bundling it
+    // would rewrite its imports and break worker instantiation.
+    exclude: ["pdfjs-dist/build/pdf.worker.min.mjs"],
   },
   build: {
     // Vendor splitting so the initial chunk only holds what first paint
@@ -123,6 +135,9 @@ export default defineConfig(async () => ({
           }
           if (id.includes("@tanstack")) {
             return "vendor-tanstack";
+          }
+          if (id.includes("pdfjs-dist") || id.includes("react-pdf") || id.includes("pdf-lib")) {
+            return "vendor-pdf";
           }
           if (id.includes("@tauri-apps")) {
             return "vendor-tauri";

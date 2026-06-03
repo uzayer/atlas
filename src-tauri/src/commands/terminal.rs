@@ -94,3 +94,62 @@ pub async fn terminal_close(
     manager.close(&id);
     Ok(())
 }
+
+/// Resolve a path token clicked in the terminal to an existing absolute path,
+/// or `None`. Strips a trailing `:line[:col]` suffix, expands `~`, resolves a
+/// relative path against the shell's live cwd, and verifies the file exists
+/// (so non-path matches in the link regex silently no-op). Blocking (lsof +
+/// stat), so run off the main thread.
+#[tauri::command]
+pub async fn terminal_resolve_path(
+    state: State<'_, TerminalState>,
+    id: String,
+    raw: String,
+) -> Result<Option<String>, String> {
+    let pid = {
+        let manager = state.manager.lock().await;
+        manager.pid(&id)
+    };
+    tokio::task::spawn_blocking(move || resolve_terminal_path(pid, &raw))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn resolve_terminal_path(pid: Option<u32>, raw: &str) -> Option<String> {
+    use std::path::PathBuf;
+
+    let mut s = raw.trim().to_string();
+    // Trim trailing punctuation that commonly abuts a path in prose/output.
+    s = s
+        .trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ')' | ']' | '"' | '\''))
+        .to_string();
+    // Strip up to two trailing `:NN` (line, col) segments.
+    for _ in 0..2 {
+        if let Some(idx) = s.rfind(':') {
+            let tail = &s[idx + 1..];
+            if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+                s.truncate(idx);
+                continue;
+            }
+        }
+        break;
+    }
+    if s.is_empty() {
+        return None;
+    }
+
+    let path: PathBuf = if s == "~" {
+        dirs::home_dir()?
+    } else if let Some(rest) = s.strip_prefix("~/") {
+        dirs::home_dir()?.join(rest)
+    } else if s.starts_with('/') {
+        PathBuf::from(&s)
+    } else {
+        // Relative — resolve against the shell's live working directory.
+        let cwd = pid.and_then(atlas_terminal::cwd_of_pid)?;
+        PathBuf::from(cwd).join(s.strip_prefix("./").unwrap_or(&s))
+    };
+
+    let canon = std::fs::canonicalize(&path).ok()?;
+    Some(canon.to_string_lossy().into_owned())
+}

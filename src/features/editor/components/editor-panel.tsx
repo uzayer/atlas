@@ -253,6 +253,17 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
         summary: path.split("/").pop() ?? path,
         payload: { path, bytes: content.length },
       });
+      // A save mutates the working tree — refresh git status/dots + diff
+      // right now instead of waiting for the workspace fs watcher (FSEvents
+      // latency + fileindex 150 ms + git-store debounce). Lazy-imported to
+      // keep the editor decoupled from the git store.
+      void import("@/features/git/stores/git-store").then(({ useGitStore }) => {
+        const git = useGitStore.getState();
+        if (git.repoPath) {
+          void git.actions.refreshStatusNow(git.repoPath);
+          void git.actions.loadDiff();
+        }
+      });
     } catch (err) {
       console.error("Save failed:", err);
     }

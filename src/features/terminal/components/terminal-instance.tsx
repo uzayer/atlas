@@ -1,7 +1,19 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { resolveTerminalFont } from "../utils/resolve-font";
+import { createPathLinkProvider } from "../lib/path-link-provider";
+import { createTerminalKeymap } from "../lib/terminal-keymap";
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+} from "@/ui/context-menu";
+import { KbdCombo } from "@/ui/kbd";
 
 interface TerminalInstanceProps {
   isActive: boolean;
@@ -25,6 +37,36 @@ export function TerminalInstance({ isActive, isVisible, onFocus }: TerminalInsta
   const unlistenExitRef = useRef<(() => void) | null>(null);
   const outputBufferRef = useRef<Uint8Array[]>([]);
   const outputFlushRafRef = useRef<number | null>(null);
+  const linkDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const [hasSelection, setHasSelection] = useState(false);
+
+  // Clipboard / selection actions — shared by the keyboard handler and the
+  // right-click context menu. They operate on the live xterm instance.
+  const copySelection = useCallback(() => {
+    const t = xtermRef.current;
+    if (t?.hasSelection()) {
+      void navigator.clipboard.writeText(t.getSelection()).catch(() => {});
+    }
+    t?.focus();
+  }, []);
+  const pasteClipboard = useCallback(() => {
+    const t = xtermRef.current;
+    if (!t) return;
+    void navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text) t.paste(text);
+      })
+      .catch(() => {})
+      .finally(() => t.focus());
+  }, []);
+  const selectAllTerm = useCallback(() => {
+    xtermRef.current?.selectAll();
+  }, []);
+  const clearTerm = useCallback(() => {
+    xtermRef.current?.clear();
+    xtermRef.current?.focus();
+  }, []);
 
   // RAF-batched output flush — merge all buffered chunks into single write
   const flushOutput = useCallback(() => {
@@ -128,15 +170,19 @@ export function TerminalInstance({ isActive, isVisible, onFocus }: TerminalInsta
       const { FitAddon } = await import("@xterm/addon-fit");
       await import("@xterm/xterm/css/xterm.css");
 
+      // Resolve the font BEFORE constructing the terminal. xterm measures the
+      // character cell once at init from the first resolvable font; if that
+      // happens before fonts are ready (common in a cold-loaded production
+      // build, less so in dev where the cache is warm) the whole grid is
+      // mis-sized. `resolveTerminalFont` awaits `document.fonts.ready` and
+      // guarantees a native + generic fallback so rendering is identical
+      // across dev and the shipped app.
+      const fontFamily = await resolveTerminalFont(13);
+
       if (disposed || !containerRef.current) return;
 
       const term = new Terminal({
-        // Lead with Menlo — it's a system font that the WebKit Canvas
-        // renderer ALWAYS resolves on macOS (xterm uses Canvas2D, which
-        // doesn't honour the CSS `ui-monospace` keyword reliably and was
-        // silently falling back to the proportional default in the bundled
-        // app). The rest are progressive fallbacks.
-        fontFamily: 'Menlo, Monaco, "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", "Courier New", monospace',
+        fontFamily,
         fontSize: 13,
         lineHeight: 1.4,
         scrollback: 5000,
@@ -173,6 +219,56 @@ export function TerminalInstance({ isActive, isVisible, onFocus }: TerminalInsta
       term.loadAddon(fitAddon);
       term.open(containerRef.current);
 
+      // Word/line navigation + keyboard selection (Option/Cmd + arrows, etc.).
+      const keymap = createTerminalKeymap(term);
+
+      // Copy/paste — intercept ⌘C/⌘V/⌘A (and Ctrl+Shift+C/V) before xterm
+      // forwards them to the PTY. Plain Ctrl+C is NOT intercepted, so SIGINT
+      // still works. Returning false stops xterm from sending the key.
+      term.attachCustomKeyEventHandler((e) => {
+        if (e.type !== "keydown") return true;
+
+        // Textual navigation (sends readline seqs) / keyboard selection.
+        const nav = keymap(e);
+        if (nav === "handled") return false;
+        if (typeof nav === "string") {
+          const id = backendPtyIdRef.current;
+          if (id) {
+            void invoke("terminal_write", {
+              id,
+              data: Array.from(new TextEncoder().encode(nav)),
+            }).catch(() => {});
+          }
+          return false;
+        }
+
+        const mod = e.metaKey || (e.ctrlKey && e.shiftKey);
+        const key = e.key.toLowerCase();
+        if (mod && key === "c") {
+          if (term.hasSelection()) {
+            e.preventDefault();
+            void navigator.clipboard.writeText(term.getSelection()).catch(() => {});
+          }
+          return false;
+        }
+        if (mod && key === "v") {
+          e.preventDefault();
+          void navigator.clipboard
+            .readText()
+            .then((text) => {
+              if (text) term.paste(text);
+            })
+            .catch(() => {});
+          return false;
+        }
+        if (e.metaKey && key === "a") {
+          e.preventDefault();
+          term.selectAll();
+          return false;
+        }
+        return true;
+      });
+
       xtermRef.current = term;
       fitAddonRef.current = fitAddon;
       isInitializedRef.current = true;
@@ -190,6 +286,12 @@ export function TerminalInstance({ isActive, isVisible, onFocus }: TerminalInsta
         });
         if (disposed) { invoke("terminal_close", { id: backendId }).catch(() => {}); return; }
         backendPtyIdRef.current = backendId;
+
+        // ⌘-clickable file paths (⌘-hover underlines, ⌘-click opens). Resolution
+        // (cwd join, ~ expand, existence) happens in `terminal_resolve_path`.
+        linkDisposableRef.current = term.registerLinkProvider(
+          createPathLinkProvider(term, backendId),
+        );
 
         // Listen for output — buffer as Uint8Array and flush per frame
         unlistenOutputRef.current = await listen<TerminalOutput>("terminal-output", (event) => {
@@ -243,6 +345,7 @@ export function TerminalInstance({ isActive, isVisible, onFocus }: TerminalInsta
         if (outputFlushRafRef.current !== null) cancelAnimationFrame(outputFlushRafRef.current);
         unlistenOutputRef.current?.();
         unlistenExitRef.current?.();
+        linkDisposableRef.current?.dispose();
         if (backendPtyIdRef.current) {
           invoke("terminal_close", { id: backendPtyIdRef.current }).catch(() => {});
         }
@@ -281,10 +384,34 @@ export function TerminalInstance({ isActive, isVisible, onFocus }: TerminalInsta
   }, [isActive, verifyFocus]);
 
   return (
-    <div
-      ref={containerRef}
-      className="h-full w-full bg-[#000] px-1 py-1"
-      onClick={onFocus}
-    />
+    <ContextMenu
+      onOpenChange={(open) => {
+        if (open) setHasSelection(!!xtermRef.current?.hasSelection());
+      }}
+    >
+      <ContextMenuTrigger asChild>
+        <div
+          ref={containerRef}
+          className="h-full w-full bg-[#000] px-1 py-1"
+          onClick={onFocus}
+        />
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem disabled={!hasSelection} onSelect={copySelection}>
+          Copy
+          <ContextMenuShortcut><KbdCombo combo="⌘C" /></ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={pasteClipboard}>
+          Paste
+          <ContextMenuShortcut><KbdCombo combo="⌘V" /></ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={selectAllTerm}>
+          Select All
+          <ContextMenuShortcut><KbdCombo combo="⌘A" /></ContextMenuShortcut>
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={clearTerm}>Clear</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }

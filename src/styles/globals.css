@@ -69,6 +69,12 @@
   --animate-fade-out: fade-out 0.12s ease-in;
   --animate-scale-in: scale-in 0.15s ease-out;
   --animate-scale-out: scale-out 0.12s ease-in;
+  --animate-slide-in-right: slide-in-right 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+
+  @keyframes slide-in-right {
+    from { transform: translateX(100%); }
+    to { transform: translateX(0); }
+  }
 
   @keyframes fade-in {
     from { opacity: 0; }
@@ -516,7 +522,8 @@
   .atlas-pill-in,
   .atlas-fade-in { animation: none; }
   .animate-scale-in,
-  .animate-fade-in { animation: none !important; }
+  .animate-fade-in,
+  .animate-slide-in-right { animation: none !important; }
 }
 
 /* Atlas-themed CodeMirror Find/Replace panel (Cmd+F). These rules sit

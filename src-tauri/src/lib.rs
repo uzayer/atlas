@@ -35,7 +35,34 @@ pub fn run() {
     // Triggered by the `atlas <path>` shell helper at ~/.local/bin/atlas.
     let initial_project = commands::cli::parse_initial_project();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Single-instance — RELEASE ONLY. When the user runs `atlas <path>` while
+    // Atlas is already open, the shell helper's `open -n` spawns a fresh
+    // process; this plugin forwards that process's argv to the running
+    // instance (firing this callback) and the duplicate exits.
+    //
+    // It is intentionally NOT registered in debug builds: otherwise
+    // `tauri dev` is killed the instant it starts whenever the installed
+    // /Applications/Atlas.app is running — the dev process is treated as the
+    // "second instance", forwards its (empty) argv, and exits. Skipping it in
+    // debug lets dev and the installed app coexist.
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        use tauri::Emitter;
+        tracing::info!(target: "atlas::cli", "second-instance argv: {argv:?}");
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        // argv[0] is the executable path — strip it before parsing.
+        let positional = argv.get(1..).unwrap_or(&[]);
+        if let Some(path) = commands::cli::parse_project_path(positional) {
+            let _ = app.emit("atlas:cli-open-project", path);
+        }
+    }));
+
+    builder
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 // Opaque dark window background. Fills the brief gap between
@@ -79,13 +106,17 @@ pub fn run() {
         .manage(SavedPapersIndex::new())
         .invoke_handler(tauri::generate_handler![
             commands::window::window_zoom,
+            commands::window::set_window_title,
             commands::terminal::terminal_create,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,
             commands::terminal::terminal_close,
+            commands::terminal::terminal_resolve_path,
             commands::fs::read_directory,
             commands::fs::read_file_content,
+            commands::fs::read_file_base64,
             commands::fs::write_file_content,
+            commands::fs::write_file_base64,
             commands::fs::ensure_atlas_gitignore,
             commands::fs::fs_create_file,
             commands::fs::fs_create_dir,
@@ -96,6 +127,7 @@ pub fn run() {
             commands::fs::fs_open_in_terminal,
             commands::fs::fs_add_to_gitignore,
             commands::git::git_status,
+            commands::git::git_status_fresh,
             commands::git::git_log,
             commands::git::git_diff_all,
             commands::git::git_diff_file,
@@ -149,6 +181,7 @@ pub fn run() {
             commands::recent_files::recent_files_open_project,
             commands::recent_files::recent_files_close_project,
             commands::recent_files::recent_files_push,
+            commands::recent_files::recent_files_rename,
             commands::recent_files::recent_files_list,
             commands::recent_files::recent_files_clear,
             commands::github::search_github,
@@ -240,6 +273,10 @@ pub fn run() {
             commands::papers::list_saved_papers,
             commands::pomodoro::pomodoro_load,
             commands::pomodoro::pomodoro_save,
+            commands::plans::plans_load,
+            commands::plans::plans_append,
+            commands::pdf_annotations::pdf_annotations_load,
+            commands::pdf_annotations::pdf_annotations_save,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas");

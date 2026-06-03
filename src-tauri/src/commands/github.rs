@@ -18,9 +18,52 @@ pub struct GithubRepo {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClonedRepo {
+    /// On-disk directory name (`owner-repo`). Used for every filesystem op
+    /// (`read_repo_readme`, `delete_cloned_repo`) — never derived from.
     pub name: String,
+    /// Human-facing `owner/repo`. Recovered from the clone's git remote so
+    /// owners/repos that themselves contain `-` (e.g. `rudi-q/leed_pdf_viewer`)
+    /// render correctly — the dashed dir name is ambiguous on its own.
+    pub display_name: String,
     pub path: String,
     pub has_readme: bool,
+}
+
+/// Best-effort `owner/repo` for a cloned repo. Reads the `origin` remote URL
+/// from `<repo>/.git/config` (the source of truth) and extracts the last two
+/// path segments. Falls back to the dashed directory name when no remote is
+/// found, splitting on the first `-` as a rough guess.
+fn derive_display_name(repo_dir: &Path, dir_name: &str) -> String {
+    if let Ok(cfg) = fs::read_to_string(repo_dir.join(".git").join("config")) {
+        // Find the first `url = ...` line under any remote. The first remote
+        // in a fresh clone is always `origin`.
+        if let Some(url) = cfg
+            .lines()
+            .map(str::trim)
+            .find_map(|l| l.strip_prefix("url = ").or_else(|| l.strip_prefix("url=")))
+        {
+            // Normalise `git@host:owner/repo.git` and `https://host/owner/repo.git`
+            // down to `owner/repo`.
+            let tail = url
+                .rsplit(|c| c == '/' || c == ':')
+                .take(2)
+                .collect::<Vec<_>>();
+            if tail.len() == 2 {
+                let repo = tail[0].trim_end_matches(".git");
+                let owner = tail[1];
+                if !owner.is_empty() && !repo.is_empty() {
+                    return format!("{owner}/{repo}");
+                }
+            }
+        }
+    }
+    // Fallback: dashed dir name → split on first `-`.
+    match dir_name.split_once('-') {
+        Some((owner, repo)) if !owner.is_empty() && !repo.is_empty() => {
+            format!("{owner}/{repo}")
+        }
+        _ => dir_name.to_string(),
+    }
 }
 
 #[tauri::command]
@@ -112,8 +155,10 @@ pub async fn list_cloned_repos(project_path: String) -> Result<Vec<ClonedRepo>, 
                 .to_string();
             let has_readme =
                 path.join("README.md").exists() || path.join("readme.md").exists();
+            let display_name = derive_display_name(&path, &name);
             repos.push(ClonedRepo {
                 name,
+                display_name,
                 path: path.to_string_lossy().to_string(),
                 has_readme,
             });

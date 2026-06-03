@@ -15,6 +15,9 @@ import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup
 const BashHistoryPanel = lazy(() =>
   import("./bash-history-panel").then((m) => ({ default: m.BashHistoryPanel }))
 );
+const PlansPanel = lazy(() =>
+  import("./plans-panel").then((m) => ({ default: m.PlansPanel }))
+);
 const ChatSearchPalette = lazy(() =>
   import("./chat-search-palette").then((m) => ({ default: m.ChatSearchPalette }))
 );
@@ -27,7 +30,7 @@ const MessagesList = lazy(() =>
   import("./messages-list").then((m) => ({ default: m.MessagesList }))
 );
 import type { MessagesListHandle } from "./messages-list";
-import { Sparkles, User, TerminalSquare, ListFilter, Search, Loader2, ChevronDown, ArrowRight } from "lucide-react";
+import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
@@ -53,6 +56,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   } = useChatStore.use.actions();
   const [roleFilter, setRoleFilter] = useState<"all" | "user" | "assistant">("all");
   const [bashPanelOpen, setBashPanelOpen] = useState(false);
+  const [plansPanelOpen, setPlansPanelOpen] = useState(false);
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -318,7 +322,11 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   handleSendRef.current = handleSend;
 
   return (
-    <div ref={rootRef} className="h-full flex">
+    // `relative` is the positioning context for the bash-history panel, which
+    // slides in from the right as an absolute overlay (scrim + panel) instead
+    // of a flex column that shrinks the chat. The session sidebar (left) stays
+    // a normal flex column.
+    <div ref={rootRef} className="h-full flex relative">
       <PermissionModal tabId={tabId} />
       <SessionSidebar tabId={tabId} />
 
@@ -377,7 +385,10 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
             <button
-              onClick={() => setBashPanelOpen((v) => !v)}
+              onClick={() => {
+                setBashPanelOpen((v) => !v);
+                setPlansPanelOpen(false);
+              }}
               className={cn(
                 "flex items-center gap-1 px-2 h-6 rounded text-[10px] cursor-pointer outline-none transition-colors",
                 bashPanelOpen
@@ -388,6 +399,22 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             >
               <TerminalSquare size={11} />
               Bash
+            </button>
+            <button
+              onClick={() => {
+                setPlansPanelOpen((v) => !v);
+                setBashPanelOpen(false);
+              }}
+              className={cn(
+                "flex items-center gap-1 px-2 h-6 rounded text-[10px] cursor-pointer outline-none transition-colors",
+                plansPanelOpen
+                  ? "text-[var(--text-primary)] bg-[var(--bg-selected)]"
+                  : "text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+              )}
+              title="Toggle plans history"
+            >
+              <ClipboardList size={11} />
+              Plans
             </button>
           </div>
         )}
@@ -445,6 +472,12 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             }}
             onClose={() => setBashPanelOpen(false)}
           />
+        </Suspense>
+      )}
+
+      {plansPanelOpen && (
+        <Suspense fallback={null}>
+          <PlansPanel onClose={() => setPlansPanelOpen(false)} />
         </Suspense>
       )}
 

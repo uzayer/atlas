@@ -78,6 +78,11 @@ pub struct AppSettings {
     /// flipping a flag first.
     #[serde(default = "default_true")]
     pub enable_atlas_logs: bool,
+    /// Show dotfiles / dot-directories (e.g. `.git`, `.atlas`, `.env`) in
+    /// the explorer file tree. Default ON so nothing is silently hidden;
+    /// users who want a cleaner tree can turn it off.
+    #[serde(default = "default_true")]
+    pub show_hidden_files: bool,
 }
 
 fn default_true() -> bool {
@@ -89,6 +94,7 @@ impl Default for AppSettings {
         Self {
             auto_add_atlas_gitignore: true,
             enable_atlas_logs: true,
+            show_hidden_files: true,
         }
     }
 }

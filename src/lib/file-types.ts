@@ -8,7 +8,7 @@
  * binary bytes into CodeMirror.
  */
 
-export type FileKind = "text" | "image" | "video" | "audio" | "unsupported";
+export type FileKind = "text" | "image" | "video" | "audio" | "pdf" | "unsupported";
 
 // Extensions the CodeMirror editor handles (or can usefully attempt — even
 // without a language extension, plaintext display is fine).
@@ -48,6 +48,8 @@ const AUDIO_EXTS = new Set([
   "mp3", "wav", "flac", "aac", "ogg", "oga", "opus", "m4a",
 ]);
 
+const PDF_EXTS = new Set(["pdf"]);
+
 const EXTENSIONLESS_TEXT_NAMES = new Set([
   "readme", "license", "licence", "notice", "authors", "contributors",
   "changelog", "copying", "install", "todo", "makefile", "dockerfile",
@@ -65,6 +67,7 @@ export function classifyFile(path: string): FileKind {
     if (IMAGE_EXTS.has(ext)) return "image";
     if (VIDEO_EXTS.has(ext)) return "video";
     if (AUDIO_EXTS.has(ext)) return "audio";
+    if (PDF_EXTS.has(ext)) return "pdf";
   }
   // Extensionless files like LICENSE, Makefile, Dockerfile.
   if (!ext && EXTENSIONLESS_TEXT_NAMES.has(base)) return "text";

@@ -21,6 +21,7 @@ export const TAB_TYPES = [
   "settings",
   "log",
   "media",
+  "pdf",
   "unsupported",
   "pomodoro",
 ] as const;

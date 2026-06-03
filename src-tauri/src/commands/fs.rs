@@ -79,10 +79,44 @@ pub async fn read_file_content(path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Read an arbitrary file as standard base64. Used for binary payloads the
+/// webview needs as bytes — notably PDFs handed to react-pdf as `{ data }`.
+///
+/// Why not `convertFileSrc`: the Tauri asset protocol 403s files under the
+/// hidden `.atlas/` dir (where research papers live), and PDF.js struggles
+/// with blob/asset URLs in WKWebView. Reading bytes through our own command
+/// works for every path. The frontend decodes via `atob` → `Uint8Array`.
+#[tauri::command]
+pub async fn read_file_base64(path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        use base64::Engine;
+        let bytes = fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn write_file_content(path: String, content: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         fs::write(&path, &content).map_err(|e| format!("Failed to write {}: {}", path, e))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Write a binary file from standard base64. Counterpart of `read_file_base64`
+/// — used to save a PDF with annotations baked in (pdf-lib produces new bytes
+/// the frontend hands back as base64).
+#[tauri::command]
+pub async fn write_file_base64(path: String, contents: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(contents.as_bytes())
+            .map_err(|e| format!("bad base64: {e}"))?;
+        fs::write(&path, &bytes).map_err(|e| format!("Failed to write {}: {}", path, e))
     })
     .await
     .map_err(|e| e.to_string())?

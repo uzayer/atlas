@@ -21,6 +21,8 @@ pub mod knowledge_meta;
 pub mod log;
 pub mod mention_search;
 pub mod papers;
+pub mod pdf_annotations;
+pub mod plans;
 pub mod pomodoro;
 pub mod recent_files;
 pub mod research;

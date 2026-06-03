@@ -1,10 +1,12 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Shield, AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+import { Shield, AlertTriangle, CheckCircle2, XCircle, ClipboardList } from "lucide-react";
 import { toast } from "sonner";
 import { useChatStore } from "../stores/chat-store";
 import { agents } from "../lib/agents-api";
 import { cn } from "@/lib/utils";
 import { Kbd } from "@/ui/kbd";
+import { Markdown } from "@/lib/markdown";
+import { extractPlanMarkdown } from "../lib/plans";
 import type { PermissionOptionRef, PendingPermission } from "@/types/acp";
 
 function isAllow(kind: string) {
@@ -73,6 +75,108 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
   const title = current.toolCall.title ?? current.toolCall.kind ?? "Tool call";
   // Recommended default = the first "allow" option, if any.
   const primaryId = current.options.find((o) => isAllow(o.kind))?.optionId;
+  // Claude Code's ExitPlanMode surfaces a `{ plan: "<markdown>" }` tool call.
+  // When we can pull the plan markdown out, render the richer two-panel
+  // review layout; otherwise fall back to the standard permission modal.
+  const planMarkdown = extractPlanMarkdown(current.toolCall);
+
+  const queueNote =
+    queueLength > 1 ? `${queueLength - 1} more pending after this` : null;
+
+  // Shared option buttons + cancel footer — identical in both layouts.
+  const controls = (
+    <>
+      <div className="flex flex-col gap-1.5 px-4 py-3">
+        {current.options.map((opt) => (
+          <PermissionButton
+            key={opt.optionId}
+            option={opt}
+            // The first "allow" option is the recommended default —
+            // autofocus + the accent (white) primary-button look, so
+            // Enter triggers it and it's visually unmistakable.
+            isPrimary={opt.optionId === primaryId}
+            onSelect={() => resolve(opt.optionId)}
+          />
+        ))}
+      </div>
+      <div className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-2.5">
+        <button
+          type="button"
+          onClick={cancel}
+          className="inline-flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs text-text-secondary hover:bg-bg-base hover:text-text-primary transition-colors"
+        >
+          Cancel
+          <Kbd>esc</Kbd>
+        </button>
+      </div>
+    </>
+  );
+
+  if (planMarkdown) {
+    return (
+      <Dialog.Root
+        open
+        onOpenChange={(open) => {
+          if (!open) cancel();
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
+          <Dialog.Content
+            className={cn(
+              "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
+              "flex max-h-[80vh] w-[880px] max-w-[94vw] flex-col overflow-hidden",
+              "rounded-md border border-border-default bg-bg-elevated",
+              "shadow-[var(--shadow-overlay)] animate-scale-in text-text-primary"
+            )}
+          >
+            <div className="flex items-start gap-3 border-b border-border-default px-4 py-3">
+              <ClipboardList className="mt-0.5 size-4 text-accent" />
+              <div className="flex-1">
+                <Dialog.Title className="text-sm font-medium">
+                  Review plan
+                </Dialog.Title>
+                <Dialog.Description className="mt-0.5 text-xs text-text-secondary">
+                  The agent proposed a plan before continuing. Review it, then
+                  approve or reject.
+                </Dialog.Description>
+              </div>
+              {queueNote && (
+                <span className="shrink-0 rounded-sm bg-bg-base px-2 py-0.5 text-[11px] text-text-secondary">
+                  {queueNote}
+                </span>
+              )}
+            </div>
+
+            <div className="flex min-h-0 flex-1">
+              {/* Left: human-readable plan. */}
+              <section className="flex min-h-0 flex-1 flex-col">
+                <div className="border-b border-border-default bg-bg-base px-5 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
+                  Plan
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+                  <Markdown>{planMarkdown}</Markdown>
+                </div>
+              </section>
+
+              {/* Right: raw tool call + the approve/reject controls. */}
+              <aside className="flex w-[320px] shrink-0 flex-col border-l border-border-default">
+                <div className="border-b border-border-default bg-bg-base px-4 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
+                  Raw tool call
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto px-4 py-2">
+                  <pre className="whitespace-pre-wrap font-mono text-[11px] leading-snug text-text-secondary">
+                    {safeStringify(current.toolCall, 2)}
+                  </pre>
+                </div>
+                {controls}
+              </aside>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+    );
+  }
 
   return (
     <Dialog.Root
@@ -104,43 +208,21 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
             </div>
           </div>
 
-          {queueLength > 1 && (
+          {queueNote && (
             <div className="border-b border-border-default bg-bg-base px-4 py-1.5 text-[11px] text-text-secondary">
-              {queueLength - 1} more pending after this
+              {queueNote}
             </div>
           )}
 
           <ToolCallPreview tc={current.toolCall} />
 
-          <div className="flex flex-col gap-1.5 px-4 py-3">
-            {current.options.map((opt) => (
-              <PermissionButton
-                key={opt.optionId}
-                option={opt}
-                // The first "allow" option is the recommended default —
-                // autofocus + the accent (white) primary-button look, so
-                // Enter triggers it and it's visually unmistakable.
-                isPrimary={opt.optionId === primaryId}
-                onSelect={() => resolve(opt.optionId)}
-              />
-            ))}
-          </div>
-
-          <div className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-2.5">
-            <button
-              type="button"
-              onClick={cancel}
-              className="inline-flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs text-text-secondary hover:bg-bg-base hover:text-text-primary transition-colors"
-            >
-              Cancel
-              <Kbd>esc</Kbd>
-            </button>
-          </div>
+          {controls}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
   );
 }
+
 
 function PermissionButton({
   option,

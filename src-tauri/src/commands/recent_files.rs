@@ -192,6 +192,52 @@ pub async fn recent_files_push(
     Ok(updated)
 }
 
+/// Re-point recent-files entries after a rename/move so the picker shows the
+/// new name instead of a stale one. Handles a single file (`abs_path == old`)
+/// and a directory rename (entries under `old/` are re-prefixed to `new/`).
+#[tauri::command]
+pub async fn recent_files_rename(
+    old_path: String,
+    new_path: String,
+    state: State<'_, RecentFilesState>,
+    app: AppHandle,
+) -> Result<Vec<RecentFile>, String> {
+    let snapshot: Option<(PathBuf, Arc<RwLock<Vec<RecentFile>>>)> = {
+        let guard = state.current.read();
+        guard.as_ref().map(|p| (p.root.clone(), p.items.clone()))
+    };
+    let Some((root, items_lock)) = snapshot else {
+        return Ok(Vec::new());
+    };
+
+    let root_prefix = format!("{}/", root.to_string_lossy());
+    let rel_of = |abs: &str| abs.strip_prefix(&root_prefix).unwrap_or(abs).to_string();
+    let old_prefix = format!("{old_path}/");
+    let new_prefix = format!("{new_path}/");
+
+    let updated: Vec<RecentFile> = {
+        let mut w = items_lock.write();
+        for it in w.iter_mut() {
+            if it.abs_path == old_path {
+                it.abs_path = new_path.clone();
+                it.rel = rel_of(&new_path);
+            } else if it.abs_path.starts_with(&old_prefix) {
+                let rest = it.abs_path[old_prefix.len()..].to_string();
+                let np = format!("{new_prefix}{rest}");
+                it.rel = rel_of(&np);
+                it.abs_path = np;
+            }
+        }
+        w.clone()
+    };
+
+    let updated_for_disk = updated.clone();
+    let root_for_disk = root.clone();
+    tokio::task::spawn_blocking(move || save_to_disk(&root_for_disk, &updated_for_disk));
+    emit_changed(&app, &root, &updated);
+    Ok(updated)
+}
+
 #[tauri::command]
 pub fn recent_files_list(state: State<'_, RecentFilesState>) -> Vec<RecentFile> {
     state

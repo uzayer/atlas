@@ -89,6 +89,27 @@ export function App() {
     };
   }, []);
 
+  // Warm-launch CLI: when `atlas <path>` runs while Atlas is already open,
+  // the Rust single-instance callback forwards the folder here. Open it in
+  // the existing window (the window is already focused by the Rust side).
+  useEffect(() => {
+    const unlisten = listen<string>("atlas:cli-open-project", (event) => {
+      const path = event.payload;
+      if (!path) return;
+      logEvent({
+        source: "atlas",
+        kind: "cli-launch-open-project",
+        summary: `Opening project from CLI (warm launch): ${path}`,
+        status: "success",
+        payload: { path },
+      });
+      void useProjectStore.getState().actions.openProject(path);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
+
   // Alpha-only: nuke any legacy WebView storage. Nothing in the current
   // codebase reads from localStorage / sessionStorage — the only entries
   // are stale dust from previous zustand-persist builds. Wiping on every
@@ -576,6 +597,14 @@ export function App() {
       .catch((e) => console.warn("recent_files_open_project failed:", e));
   }, [currentProject?.path]);
 
+  // Native window title: `projectName - Atlas` while a project is open,
+  // plain `Atlas` otherwise. This is what macOS shows on the window-menu,
+  // on minimize, and on title hover.
+  useEffect(() => {
+    const title = currentProject ? `${currentProject.name} - Atlas` : "Atlas";
+    void invoke("set_window_title", { title }).catch(() => {});
+  }, [currentProject?.name]);
+
   // Install the singleton listener for `atlas:recent-files-changed`
   // once — every push from Rust patches the mirror in place.
   useEffect(() => {
@@ -633,6 +662,28 @@ export function App() {
     {
       combo: { key: "j", meta: true, alt: true },
       action: toggleChatSidebar,
+    },
+    {
+      // ⌥J — open the Knowledge Base, or jump to it if already open. Placed
+      // after ⌘⌥J (chat sidebar) so the matcher resolves that combo first;
+      // plain ⌥J (no ⌘) only matches here.
+      combo: { key: "j", alt: true },
+      action: () => {
+        const layout = useLayoutStore.getState();
+        const existing = layout.tabs.find((t) => t.type === "knowledge");
+        if (existing) {
+          setActiveTab(existing.id);
+          return;
+        }
+        addTab({
+          id: `knowledge-${Date.now()}`,
+          type: "knowledge",
+          title: "Knowledge",
+          closable: true,
+          dirty: false,
+          data: {},
+        });
+      },
     },
     {
       combo: { key: "t", meta: true, alt: true },
