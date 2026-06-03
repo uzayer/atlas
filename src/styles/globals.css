@@ -192,13 +192,12 @@
     font-size: 13px;
     line-height: 1.45;
     color: var(--text-primary);
-    /* Transparent so the native NSVisualEffectView (HudWindow vibrancy,
-       applied in lib.rs) shows through wherever the React tree is also
-       translucent — currently just the left/right side panels (Xcode
-       look). Every always-solid surface (titlebar, status bar, center
-       panel, welcome screen) paints its own opaque background, so only
-       the side panels reveal the blur. */
-    background: transparent;
+    /* Opaque base black. The window is no longer transparent (the
+       NSVisualEffectView vibrancy was removed because its live backdrop
+       blur caused system-wide Mission Control lag), so the root paints the
+       app's base color. Side panels sit at ~90% opacity over this, which on
+       the pure-black base reads the same as before, minus the desktop blur. */
+    background: var(--bg-base);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     letter-spacing: -0.01em;
@@ -224,6 +223,20 @@
   .atlas-vibrant-panel {
     position: relative;
     isolation: isolate;
+    /* Faux-glass depth — NO live blur. The macOS NSVisualEffectView vibrancy
+       was removed because its live backdrop blur lagged Mission Control
+       system-wide. This recreates a sense of material/depth with pure paint:
+       a subtle lit-from-above sheen layered over the panel's bg color
+       (set via Tailwind — untouched here since we only set background-image).
+       Costs nothing extra to composite, so Mission Control stays smooth. The
+       grain ::after below still sits on top for texture.
+       NOTE: no inset top highlight box-shadow here — it stacked directly under
+       the titlebar's bottom border and read as a thicker top edge. */
+    background-image: linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.03) 0,
+      rgba(255, 255, 255, 0) 180px
+    );
   }
   .atlas-vibrant-panel::after {
     content: "";

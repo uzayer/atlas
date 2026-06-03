@@ -191,23 +191,6 @@
     text-align: center;
     overflow: hidden;
   }
-  .hero-grid {
-    position: absolute; inset: 0;
-    background-image:
-      linear-gradient(to right, rgba(255,255,255,0.025) 1px, transparent 1px),
-      linear-gradient(to bottom, rgba(255,255,255,0.025) 1px, transparent 1px);
-    background-size: 64px 64px;
-    mask-image: radial-gradient(ellipse 60% 50% at 50% 0%, #000 30%, transparent 80%);
-    -webkit-mask-image: radial-gradient(ellipse 60% 50% at 50% 0%, #000 30%, transparent 80%);
-    pointer-events: none;
-  }
-  .hero-glow {
-    position: absolute; left: 50%; top: -200px;
-    width: 800px; height: 500px;
-    transform: translateX(-50%);
-    background: radial-gradient(ellipse at center, rgba(255,255,255,0.04) 0%, transparent 65%);
-    pointer-events: none;
-  }
   .hero-inner { position: relative; z-index: 1; }
   .eyebrow {
     display: inline-flex; align-items: center; gap: 8px;
@@ -1704,11 +1687,6 @@
     position: relative;
     overflow: hidden;
   }
-  .cta-section::before {
-    content: ""; position: absolute; inset: 0;
-    background: radial-gradient(ellipse 50% 80% at 50% 100%, rgba(255,255,255,0.04), transparent 70%);
-    pointer-events: none;
-  }
   .cta-title {
     color: var(--text-primary);
     font-size: clamp(36px, 5vw, 60px);
@@ -1865,8 +1843,6 @@
 
 <!-- ====================== HERO ====================== -->
 <header class="hero">
-  <div class="hero-grid"></div>
-  <div class="hero-glow"></div>
   <div class="wrap hero-inner">
     <div class="eyebrow">
       <span class="eyebrow-tag">Alpha</span>

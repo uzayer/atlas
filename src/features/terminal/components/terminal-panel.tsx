@@ -57,15 +57,25 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
   }, [tab?.root, measurePanes]);
 
   useEffect(() => {
-    const onResize = () => requestAnimationFrame(measurePanes);
+    // Double RAF so we measure AFTER layout settles. A single RAF can fire
+    // while the panel is still transitioning (e.g. tab switch flipping the
+    // container from display:none to visible), capturing a stale top of 0 —
+    // which makes the absolutely-positioned terminal overlay cover its own
+    // 28px pane header and bleed up under the tab bar.
+    const onResize = () =>
+      requestAnimationFrame(() => requestAnimationFrame(measurePanes));
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [measurePanes]);
 
-  // Also measure when the root container itself resizes (panel drag from main layout)
+  // Also measure when the root container itself resizes (panel drag from main
+  // layout, or the tab becoming visible). Double RAF for the same settle
+  // reason as above.
   useEffect(() => {
     if (!rootRef.current) return;
-    const ro = new ResizeObserver(() => requestAnimationFrame(measurePanes));
+    const ro = new ResizeObserver(() =>
+      requestAnimationFrame(() => requestAnimationFrame(measurePanes))
+    );
     ro.observe(rootRef.current);
     return () => ro.disconnect();
   }, [measurePanes]);

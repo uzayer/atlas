@@ -1,6 +1,6 @@
 [package]
 name = "atlas"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 
 [lib]
@@ -75,28 +75,12 @@ parking_lot = "0.12"
 # startup-allocation-heavy hot path. `default-features = false` strips
 # secure-mode + override hooks we don't need.
 mimalloc = { version = "0.1", default-features = false }
-# Window vibrancy / NSVisualEffectView wrapper. Used in `lib.rs::run`'s
-# setup closure to apply a dark macOS blur material as the window's
-# backdrop. Combined with the `macos-private-api` Tauri feature this kills
-# the cold-launch white flash by making the WKWebView transparent over a
-# blurred dark surface from frame one.
-window-vibrancy = "0.6"
 # CommonMark + GFM parser used by `commands::knowledge_export` to render
 # notes to HTML (single-note export, workspace export, and the standalone
 # server crate template).
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
-# macOS-only: unlock WKWebView's >60fps cap on macOS 13-15 by flipping the
-# private WebKit pref `PreferPageRenderingUpdatesNear60FPSEnabled`, so the
-# UI renders/scrolls at the display's native refresh (120Hz ProMotion)
-# instead of being locked to 60. No-op on macOS 26+ (Apple removed the cap)
-# and on non-macOS (not compiled). Acceptable here: Atlas already enables
-# `macos-private-api` and ships via .dmg, not the Mac App Store (which is
-# the only distribution channel that rejects private APIs). The crate wraps
-# its unsafe ObjC in catch_unwind, so a future WebKit change degrades to a
-# logged no-op rather than a crash.
 [target.'cfg(target_os = "macos")'.dependencies]
-tauri-plugin-macos-fps = "0.1"
 # Native NSWindow access for the titlebar double-click "zoom" (AppKit
 # performZoom:), which Tauri's cross-platform maximize API doesn't cover.
 # Already in the tree transitively; pinned here for the direct msg_send.
