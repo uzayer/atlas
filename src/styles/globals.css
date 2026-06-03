@@ -223,6 +223,20 @@
   .atlas-vibrant-panel {
     position: relative;
     isolation: isolate;
+    /* Faux-glass depth — NO live blur. The macOS NSVisualEffectView vibrancy
+       was removed because its live backdrop blur lagged Mission Control
+       system-wide. This recreates a sense of material/depth with pure paint:
+       a subtle lit-from-above sheen layered over the panel's bg color
+       (set via Tailwind — untouched here since we only set background-image).
+       Costs nothing extra to composite, so Mission Control stays smooth. The
+       grain ::after below still sits on top for texture.
+       NOTE: no inset top highlight box-shadow here — it stacked directly under
+       the titlebar's bottom border and read as a thicker top edge. */
+    background-image: linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.03) 0,
+      rgba(255, 255, 255, 0) 180px
+    );
   }
   .atlas-vibrant-panel::after {
     content: "";
