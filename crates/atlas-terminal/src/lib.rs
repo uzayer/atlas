@@ -59,10 +59,28 @@ impl TerminalManager {
 
         // Set TERM for proper terminal behavior.
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         // Ensure a UTF-8 locale even if the user's profile doesn't set one,
         // so box-drawing / multi-byte glyphs render correctly.
         if std::env::var_os("LANG").is_none() {
             cmd.env("LANG", "en_US.UTF-8");
+        }
+
+        // Shell integration: for zsh (the macOS default) point ZDOTDIR at a
+        // generated dir whose rc files chain to the user's config and add
+        // OSC 133 / OSC 7 / command hooks. That lets the frontend segment
+        // output into command "blocks" with exit codes + cwd.
+        // Non-zsh shells run plain (the UI degrades to a single stream).
+        if shell.ends_with("zsh") {
+            if let Some(dir) = ensure_zsh_integration_dir() {
+                let user_zdotdir = std::env::var("ZDOTDIR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| std::env::var("HOME").ok())
+                    .unwrap_or_default();
+                cmd.env("ATLAS_USER_ZDOTDIR", user_zdotdir);
+                cmd.env("ZDOTDIR", dir.to_string_lossy().to_string());
+            }
         }
 
         let child = pair.slave.spawn_command(cmd)?;
@@ -185,4 +203,79 @@ pub fn cwd_of_pid(pid: u32) -> Option<String> {
 
 fn detect_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
+// ── zsh shell integration ──────────────────────────────────────────────────
+//
+// Each rc file chains to the user's real config (under ATLAS_USER_ZDOTDIR),
+// preserving ZDOTDIR across the source so plugins/configs that read it still
+// work. `.zshrc` additionally installs precmd/preexec hooks that emit:
+//   OSC 133 ; D ; <exit>   previous command ended (exit code)
+//   OSC 133 ; A            new prompt
+//   OSC 7   ; file://…      cwd
+//   OSC 133 ; C            command output begins
+//   OSC 6973 ; C ; <cmd>   the command text (Atlas-private OSC)
+
+const ZSHENV: &str = r#"ATLAS_SELF="$ZDOTDIR"
+ZDOTDIR="$ATLAS_USER_ZDOTDIR"
+[ -f "$ATLAS_USER_ZDOTDIR/.zshenv" ] && source "$ATLAS_USER_ZDOTDIR/.zshenv"
+ZDOTDIR="$ATLAS_SELF"
+"#;
+
+const ZPROFILE: &str = r#"ATLAS_SELF="$ZDOTDIR"
+ZDOTDIR="$ATLAS_USER_ZDOTDIR"
+[ -f "$ATLAS_USER_ZDOTDIR/.zprofile" ] && source "$ATLAS_USER_ZDOTDIR/.zprofile"
+ZDOTDIR="$ATLAS_SELF"
+"#;
+
+const ZLOGIN: &str = r#"ATLAS_SELF="$ZDOTDIR"
+ZDOTDIR="$ATLAS_USER_ZDOTDIR"
+[ -f "$ATLAS_USER_ZDOTDIR/.zlogin" ] && source "$ATLAS_USER_ZDOTDIR/.zlogin"
+ZDOTDIR="$ATLAS_SELF"
+"#;
+
+const ZSHRC: &str = r#"ATLAS_SELF="$ZDOTDIR"
+ZDOTDIR="$ATLAS_USER_ZDOTDIR"
+[ -f "$ATLAS_USER_ZDOTDIR/.zshrc" ] && source "$ATLAS_USER_ZDOTDIR/.zshrc"
+
+# Atlas shell integration (OSC 133 prompt markers + cwd + command text).
+# Suppress zsh's partial-line indicator (the reverse `%` shown at the end of
+# output without a trailing newline) — in the block UI it just looks like junk.
+unsetopt PROMPT_SP 2>/dev/null
+PROMPT_EOL_MARK=''
+autoload -Uz add-zsh-hook 2>/dev/null
+_atlas_precmd() {
+  local _atlas_exit=$?
+  printf '\033]133;D;%s\007' "$_atlas_exit"
+  printf '\033]133;A\007'
+  printf '\033]7;file://%s%s\007' "${HOST}" "${PWD}"
+}
+_atlas_preexec() {
+  # Emit the command text (6973) BEFORE the output-start marker (133;C) so the
+  # parser has the command in hand when it opens the block — otherwise the very
+  # first block opens with an empty header (off-by-one vs the previous command).
+  printf '\033]6973;C;%s\007' "$1"
+  printf '\033]133;C\007'
+}
+add-zsh-hook precmd _atlas_precmd 2>/dev/null
+add-zsh-hook preexec _atlas_preexec 2>/dev/null
+
+# Hand the interactive session the user's ZDOTDIR.
+ZDOTDIR="$ATLAS_USER_ZDOTDIR"
+"#;
+
+/// Create (idempotently) the temp ZDOTDIR holding the zsh integration rc files
+/// and return its path. `None` if the files can't be written.
+fn ensure_zsh_integration_dir() -> Option<std::path::PathBuf> {
+    let dir = std::env::temp_dir().join("atlas-zsh-integration");
+    std::fs::create_dir_all(&dir).ok()?;
+    for (name, body) in [
+        (".zshenv", ZSHENV),
+        (".zprofile", ZPROFILE),
+        (".zlogin", ZLOGIN),
+        (".zshrc", ZSHRC),
+    ] {
+        std::fs::write(dir.join(name), body).ok()?;
+    }
+    Some(dir)
 }
