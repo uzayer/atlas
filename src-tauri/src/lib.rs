@@ -18,7 +18,7 @@ use commands::sessions_watch::SessionsWatchState;
 use commands::terminal::TerminalState;
 use parking_lot::Mutex;
 use state::{AppState, AppStateHandle};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -36,6 +36,24 @@ pub fn run() {
     let initial_project = commands::cli::parse_initial_project();
 
     tauri::Builder::default()
+        // MUST be the first plugin. When the user runs `atlas <path>` while
+        // Atlas is already open, the shell helper's `open -n` spawns a fresh
+        // process; this plugin forwards that process's argv to the running
+        // instance (firing this callback) and the duplicate exits. We focus
+        // the existing window and tell the frontend to open the folder —
+        // rather than leaving the new project stranded behind the last one.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            tracing::info!(target: "atlas::cli", "second-instance argv: {argv:?}");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            // argv[0] is the executable path — strip it before parsing.
+            let positional = argv.get(1..).unwrap_or(&[]);
+            if let Some(path) = commands::cli::parse_project_path(positional) {
+                let _ = app.emit("atlas:cli-open-project", path);
+            }
+        }))
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 // Opaque dark window background. Fills the brief gap between
@@ -79,6 +97,7 @@ pub fn run() {
         .manage(SavedPapersIndex::new())
         .invoke_handler(tauri::generate_handler![
             commands::window::window_zoom,
+            commands::window::set_window_title,
             commands::terminal::terminal_create,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,

@@ -132,6 +132,15 @@ function GeneralSettings() {
         />
       </SettingRow>
       <SettingRow
+        label="Show hidden files"
+        description="Show dotfiles and dot-directories (e.g. `.git`, `.atlas`, `.env`) in the file tree. Default ON so nothing is silently hidden. Turn off for a cleaner tree that only lists your project's visible files."
+      >
+        <Toggle
+          checked={settings.showHiddenFiles}
+          onChange={(next) => updateSettings({ showHiddenFiles: next })}
+        />
+      </SettingRow>
+      <SettingRow
         label="Enable Atlas Logs"
         description="Record Atlas-internal events (sign-in, agent start/finish, browser/file open, etc.) into the Logs tab under the `atlas` source. Default ON so when something goes wrong you can open the Logs tab, filter by `atlas`, and share a timeline. Turn off if the noise bothers you."
       >

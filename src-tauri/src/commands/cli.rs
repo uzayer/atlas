@@ -58,17 +58,27 @@ impl CliLaunchState {
 ///
 /// We intentionally don't pull in `clap` for one positional arg.
 pub fn parse_initial_project() -> Option<String> {
-    let mut args = std::env::args().skip(1);
-    let raw = args.next()?;
-    if args.next().is_some() {
-        // Multiple args — refuse rather than guess.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    tracing::info!(target: "atlas::cli", "launch argv (positional): {args:?}");
+    parse_project_path(&args)
+}
+
+/// Resolve a single positional directory argument to a canonical path.
+/// Shared by the cold-start path (`parse_initial_project`) and the
+/// single-instance callback (which receives a forwarded argv). `args` must
+/// already have the program name stripped. Returns `Some(abs_dir)` only when
+/// there's exactly one positional, it isn't a flag, and it's an existing dir.
+pub fn parse_project_path(args: &[String]) -> Option<String> {
+    if args.len() != 1 {
+        // Zero (plain `atlas`, cwd handled by the shell helper passing `.`)
+        // or multiple args — refuse rather than guess.
         return None;
     }
-    if raw.starts_with("--") || raw.starts_with("-") {
+    let raw = &args[0];
+    if raw.starts_with('-') {
         return None;
     }
-    let path = std::path::PathBuf::from(&raw);
-    let abs = std::fs::canonicalize(&path).ok()?;
+    let abs = std::fs::canonicalize(raw).ok()?;
     if abs.is_dir() {
         Some(abs.to_string_lossy().into_owned())
     } else {

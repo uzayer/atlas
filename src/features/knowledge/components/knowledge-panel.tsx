@@ -61,7 +61,7 @@ export function KnowledgePanel() {
   const [activeRepoName, setActiveRepoName] = useState<string | null>(null);
   const [repoReadme, setRepoReadme] = useState<string | null>(null);
   const [clonedRepos, setClonedRepos] = useState<
-    Array<{ name: string; path: string; has_readme: boolean }>
+    Array<{ name: string; display_name: string; path: string; has_readme: boolean }>
   >([]);
   // KB panel layout is hoisted into layout-store so tab switches don't
   // reset sidebar/inspector visibility or column widths — same model the
@@ -147,7 +147,7 @@ export function KnowledgePanel() {
       loadEntries(currentProject.path);
       void bindMeta(currentProject.path);
       void bindLinks(currentProject.path);
-      invoke<Array<{ name: string; path: string; has_readme: boolean }>>(
+      invoke<Array<{ name: string; display_name: string; path: string; has_readme: boolean }>>(
         "list_cloned_repos",
         { projectPath: currentProject.path },
       )
@@ -424,7 +424,10 @@ export function KnowledgePanel() {
         {activeRepoName ? (
           <>
             <RepoTopbar
-              name={activeRepoName}
+              name={
+                clonedRepos.find((r) => r.name === activeRepoName)?.display_name ??
+                activeRepoName
+              }
               path={clonedRepos.find((r) => r.name === activeRepoName)?.path ?? ""}
               onToggleSidebar={toggleKnowledgeSidebar}
               sidebarHidden={!showSidebar}

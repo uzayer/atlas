@@ -64,9 +64,10 @@ if [ -z "$app" ]; then
   app="Atlas.app"  # let `open` resolve via LaunchServices as a fallback
 fi
 
-# `-n` forces a fresh instance so each invocation gets its own
-# window. Without it, macOS would activate the existing Atlas without
-# passing argv (because Atlas isn't deep-link / single-instance
-# wired). `-a` selects the app explicitly. `--args` passes everything
-# after to the app's argv.
+# `-n` forces a fresh process so argv is actually delivered — without it
+# macOS just activates a running Atlas and drops the path. When Atlas is
+# already open, that fresh process is intercepted by the single-instance
+# plugin, which forwards the path to the existing window and exits (so no
+# duplicate window appears); on a cold start it simply becomes the primary
+# instance. `-a` selects the app explicitly; `--args` passes the rest to argv.
 exec open -na "$app" --args "$abs"

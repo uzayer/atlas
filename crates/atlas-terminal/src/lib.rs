@@ -1,4 +1,4 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -6,6 +6,11 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub struct TerminalSession {
+    /// Kept alive (rather than dropped after taking the writer/reader) so
+    /// `resize` can drive `MasterPty::resize` — the previous build dropped
+    /// the pair and resize was a silent no-op, leaving columns clipped after
+    /// a pane resize.
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     _reader_handle: std::thread::JoinHandle<()>,
 }
@@ -44,25 +49,34 @@ impl TerminalManager {
 
         let shell = detect_shell();
         let mut cmd = CommandBuilder::new(&shell);
-        cmd.arg("-l"); // login shell
+        cmd.arg("-l"); // login shell — sources the user's profile so PATH etc. are correct
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }
 
-        // Set TERM for proper terminal behavior
+        // Set TERM for proper terminal behavior.
         cmd.env("TERM", "xterm-256color");
+        // Ensure a UTF-8 locale even if the user's profile doesn't set one,
+        // so box-drawing / multi-byte glyphs render correctly.
+        if std::env::var_os("LANG").is_none() {
+            cmd.env("LANG", "en_US.UTF-8");
+        }
 
         let _child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave); // drop slave so reads on master detect EOF
 
         let writer = pair.master.take_writer()?;
         let mut reader = pair.master.try_clone_reader()?;
+        // Retain the master so resize works for the session's lifetime.
+        let master = Arc::new(Mutex::new(pair.master));
 
         let id = Uuid::new_v4().to_string();
         let session_id = id.clone();
 
         let reader_handle = std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
+            // 64 KiB read buffer (was 4 KiB) — fewer syscalls / channel sends
+            // on high-throughput output (builds, `cat` of large files).
+            let mut buf = vec![0u8; 65536];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -83,6 +97,7 @@ impl TerminalManager {
         self.sessions.insert(
             id.clone(),
             TerminalSession {
+                master,
                 writer: Arc::new(Mutex::new(writer)),
                 _reader_handle: reader_handle,
             },
@@ -102,11 +117,21 @@ impl TerminalManager {
         Ok(())
     }
 
-    pub fn resize(&self, id: &str, _cols: u16, _rows: u16) -> anyhow::Result<()> {
-        // portable-pty resize is handled through the master pair
-        // which we've already consumed. For now this is a no-op.
-        // A future version can store the master for resize support.
-        let _ = self.sessions.get(id);
+    pub fn resize(&self, id: &str, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let session = self
+            .sessions
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("Terminal session not found: {}", id))?;
+        let master = session
+            .master
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal master mutex poisoned"))?;
+        master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
         Ok(())
     }
 

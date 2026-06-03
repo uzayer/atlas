@@ -10,9 +10,11 @@ import {
 } from "../stores/explorer-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useGitStore } from "@/features/git/stores/git-store";
 import { FolderPlus, FoldVertical, UnfoldVertical } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TreeRow } from "./tree-row";
+import { openFile } from "@/lib/open-file";
 import { useFileTreeDragDrop, ROOT_DROP } from "../hooks/use-file-tree-drag-drop";
 import { useExternalFileDrop } from "../hooks/use-external-file-drop";
 import { ROW_HEIGHT } from "../lib/tree-constants";
@@ -34,6 +36,24 @@ import { FileTreeConfirmDelete } from "./file-tree-confirm-delete";
 interface FlatRow {
   node: ReturnType<typeof flattenTree>[number] | null;
   ghost?: { parentDir: string; isDir: boolean; depth: number };
+}
+
+/** Map a git porcelain status char to a gutter-dot color, matching the
+ *  Source Control panel's convention (`changes-view.tsx:statusBadge`). */
+function gitStatusColor(status: string): string {
+  switch (status) {
+    case "?": // untracked
+    case "A": // added
+      return "var(--status-success)";
+    case "D": // deleted
+    case "U": // unmerged / conflict
+      return "var(--status-error)";
+    case "R": // renamed
+    case "C": // copied
+      return "var(--status-info)";
+    default: // M and everything else → modified
+      return "var(--status-warning)";
+  }
 }
 
 export function FileTree() {
@@ -64,7 +84,7 @@ export function FileTree() {
   const projectPath = useProjectStore.use.currentProject()?.path ?? null;
   const activeTabId = useLayoutStore.use.activeTabId();
   const tabs = useLayoutStore.use.tabs();
-  const { addTab, closeTab } = useLayoutStore.use.actions();
+  const { closeTab } = useLayoutStore.use.actions();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [deleteTargets, setDeleteTargets] = useState<{ path: string; name: string; isDir: boolean }[] | null>(null);
 
@@ -111,6 +131,33 @@ export function FileTree() {
     return next;
   }, [tree, pendingNewEntry, rootPath]);
 
+  // Git-status overlay for the tree. `git_status` paths are repo-relative;
+  // resolve them to absolute against the repo root so they key off the same
+  // `entry.path` the tree rows use. Files get their exact status color; a
+  // collapsed directory gets a marker when it (transitively) contains a
+  // change, so hidden edits are still visible without expanding.
+  const gitFiles = useGitStore.use.files();
+  const gitRepoPath = useGitStore.use.repoPath();
+  const { fileColors, dirtyDirs } = useMemo(() => {
+    const fileColors = new Map<string, string>();
+    const dirtyDirs = new Set<string>();
+    const root = gitRepoPath ?? rootPath;
+    if (!root) return { fileColors, dirtyDirs };
+    for (const f of gitFiles) {
+      const abs = `${root}/${f.path}`;
+      fileColors.set(abs, gitStatusColor(f.status));
+      // Walk ancestors up to (and excluding) the root so each enclosing
+      // folder knows it contains a change.
+      let dir = abs.slice(0, abs.lastIndexOf("/"));
+      while (dir.length > root.length) {
+        if (dirtyDirs.has(dir)) break; // ancestors already recorded
+        dirtyDirs.add(dir);
+        dir = dir.slice(0, dir.lastIndexOf("/"));
+      }
+    }
+    return { fileColors, dirtyDirs };
+  }, [gitFiles, gitRepoPath, rootPath]);
+
   const virtualizer = useVirtualizer({
     count: flat.length,
     getScrollElement: () => scrollRef.current,
@@ -118,19 +165,11 @@ export function FileTree() {
     overscan: 15,
   });
 
-  const handleOpenFile = useCallback(
-    (path: string, name: string) => {
-      addTab({
-        id: `editor-${path}`,
-        type: "editor",
-        title: name,
-        closable: true,
-        dirty: false,
-        data: { filePath: path },
-      });
-    },
-    [addTab],
-  );
+  const handleOpenFile = useCallback((path: string, _name: string) => {
+    // Single entry point: classifies by extension and routes text → editor,
+    // images/video/audio → media viewer, everything else → unsupported view.
+    openFile(path);
+  }, []);
 
   // Click handling with Finder/Zed-style multi-select:
   //   • plain click → single-select + open/expand
@@ -669,6 +708,14 @@ export function FileTree() {
 
                   const node = row.node!;
                   const isDir = node.entry.is_dir;
+                  // Files show their own status color; a collapsed dir shows a
+                  // marker when it contains a change (expanded dirs let their
+                  // children carry the signal instead, to avoid double-marking).
+                  const gitColor = isDir
+                    ? !node.expanded && dirtyDirs.has(node.entry.path)
+                      ? "var(--status-warning)"
+                      : null
+                    : (fileColors.get(node.entry.path) ?? null);
                   const isSelected = selectedPaths.includes(node.entry.path);
                   const isActive = !isDir && node.entry.path === activeFilePath;
                   const isCut =
@@ -707,6 +754,7 @@ export function FileTree() {
                             dataPath={node.entry.path}
                             isDropTarget={isDir && dropTargetPath === node.entry.path}
                             isDragging={dragState.draggedItem?.path === node.entry.path}
+                            gitColor={gitColor}
                             onClick={(e) => handleRowClick(node, e)}
                             style={{ transform: `translateY(${virtualRow.start}px)` }}
                           />

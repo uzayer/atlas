@@ -33,11 +33,14 @@ export interface AppSettings {
   /** Record Atlas-internal events (sign-in, agent lifecycle, etc.) into
    *  the Logs panel under the `atlas` source. */
   enableAtlasLogs: boolean;
+  /** Show dotfiles / dot-directories in the explorer file tree. */
+  showHiddenFiles: boolean;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   autoAddAtlasGitignore: true,
   enableAtlasLogs: true,
+  showHiddenFiles: true,
 };
 
 /**
@@ -190,6 +193,12 @@ export const useProjectStore = createSelectors(
       updateSettings: (partial: Partial<AppSettings>) => {
         set((s) => ({ settings: { ...s.settings, ...partial } }));
         scheduleSave(get());
+        // Toggling hidden-files visibility must re-apply the explorer's
+        // dotfile filter immediately. `refresh()` reconciles the root and
+        // every expanded subtree, so the user's expansion state survives.
+        if (partial.showHiddenFiles !== undefined) {
+          void useExplorerStore.getState().actions.refresh();
+        }
       },
       hydrate: (payload: AppStateWire) => {
         // New windows always start fresh — same special case the previous

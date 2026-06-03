@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { resolveTerminalFont } from "../utils/resolve-font";
 
 interface TerminalInstanceProps {
   isActive: boolean;
@@ -128,15 +129,19 @@ export function TerminalInstance({ isActive, isVisible, onFocus }: TerminalInsta
       const { FitAddon } = await import("@xterm/addon-fit");
       await import("@xterm/xterm/css/xterm.css");
 
+      // Resolve the font BEFORE constructing the terminal. xterm measures the
+      // character cell once at init from the first resolvable font; if that
+      // happens before fonts are ready (common in a cold-loaded production
+      // build, less so in dev where the cache is warm) the whole grid is
+      // mis-sized. `resolveTerminalFont` awaits `document.fonts.ready` and
+      // guarantees a native + generic fallback so rendering is identical
+      // across dev and the shipped app.
+      const fontFamily = await resolveTerminalFont(13);
+
       if (disposed || !containerRef.current) return;
 
       const term = new Terminal({
-        // Lead with Menlo — it's a system font that the WebKit Canvas
-        // renderer ALWAYS resolves on macOS (xterm uses Canvas2D, which
-        // doesn't honour the CSS `ui-monospace` keyword reliably and was
-        // silently falling back to the proportional default in the bundled
-        // app). The rest are progressive fallbacks.
-        fontFamily: 'Menlo, Monaco, "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", "Courier New", monospace',
+        fontFamily,
         fontSize: 13,
         lineHeight: 1.4,
         scrollback: 5000,

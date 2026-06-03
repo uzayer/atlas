@@ -53,6 +53,9 @@ interface TreeRowProps {
   isDropTarget?: boolean;
   /** Dim this row while it's the active drag source. */
   isDragging?: boolean;
+  /** When set, paints a small git-status dot in the left gutter (e.g. a
+   *  modified/added/untracked marker). Pass a CSS color string. */
+  gitColor?: string | null;
 }
 
 /**
@@ -81,6 +84,7 @@ export function TreeRow({
   isSelected,
   isDropTarget,
   isDragging,
+  gitColor,
 }: TreeRowProps) {
   const isEditing = !!editingMode;
   const inputRef = useRef<HTMLInputElement>(null);
@@ -172,6 +176,17 @@ export function TreeRow({
         ...style,
       }}
     >
+      {gitColor && !isEditing ? (
+        // Git-status marker in the far-left gutter — depth-independent, like
+        // an editor's change gutter. Sits left of the indent so it reads as a
+        // per-row status rather than part of the name.
+        <span
+          aria-hidden
+          className="absolute top-1/2 -translate-y-1/2 rounded-full"
+          style={{ left: 3, width: 5, height: 5, background: gitColor }}
+        />
+      ) : null}
+
       {isDir ? (
         <ChevronRight
           size={12}
