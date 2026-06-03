@@ -2,6 +2,7 @@ import { useState, memo } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/types/agent";
+import { isBashToolCall } from "../lib/tool-calls";
 import {
   User,
   Sparkles,
@@ -624,7 +625,7 @@ const ToolCallCard = memo(function ToolCallCard({
   const [outputOpen, setOutputOpen] = useState(false);
 
   const args = toolCall.arguments as Record<string, unknown>;
-  const isBash = toolCall.toolName.toLowerCase() === "bash";
+  const isBash = isBashToolCall(toolCall);
   const filePath = getFilePathFromInput(args);
   const editParts = getEditParts(toolCall.toolName, args);
   const hasDiff = editParts.length > 0;

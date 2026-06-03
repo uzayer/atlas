@@ -40,6 +40,7 @@ function snapshotMessageToWire(m: SessionMessage) {
     timestamp: m.timestamp,
     toolCalls: m.tool_calls.map((tc) => ({
       toolName: tc.tool_name,
+      kind: tc.kind ?? null,
       arguments: (tc.arguments ?? {}) as Record<string, unknown>,
     })),
   };

@@ -563,7 +563,12 @@
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
-  vertical-align: -2px;
+  /* `inline-flex` reports its baseline as the bottom margin edge in WebKit,
+     which rides the chip up above the text. `middle` aligns the chip box to
+     the line's middle instead — visually centered on the 15px/1.7 body text,
+     including inside task-list items. */
+  vertical-align: middle;
+  line-height: 1;
 }
 
 /* The mention picker itself ships its own styling — the editor only

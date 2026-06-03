@@ -1,6 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useMemo } from "react";
 import { classifyFile, type FileKind } from "@/lib/file-types";
+import { ImageZoomView } from "./image-zoom-view";
 
 interface MediaViewerProps {
   filePath: string;
@@ -24,29 +25,23 @@ export function MediaViewer({ filePath }: MediaViewerProps) {
       <div className="flex items-center px-3 h-[32px] border-b border-[var(--border-default)] shrink-0 text-[11px] font-mono text-[var(--text-tertiary)] truncate">
         {filePath}
       </div>
-      <div className="flex-1 min-h-0 flex items-center justify-center p-4 overflow-auto">
-        {kind === "image" && (
-          <img
-            src={src}
-            alt={name}
-            className="max-w-full max-h-full object-contain select-none"
-            draggable={false}
-          />
-        )}
-        {kind === "video" && (
-          <video
-            src={src}
-            controls
-            className="max-w-full max-h-full"
-          />
-        )}
-        {kind === "audio" && (
-          <div className="flex flex-col items-center gap-3 text-[var(--text-secondary)]">
-            <span className="text-[12px] font-mono">{name}</span>
-            <audio src={src} controls />
-          </div>
-        )}
-      </div>
+      {kind === "image" ? (
+        <div className="flex-1 min-h-0">
+          <ImageZoomView src={src} alt={name} />
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0 flex items-center justify-center p-4 overflow-auto">
+          {kind === "video" && (
+            <video src={src} controls className="max-w-full max-h-full" />
+          )}
+          {kind === "audio" && (
+            <div className="flex flex-col items-center gap-3 text-[var(--text-secondary)]">
+              <span className="text-[12px] font-mono">{name}</span>
+              <audio src={src} controls />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -12,6 +12,9 @@ pub struct TerminalSession {
     /// a pane resize.
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// PID of the spawned login shell. Used by `cwd` to resolve relative file
+    /// paths clicked in the terminal against the shell's live directory.
+    pid: Option<u32>,
     _reader_handle: std::thread::JoinHandle<()>,
 }
 
@@ -62,7 +65,9 @@ impl TerminalManager {
             cmd.env("LANG", "en_US.UTF-8");
         }
 
-        let _child = pair.slave.spawn_command(cmd)?;
+        let child = pair.slave.spawn_command(cmd)?;
+        let pid = child.process_id();
+        drop(child); // the pty keeps the process alive; we only needed the pid
         drop(pair.slave); // drop slave so reads on master detect EOF
 
         let writer = pair.master.take_writer()?;
@@ -99,6 +104,7 @@ impl TerminalManager {
             TerminalSession {
                 master,
                 writer: Arc::new(Mutex::new(writer)),
+                pid,
                 _reader_handle: reader_handle,
             },
         );
@@ -141,6 +147,39 @@ impl TerminalManager {
 
     pub fn has_session(&self, id: &str) -> bool {
         self.sessions.contains_key(id)
+    }
+
+    /// PID of the session's login shell (for `cwd_of_pid`).
+    pub fn pid(&self, id: &str) -> Option<u32> {
+        self.sessions.get(id)?.pid
+    }
+}
+
+/// The live working directory of a shell pid, used to resolve relative file
+/// paths clicked in the terminal. Linux reads the `/proc/<pid>/cwd` symlink;
+/// macOS shells out to `lsof` (no `/proc`). BLOCKING (lsof) — call off-thread.
+pub fn cwd_of_pid(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `lsof -a -d cwd -p <pid> -Fn` prints `n<path>` for the cwd fd.
+        let out = std::process::Command::new("lsof")
+            .args(["-a", "-d", "cwd", "-p", &pid.to_string(), "-Fn"])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        s.lines()
+            .find_map(|l| l.strip_prefix('n').map(|p| p.to_string()))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
     }
 }
 

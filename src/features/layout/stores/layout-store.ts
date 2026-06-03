@@ -48,6 +48,9 @@ interface LayoutState {
   bashPanel: {
     width: number;
   };
+  plansPanel: {
+    width: number;
+  };
   tabs: Tab[];
   activeTabId: string | null;
   tabBarVisible: boolean;
@@ -70,6 +73,7 @@ interface LayoutActions {
     setKnowledgeInspectorWidth: (width: number) => void;
     setChatSidebarWidth: (width: number) => void;
     setBashPanelWidth: (width: number) => void;
+    setPlansPanelWidth: (width: number) => void;
     setLeftSection: (section: LayoutState["leftPanel"]["activeSection"]) => void;
     setRightSection: (section: LayoutState["rightPanel"]["activeSection"]) => void;
     addTab: (tab: Tab) => void;
@@ -119,6 +123,9 @@ const initialState: LayoutState = {
   },
   bashPanel: {
     width: 260,
+  },
+  plansPanel: {
+    width: 380,
   },
   tabs: [
     {
@@ -185,6 +192,10 @@ export const useLayoutStore = createSelectors(
         setBashPanelWidth: (width) =>
           set((s) => {
             s.bashPanel.width = Math.max(200, Math.min(width, 480));
+          }),
+        setPlansPanelWidth: (width) =>
+          set((s) => {
+            s.plansPanel.width = Math.max(300, Math.min(width, 640));
           }),
         setLeftSection: (section) =>
           set((s) => {
@@ -387,6 +398,7 @@ export const useLayoutStore = createSelectors(
           bottomPanel: s.bottomPanel,
           chatSidebar: s.chatSidebar,
           bashPanel: s.bashPanel,
+          plansPanel: s.plansPanel,
           tabBarVisible: s.tabBarVisible,
         }),
         // One-level-deep merge so persisted slices overlay the defaults
@@ -403,6 +415,7 @@ export const useLayoutStore = createSelectors(
             bottomPanel: { ...current.bottomPanel, ...(p.bottomPanel ?? {}) },
             chatSidebar: { ...current.chatSidebar, ...(p.chatSidebar ?? {}) },
             bashPanel: { ...current.bashPanel, ...(p.bashPanel ?? {}) },
+            plansPanel: { ...current.plansPanel, ...(p.plansPanel ?? {}) },
           };
         },
       },

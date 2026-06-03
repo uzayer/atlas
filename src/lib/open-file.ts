@@ -26,8 +26,9 @@ export function openFile(path: string): void {
   });
 }
 
-function tabTypeFor(kind: FileKind): "editor" | "media" | "unsupported" {
+function tabTypeFor(kind: FileKind): "editor" | "media" | "pdf" | "unsupported" {
   if (kind === "text") return "editor";
   if (kind === "image" || kind === "video" || kind === "audio") return "media";
+  if (kind === "pdf") return "pdf";
   return "unsupported";
 }

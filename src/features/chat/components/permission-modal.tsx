@@ -6,7 +6,8 @@ import { agents } from "../lib/agents-api";
 import { cn } from "@/lib/utils";
 import { Kbd } from "@/ui/kbd";
 import { Markdown } from "@/lib/markdown";
-import type { PermissionOptionRef, PendingPermission, ToolCallRef } from "@/types/acp";
+import { extractPlanMarkdown } from "../lib/plans";
+import type { PermissionOptionRef, PendingPermission } from "@/types/acp";
 
 function isAllow(kind: string) {
   return kind === "allow_once" || kind === "allow_always";
@@ -222,23 +223,6 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
   );
 }
 
-/**
- * Pull the plan markdown out of a permission tool call. Claude Code's
- * ExitPlanMode tool carries `{ plan: "<markdown>" }` in its input; the ACP
- * bridge surfaces that under `rawInput` (or `input`). Returns the markdown
- * string when present and non-empty, else null (→ standard modal).
- */
-function extractPlanMarkdown(tc: ToolCallRef): string | null {
-  const record = tc as Record<string, unknown>;
-  const input = (record.rawInput ?? record.input) as unknown;
-  if (input && typeof input === "object") {
-    const plan = (input as Record<string, unknown>).plan;
-    if (typeof plan === "string" && plan.trim().length > 0) {
-      return plan;
-    }
-  }
-  return null;
-}
 
 function PermissionButton({
   option,

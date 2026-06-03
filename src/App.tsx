@@ -664,6 +664,28 @@ export function App() {
       action: toggleChatSidebar,
     },
     {
+      // ⌥J — open the Knowledge Base, or jump to it if already open. Placed
+      // after ⌘⌥J (chat sidebar) so the matcher resolves that combo first;
+      // plain ⌥J (no ⌘) only matches here.
+      combo: { key: "j", alt: true },
+      action: () => {
+        const layout = useLayoutStore.getState();
+        const existing = layout.tabs.find((t) => t.type === "knowledge");
+        if (existing) {
+          setActiveTab(existing.id);
+          return;
+        }
+        addTab({
+          id: `knowledge-${Date.now()}`,
+          type: "knowledge",
+          title: "Knowledge",
+          closable: true,
+          dirty: false,
+          data: {},
+        });
+      },
+    },
+    {
       combo: { key: "t", meta: true, alt: true },
       action: toggleTabBar,
     },

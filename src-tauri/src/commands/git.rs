@@ -95,6 +95,22 @@ pub async fn git_status(path: String, app: AppHandle) -> Result<GitStatus, Strin
     Ok(fresh)
 }
 
+/// Force-fresh status — skips the stale-while-revalidate cache read and
+/// computes synchronously, returning the result directly (no event detour).
+///
+/// Used for changes Atlas *originates* and therefore already knows about:
+/// git mutations (stage / unstage / commit / discard / checkout …) and
+/// editor saves. Those don't need to wait for the `.git` / workspace fs
+/// watcher to notice — calling this right after the action lands makes the
+/// Changes panel and file-tree dots update in one lean `git status`
+/// (~50–120 ms) instead of FSEvents-latency + debounce + a stale round-trip.
+#[tauri::command]
+pub async fn git_status_fresh(path: String) -> Result<GitStatus, String> {
+    let fresh = git_status_compute(&path).await?;
+    write_status_cache(&path, &fresh);
+    Ok(fresh)
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct GitStatusFreshPayload {
     path: String,
@@ -135,24 +151,11 @@ fn write_status_cache(project_path: &str, status: &GitStatus) {
 async fn git_status_compute(path: &str) -> Result<GitStatus, String> {
     use tokio::process::Command as AsyncCommand;
 
-    let check = AsyncCommand::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(path)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !check.status.success() {
-        return Ok(GitStatus {
-            is_repo: false,
-            branch: String::new(),
-            files: vec![],
-            ahead: 0,
-            behind: 0,
-        });
-    }
-
-    // branch / status / ahead-behind in parallel.
+    // branch / status / ahead-behind in parallel. We intentionally DON'T
+    // gate on a preliminary `rev-parse --is-inside-work-tree` — that was a
+    // serial subprocess on the hot path (every refresh paid one extra `git`
+    // spawn before the real work). Instead we infer repo-ness from the
+    // `git status` exit code below: it fails fast outside a work tree.
     //   --ignore-submodules=all   skips per-submodule recursion — biggest
     //                             win on monorepos.
     //   --no-renames              skips O(adds × dels) rename detection.
@@ -176,37 +179,47 @@ async fn git_status_compute(path: &str) -> Result<GitStatus, String> {
 
     let (branch_res, status_res, ab_res) = tokio::join!(branch_fut, status_fut, ab_fut);
 
+    // Not a work tree (or git missing) → `git status` errored. Return the
+    // empty not-a-repo shape, same as the old `rev-parse` gate did.
+    let status_out = match status_res {
+        Ok(out) if out.status.success() => out,
+        _ => {
+            return Ok(GitStatus {
+                is_repo: false,
+                branch: String::new(),
+                files: vec![],
+                ahead: 0,
+                behind: 0,
+            });
+        }
+    };
+
     let branch = branch_res
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
-    let files: Vec<GitFileStatus> = match status_res {
-        Ok(out) => {
-            let status_str = String::from_utf8_lossy(&out.stdout);
-            status_str
-                .lines()
-                .filter(|l| l.len() >= 3)
-                .map(|line| {
-                    let index = line.chars().nth(0).unwrap_or(' ');
-                    let worktree = line.chars().nth(1).unwrap_or(' ');
-                    let file_path = line[3..].to_string();
-                    let (status, staged) = if index != ' ' && index != '?' {
-                        (index.to_string(), true)
-                    } else if worktree == '?' {
-                        ("?".to_string(), false)
-                    } else {
-                        (worktree.to_string(), false)
-                    };
-                    GitFileStatus {
-                        path: file_path,
-                        status,
-                        staged,
-                    }
-                })
-                .collect()
-        }
-        Err(_) => Vec::new(),
-    };
+    let status_str = String::from_utf8_lossy(&status_out.stdout);
+    let files: Vec<GitFileStatus> = status_str
+        .lines()
+        .filter(|l| l.len() >= 3)
+        .map(|line| {
+            let index = line.chars().nth(0).unwrap_or(' ');
+            let worktree = line.chars().nth(1).unwrap_or(' ');
+            let file_path = line[3..].to_string();
+            let (status, staged) = if index != ' ' && index != '?' {
+                (index.to_string(), true)
+            } else if worktree == '?' {
+                ("?".to_string(), false)
+            } else {
+                (worktree.to_string(), false)
+            };
+            GitFileStatus {
+                path: file_path,
+                status,
+                staged,
+            }
+        })
+        .collect();
 
     let (ahead, behind) = match ab_res {
         Ok(out) => {

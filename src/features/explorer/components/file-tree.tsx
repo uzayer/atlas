@@ -263,6 +263,9 @@ export function FileTree() {
     try {
       await invoke("fs_rename", { from: oldPath, to: newPath });
       await reconcileDirectory(dirOfPath(oldPath));
+      // Re-point recent-files entries so the mention picker shows the new name
+      // (the file-index search already self-updates via the fs watcher).
+      void invoke("recent_files_rename", { oldPath, newPath }).catch(() => {});
       // If the renamed file is open, swap the tab to the new path.
       const openTab = tabs.find(
         (t) => t.type === "editor" && (t.data as { filePath?: string }).filePath === oldPath,
@@ -308,6 +311,7 @@ export function FileTree() {
         if (clipboard.isCut) {
           await invoke("fs_rename", { from: src, to: destPath });
           await reconcileDirectory(dirOfPath(src));
+          void invoke("recent_files_rename", { oldPath: src, newPath: destPath }).catch(() => {});
         } else {
           await invoke("fs_copy", { from: src, to: destPath });
         }
@@ -357,6 +361,7 @@ export function FileTree() {
       try {
         const destPath = await resolveCollision(src, destDir);
         await invoke("fs_rename", { from: src, to: destPath });
+        void invoke("recent_files_rename", { oldPath: src, newPath: destPath }).catch(() => {});
         // Refresh both ends — the source's old parent loses the entry
         // and the destination gains it. The fs-watcher would catch
         // both eventually but the user expects an immediate update.
@@ -570,7 +575,7 @@ export function FileTree() {
         </ContextMenuItem>
         <ContextMenuItem onSelect={() => beginRename(entry.path)}>
           Rename
-          <ContextMenuShortcut><KbdCombo combo="F2" /></ContextMenuShortcut>
+          <ContextMenuShortcut><KbdCombo combo="↵" /></ContextMenuShortcut>
         </ContextMenuItem>
         <ContextMenuItem
           onSelect={() =>
@@ -756,6 +761,7 @@ export function FileTree() {
                             isDragging={dragState.draggedItem?.path === node.entry.path}
                             gitColor={gitColor}
                             onClick={(e) => handleRowClick(node, e)}
+                            onRename={() => beginRename(node.entry.path)}
                             style={{ transform: `translateY(${virtualRow.start}px)` }}
                           />
                         </div>

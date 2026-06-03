@@ -17,6 +17,7 @@ const TerminalPanel = lazy(() => import("@/features/terminal/components/terminal
 const EditorPanel = lazy(() => import("@/features/editor/components/editor-panel").then(m => ({ default: m.EditorPanel })));
 const BrowserPanel = lazy(() => import("@/features/browser/components/browser-panel").then(m => ({ default: m.BrowserPanel })));
 const MediaViewer = lazy(() => import("@/features/media/components/media-viewer").then(m => ({ default: m.MediaViewer })));
+const PdfViewer = lazy(() => import("@/features/pdf/components/pdf-viewer").then(m => ({ default: m.PdfViewer })));
 const CanvasPanel = lazy(() => import("@/features/canvas/components/canvas-panel").then(m => ({ default: m.CanvasPanel })));
 const KnowledgePanel = lazy(() => import("@/features/knowledge/components/knowledge-panel").then(m => ({ default: m.KnowledgePanel })));
 const KnowledgeGraph = lazy(() => import("@/features/knowledge/components/knowledge-graph").then(m => ({ default: m.KnowledgeGraph })));
@@ -46,6 +47,7 @@ import {
   ChevronRight,
   ScrollText,
   Timer,
+  FileText,
 } from "lucide-react";
 import type { TabType } from "@/lib/constants";
 
@@ -63,6 +65,7 @@ const tabIcons: Record<TabType, React.ElementType> = {
   settings: Settings,
   log: ScrollText,
   media: Code,
+  pdf: FileText,
   unsupported: Code,
   pomodoro: Timer,
 };
@@ -283,7 +286,10 @@ function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
       t.type === "editor" ||
       t.type === "terminal" ||
       t.type === "browser" ||
-      t.type === "knowledge-graph",
+      t.type === "knowledge-graph" ||
+      // PDF stays mounted across tab switches so its annotation overlay +
+      // scroll position survive (and Cmd+S can be optimistic — no reload).
+      t.type === "pdf",
   );
   const activeIsNonPersistent = !persistentTabs.find((t) => t.id === activeTab.id);
 
@@ -314,6 +320,8 @@ function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
                 <BrowserPanel initialUrl={tab.data.url as string | undefined} />
               ) : tab.type === "knowledge-graph" ? (
                 <KnowledgeGraph />
+              ) : tab.type === "pdf" ? (
+                <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />
               ) : (
                 <TerminalPanel tabId={tab.id} />
               )}
@@ -358,6 +366,8 @@ function TabContent({ tab }: { tab: Tab }) {
       return <PomodoroPanel />;
     case "media":
       return <MediaViewer filePath={tab.data.filePath as string} />;
+    case "pdf":
+      return <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />;
     case "unsupported":
       return <UnsupportedView filePath={tab.data.filePath as string} />;
     default:

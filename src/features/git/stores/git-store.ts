@@ -102,15 +102,18 @@ function ensureGitStatusFreshListener(): void {
     const current = useGitStore.getState().repoPath;
     if (!current || current !== e.payload.project) return;
     const actions = useGitStore.getState().actions;
-    void actions.loadStatus(current).catch(() => {});
+    // Force-fresh (not the SWR `loadStatus`) so the watcher path never
+    // flashes the stale disk cache before the real value lands.
+    void actions.refreshStatusNow(current).catch(() => {});
     void actions.listBranches().catch(() => {});
     void actions.loadBranchesFull().catch(() => {});
     void actions.loadDiff().catch(() => {});
     void actions.loadInProgress().catch(() => {});
   });
 
-  // Workspace edits — refresh status + diff (debounced) so editor/agent
-  // writes show up without polling.
+  // Workspace edits Atlas didn't originate (terminal git, external editor).
+  // Editor saves inside Atlas refresh directly (see editor-panel) and don't
+  // depend on this. Short debounce just coalesces fs-event bursts.
   let workspaceDebounce: ReturnType<typeof setTimeout> | null = null;
   void listen("atlas:explorer:changed", () => {
     const current = useGitStore.getState().repoPath;
@@ -121,9 +124,9 @@ function ensureGitStatusFreshListener(): void {
       const repoPath = useGitStore.getState().repoPath;
       if (!repoPath) return;
       const actions = useGitStore.getState().actions;
-      void actions.loadStatus(repoPath).catch(() => {});
+      void actions.refreshStatusNow(repoPath).catch(() => {});
       void actions.loadDiff().catch(() => {});
-    }, 250);
+    }, 120);
   });
 }
 
@@ -149,6 +152,11 @@ interface GitState {
 interface GitActions {
   actions: {
     loadStatus: (path: string) => Promise<void>;
+    /** Force-fresh status refresh for changes Atlas originates (git
+     *  mutations, editor saves). Computes synchronously and patches in
+     *  place — no `loading` flicker, no stale-cache flash, no wait for the
+     *  fs watcher. Defaults to the active `repoPath`. */
+    refreshStatusNow: (path?: string) => Promise<void>;
     loadLog: (path: string) => Promise<void>;
     loadDiff: () => Promise<void>;
     listBranches: () => Promise<void>;
@@ -242,6 +250,35 @@ export const useGitStore = createSelectors(
               set((s) => {
                 s.loading = false;
               });
+            }
+          },
+          refreshStatusNow: async (path) => {
+            ensureGitStatusFreshListener();
+            const p = path ?? get().repoPath;
+            if (!p) return;
+            // No `loading = true` here — this is an in-place patch after a
+            // known change, so the panel must not flash its loading state.
+            // `repoPath` is set so the dot map / Changes view key correctly.
+            set((s) => {
+              s.repoPath = p;
+            });
+            try {
+              const status = await invoke<{
+                is_repo: boolean;
+                branch: string;
+                files: GitFileStatus[];
+                ahead: number;
+                behind: number;
+              }>("git_status_fresh", { path: p });
+              set((s) => {
+                s.isRepo = status.is_repo;
+                s.branch = status.branch;
+                s.files = status.files;
+                s.ahead = status.ahead;
+                s.behind = status.behind;
+              });
+            } catch {
+              /* not a repo / transient — leave prior state */
             }
           },
           loadLog: async (path) => {
@@ -375,6 +412,10 @@ export const useGitStore = createSelectors(
             if (!p) return;
             await invoke("git_checkout", { path: p, branch });
             logEvent({ source: "git", kind: "checkout", summary: branch, payload: { branch } });
+            // Switching branches changes HEAD + working-tree status — update
+            // now; the watcher (HEAD move) reconciles branch lists shortly.
+            await get().actions.refreshStatusNow(p);
+            void get().actions.loadDiff();
           },
           createBranch: async (name) => {
             const p = repo();
@@ -402,22 +443,35 @@ export const useGitStore = createSelectors(
             const p = repo();
             if (!p) return;
             await invoke("git_stage", { path: p, files: paths });
+            // Refresh immediately — don't wait for the `.git/index` fs
+            // watcher (FSEvents latency + 200 ms debounce + stale round-trip).
+            await get().actions.refreshStatusNow(p);
+            void get().actions.loadDiff();
           },
           unstageFiles: async (paths) => {
             const p = repo();
             if (!p) return;
             await invoke("git_unstage", { path: p, files: paths });
+            await get().actions.refreshStatusNow(p);
+            void get().actions.loadDiff();
           },
           discard: async (paths) => {
             const p = repo();
             if (!p) return;
             await invoke("git_discard", { path: p, files: paths });
+            await get().actions.refreshStatusNow(p);
+            void get().actions.loadDiff();
           },
           commit: async (summary, description, amend = false) => {
             const p = repo();
             if (!p) return;
             await invoke("git_commit_ex", { path: p, summary, description: description ?? null, amend });
             logEvent({ source: "git", kind: "commit", summary: summary.slice(0, 120), payload: {} });
+            // Commit clears the staged set and moves HEAD — refresh the
+            // status/diff now; the watcher still reconciles branch ahead/behind.
+            await get().actions.refreshStatusNow(p);
+            void get().actions.loadDiff();
+            void get().actions.loadBranchesFull();
           },
           fetch: async () => {
             const p = repo();

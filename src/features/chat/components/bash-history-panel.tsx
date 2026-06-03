@@ -1,9 +1,10 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { TerminalSquare, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/types/agent";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
+import { isBashToolCall, bashCommandOf } from "../lib/tool-calls";
 
 interface BashEntry {
   command: string;
@@ -37,13 +38,25 @@ export function BashHistoryPanel({ messages, onJump, onClose }: BashHistoryPanel
   const bashPanel = useLayoutStore.use.bashPanel();
   const { setBashPanelWidth } = useLayoutStore.use.actions();
 
+  // Esc closes the overlay (it's a plain div, not a Radix dialog).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const entries = useMemo<BashEntry[]>(() => {
     const out: BashEntry[] = [];
     messages.forEach((m, i) => {
       for (const tc of m.toolCalls) {
-        if (tc.toolName.toLowerCase() !== "bash") continue;
+        if (!isBashToolCall(tc)) continue;
         const args = tc.arguments as Record<string, unknown>;
-        const cmd = (args.command as string) ?? (args.cmd as string) ?? "";
+        const cmd = bashCommandOf(args);
         const desc = (args.description as string) ?? undefined;
         if (!cmd) continue;
         out.push({
@@ -94,10 +107,18 @@ export function BashHistoryPanel({ messages, onJump, onClose }: BashHistoryPanel
   });
 
   return (
-    <div
-      style={{ width: bashPanel.width }}
-      className="relative shrink-0 h-full flex flex-col border-l border-[var(--border-default)] bg-[var(--bg-sidebar)]"
-    >
+    <>
+      {/* Scrim — click outside the panel to dismiss. Subtle so the chat stays
+          readable underneath the overlay. */}
+      <div
+        className="absolute inset-0 z-20 bg-black/20 animate-fade-in"
+        onClick={onClose}
+        aria-hidden
+      />
+      <div
+        style={{ width: bashPanel.width }}
+        className="absolute right-0 top-0 bottom-0 z-30 flex flex-col border-l border-[var(--border-default)] bg-[var(--bg-sidebar)] shadow-[var(--shadow-overlay)] animate-slide-in-right"
+      >
       {/* Left-edge resize handle */}
       <div
         onMouseDown={onResizeStart}
@@ -184,6 +205,7 @@ export function BashHistoryPanel({ messages, onJump, onClose }: BashHistoryPanel
           </div>
         )}
       </div>
-    </div>
+      </div>
+    </>
   );
 }

@@ -12,12 +12,17 @@ import { CLAUDE_PERMISSION_MODES } from "@/types/agent";
 import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta, ToolCall as AgentToolCall } from "@/types/agents";
 import { splitAtlasContext } from "../lib/atlas-context";
+import { invoke } from "@tauri-apps/api/core";
+import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
 
 /** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
 function toChatToolCall(tc: AgentToolCall): ChatMessage["toolCalls"][number] {
   return {
     id: tc.id,
     toolName: tc.tool_name,
+    // Preserve the ACP `kind` so bash/execute calls can be recognised
+    // reliably (the bash-history panel + bash-styled cards key off it).
+    kind: tc.kind ?? null,
     arguments: (tc.arguments ?? {}) as Record<string, unknown>,
     result: tc.result,
     status:
@@ -90,7 +95,11 @@ interface ChatActions {
         role: MessageRole;
         content: string;
         timestamp?: string;
-        toolCalls?: Array<{ toolName: string; arguments: Record<string, unknown> }>;
+        toolCalls?: Array<{
+          toolName: string;
+          kind?: string | null;
+          arguments: Record<string, unknown>;
+        }>;
       }>
     ) => void;
     /** Mirror the composer's plain text into the per-tab draft slot. */
@@ -171,6 +180,59 @@ function findTabByAcpSession(
   return null;
 }
 
+/**
+ * When a permission request carries a plan (Claude Code ExitPlanMode), persist
+ * it to the per-project plans store together with the user message that
+ * triggered it and a timestamp. Fire-and-forget; never blocks the permission
+ * UI. Rust dedups by (session, plan) so a re-delivered permission is a no-op.
+ */
+async function capturePlanIfPresent(
+  req: PendingPermission,
+  sessions: Record<string, ChatSession>
+): Promise<void> {
+  const plan = extractPlanMarkdown(req.toolCall);
+  if (!plan) return;
+
+  const tabId = findTabByAcpSession(sessions, req.acpSessionId);
+  const session = tabId ? sessions[tabId] : undefined;
+
+  // Original user message = the most recent user message in the session.
+  // Prefer the clean prose (atlas-context wrapper stripped) for display.
+  let userMessage = "";
+  if (session) {
+    for (let i = session.messages.length - 1; i >= 0; i--) {
+      const m = session.messages[i];
+      if (m.role === "user") {
+        userMessage = m.atlasProse ?? m.content;
+        break;
+      }
+    }
+  }
+
+  const { useProjectStore } = await import(
+    "@/features/project/stores/project-store"
+  );
+  const projectPath = useProjectStore.getState().currentProject?.path;
+  if (!projectPath) return;
+
+  const record: PlanRecord = {
+    id: `plan-${req.requestId}`,
+    sessionId: req.acpSessionId ?? null,
+    sessionTitle: session?.title ?? null,
+    userMessage,
+    plan,
+    timestamp: new Date().toISOString(),
+  };
+
+  try {
+    await invoke("plans_append", { projectPath, record });
+    // Let an open Plans panel refresh without re-opening.
+    window.dispatchEvent(new CustomEvent("atlas:plan-saved"));
+  } catch {
+    /* non-fatal — persistence failure shouldn't affect the permission flow */
+  }
+}
+
 let messageCounter = 0;
 function nextMessageId(): string {
   messageCounter += 1;
@@ -232,7 +294,7 @@ function findToolCall(
 
 export const useChatStore = createSelectors(
   create<ChatState & ChatActions>()(
-    immer((set) => ({
+    immer((set, get) => ({
       sessions: {},
       pendingPermissions: {},
       queues: {},
@@ -302,6 +364,7 @@ export const useChatStore = createSelectors(
                 session.messages[i].toolCalls.push({
                   id: `tc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
                   toolName,
+                  kind: null,
                   arguments: input,
                   result: null,
                   status: "completed",
@@ -380,6 +443,7 @@ export const useChatStore = createSelectors(
                 toolCalls: (m.toolCalls ?? []).map((tc, j) => ({
                   id: `tc-${Date.now()}-${i}-${j}`,
                   toolName: tc.toolName,
+                  kind: tc.kind ?? null,
                   arguments: tc.arguments,
                   result: null,
                   status: "completed" as const,
@@ -507,11 +571,15 @@ export const useChatStore = createSelectors(
             session.acpAgentId = agentId;
             session.acpSessionId = acpSessionId;
           }),
-        pushPermission: (req) =>
+        pushPermission: (req) => {
           set((s) => {
             const list = s.pendingPermissions[req.acpSessionId] ?? [];
             s.pendingPermissions[req.acpSessionId] = [...list, req];
-          }),
+          });
+          // Persist the plan (if this permission carries one) for the Plans
+          // panel — captures every plan made, even if later rejected.
+          void capturePlanIfPresent(req, get().sessions);
+        },
         popPermission: (acpSessionId, requestId) =>
           set((s) => {
             const list = s.pendingPermissions[acpSessionId];
