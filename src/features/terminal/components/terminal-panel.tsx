@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useTerminalStore, collectPanes, type TreeNode, type PaneNode } from "../stores/terminal-store";
-import { TerminalInstance } from "./terminal-instance";
+import { BlockTerminal } from "./block-terminal";
 import {
   Plus,
   Columns2,
@@ -23,7 +23,8 @@ interface PaneRect {
 
 export function TerminalPanel({ tabId }: TerminalPanelProps) {
   const tab = useTerminalStore((s) => s.tabs[tabId]);
-  const { initTab, setActiveTerminalInPane, setActivePane } = useTerminalStore.use.actions();
+  const { initTab, setActiveTerminalInPane, setActivePane, closeTerminalInPane } =
+    useTerminalStore.use.actions();
   const rootRef = useRef<HTMLDivElement>(null);
   const [paneRects, setPaneRects] = useState<Record<string, PaneRect>>({});
 
@@ -31,21 +32,46 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
     if (!tab) initTab(tabId);
   }, [tabId, tab, initTab]);
 
+  const measureRetryRef = useRef(0);
   const measurePanes = useCallback(() => {
-    if (!rootRef.current) return;
-    const rootRect = rootRef.current.getBoundingClientRect();
-    const containers = rootRef.current.querySelectorAll<HTMLElement>("[data-pane-container]");
+    const root = rootRef.current;
+    if (!root) return;
+    // Bail while the panel is hidden/collapsed (tab inactive, mid-transition).
+    // Measuring now yields a stale top:0 / height:0 that paints the terminal
+    // over its own 28px pane header and the tab bar. We simply don't update —
+    // the last *valid* rects stay in place; the ResizeObserver re-measures
+    // once real geometry exists.
+    if (root.offsetParent === null) return;
+    const rootRect = root.getBoundingClientRect();
+    if (rootRect.height === 0 || rootRect.width === 0) return;
+
+    const containers = root.querySelectorAll<HTMLElement>("[data-pane-container]");
     const rects: Record<string, PaneRect> = {};
+    let allValid = containers.length > 0;
     containers.forEach((el) => {
-      const id = el.dataset.paneContainer!;
       const r = el.getBoundingClientRect();
-      rects[id] = {
+      if (r.height === 0 || r.width === 0 || el.offsetParent === null) {
+        allValid = false;
+        return;
+      }
+      rects[el.dataset.paneContainer!] = {
         top: r.top - rootRect.top,
         left: r.left - rootRect.left,
         width: r.width,
         height: r.height,
       };
     });
+
+    if (!allValid) {
+      // Layout still settling — retry a few frames before giving up (avoids
+      // committing a half-measured frame, and avoids an infinite loop).
+      if (measureRetryRef.current < 10) {
+        measureRetryRef.current += 1;
+        requestAnimationFrame(measurePanes);
+      }
+      return;
+    }
+    measureRetryRef.current = 0;
     setPaneRects(rects);
   }, []);
 
@@ -80,6 +106,51 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
     return () => ro.disconnect();
   }, [measurePanes]);
 
+  // Terminal-tab keyboard shortcuts, gated to the VISIBLE terminal panel
+  // (offsetParent !== null) so background tabs never steal them:
+  //   ⌘;  → previous terminal tab     ⌘'  → next terminal tab  (within the
+  //         active pane, wrapping)
+  //   ⌘W  → close the active terminal tab WHEN the pane has more than one;
+  //         otherwise it falls through to the global ⌘W (close the editor tab).
+  // Registered in the CAPTURE phase so ⌘W can stopImmediatePropagation() before
+  // the global (bubble-phase) ⌘W handler closes the whole tab.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.ctrlKey || e.altKey) return;
+      const isNav = e.key === ";" || e.key === "'";
+      const isClose = e.key === "w" || e.key === "W";
+      if (!isNav && !isClose) return;
+      if (rootRef.current?.offsetParent == null) return;
+      const t = useTerminalStore.getState().tabs[tabId];
+      if (!t) return;
+      const panes = collectPanes(t.root);
+      const pane = panes.find((p) => p.id === t.activePaneId) ?? panes[0];
+      if (!pane) return;
+
+      if (isClose) {
+        // Only intercept when there's a terminal tab to close; otherwise let
+        // the global ⌘W close the editor tab as usual.
+        if (pane.terminals.length < 2) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        closeTerminalInPane(tabId, pane.id, pane.activeTerminalId ?? pane.terminals[0]);
+        setActivePane(tabId, pane.id);
+        return;
+      }
+
+      // Tab navigation.
+      if (pane.terminals.length < 2) return;
+      e.preventDefault();
+      const idx = Math.max(0, pane.terminals.indexOf(pane.activeTerminalId ?? pane.terminals[0]));
+      const delta = e.key === ";" ? -1 : 1;
+      const next = (idx + delta + pane.terminals.length) % pane.terminals.length;
+      setActiveTerminalInPane(tabId, pane.id, pane.terminals[next]);
+      setActivePane(tabId, pane.id);
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [tabId, setActiveTerminalInPane, setActivePane, closeTerminalInPane]);
+
   if (!tab) return null;
 
   const allPanes = collectPanes(tab.root);
@@ -111,9 +182,8 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
                 pointerEvents: isActiveInPane ? "auto" : "none",
               }}
             >
-              <TerminalInstance
+              <BlockTerminal
                 isActive={isActiveInPane && isPaneActive}
-                isVisible={isActiveInPane && !!rect}
                 onFocus={() => { setActiveTerminalInPane(tabId, pane.id, ptyId); setActivePane(tabId, pane.id); }}
               />
             </div>

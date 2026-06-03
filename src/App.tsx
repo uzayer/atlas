@@ -215,7 +215,7 @@ export function App() {
     const activeTab = list.find((t) => t.id === current);
 
     const focusTerminalSoon = () => {
-      // Ask the active TerminalInstance to focus once the tab is mounted/visible.
+      // Ask the active block terminal to focus once the tab is mounted/visible.
       requestAnimationFrame(() => {
         window.dispatchEvent(new CustomEvent("atlas:focus-terminal"));
       });
