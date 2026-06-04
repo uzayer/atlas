@@ -19,6 +19,7 @@ import {
 import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta } from "@/types/agents";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
+import { HintOverlay } from "@/features/hint-nav/components/hint-overlay";
 import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
 import { listen } from "@tauri-apps/api/event";
@@ -795,6 +796,7 @@ export function App() {
       />
       <SearchOverlay open={searchOpen} onOpenChange={setSearchOpen} />
       <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />
+      <HintOverlay />
       <Toaster
         position="bottom-right"
         toastOptions={{
