@@ -129,6 +129,7 @@ pub fn run() {
             commands::browser::browser_embed_set_visible,
             commands::browser::browser_embed_destroy,
             commands::terminal::terminal_create,
+            commands::terminal::terminal_zsh_dir,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,
             commands::terminal::terminal_close,

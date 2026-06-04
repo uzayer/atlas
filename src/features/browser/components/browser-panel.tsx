@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { logEvent } from "@/features/log/lib/log";
+import { cn } from "@/lib/utils";
+import { safeUnlistenPromise } from "@/lib/safe-unlisten";
 import {
   Globe,
   ExternalLink,
@@ -48,6 +50,19 @@ function normalizeUrl(url: string): string {
   const t = url.trim();
   if (t.startsWith("http://") || t.startsWith("https://")) return t;
   return `https://${t}`;
+}
+
+/** Omnibox resolution: a URL/host stays a URL; anything else becomes a Google
+ *  search. Mirrors a normal browser's address bar. */
+function toNavUrl(input: string): string {
+  const t = input.trim();
+  if (!t) return "";
+  if (/^https?:\/\//i.test(t)) return t;
+  // A bare host (has a dot, no spaces) or localhost → treat as a URL.
+  const looksLikeUrl =
+    /^localhost(:\d+)?(\/.*)?$/i.test(t) || /^[^\s]+\.[^\s]{2,}(\/.*)?$/.test(t);
+  if (looksLikeUrl) return `https://${t}`;
+  return `https://www.google.com/search?q=${encodeURIComponent(t)}`;
 }
 
 export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
@@ -119,7 +134,7 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
       setInputUrl(e.payload.url);
     });
     return () => {
-      un.then((f) => f());
+      safeUnlistenPromise(un);
     };
   }, [embedId]);
 
@@ -202,8 +217,10 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
 
   // ── Unified navigation (dispatches by mode) ─────────────────────────────
   const navigate = useCallback(
-    (url: string) => {
-      if (mode === "live") ensureLive(normalizeUrl(url));
+    (raw: string) => {
+      const url = toNavUrl(raw);
+      if (!url) return;
+      if (mode === "live") ensureLive(url);
       else fetchPage(url);
     },
     [mode, ensureLive, fetchPage],
@@ -317,6 +334,19 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
     }
   };
 
+  // Reader is a per-page action, not a persistent mode: entering reader renders
+  // the CURRENT page's readable view; toggling off returns to the live webview
+  // (which is still parked at its URL).
+  const toggleReader = useCallback(() => {
+    if (mode === "live") {
+      const url = liveNav?.url || inputUrl;
+      setMode("reader");
+      if (url && url.trim()) fetchPage(url);
+    } else {
+      setMode("live");
+    }
+  }, [mode, liveNav, inputUrl, fetchPage]);
+
   // ── Derived chrome state ────────────────────────────────────────────────
   const isLive = mode === "live";
   const canBack = isLive ? !!liveNav?.canGoBack : historyIndex > 0;
@@ -344,18 +374,24 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
             onChange={(e) => setInputUrl(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") navigate(inputUrl); }}
             className="flex-1 bg-transparent outline-none text-[11px] text-text-primary font-mono placeholder:text-text-tertiary"
-            placeholder="Enter URL..."
+            placeholder="Search or enter URL"
           />
         </div>
 
-        {/* Live ⇄ Reader toggle */}
+        {/* Reader toggle — renders a clean view of the current page; toggle off
+            returns to the live webview. */}
         <button
-          onClick={() => setMode((m) => (m === "live" ? "reader" : "live"))}
-          className="flex items-center gap-1 px-1.5 h-6 rounded hover:bg-bg-hover text-text-tertiary transition-colors cursor-pointer"
-          title={isLive ? "Switch to Reader mode (sanitized, no JS)" : "Switch to Live mode (full browser)"}
+          onClick={toggleReader}
+          className={cn(
+            "flex items-center gap-1 px-1.5 h-6 rounded transition-colors cursor-pointer",
+            mode === "reader"
+              ? "bg-bg-hover text-text-primary"
+              : "hover:bg-bg-hover text-text-tertiary",
+          )}
+          title={mode === "reader" ? "Back to live page" : "Reader view of this page"}
         >
-          {isLive ? <Zap size={11} /> : <BookText size={11} />}
-          <span className="text-[10px]">{isLive ? "Live" : "Reader"}</span>
+          {mode === "reader" ? <Zap size={11} /> : <BookText size={11} />}
+          <span className="text-[10px]">{mode === "reader" ? "Live" : "Reader"}</span>
         </button>
 
         {!isLive && page && currentProject && (

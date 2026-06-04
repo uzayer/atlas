@@ -64,6 +64,13 @@ pub async fn terminal_create(
     Ok(id)
 }
 
+/// The zsh shell-integration ZDOTDIR, so the frontend can relaunch an
+/// interactive root shell (`sudo -s`/`-i`/`su`) with the same integration.
+#[tauri::command]
+pub fn terminal_zsh_dir() -> Option<String> {
+    atlas_terminal::zsh_integration_dir().map(|p| p.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn terminal_write(
     state: State<'_, TerminalState>,
@@ -133,7 +140,7 @@ fn resolve_path_with_base(base: Option<&str>, raw: &str) -> Option<String> {
     let mut s = raw.trim().to_string();
     // Trim trailing punctuation that commonly abuts a path in prose/output.
     s = s
-        .trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ')' | ']' | '"' | '\''))
+        .trim_end_matches(['.', ',', ';', ')', ']', '"', '\''])
         .to_string();
     // Strip up to two trailing `:NN` (line, col) segments.
     for _ in 0..2 {

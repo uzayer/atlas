@@ -280,9 +280,8 @@ dependencies = [
 
 [[package]]
 name = "atlas"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
- "anyhow",
  "atlas-acp",
  "atlas-agents",
  "atlas-terminal",
@@ -308,7 +307,6 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -322,10 +320,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-tokio",
- "anyhow",
  "dashmap",
- "futures",
- "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -339,7 +334,6 @@ name = "atlas-agents"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
- "anyhow",
  "atlas-acp",
  "chrono",
  "dashmap",
@@ -360,7 +354,6 @@ dependencies = [
  "anyhow",
  "portable-pty",
  "serde",
- "serde_json",
  "tokio",
  "uuid",
 ]

@@ -1,7 +1,6 @@
 import { Extension } from "@tiptap/core";
 import Suggestion, { type SuggestionOptions } from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
-import { ReactRenderer } from "@tiptap/react";
 import { createRoot } from "react-dom/client";
 import {
   SLASH_ITEMS,
@@ -153,7 +152,3 @@ export const Slash = Extension.create<SlashExtensionOptions>({
     ];
   },
 });
-
-// Re-export the renderer type so callers know what comes back from
-// Suggestion's onStart props (handy if they want to extend this).
-export { ReactRenderer };

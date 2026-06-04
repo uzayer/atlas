@@ -25,9 +25,47 @@ export interface TerminalBlock {
   running: boolean;
   startedAt: number;
   endedAt: number | null;
+  /** The running command is waiting for a secret (heuristic on the output tail).
+   *  Drives an inline masked input inside the block — see BlockCard. */
+  awaitingPassword?: boolean;
+  /** Stored output was trimmed from the front (very large output). */
+  truncated?: boolean;
+  /** This block emitted a high volume of output, so live rendering is throttled
+   *  (the "large output" badge). */
+  firehose?: boolean;
 }
 
 const ESC = 0x1b;
+
+// Bound a single block's stored output so a huge dump (e.g. `tree /`, 100k+
+// lines) can't grow the string to hundreds of MB — that alone froze the app
+// (O(n) string append per 16ms batch → O(n²), plus re-segmenting the whole
+// thing every frame). We keep the most recent `OUTPUT_STORE_CAP` bytes.
+const OUTPUT_STORE_CAP = 512 * 1024;
+// Once a block has emitted this much, treat it as a "firehose": stop rendering
+// every batch (throttle to FIREHOSE_FLUSH_MS) so the UI thread stays free.
+const FIREHOSE_BYTES = 256 * 1024;
+const FIREHOSE_FLUSH_MS = 1500;
+const NORMAL_FLUSH_MS = 16;
+
+// Matches the tail of common password / passphrase prompts:
+//   "[sudo] password for user:"  "Password:"  "user@host's password:"
+//   "Enter passphrase for key …:"
+const PW_PROMPT_RE =
+  /(?:password(?: for [^:\n]*)?|passphrase[^:\n]*|'s password)\s*:[ \t]*$/i;
+
+/** Whether the output's last line looks like a password prompt. Strips OSC/CSI
+ *  so a colour-styled prompt still matches. */
+function looksLikePasswordPrompt(output: string): boolean {
+  const plain = output
+    // OSC … BEL/ST
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    // CSI …
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+  const trimmed = plain.replace(/[ \t\r]+$/, "");
+  const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1);
+  return PW_PROMPT_RE.test(lastLine);
+}
 
 export class BlockStreamParser {
   private pending = "";
@@ -40,6 +78,58 @@ export class BlockStreamParser {
   private current: TerminalBlock | null = null;
   private preambleId = 0;
   private integrated = false;
+  // Render coalescing: pushes mark dirty and schedule a single flush instead of
+  // calling onChange synchronously per batch. A firehose block flushes slowly.
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private forceFlush = false;
+  private bytesInBlock = 0;
+
+  /** Live working directory (OSC 7), surfaced for the input-area badge. */
+  get currentCwd(): string {
+    return this.cwd;
+  }
+
+  /** Whether a command is currently executing (the live block is running). */
+  get busy(): boolean {
+    const last = this.blocks[this.blocks.length - 1];
+    return !!last && last.running && last.command !== "";
+  }
+
+  /** Drop the rendered command blocks (the `clear` builtin). Keeps cwd / mode /
+   *  shell-integration state so the next prompt continues cleanly. */
+  clearBlocks(): void {
+    this.blocks = [];
+    this.current = null;
+    this.bytesInBlock = 0;
+    this.mode = "prompt";
+    this.flushNow();
+  }
+
+  /** Coalesce renders. The current block's volume decides the cadence: a
+   *  firehose throttles to FIREHOSE_FLUSH_MS so the UI thread stays responsive
+   *  during a huge dump; normal output flushes next frame. */
+  private scheduleFlush(): void {
+    if (this.forceFlush) {
+      this.flushNow();
+      return;
+    }
+    if (this.flushTimer != null) return;
+    const delay = this.current?.firehose ? FIREHOSE_FLUSH_MS : NORMAL_FLUSH_MS;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.onChange();
+    }, delay);
+  }
+
+  /** Flush immediately (command finished / cleared) — bypasses throttling. */
+  private flushNow(): void {
+    if (this.flushTimer != null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.forceFlush = false;
+    this.onChange();
+  }
 
   constructor(initialCwd: string, private onChange: () => void) {
     this.cwd = initialCwd;
@@ -72,6 +162,17 @@ export class BlockStreamParser {
     const appendOut = (chunk: string) => {
       if (this.mode === "output" && this.current) {
         this.current.output += chunk;
+        this.bytesInBlock += chunk.length;
+        // Bound stored output so a giant dump can't grow the string unbounded
+        // (and re-segment quadratically). Trim from the front past the cap.
+        if (this.current.output.length > OUTPUT_STORE_CAP) {
+          this.current.output = this.current.output.slice(-OUTPUT_STORE_CAP);
+          this.current.truncated = true;
+        }
+        // Flip to throttled rendering once the block crosses the firehose mark.
+        if (!this.current.firehose && this.bytesInBlock > FIREHOSE_BYTES) {
+          this.current.firehose = true;
+        }
         changed = true;
       }
     };
@@ -132,15 +233,37 @@ export class BlockStreamParser {
       i += 2;
     }
 
+    // Re-evaluate whether the live command is prompting for a secret. Only the
+    // running block can be awaiting input; recomputed each push so the inline
+    // field appears on "Password:" and disappears once other output follows.
+    // Skip firehose blocks (a huge dump isn't a prompt) and scan only the tail
+    // so the regex stays cheap even on a large block.
+    if (this.current && this.current.running && this.mode === "output" && !this.current.firehose) {
+      const out = this.current.output;
+      const tail = out.length > 256 ? out.slice(-256) : out;
+      const next = looksLikePasswordPrompt(tail);
+      if (next !== !!this.current.awaitingPassword) {
+        this.current.awaitingPassword = next;
+        changed = true;
+      }
+    }
+
     this.pending = s.slice(i);
-    if (changed) this.onChange();
+    if (changed) this.scheduleFlush();
   }
 
   private handleOsc(body: string): boolean {
     // OSC 7 — working directory: "7;file://host/abs/path"
     if (body.startsWith("7;")) {
       const m = body.match(/file:\/\/[^/]*(\/[^\x07]*)/);
-      if (m) this.cwd = decodeURIComponent(m[1]);
+      if (m) {
+        const next = decodeURIComponent(m[1]);
+        if (next !== this.cwd) {
+          this.cwd = next;
+          // Trigger a render so the input-area cwd/git badge tracks `cd`.
+          return true;
+        }
+      }
       return false;
     }
     // OSC 6973 — Atlas command text: "6973;C;<command>"
@@ -177,6 +300,7 @@ export class BlockStreamParser {
       endedAt: null,
         };
         this.pendingCommand = "";
+        this.bytesInBlock = 0;
         this.blocks = [...this.blocks, this.current];
         this.mode = "output";
         return true;
@@ -184,6 +308,7 @@ export class BlockStreamParser {
         const code = parseInt(part.split(";")[1] ?? "", 10);
         if (this.current) {
           this.current.running = false;
+          this.current.awaitingPassword = false;
           this.current.endedAt = Date.now();
           // Trim trailing blank lines for a compact block (the `%` partial-line
           // mark itself is suppressed at the source via `unsetopt PROMPT_SP`).
@@ -198,6 +323,8 @@ export class BlockStreamParser {
         }
         this.current = null;
         this.mode = "prompt";
+        // Render the finished block immediately, bypassing firehose throttling.
+        this.forceFlush = true;
         return true;
       }
     }

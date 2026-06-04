@@ -347,12 +347,6 @@ export function publishSymbolsToMentionCache(): void {
   );
 }
 
-/** Drop both caches — call on project close so the next project's
- *  picker doesn't briefly show the previous project's symbols. */
-export function clearMentionCache(): void {
-  void invoke("mention_cache_clear").catch(() => {});
-}
-
 /** Build the final prompt sent to the agent. Pure pass-through to a
  *  Rust command that:
  *   - dedupes mentions by id

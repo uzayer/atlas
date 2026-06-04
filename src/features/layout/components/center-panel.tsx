@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense, Fragment } from "react";
 import { cn } from "@/lib/utils";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useLayoutStore, type Tab } from "../stores/layout-store";
 // Chat is the default landing surface — always loaded so the first paint
 // shows the agent UI without a Suspense flash.
@@ -48,6 +49,7 @@ import {
   ScrollText,
   Timer,
   FileText,
+  Columns2,
 } from "lucide-react";
 import type { TabType } from "@/lib/constants";
 
@@ -70,35 +72,27 @@ const tabIcons: Record<TabType, React.ElementType> = {
   pomodoro: Timer,
 };
 
+const GROUP_OF = (t: Tab) => t.groupId ?? "main";
+const PERSISTENT_TYPES: ReadonlySet<TabType> = new Set([
+  "editor",
+  "terminal",
+  "browser",
+  "knowledge-graph",
+  "pdf",
+]);
+
+/**
+ * The center panel is one or more side-by-side **split columns**
+ * (`layout-store.groupOrder`, max 3, resizable). Each column hosts an
+ * independent tab strip + content area; a given tab lives in exactly one
+ * column. The single-column case is the normal IDE.
+ */
 export function CenterPanel() {
-  const tabs = useLayoutStore.use.tabs();
-  const activeTabId = useLayoutStore.use.activeTabId();
-  const tabBarVisible = useLayoutStore.use.tabBarVisible();
-  const tabHistory = useLayoutStore.use.tabHistory();
-  const tabHistoryIndex = useLayoutStore.use.tabHistoryIndex();
-  const { setActiveTab, closeTab, addTab, navigateTabBack, navigateTabForward } =
-    useLayoutStore.use.actions();
   const currentProject = useProjectStore.use.currentProject();
+  const groupOrder = useLayoutStore.use.groupOrder();
 
-  const canGoBack = useMemo(() => {
-    for (let i = tabHistoryIndex - 1; i >= 0; i--) {
-      if (tabs.find((t) => t.id === tabHistory[i])) return true;
-    }
-    return false;
-  }, [tabHistory, tabHistoryIndex, tabs]);
-
-  const canGoForward = useMemo(() => {
-    for (let i = tabHistoryIndex + 1; i < tabHistory.length; i++) {
-      if (tabs.find((t) => t.id === tabHistory[i])) return true;
-    }
-    return false;
-  }, [tabHistory, tabHistoryIndex, tabs]);
-
-  const activeTab = tabs.find((t) => t.id === activeTabId);
-
-  // Running-tab IDs. Pulled as a sorted string via shallow-equal selector so
-  // streaming chunks (which don't change `status`) never invalidate this and
-  // the tab bar doesn't re-render per token.
+  // Running-tab ids (shallow-equal so streaming chunks don't churn it),
+  // computed once here and shared to every column's tab strip.
   const runningTabIdsArray = useChatStore(
     useShallow((s) =>
       Object.entries(s.sessions)
@@ -107,22 +101,94 @@ export function CenterPanel() {
         .sort()
     )
   );
-  const runningTabIds = useMemo(
-    () => new Set(runningTabIdsArray),
-    [runningTabIdsArray]
-  );
+  const runningTabIds = useMemo(() => new Set(runningTabIdsArray), [runningTabIdsArray]);
 
-  // Show welcome screen when no project is open
-  if (!currentProject) {
-    return <WelcomeScreen />;
-  }
+  if (!currentProject) return <WelcomeScreen />;
+
+  const solo = groupOrder.length === 1;
+
+  // Always render through the same PanelGroup tree (even for one column) so
+  // adding/removing a split never remounts a sibling column's heavy modules
+  // (a terminal would lose its shell, a browser would reload).
+  return (
+    <PanelGroup
+      direction="horizontal"
+      autoSaveId="atlas-center-split"
+      className="h-full bg-bg-surface"
+    >
+      {groupOrder.map((gid, i) => (
+        <Fragment key={gid}>
+          {i > 0 && (
+            <PanelResizeHandle className="w-px bg-border-default hover:bg-accent data-[resize-handle-active]:bg-accent transition-colors cursor-col-resize" />
+          )}
+          <Panel id={gid} order={i + 1} minSize={20} className="min-w-0">
+            <TabColumn groupId={gid} runningTabIds={runningTabIds} soloColumn={solo} />
+          </Panel>
+        </Fragment>
+      ))}
+    </PanelGroup>
+  );
+}
+
+function TabColumn({
+  groupId,
+  runningTabIds,
+  soloColumn,
+}: {
+  groupId: string;
+  runningTabIds: Set<string>;
+  soloColumn?: boolean;
+}) {
+  const tabsAll = useLayoutStore.use.tabs();
+  const activeByGroup = useLayoutStore.use.activeByGroup();
+  const focusedGroupId = useLayoutStore.use.focusedGroupId();
+  const groupOrder = useLayoutStore.use.groupOrder();
+  const tabBarVisible = useLayoutStore.use.tabBarVisible();
+  const tabHistory = useLayoutStore.use.tabHistory();
+  const tabHistoryIndex = useLayoutStore.use.tabHistoryIndex();
+  const {
+    setActiveTab,
+    closeTab,
+    addTab,
+    navigateTabBack,
+    navigateTabForward,
+    setFocusedGroup,
+    addGroup,
+    closeGroup,
+  } = useLayoutStore.use.actions();
+
+  const tabs = useMemo(
+    () => tabsAll.filter((t) => GROUP_OF(t) === groupId),
+    [tabsAll, groupId]
+  );
+  const activeId = activeByGroup[groupId] ?? null;
+  const isFocused = focusedGroupId === groupId;
+  const canSplit = groupOrder.length < 3;
+  const canCloseGroup = groupOrder.length > 1;
+
+  // Back/forward operate on the (global) tab history.
+  const canGoBack = useMemo(() => {
+    for (let i = tabHistoryIndex - 1; i >= 0; i--)
+      if (tabsAll.find((t) => t.id === tabHistory[i])) return true;
+    return false;
+  }, [tabHistory, tabHistoryIndex, tabsAll]);
+  const canGoForward = useMemo(() => {
+    for (let i = tabHistoryIndex + 1; i < tabHistory.length; i++)
+      if (tabsAll.find((t) => t.id === tabHistory[i])) return true;
+    return false;
+  }, [tabHistory, tabHistoryIndex, tabsAll]);
 
   return (
-    <div className="h-full flex flex-col overflow-hidden bg-bg-surface">
-      {/* Tab bar */}
+    <div
+      className={cn(
+        "h-full flex flex-col overflow-hidden bg-bg-surface",
+        // Subtle focused-column ring (only meaningful when split).
+        !soloColumn && isFocused && "ring-1 ring-inset ring-[#ffffff14]"
+      )}
+      onMouseDownCapture={() => setFocusedGroup(groupId)}
+    >
       {tabBarVisible && (
         <div className="flex items-stretch h-[29px] shrink-0 bg-bg-base border-b border-border-default">
-          {/* Back / forward nav */}
           <div className="flex items-center gap-0.5 px-1 border-r border-border-default shrink-0">
             <button
               onClick={navigateTabBack}
@@ -155,7 +221,7 @@ export function CenterPanel() {
           <div className="flex items-stretch min-w-0 flex-1 overflow-x-auto hide-scrollbar">
             {tabs.map((tab) => {
               const Icon = tabIcons[tab.type as TabType] ?? MessageSquare;
-              const isActive = tab.id === activeTabId;
+              const isActive = tab.id === activeId;
               const isRunning = runningTabIds.has(tab.id);
               return (
                 <div
@@ -167,15 +233,10 @@ export function CenterPanel() {
                   className={cn(
                     "group relative flex items-center gap-1.5 pl-3 h-full text-[12px] font-medium shrink-0 cursor-pointer select-none border-r border-border-default",
                     "transition-[padding-right,background-color,color] duration-150",
-                    // Reserve right padding only on hover so the close
-                    // button has room without claiming any space at
-                    // rest. Title text shifts left by ~16px during the
-                    // fade — reads as one motion together with the X
-                    // fading in.
                     tab.closable ? "pr-3 hover:pr-7" : "pr-3",
                     isActive
                       ? "text-text-primary bg-bg-surface"
-                      : "text-text-tertiary bg-bg-base hover:text-text-secondary hover:bg-bg-hover",
+                      : "text-text-tertiary bg-bg-base hover:text-text-secondary hover:bg-bg-hover"
                   )}
                 >
                   {isRunning ? (
@@ -183,33 +244,18 @@ export function CenterPanel() {
                   ) : (
                     <Icon size={12} className={cn("shrink-0", isActive ? "text-text-secondary" : "text-text-tertiary")} />
                   )}
-                  <span
-                    className={cn(
-                      "truncate max-w-[140px] leading-none",
-                      tab.dirty && "italic"
-                    )}
-                  >
+                  <span className={cn("truncate max-w-[140px] leading-none", tab.dirty && "italic")}>
                     {tab.title}
                   </span>
                   {tab.closable && (
-                    // Absolute-positioned: the button claims no inline
-                    // space at rest, stays vertically centered on the
-                    // tab's midline regardless of font metrics, and
-                    // fades in via opacity (no width animation to
-                    // drift the icon during reveal).
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        closeTab(tab.id);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                       title="Close tab"
                       className={cn(
                         "absolute right-1.5 top-1/2 -translate-y-1/2",
                         "inline-flex items-center justify-center w-4 h-4 rounded-full",
-                        "text-text-tertiary opacity-0",
-                        "group-hover:opacity-100",
-                        "hover:bg-[#ffffff22] hover:text-text-primary",
-                        "transition-opacity duration-150",
+                        "text-text-tertiary opacity-0 group-hover:opacity-100",
+                        "hover:bg-[#ffffff22] hover:text-text-primary transition-opacity duration-150"
                       )}
                     >
                       <X size={10} strokeWidth={2.2} />
@@ -219,32 +265,54 @@ export function CenterPanel() {
               );
             })}
           </div>
+
           <div className="relative flex items-center shrink-0">
-            {/* Fade tabs into the new-tab button instead of a hard divider */}
             <div
               aria-hidden
               className="pointer-events-none absolute right-full top-0 h-full w-8"
-              style={{
-                background:
-                  "linear-gradient(to right, transparent, var(--bg-base))",
-              }}
+              style={{ background: "linear-gradient(to right, transparent, var(--bg-base))" }}
             />
-            <NewTabDropdown addTab={addTab} />
+            <NewTabDropdown addTab={addTab} groupId={groupId} />
+            {canSplit && (
+              <button
+                onClick={addGroup}
+                title="Split right (⌘\\)"
+                className="self-center flex items-center justify-center w-6 h-6 text-text-tertiary hover:text-text-secondary hover:bg-bg-hover rounded transition-colors shrink-0 mr-0.5 cursor-pointer outline-none"
+              >
+                <Columns2 size={13} />
+              </button>
+            )}
+            {canCloseGroup && (
+              <button
+                onClick={() => closeGroup(groupId)}
+                title="Close split (⌥W)"
+                className="self-center flex items-center justify-center w-6 h-6 text-text-tertiary hover:text-text-secondary hover:bg-bg-hover rounded transition-colors shrink-0 mr-1 cursor-pointer outline-none"
+              >
+                <X size={13} />
+              </button>
+            )}
           </div>
         </div>
       )}
 
-      {/* Tab content */}
-      <TabContentContainer activeTab={activeTab} />
+      <TabContentContainer groupId={groupId} />
     </div>
   );
 }
 
-function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
-  const tabs = useLayoutStore.use.tabs();
+function TabContentContainer({ groupId }: { groupId: string }) {
+  const tabsAll = useLayoutStore.use.tabs();
+  const activeByGroup = useLayoutStore.use.activeByGroup();
   const { setActiveTab } = useLayoutStore.use.actions();
   const ref = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState(0);
+
+  const tabs = useMemo(
+    () => tabsAll.filter((t) => GROUP_OF(t) === groupId),
+    [tabsAll, groupId]
+  );
+  const activeTabId = activeByGroup[groupId] ?? null;
+  const activeTab = tabs.find((t) => t.id === activeTabId);
 
   useEffect(() => {
     const el = ref.current;
@@ -260,56 +328,40 @@ function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
     return () => ro.disconnect();
   }, []);
 
-  // If we somehow lost the active tab (stale id, fresh project switch,
-  // a close that didn't pick a successor), snap to the first tab —
-  // welcome-chat is the permanent fallback the layout store guarantees
-  // is always present.
+  // If this column's active id is stale (closed tab, etc.) snap to its first.
   useEffect(() => {
-    if (!activeTab && tabs.length > 0) {
-      setActiveTab(tabs[0].id);
-    }
+    if (!activeTab && tabs.length > 0) setActiveTab(tabs[0].id);
   }, [activeTab, tabs, setActiveTab]);
 
-  if (!activeTab) {
+  // Empty split column — invite the user to open something.
+  if (tabs.length === 0) {
     return (
-      <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden" }} />
+      <div
+        ref={ref}
+        style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden" }}
+        className="flex items-center justify-center text-[12px] text-text-tertiary"
+      >
+        Empty split — open a tab with + or ⌘⌥N
+      </div>
     );
   }
 
-  // Keep editor, terminal, browser, and knowledge-graph instances alive
-  // across tab switches. The graph in particular is expensive to rebuild
-  // (Pixi WebGL init + Matter physics + force-layout warmup ~hundreds of
-  // ms on a moderate-sized graph), so unmounting it on every tab swap
-  // makes the IDE feel sluggish.
-  const persistentTabs = tabs.filter(
-    (t) =>
-      t.type === "editor" ||
-      t.type === "terminal" ||
-      t.type === "browser" ||
-      t.type === "knowledge-graph" ||
-      // PDF stays mounted across tab switches so its annotation overlay +
-      // scroll position survive (and Cmd+S can be optimistic — no reload).
-      t.type === "pdf",
-  );
+  if (!activeTab) {
+    return <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden" }} />;
+  }
+
+  // Keep editor/terminal/browser/knowledge-graph/pdf mounted across tab
+  // switches *within this column* (expensive to rebuild).
+  const persistentTabs = tabs.filter((t) => PERSISTENT_TYPES.has(t.type));
   const activeIsNonPersistent = !persistentTabs.find((t) => t.id === activeTab.id);
 
   return (
     <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden", position: "relative" }}>
-      {/* Single Suspense boundary — Editor/Terminal/Browser are all lazy
-          (CodeMirror+Lezer / xterm / WebView pull in significant chunks),
-          and we want one fallback for the whole pane rather than per-tab
-          flicker. */}
       <Suspense fallback={<PanelLoading />}>
-        {/* Persistent tabs: stay mounted, hidden when inactive */}
         {persistentTabs.map((tab) => {
           const isActive = tab.id === activeTab.id;
           return (
-            <div
-              key={tab.id}
-              style={{
-                display: isActive ? "contents" : "none",
-              }}
-            >
+            <div key={tab.id} style={{ display: isActive ? "contents" : "none" }}>
               {tab.type === "editor" ? (
                 <EditorPanel
                   tabId={tab.id}
@@ -329,7 +381,6 @@ function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
           );
         })}
 
-        {/* Non-persistent tabs: mount/unmount normally */}
         {activeIsNonPersistent && <TabContent tab={activeTab} />}
       </Suspense>
     </div>
@@ -403,19 +454,28 @@ const NEW_TAB_OPTIONS: Array<{ type: TabType; label: string; icon: React.Element
   { type: "pomodoro", label: "Pomodoro", icon: Timer },
 ];
 
-function NewTabDropdown({ addTab }: { addTab: (tab: Tab) => void }) {
+function NewTabDropdown({
+  addTab,
+  groupId,
+}: {
+  addTab: (tab: Tab, groupId?: string) => void;
+  groupId: string;
+}) {
   const handleAdd = useCallback(
     (type: TabType, label: string) => {
-      addTab({
-        id: `${type}-${Date.now()}`,
-        type,
-        title: label,
-        closable: true,
-        dirty: false,
-        data: {},
-      });
+      addTab(
+        {
+          id: `${type}-${Date.now()}`,
+          type,
+          title: label,
+          closable: true,
+          dirty: false,
+          data: {},
+        },
+        groupId
+      );
     },
-    [addTab]
+    [addTab, groupId]
   );
 
   return (

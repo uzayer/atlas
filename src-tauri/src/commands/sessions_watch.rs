@@ -14,9 +14,9 @@
 //! the event.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
+use atlas_agents::transcript::encode_cwd;
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, Debouncer, RecommendedCache};
 use parking_lot::Mutex;
@@ -162,12 +162,5 @@ pub fn sessions_watch_status(state: State<'_, SessionsWatchState>) -> WatchStatu
 
 fn encoded_folder(cwd: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
-    let trimmed = cwd.trim_end_matches('/');
-    let encoded = trimmed.replace('/', "-");
-    Some(home.join(".claude").join("projects").join(encoded))
+    Some(home.join(".claude").join("projects").join(encode_cwd(cwd)))
 }
-
-// Suppress dead-code warnings on the Arc import which is referenced via the
-// state wrapper rather than directly.
-#[allow(dead_code)]
-type _ArcMarker = Arc<()>;

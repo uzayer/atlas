@@ -47,7 +47,7 @@ function getProcessor(): Processor {
   return processor;
 }
 
-export function escapeHtml(s: string): string {
+function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

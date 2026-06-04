@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { FileText, Image as ImageIcon, Film, Music, FileCode, FileX } from "lucide-react";
+import { Image as ImageIcon, Film, Music, FileCode, FileX } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -226,7 +226,3 @@ function KindIcon({ kind }: { kind: FileKind }) {
   if (kind === "text") return <FileCode className={cls} />;
   return <FileX className={cls} />;
 }
-
-// Keep FileText referenced so the icon set stays available for downstream
-// component variations without re-importing.
-export const _exportedIcons = { FileText };

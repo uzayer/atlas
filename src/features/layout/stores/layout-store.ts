@@ -12,6 +12,18 @@ export interface Tab {
   closable: boolean;
   dirty: boolean;
   data: Record<string, unknown>;
+  /** Which split column this tab lives in. Absent = the default "main"
+   *  column (so existing tab literals don't need to set it). */
+  groupId?: string;
+}
+
+interface ZenSnapshot {
+  groupOrder: string[];
+  activeByGroup: Record<string, string | null>;
+  focusedGroupId: string;
+  tabGroups: Record<string, string>;
+  leftVisible: boolean;
+  rightVisible: boolean;
 }
 
 interface LayoutState {
@@ -52,7 +64,21 @@ interface LayoutState {
     width: number;
   };
   tabs: Tab[];
+  /** Mirror of the FOCUSED column's active tab — kept in sync so the many
+   *  existing readers (status bar, persistence, etc.) don't need to know about
+   *  split columns. */
   activeTabId: string | null;
+  // ── Split view ──────────────────────────────────────────────────────────
+  /** Ordered split columns, left→right. Length 1–3. */
+  groupOrder: string[];
+  /** Active tab id per column. */
+  activeByGroup: Record<string, string | null>;
+  /** The column that owns keyboard focus (tab hotkeys target it). */
+  focusedGroupId: string;
+  /** Zen mode: a focused Knowledge │ Chat │ Browser 3-column split with the
+   *  global side panels hidden. `zenPrev` snapshots the layout to restore. */
+  zen: boolean;
+  zenPrev: ZenSnapshot | null;
   tabBarVisible: boolean;
   // Back/forward stack of tab ids — entries are pushed every time the user
   // navigates to a tab; back() / forward() rewind/advance an index.
@@ -76,7 +102,7 @@ interface LayoutActions {
     setPlansPanelWidth: (width: number) => void;
     setLeftSection: (section: LayoutState["leftPanel"]["activeSection"]) => void;
     setRightSection: (section: LayoutState["rightPanel"]["activeSection"]) => void;
-    addTab: (tab: Tab) => void;
+    addTab: (tab: Tab, groupId?: string) => void;
     closeTab: (id: string) => void;
     setActiveTab: (id: string) => void;
     setTabDirty: (id: string, dirty: boolean) => void;
@@ -84,6 +110,20 @@ interface LayoutActions {
     navigateTabBack: () => void;
     navigateTabForward: () => void;
     activateTabByIndex: (i: number) => void;
+    cycleTab: (delta: 1 | -1) => void;
+    // ── Split view ──
+    /** Set which column has keyboard focus. */
+    setFocusedGroup: (groupId: string) => void;
+    /** Move focus to the column delta steps away (clamped). */
+    focusAdjacentGroup: (delta: 1 | -1) => void;
+    /** Open a new empty split column to the right of the focused one (≤3). */
+    addGroup: () => void;
+    /** Close a split column, moving its tabs to the left neighbour (never the
+     *  last remaining column). */
+    closeGroup: (groupId: string) => void;
+    /** Toggle Zen mode: a Knowledge │ Chat │ Browser 3-column split with the
+     *  global side panels hidden; toggling again restores the prior layout. */
+    toggleZenMode: () => void;
     saveEditorState: (projectPath: string) => void;
     loadEditorState: (projectPath: string) => Promise<void>;
     /** Wipe tabs/history back to the welcome-chat baseline. Called when
@@ -135,13 +175,67 @@ const initialState: LayoutState = {
       closable: false,
       dirty: false,
       data: {},
+      groupId: "main",
     },
   ],
   activeTabId: "welcome-chat",
+  groupOrder: ["main"],
+  activeByGroup: { main: "welcome-chat" },
+  focusedGroupId: "main",
+  zen: false,
+  zenPrev: null,
   tabBarVisible: true,
   tabHistory: ["welcome-chat"],
   tabHistoryIndex: 0,
 };
+
+const DEFAULT_GROUP = "main";
+const MAX_GROUPS = 3;
+
+function groupOf(tab: Tab | undefined): string {
+  return tab?.groupId ?? DEFAULT_GROUP;
+}
+
+/** Keep `activeTabId` pointing at the focused column's active tab. */
+function syncActiveMirror(s: LayoutState): void {
+  s.activeTabId = s.activeByGroup[s.focusedGroupId] ?? null;
+}
+
+function pushTabHistory(s: LayoutState, id: string): void {
+  if (s.tabHistory[s.tabHistoryIndex] === id) return;
+  s.tabHistory = s.tabHistory.slice(0, s.tabHistoryIndex + 1);
+  s.tabHistory.push(id);
+  s.tabHistoryIndex = s.tabHistory.length - 1;
+}
+
+/** Ensure every tab sits in a live column, every column has a valid active
+ *  tab, and focus is valid. Used after bulk group changes (workspace restore,
+ *  zen toggle). */
+function reconcileGroups(s: LayoutState): void {
+  if (s.groupOrder.length === 0) s.groupOrder = [DEFAULT_GROUP];
+  for (const t of s.tabs) if (!s.groupOrder.includes(groupOf(t))) t.groupId = s.groupOrder[0];
+  for (const k of Object.keys(s.activeByGroup)) {
+    if (!s.groupOrder.includes(k)) delete s.activeByGroup[k];
+  }
+  for (const g of s.groupOrder) {
+    const a = s.activeByGroup[g];
+    if (!a || !s.tabs.find((t) => t.id === a && groupOf(t) === g)) {
+      s.activeByGroup[g] = s.tabs.find((t) => groupOf(t) === g)?.id ?? null;
+    }
+  }
+  if (!s.groupOrder.includes(s.focusedGroupId)) s.focusedGroupId = s.groupOrder[0];
+  syncActiveMirror(s);
+}
+
+const WELCOME_TAB = (groupId: string): Tab => ({
+  id: "welcome-chat",
+  type: "chat",
+  title: "Chat",
+  closable: false,
+  dirty: false,
+  data: {},
+  groupId,
+});
 
 export const useLayoutStore = createSelectors(
   create<LayoutState & LayoutActions>()(
@@ -205,36 +299,43 @@ export const useLayoutStore = createSelectors(
           set((s) => {
             s.rightPanel.activeSection = section;
           }),
-        addTab: (tab) =>
+        addTab: (tab, groupId) =>
           set((s) => {
             // chat: each session is its own tab (multiple parallel agent
             // chats supported). editor / diff: one per filePath. Everything
-            // else: at most one instance.
+            // else: at most one instance — opening it again focuses the
+            // existing one (incl. across split columns; "can't open the same
+            // tab in two splits").
             const allowMultiple =
               tab.type === "editor" ||
               tab.type === "diff" ||
               tab.type === "chat";
 
             let targetId = tab.id;
+            // Where the tab lands: caller-specified column, else the focused one.
+            let targetGroup = groupId ?? s.focusedGroupId;
+            if (!s.groupOrder.includes(targetGroup)) targetGroup = s.focusedGroupId;
+
             if (!allowMultiple) {
               const existingOfType = s.tabs.find((t) => t.type === tab.type);
               if (existingOfType) {
                 targetId = existingOfType.id;
+                targetGroup = groupOf(existingOfType); // focus where it already lives
               } else {
-                s.tabs.push(tab);
+                s.tabs.push({ ...tab, groupId: targetGroup });
               }
             } else {
               const existsById = s.tabs.find((t) => t.id === tab.id);
-              if (!existsById) {
-                s.tabs.push(tab);
+              if (existsById) {
+                targetGroup = groupOf(existsById);
+              } else {
+                s.tabs.push({ ...tab, groupId: targetGroup });
               }
             }
-            if (s.activeTabId !== targetId) {
-              s.activeTabId = targetId;
-              s.tabHistory = s.tabHistory.slice(0, s.tabHistoryIndex + 1);
-              s.tabHistory.push(targetId);
-              s.tabHistoryIndex = s.tabHistory.length - 1;
-            }
+            s.focusedGroupId = targetGroup;
+            s.activeByGroup[targetGroup] = targetId;
+            pushTabHistory(s, targetId);
+            syncActiveMirror(s);
           }),
         closeTab: (id) =>
           set((s) => {
@@ -242,40 +343,41 @@ export const useLayoutStore = createSelectors(
             if (idx === -1) return;
             const tab = s.tabs[idx];
             if (!tab.closable) return;
+            const grp = groupOf(tab);
+            const groupIdxInGroup = s.tabs
+              .filter((t) => groupOf(t) === grp)
+              .findIndex((t) => t.id === id);
             s.tabs.splice(idx, 1);
-            // Never leave an empty tab strip — the welcome chat is the
-            // permanent first-tab fallback.
-            if (s.tabs.length === 0) {
-              s.tabs.push({
-                id: "welcome-chat",
-                type: "chat",
-                title: "Chat",
-                closable: false,
-                dirty: false,
-                data: {},
-              });
+
+            const remaining = s.tabs.filter((t) => groupOf(t) === grp);
+            if (remaining.length === 0) {
+              if (s.groupOrder.length > 1) {
+                // The column emptied — collapse the split.
+                s.groupOrder = s.groupOrder.filter((g) => g !== grp);
+                delete s.activeByGroup[grp];
+                if (s.focusedGroupId === grp) s.focusedGroupId = s.groupOrder[0];
+              } else {
+                // Last column emptied — restore the permanent welcome chat.
+                s.tabs.push(WELCOME_TAB(grp));
+                s.activeByGroup[grp] = "welcome-chat";
+              }
+            } else if (s.activeByGroup[grp] === id) {
+              // Activate the neighbour at the same slot within the column.
+              const next = remaining[Math.min(groupIdxInGroup, remaining.length - 1)];
+              s.activeByGroup[grp] = next.id;
             }
-            if (s.activeTabId === id) {
-              // Prefer the neighbour at the same slot; fall back to the
-              // first tab (always present after the guard above).
-              s.activeTabId = s.tabs[Math.min(idx, s.tabs.length - 1)]?.id
-                ?? s.tabs[0].id;
-            }
+            syncActiveMirror(s);
           }),
         setActiveTab: (id) =>
           set((s) => {
-            // Defensive: if the caller hands us an id that no longer
-            // exists in the tab list, route to the first tab instead
-            // of letting `activeTabId` point at nothing.
-            const target = s.tabs.find((t) => t.id === id)
-              ? id
-              : s.tabs[0]?.id ?? null;
-            if (target === null || s.activeTabId === target) return;
-            s.activeTabId = target;
-            // Truncate forward history (typical browser-style) and push.
-            s.tabHistory = s.tabHistory.slice(0, s.tabHistoryIndex + 1);
-            s.tabHistory.push(target);
-            s.tabHistoryIndex = s.tabHistory.length - 1;
+            const tab = s.tabs.find((t) => t.id === id);
+            const target = tab ? id : s.tabs[0]?.id ?? null;
+            if (target === null) return;
+            const grp = groupOf(s.tabs.find((t) => t.id === target));
+            s.focusedGroupId = grp;
+            s.activeByGroup[grp] = target;
+            pushTabHistory(s, target);
+            syncActiveMirror(s);
           }),
         toggleTabBar: () =>
           set((s) => {
@@ -285,9 +387,12 @@ export const useLayoutStore = createSelectors(
           set((s) => {
             for (let i = s.tabHistoryIndex - 1; i >= 0; i--) {
               const id = s.tabHistory[i];
-              if (s.tabs.find((t) => t.id === id)) {
+              const tab = s.tabs.find((t) => t.id === id);
+              if (tab) {
                 s.tabHistoryIndex = i;
-                s.activeTabId = id;
+                s.focusedGroupId = groupOf(tab);
+                s.activeByGroup[s.focusedGroupId] = id;
+                syncActiveMirror(s);
                 return;
               }
             }
@@ -296,39 +401,171 @@ export const useLayoutStore = createSelectors(
           set((s) => {
             for (let i = s.tabHistoryIndex + 1; i < s.tabHistory.length; i++) {
               const id = s.tabHistory[i];
-              if (s.tabs.find((t) => t.id === id)) {
+              const tab = s.tabs.find((t) => t.id === id);
+              if (tab) {
                 s.tabHistoryIndex = i;
-                s.activeTabId = id;
+                s.focusedGroupId = groupOf(tab);
+                s.activeByGroup[s.focusedGroupId] = id;
+                syncActiveMirror(s);
                 return;
               }
             }
           }),
+        // ⌘1–9 — select the i-th tab WITHIN the focused column.
         activateTabByIndex: (i) =>
           set((s) => {
-            if (i < 0 || i >= s.tabs.length) return;
-            const id = s.tabs[i].id;
-            if (s.activeTabId === id) return;
-            s.activeTabId = id;
-            s.tabHistory = s.tabHistory.slice(0, s.tabHistoryIndex + 1);
-            s.tabHistory.push(id);
-            s.tabHistoryIndex = s.tabHistory.length - 1;
+            const groupTabs = s.tabs.filter((t) => groupOf(t) === s.focusedGroupId);
+            const target = i < 0 ? groupTabs[groupTabs.length - 1] : groupTabs[i];
+            if (!target) return;
+            s.activeByGroup[s.focusedGroupId] = target.id;
+            pushTabHistory(s, target.id);
+            syncActiveMirror(s);
+          }),
+        cycleTab: (delta) =>
+          set((s) => {
+            const groupTabs = s.tabs.filter((t) => groupOf(t) === s.focusedGroupId);
+            if (groupTabs.length === 0) return;
+            const cur = s.activeByGroup[s.focusedGroupId];
+            const ci = Math.max(0, groupTabs.findIndex((t) => t.id === cur));
+            const next = groupTabs[(ci + delta + groupTabs.length) % groupTabs.length];
+            s.activeByGroup[s.focusedGroupId] = next.id;
+            pushTabHistory(s, next.id);
+            syncActiveMirror(s);
+          }),
+        setFocusedGroup: (groupId) =>
+          set((s) => {
+            if (!s.groupOrder.includes(groupId) || s.focusedGroupId === groupId) return;
+            s.focusedGroupId = groupId;
+            syncActiveMirror(s);
+          }),
+        focusAdjacentGroup: (delta) =>
+          set((s) => {
+            const i = s.groupOrder.indexOf(s.focusedGroupId);
+            const ni = i + delta;
+            if (ni < 0 || ni >= s.groupOrder.length) return;
+            s.focusedGroupId = s.groupOrder[ni];
+            syncActiveMirror(s);
+          }),
+        addGroup: () =>
+          set((s) => {
+            if (s.groupOrder.length >= MAX_GROUPS) return;
+            const gid = `split-${Date.now().toString(36)}-${Math.random()
+              .toString(36)
+              .slice(2, 5)}`;
+            const fi = s.groupOrder.indexOf(s.focusedGroupId);
+            s.groupOrder.splice(fi + 1, 0, gid);
+            s.activeByGroup[gid] = null;
+            s.focusedGroupId = gid;
+            syncActiveMirror(s);
+          }),
+        closeGroup: (groupId) =>
+          set((s) => {
+            if (s.groupOrder.length <= 1) return;
+            const gi = s.groupOrder.indexOf(groupId);
+            if (gi === -1) return;
+            const leftId = s.groupOrder[gi - 1] ?? s.groupOrder[gi + 1];
+            // Move the column's tabs to the neighbour (they remount there).
+            for (const t of s.tabs) {
+              if (groupOf(t) === groupId) t.groupId = leftId;
+            }
+            const moved = s.activeByGroup[groupId];
+            s.groupOrder.splice(gi, 1);
+            delete s.activeByGroup[groupId];
+            if (moved) s.activeByGroup[leftId] = moved;
+            s.focusedGroupId = leftId;
+            syncActiveMirror(s);
+          }),
+        toggleZenMode: () =>
+          set((s) => {
+            // Exit: restore the snapshot.
+            if (s.zen && s.zenPrev) {
+              const p = s.zenPrev;
+              s.leftPanel.visible = p.leftVisible;
+              s.rightPanel.visible = p.rightVisible;
+              s.groupOrder = p.groupOrder.length ? [...p.groupOrder] : [DEFAULT_GROUP];
+              s.activeByGroup = { ...p.activeByGroup };
+              s.focusedGroupId = p.focusedGroupId;
+              for (const t of s.tabs) t.groupId = p.tabGroups[t.id] ?? s.groupOrder[0];
+              s.zen = false;
+              s.zenPrev = null;
+              reconcileGroups(s);
+              return;
+            }
+            // Enter: snapshot the current layout, then build Knowledge │ Chat │
+            // Browser with the side panels hidden.
+            const tabGroups: Record<string, string> = {};
+            for (const t of s.tabs) tabGroups[t.id] = groupOf(t);
+            s.zenPrev = {
+              groupOrder: [...s.groupOrder],
+              activeByGroup: { ...s.activeByGroup },
+              focusedGroupId: s.focusedGroupId,
+              tabGroups,
+              leftVisible: s.leftPanel.visible,
+              rightVisible: s.rightPanel.visible,
+            };
+            const G_KB = "zen-kb";
+            const G_CHAT = "zen-chat";
+            const G_BROWSER = "zen-browser";
+            // Reuse the existing singleton tab if present, else create one.
+            const ensure = (type: TabType, title: string, gid: string): string => {
+              const existing = s.tabs.find((x) => x.type === type);
+              if (existing) {
+                existing.groupId = gid;
+                return existing.id;
+              }
+              const id = `${type}-zen`;
+              s.tabs.push({ id, type, title, closable: true, dirty: false, data: {}, groupId: gid });
+              return id;
+            };
+            const kbId = ensure("knowledge", "Knowledge", G_KB);
+            // A chat tab always exists (welcome-chat is the non-closable baseline).
+            let chat = s.tabs.find((x) => x.type === "chat");
+            if (!chat) {
+              chat = { id: "chat-zen", type: "chat", title: "Chat", closable: true, dirty: false, data: {}, groupId: G_CHAT };
+              s.tabs.push(chat);
+            } else {
+              chat.groupId = G_CHAT;
+            }
+            const browserId = ensure("browser", "Browser", G_BROWSER);
+            s.groupOrder = [G_KB, G_CHAT, G_BROWSER];
+            s.activeByGroup = { [G_KB]: kbId, [G_CHAT]: chat.id, [G_BROWSER]: browserId };
+            s.focusedGroupId = G_CHAT;
+            s.leftPanel.visible = false;
+            s.rightPanel.visible = false;
+            s.zen = true;
+            syncActiveMirror(s);
           }),
         setTabDirty: (id, dirty) =>
           set((s) => {
             const tab = s.tabs.find((t) => t.id === id);
             if (tab) tab.dirty = dirty;
           }),
+        // Persist the whole workspace layout (split columns + their tabs) per
+        // project so the AKB arrangement comes back on reopen. The Rust
+        // save/load commands store the JSON opaquely, so the shape is ours.
         saveEditorState: (projectPath) => {
           const state = useLayoutStore.getState();
-          const editorTabs = state.tabs.filter((t) => t.type === "editor");
-          const data = {
-            tabs: editorTabs.map((t) => ({
+          // Zen mode is a transient overlay — don't persist its 3-column layout
+          // over the real workspace (the pre-zen snapshot stays saved, so
+          // quitting in zen reopens the underlying layout).
+          if (state.zen) return;
+          // Persist every closable tab (welcome-chat is the recreated baseline).
+          const tabs = state.tabs
+            .filter((t) => t.closable)
+            .map((t) => ({
               id: t.id,
               type: t.type,
               title: t.title,
               data: t.data,
-            })),
-            activeTabId: state.activeTabId,
+              groupId: groupOf(t),
+            }));
+          const data = {
+            version: 2,
+            tabs,
+            groupOrder: state.groupOrder,
+            activeByGroup: state.activeByGroup,
+            focusedGroupId: state.focusedGroupId,
+            activeTabId: state.activeTabId, // legacy readers
           };
           invoke("save_editor_state", {
             projectPath,
@@ -337,17 +574,11 @@ export const useLayoutStore = createSelectors(
         },
         resetForProjectSwitch: () =>
           set((s) => {
-            s.tabs = [
-              {
-                id: "welcome-chat",
-                type: "chat",
-                title: "Chat",
-                closable: false,
-                dirty: false,
-                data: {},
-              },
-            ];
+            s.tabs = [WELCOME_TAB(DEFAULT_GROUP)];
             s.activeTabId = "welcome-chat";
+            s.groupOrder = [DEFAULT_GROUP];
+            s.activeByGroup = { [DEFAULT_GROUP]: "welcome-chat" };
+            s.focusedGroupId = DEFAULT_GROUP;
             s.tabHistory = ["welcome-chat"];
             s.tabHistoryIndex = 0;
           }),
@@ -355,26 +586,60 @@ export const useLayoutStore = createSelectors(
           try {
             const raw = await invoke<string>("load_editor_state", { projectPath });
             const data = JSON.parse(raw) as {
-              tabs?: Array<{ id: string; type: string; title: string; data: Record<string, unknown> }>;
+              tabs?: Array<{ id: string; type: string; title: string; data: Record<string, unknown>; groupId?: string }>;
+              groupOrder?: string[];
+              activeByGroup?: Record<string, string | null>;
+              focusedGroupId?: string;
               activeTabId?: string;
             };
             if (data.tabs && data.tabs.length > 0) {
               set((s) => {
-                for (const saved of data.tabs!) {
-                  if (!s.tabs.find((t) => t.id === saved.id)) {
-                    s.tabs.push({
-                      id: saved.id,
-                      type: saved.type as TabType,
-                      title: saved.title,
-                      closable: true,
-                      dirty: false,
-                      data: saved.data,
-                    });
+                // Restore the column structure (≤3). Falls back to the existing
+                // single "main" column for the legacy (v1) format.
+                if (data.groupOrder && data.groupOrder.length > 0) {
+                  s.groupOrder = data.groupOrder.slice(0, MAX_GROUPS);
+                  // If "main" (the welcome tab's column) was dropped, re-home it.
+                  if (!s.groupOrder.includes(DEFAULT_GROUP)) {
+                    const first = s.groupOrder[0];
+                    for (const t of s.tabs) if (groupOf(t) === DEFAULT_GROUP) t.groupId = first;
                   }
                 }
-                if (data.activeTabId) {
-                  s.activeTabId = data.activeTabId;
+                // Add the saved tabs into their columns.
+                for (const saved of data.tabs!) {
+                  if (s.tabs.find((t) => t.id === saved.id)) continue;
+                  let gid = saved.groupId ?? DEFAULT_GROUP;
+                  if (!s.groupOrder.includes(gid)) gid = s.groupOrder[0];
+                  s.tabs.push({
+                    id: saved.id,
+                    type: saved.type as TabType,
+                    title: saved.title,
+                    closable: true,
+                    dirty: false,
+                    data: saved.data,
+                    groupId: gid,
+                  });
                 }
+                // Reconcile: every tab in a live column; every column with a
+                // valid active tab; restore focus.
+                for (const t of s.tabs) if (!s.groupOrder.includes(groupOf(t))) t.groupId = s.groupOrder[0];
+                const saved = data.activeByGroup ?? {};
+                for (const g of s.groupOrder) {
+                  const want = saved[g];
+                  const valid = want && s.tabs.find((t) => t.id === want && groupOf(t) === g);
+                  if (valid) s.activeByGroup[g] = want!;
+                  else if (!s.activeByGroup[g] || !s.tabs.find((t) => t.id === s.activeByGroup[g] && groupOf(t) === g)) {
+                    s.activeByGroup[g] = s.tabs.find((t) => groupOf(t) === g)?.id ?? null;
+                  }
+                }
+                // Legacy: no per-group active map — fall back to activeTabId.
+                if (!data.activeByGroup && data.activeTabId && s.tabs.find((t) => t.id === data.activeTabId)) {
+                  s.activeByGroup[DEFAULT_GROUP] = data.activeTabId;
+                }
+                s.focusedGroupId =
+                  data.focusedGroupId && s.groupOrder.includes(data.focusedGroupId)
+                    ? data.focusedGroupId
+                    : s.groupOrder[0];
+                syncActiveMirror(s);
               });
             }
           } catch {

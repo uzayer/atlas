@@ -5,7 +5,7 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { InboxPanel } from "@/features/chat/components/inbox-panel";
-import { ChevronDown, Folder, FolderOpen, X, PanelLeft, PanelRight, Plus, Search, Inbox } from "lucide-react";
+import { ChevronDown, Folder, FolderOpen, X, PanelLeft, PanelRight, Search, Inbox } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
@@ -100,12 +100,7 @@ export function Titlebar() {
       className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[#000] border-b border-border-default ${isFullscreen ? "pl-3" : "pl-[72px]"}`}
     >
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
-        {currentProject && (
-          <>
-            <LeftPanelToggle />
-            <WorkspaceButton />
-          </>
-        )}
+        {currentProject && <LeftPanelToggle />}
         <DropdownMenu.Root onOpenChange={(open) => { if (!open) setSearch(""); }}>
           <DropdownMenu.Trigger asChild>
             <button
@@ -257,17 +252,6 @@ function NotificationButton() {
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
-  );
-}
-
-function WorkspaceButton() {
-  return (
-    <button
-      className="flex items-center justify-center w-6 h-6 rounded text-[#555] hover:text-[#aaa] hover:bg-[#ffffff08] transition-all duration-150"
-      title="New workspace"
-    >
-      <Plus size={14} />
-    </button>
   );
 }
 

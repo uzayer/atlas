@@ -1,5 +1,6 @@
+import { useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Shield, AlertTriangle, CheckCircle2, XCircle, ClipboardList } from "lucide-react";
+import { Shield, CheckCircle2, XCircle, AlertTriangle, ClipboardList } from "lucide-react";
 import { toast } from "sonner";
 import { useChatStore } from "../stores/chat-store";
 import { agents } from "../lib/agents-api";
@@ -18,108 +19,131 @@ function isReject(kind: string) {
 
 interface PermissionModalProps {
   tabId: string;
+  /** Send a fresh message to the agent (used by the "tell the agent what to do
+   *  instead" field, which cancels the request then sends the text). */
+  onSendMessage?: (text: string) => void;
 }
 
 /**
  * Renders the head of the pending-permission queue for whichever ACP session
- * is bound to this tab. Cancelled requests (ESC / click outside) resolve as
- * `cancelled` on the wire so the agent backs off correctly.
+ * is bound to this tab. The standard case is an inline card (numbered options,
+ * keyboard-selectable, with a free-text fallback) pinned above the composer,
+ * à la Claude Code / VSCode. Plan reviews keep the richer two-panel modal.
+ * Cancelled requests (ESC / click outside) resolve as `cancelled` on the wire
+ * so the agent backs off correctly.
  */
-export function PermissionModal({ tabId }: PermissionModalProps) {
-  // Narrow subscription: we only care about this tab's acpSessionId
-  // and the head of its permission queue. The previous broad
-  // `useChatStore.use.sessions()` + `useChatStore.use.pendingPermissions()`
-  // pair re-rendered this modal on every streaming chunk because the
-  // top-level `sessions` map identity flips on each tail mutation.
-  // Subscribing to only the values we read keeps the modal idle until
-  // a permission actually arrives.
-  const acpSessionId = useChatStore(
-    (s) => s.sessions[tabId]?.acpSessionId,
+export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) {
+  // Narrow subscription: only this tab's acpSessionId and the head of its
+  // permission queue, so the card stays idle until a request actually arrives.
+  const acpSessionId = useChatStore((s) => s.sessions[tabId]?.acpSessionId);
+  const current = useChatStore((s) =>
+    acpSessionId ? s.pendingPermissions[acpSessionId]?.[0] : undefined,
   );
-  const current = useChatStore((s) => {
-    if (!acpSessionId) return undefined;
-    return s.pendingPermissions[acpSessionId]?.[0];
-  });
-  const queueLength = useChatStore((s) => {
-    if (!acpSessionId) return 0;
-    return s.pendingPermissions[acpSessionId]?.length ?? 0;
-  });
+  const queueLength = useChatStore((s) =>
+    acpSessionId ? (s.pendingPermissions[acpSessionId]?.length ?? 0) : 0,
+  );
   const popPermission = useChatStore.use.actions().popPermission;
+
+  const [draft, setDraft] = useState("");
+  const textRef = useRef<HTMLTextAreaElement>(null);
+
+  // Reset the free-text field whenever the active request changes.
+  const reqId = current?.requestId;
+  useEffect(() => {
+    setDraft("");
+  }, [reqId]);
+
+  const primaryId = current?.options.find((o) => isAllow(o.kind))?.optionId;
+
+  // Keyboard: digits 1–9 select, Enter = primary, Esc = cancel — except while
+  // the free-text field is focused (there Enter submits text, Esc still cancels).
+  useEffect(() => {
+    if (!current) return;
+    const send = (decision: Parameters<typeof agents.respondPermission>[3]) => {
+      agents
+        .respondPermission(current.agentId, current.acpSessionId, current.requestId, decision)
+        .catch((e) => toast.error(`Permission send failed: ${e}`))
+        .finally(() => popPermission(current.acpSessionId, current.requestId));
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const inText = document.activeElement === textRef.current;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        send({ kind: "cancelled" });
+        return;
+      }
+      if (inText) return; // let the field handle digits / Enter
+      if (e.key === "Enter") {
+        if (primaryId) {
+          e.preventDefault();
+          send({ kind: "selected", option_id: primaryId });
+        }
+        return;
+      }
+      const n = parseInt(e.key, 10);
+      if (!Number.isNaN(n) && n >= 1 && n <= current.options.length) {
+        e.preventDefault();
+        send({ kind: "selected", option_id: current.options[n - 1].optionId });
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [current, primaryId, popPermission]);
 
   if (!current) return null;
 
   const resolve = (optId: string) => {
     agents
-      .respondPermission(
-        current.agentId,
-        current.acpSessionId,
-        current.requestId,
-        { kind: "selected", option_id: optId }
-      )
+      .respondPermission(current.agentId, current.acpSessionId, current.requestId, {
+        kind: "selected",
+        option_id: optId,
+      })
       .catch((e) => toast.error(`Permission send failed: ${e}`))
       .finally(() => popPermission(current.acpSessionId, current.requestId));
   };
 
   const cancel = () => {
     agents
-      .respondPermission(
-        current.agentId,
-        current.acpSessionId,
-        current.requestId,
-        { kind: "cancelled" }
-      )
+      .respondPermission(current.agentId, current.acpSessionId, current.requestId, {
+        kind: "cancelled",
+      })
       .catch((e) => toast.error(`Permission cancel failed: ${e}`))
       .finally(() => popPermission(current.acpSessionId, current.requestId));
   };
 
+  // Free-text: cancel the request, then send the typed instruction as a new
+  // message (ACP has no text-response path for a permission).
+  const submitText = () => {
+    const text = draft.trim();
+    if (!text) return;
+    cancel();
+    onSendMessage?.(text);
+  };
+
   const title = current.toolCall.title ?? current.toolCall.kind ?? "Tool call";
-  // Recommended default = the first "allow" option, if any.
-  const primaryId = current.options.find((o) => isAllow(o.kind))?.optionId;
-  // Claude Code's ExitPlanMode surfaces a `{ plan: "<markdown>" }` tool call.
-  // When we can pull the plan markdown out, render the richer two-panel
-  // review layout; otherwise fall back to the standard permission modal.
   const planMarkdown = extractPlanMarkdown(current.toolCall);
+  const queueNote = queueLength > 1 ? `${queueLength - 1} more pending after this` : null;
 
-  const queueNote =
-    queueLength > 1 ? `${queueLength - 1} more pending after this` : null;
-
-  // Shared option buttons + cancel footer — identical in both layouts.
-  const controls = (
-    <>
-      <div className="flex flex-col gap-1.5 px-4 py-3">
-        {current.options.map((opt) => (
-          <PermissionButton
-            key={opt.optionId}
-            option={opt}
-            // The first "allow" option is the recommended default —
-            // autofocus + the accent (white) primary-button look, so
-            // Enter triggers it and it's visually unmistakable.
-            isPrimary={opt.optionId === primaryId}
-            onSelect={() => resolve(opt.optionId)}
-          />
-        ))}
-      </div>
-      <div className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-2.5">
-        <button
-          type="button"
-          onClick={cancel}
-          className="inline-flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs text-text-secondary hover:bg-bg-base hover:text-text-primary transition-colors"
-        >
-          Cancel
-          <Kbd>esc</Kbd>
-        </button>
-      </div>
-    </>
+  // Numbered option list — shared by both layouts.
+  const optionList = (
+    <div className="flex flex-col gap-1">
+      {current.options.map((opt, i) => (
+        <PermissionOption
+          key={opt.optionId}
+          index={i + 1}
+          option={opt}
+          isPrimary={opt.optionId === primaryId}
+          onSelect={() => resolve(opt.optionId)}
+        />
+      ))}
+    </div>
   );
 
+  // Plan review keeps the richer two-panel modal (with number-key support from
+  // the keyboard effect above).
   if (planMarkdown) {
     return (
-      <Dialog.Root
-        open
-        onOpenChange={(open) => {
-          if (!open) cancel();
-        }}
-      >
+      <Dialog.Root open onOpenChange={(open) => !open && cancel()}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
           <Dialog.Content
@@ -127,18 +151,15 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
               "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
               "flex max-h-[80vh] w-[880px] max-w-[94vw] flex-col overflow-hidden",
               "rounded-md border border-border-default bg-bg-elevated",
-              "shadow-[var(--shadow-overlay)] animate-scale-in text-text-primary"
+              "shadow-[var(--shadow-overlay)] animate-scale-in text-text-primary",
             )}
           >
             <div className="flex items-start gap-3 border-b border-border-default px-4 py-3">
               <ClipboardList className="mt-0.5 size-4 text-accent" />
               <div className="flex-1">
-                <Dialog.Title className="text-sm font-medium">
-                  Review plan
-                </Dialog.Title>
+                <Dialog.Title className="text-sm font-medium">Review plan</Dialog.Title>
                 <Dialog.Description className="mt-0.5 text-xs text-text-secondary">
-                  The agent proposed a plan before continuing. Review it, then
-                  approve or reject.
+                  The agent proposed a plan before continuing. Review it, then approve or reject.
                 </Dialog.Description>
               </div>
               {queueNote && (
@@ -147,9 +168,7 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
                 </span>
               )}
             </div>
-
             <div className="flex min-h-0 flex-1">
-              {/* Left: human-readable plan. */}
               <section className="flex min-h-0 flex-1 flex-col">
                 <div className="border-b border-border-default bg-bg-base px-5 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
                   Plan
@@ -158,18 +177,20 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
                   <Markdown>{planMarkdown}</Markdown>
                 </div>
               </section>
-
-              {/* Right: raw tool call + the approve/reject controls. */}
               <aside className="flex w-[320px] shrink-0 flex-col border-l border-border-default">
                 <div className="border-b border-border-default bg-bg-base px-4 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
-                  Raw tool call
+                  Choose
                 </div>
-                <div className="min-h-0 flex-1 overflow-auto px-4 py-2">
-                  <pre className="whitespace-pre-wrap font-mono text-[11px] leading-snug text-text-secondary">
-                    {safeStringify(current.toolCall, 2)}
-                  </pre>
+                <div className="min-h-0 flex-1 overflow-auto px-4 py-3">{optionList}</div>
+                <div className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-2.5">
+                  <button
+                    type="button"
+                    onClick={cancel}
+                    className="inline-flex items-center gap-1.5 rounded-sm px-2.5 py-1 text-xs text-text-secondary hover:bg-bg-base hover:text-text-primary transition-colors"
+                  >
+                    Cancel <Kbd>esc</Kbd>
+                  </button>
                 </div>
-                {controls}
               </aside>
             </div>
           </Dialog.Content>
@@ -178,57 +199,55 @@ export function PermissionModal({ tabId }: PermissionModalProps) {
     );
   }
 
+  // Standard case — inline card above the composer.
   return (
-    <Dialog.Root
-      open
-      onOpenChange={(open) => {
-        if (!open) cancel();
-      }}
-    >
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
-        <Dialog.Content
-          className={cn(
-            "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
-            "w-[480px] max-w-[92vw] rounded-md border border-border-default bg-bg-elevated",
-            "shadow-[var(--shadow-overlay)] animate-scale-in",
-            "text-text-primary"
-          )}
-        >
-          <div className="flex items-start gap-3 border-b border-border-default px-4 py-3">
-            <Shield className="mt-0.5 size-4 text-accent" />
-            <div className="flex-1">
-              <Dialog.Title className="text-sm font-medium">
-                Permission required
-              </Dialog.Title>
-              <Dialog.Description className="mt-0.5 text-xs text-text-secondary">
-                The agent wants to run {" "}
-                <span className="font-mono text-text-primary">{title}</span>.
-              </Dialog.Description>
+    <div className="px-4 pt-2">
+      <div className="mx-auto w-full max-w-[720px] overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--bg-elevated)] shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
+        <div className="flex items-start gap-2 px-3 pt-3">
+          <Shield className="mt-0.5 size-3.5 shrink-0 text-accent" />
+          <div className="flex-1 min-w-0">
+            <div className="text-[13px] font-medium leading-snug text-text-primary">
+              The agent wants to run{" "}
+              <span className="font-mono text-text-primary">{title}</span>?
             </div>
+            {queueNote && (
+              <div className="mt-0.5 text-[11px] text-text-secondary">{queueNote}</div>
+            )}
           </div>
+        </div>
 
-          {queueNote && (
-            <div className="border-b border-border-default bg-bg-base px-4 py-1.5 text-[11px] text-text-secondary">
-              {queueNote}
-            </div>
-          )}
+        <ToolCallPreview tc={current.toolCall} />
 
-          <ToolCallPreview tc={current.toolCall} />
+        <div className="px-3 py-2.5">{optionList}</div>
 
-          {controls}
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        <div className="border-t border-border-default px-3 py-2.5">
+          <textarea
+            ref={textRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submitText();
+              }
+            }}
+            rows={1}
+            placeholder="Tell the agent what to do instead…"
+            className="w-full resize-none rounded-md border border-border-default bg-bg-base px-2.5 py-1.5 text-[12px] text-text-primary outline-none placeholder:text-text-tertiary focus:border-[var(--border-focus)]"
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
-
-function PermissionButton({
+function PermissionOption({
+  index,
   option,
   isPrimary,
   onSelect,
 }: {
+  index: number;
   option: PermissionOptionRef;
   isPrimary?: boolean;
   onSelect: () => void;
@@ -237,9 +256,6 @@ function PermissionButton({
   const reject = isReject(option.kind);
   const Icon = allow ? CheckCircle2 : reject ? XCircle : AlertTriangle;
 
-  // Monochrome theme: the recommended action is the accent (white)
-  // "default button"; reject carries the only chromatic signal (error
-  // red); neutral options stay quiet. No off-palette greens.
   const tone = isPrimary
     ? "border-transparent bg-[var(--accent-primary)] text-[var(--bg-base)] hover:bg-[var(--accent-primary-hover)]"
     : reject
@@ -249,40 +265,37 @@ function PermissionButton({
   return (
     <button
       type="button"
-      autoFocus={isPrimary}
       onClick={onSelect}
       className={cn(
-        "flex items-center gap-2 rounded-sm border px-3 py-2 text-left text-xs transition-colors outline-none",
-        isPrimary && "focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)]/30",
-        tone
+        "flex items-center gap-2.5 rounded-md border px-2.5 py-2 text-left text-[12px] transition-colors outline-none",
+        tone,
       )}
     >
+      <span
+        className={cn(
+          "flex h-4 w-4 shrink-0 items-center justify-center rounded text-[10px] font-semibold",
+          isPrimary ? "bg-[var(--bg-base)]/15 text-[var(--bg-base)]" : "bg-bg-elevated text-text-secondary",
+        )}
+      >
+        {index}
+      </span>
       <Icon className="size-3.5 shrink-0" />
       <span className="flex-1 font-medium">{option.name}</span>
-      {isPrimary ? (
-        <Kbd className="border-[var(--bg-base)]/20 bg-[var(--bg-base)]/10 text-[var(--bg-base)]">
-          ↵
-        </Kbd>
-      ) : (
-        <span className="text-[10px] uppercase tracking-wide text-text-secondary">
-          {option.kind.replace(/_/g, " ")}
-        </span>
+      {isPrimary && (
+        <Kbd className="border-[var(--bg-base)]/20 bg-[var(--bg-base)]/10 text-[var(--bg-base)]">↵</Kbd>
       )}
     </button>
   );
 }
 
 function ToolCallPreview({ tc }: { tc: PendingPermission["toolCall"] }) {
-  // Best-effort surfacing of common fields. We render the input as JSON so the
-  // user can see exactly what's about to run.
-  const inputValue = (tc as Record<string, unknown>).rawInput ?? (tc as Record<string, unknown>).input;
-  const formatted = inputValue !== undefined
-    ? safeStringify(inputValue, 2)
-    : null;
+  const inputValue =
+    (tc as Record<string, unknown>).rawInput ?? (tc as Record<string, unknown>).input;
+  const formatted = inputValue !== undefined ? safeStringify(inputValue, 2) : null;
   if (!formatted) return null;
   return (
-    <div className="border-b border-border-default bg-bg-base px-4 py-2">
-      <pre className="max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-snug text-text-secondary">
+    <div className="mx-3 mt-2 rounded-md border border-border-default bg-bg-base px-3 py-2">
+      <pre className="max-h-32 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-snug text-text-secondary">
         {formatted}
       </pre>
     </div>

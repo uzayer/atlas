@@ -27,6 +27,9 @@ export interface TerminalTabState {
 
 interface TerminalState {
   tabs: Record<string, TerminalTabState>;
+  /** Per-terminal "a command is running" flag, keyed by the layout terminal id.
+   *  Surfaced as a spinner on the tab strip; the BlockTerminal reports it. */
+  busy: Record<string, boolean>;
 }
 
 interface TerminalActions {
@@ -38,6 +41,7 @@ interface TerminalActions {
     closePane: (tabId: string, paneId: string) => void;
     setActiveTerminalInPane: (tabId: string, paneId: string, ptyId: string) => void;
     setActivePane: (tabId: string, paneId: string) => void;
+    setTerminalBusy: (ptyId: string, busy: boolean) => void;
   };
 }
 
@@ -90,6 +94,7 @@ export const useTerminalStore = createSelectors(
   create<TerminalState & TerminalActions>()(
     immer((set, get) => ({
       tabs: {},
+      busy: {},
       actions: {
         initTab: (tabId) => {
           if (get().tabs[tabId]) return;
@@ -181,6 +186,13 @@ export const useTerminalStore = createSelectors(
           set((s) => {
             const t = s.tabs[tabId];
             if (t) t.activePaneId = paneId;
+          });
+        },
+
+        setTerminalBusy: (ptyId, busy) => {
+          set((s) => {
+            if (busy) s.busy[ptyId] = true;
+            else delete s.busy[ptyId];
           });
         },
       },

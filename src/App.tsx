@@ -202,18 +202,16 @@ export function App() {
     setActiveTab,
     closeTab,
     activateTabByIndex,
+    cycleTab,
+    addGroup,
+    closeGroup,
+    focusAdjacentGroup,
+    toggleZenMode,
   } = useLayoutStore.use.actions();
   const tabs = useLayoutStore.use.tabs();
   const activeTabId = useLayoutStore.use.activeTabId();
-
-  const cycleTab = (delta: 1 | -1) => {
-    const list = useLayoutStore.getState().tabs;
-    if (list.length === 0) return;
-    const current = useLayoutStore.getState().activeTabId;
-    const idx = list.findIndex((t) => t.id === current);
-    const next = (idx === -1 ? 0 : (idx + delta + list.length) % list.length);
-    setActiveTab(list[next].id);
-  };
+  const groupOrder = useLayoutStore.use.groupOrder();
+  const focusedGroupId = useLayoutStore.use.focusedGroupId();
 
   // Remember the last non-terminal tab so cmd+j can toggle back to it.
   const lastNonTerminalTabRef = useRef<string | null>(null);
@@ -549,7 +547,7 @@ export function App() {
       useLayoutStore.getState().actions.saveEditorState(currentProject.path);
     }, 1000);
     return () => clearTimeout(saveTimerRef.current);
-  }, [tabs.length, activeTabId, currentProject]);
+  }, [tabs.length, activeTabId, groupOrder, focusedGroupId, currentProject]);
 
   // Maintain the chat-mention picker's "recent files" queue. Push whenever
   // an editor/media/unsupported tab appears whose data.filePath we haven't
@@ -708,13 +706,8 @@ export function App() {
       combo: { key: String(i + 1), meta: true },
       // ⌘9 always jumps to the LAST tab (browser convention), regardless
       // of how many tabs there are; ⌘1–8 select by index.
-      action:
-        i === 8
-          ? () => {
-              const n = useLayoutStore.getState().tabs.length;
-              if (n > 0) activateTabByIndex(n - 1);
-            }
-          : () => activateTabByIndex(i),
+      // ⌘9 = last tab in the focused column (the store treats i<0 as "last").
+      action: i === 8 ? () => activateTabByIndex(-1) : () => activateTabByIndex(i),
     })),
     {
       combo: { key: "w", meta: true },
@@ -730,6 +723,34 @@ export function App() {
     {
       combo: { key: "]", meta: true, shift: true },
       action: () => cycleTab(1),
+    },
+    // ── Split view ──
+    {
+      // ⌘\ — open a new split column to the right (max 3).
+      combo: { key: "\\", meta: true },
+      action: () => addGroup(),
+    },
+    {
+      // ⌥; — focus the split to the left.
+      combo: { key: ";", alt: true },
+      action: () => focusAdjacentGroup(-1),
+    },
+    {
+      // ⌥' — focus the split to the right.
+      combo: { key: "'", alt: true },
+      action: () => focusAdjacentGroup(1),
+    },
+    {
+      // ⌥W — close the focused split column (tabs move to the left neighbour).
+      combo: { key: "w", alt: true },
+      action: () => closeGroup(useLayoutStore.getState().focusedGroupId),
+    },
+    {
+      // ⌥Z — Zen mode: Knowledge │ Chat │ Browser, side panels hidden. Again restores.
+      combo: { key: "z", alt: true },
+      action: () => {
+        if (currentProject) toggleZenMode();
+      },
     },
     {
       combo: { key: "t", meta: true },
