@@ -137,6 +137,7 @@ export const useTerminalStore = createSelectors(
             if (!t) return;
             const pane = findPane(t.root, paneId);
             if (!pane) return;
+            const closedIdx = pane.terminals.indexOf(ptyId);
             pane.terminals = pane.terminals.filter((id) => id !== ptyId);
             if (pane.terminals.length === 0) {
               const result = removePaneFromTree(t.root, paneId);
@@ -146,7 +147,10 @@ export const useTerminalStore = createSelectors(
                 t.activePaneId = collectPanes(t.root)[0]?.id ?? null;
               }
             } else if (pane.activeTerminalId === ptyId) {
-              pane.activeTerminalId = pane.terminals[0];
+              // Activate the LEFT neighbour (the tab that was at closedIdx-1);
+              // items before the closed one keep their indices after filtering.
+              const nextIdx = Math.min(Math.max(0, closedIdx - 1), pane.terminals.length - 1);
+              pane.activeTerminalId = pane.terminals[nextIdx];
             }
           });
         },

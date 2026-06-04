@@ -110,12 +110,24 @@ pub async fn terminal_resolve_path(
         let manager = state.manager.lock().await;
         manager.pid(&id)
     };
-    tokio::task::spawn_blocking(move || resolve_terminal_path(pid, &raw))
+    tokio::task::spawn_blocking(move || {
+        let base = pid.and_then(atlas_terminal::cwd_of_pid);
+        resolve_path_with_base(base.as_deref(), &raw)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Resolve a path token against an EXPLICIT base directory (e.g. a historical
+/// command block's captured cwd), returning the existing absolute path or None.
+#[tauri::command]
+pub async fn resolve_path(base: String, raw: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || resolve_path_with_base(Some(&base), &raw))
         .await
         .map_err(|e| e.to_string())
 }
 
-fn resolve_terminal_path(pid: Option<u32>, raw: &str) -> Option<String> {
+fn resolve_path_with_base(base: Option<&str>, raw: &str) -> Option<String> {
     use std::path::PathBuf;
 
     let mut s = raw.trim().to_string();
@@ -145,8 +157,8 @@ fn resolve_terminal_path(pid: Option<u32>, raw: &str) -> Option<String> {
     } else if s.starts_with('/') {
         PathBuf::from(&s)
     } else {
-        // Relative — resolve against the shell's live working directory.
-        let cwd = pid.and_then(atlas_terminal::cwd_of_pid)?;
+        // Relative — resolve against the provided base directory.
+        let cwd = base?;
         PathBuf::from(cwd).join(s.strip_prefix("./").unwrap_or(&s))
     };
 

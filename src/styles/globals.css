@@ -526,6 +526,12 @@
   .animate-slide-in-right { animation: none !important; }
 }
 
+/* Active match in the terminal search (brighter than the other matches). */
+.term-match-active {
+  background: var(--status-warning) !important;
+  color: #000 !important;
+}
+
 /* Atlas-themed CodeMirror Find/Replace panel (Cmd+F). These rules sit
    OUTSIDE `@layer base` so they outrank any unlayered @codemirror/view
    StyleModule injections — layered styles always lose to unlayered. The

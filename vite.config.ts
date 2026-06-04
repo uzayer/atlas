@@ -101,6 +101,12 @@ export default defineConfig(async () => ({
       "react-pdf",
       "pdfjs-dist",
       "pdf-lib",
+      // Terminal stack — pre-bundle so first terminal open doesn't trigger a
+      // "new deps optimized → reload" cycle.
+      "@xterm/xterm",
+      "@xterm/addon-fit",
+      "@xterm/addon-webgl",
+      "@xterm/addon-unicode11",
     ],
     // The worker is a separate ESM entry loaded via `?url`; pre-bundling it
     // would rewrite its imports and break worker instantiation.
