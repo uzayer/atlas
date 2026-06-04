@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod analysis;
 pub mod app_state;
+pub mod browser;
 pub mod claude_setup;
 pub mod cli;
 pub mod compose_prompt;

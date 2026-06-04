@@ -111,6 +111,20 @@ export function App() {
     };
   }, []);
 
+  // Close-active-tab from the native menu (Cmd+W). The embedded browser is a
+  // separate native webview, so its Cmd+W can't reach the React `useHotkeys`
+  // handler — it falls through to the menu's "Close Tab" item, which emits this
+  // event. Mirrors the Cmd+W hotkey: close whichever tab is active.
+  useEffect(() => {
+    const unlisten = listen("atlas:close-active-tab", () => {
+      const current = useLayoutStore.getState().activeTabId;
+      if (current) useLayoutStore.getState().actions.closeTab(current);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
+
   // Alpha-only: nuke any legacy WebView storage. Nothing in the current
   // codebase reads from localStorage / sessionStorage — the only entries
   // are stale dust from previous zustand-persist builds. Wiping on every

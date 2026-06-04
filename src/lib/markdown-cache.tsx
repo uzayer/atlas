@@ -1,89 +1,154 @@
 // Markdown → HTML cache for the chat thread. Built once per unique source
 // string and stored in a bounded LRU so virtualizer remounts (scroll a
-// message off-screen and back in) don't re-parse react-markdown or re-run
-// highlight.js synchronously on the main thread — the cost was visible as
-// scroll-back jank on long code-heavy answers.
+// message off-screen and back in) don't re-parse markdown or re-run
+// highlight.js — the cost was visible as scroll-back jank on long
+// code-heavy answers.
 //
-// The pipeline mirrors what `react-markdown` would do internally:
-//   remark-parse → remark-gfm → remark-rehype
-//   → rehype-highlight (tokenise code blocks) → rehype-sanitize
-//   → rehype-stringify.
-//
-// `rehype-sanitize` is in the chain on purpose: cached HTML lands in the
-// DOM via `dangerouslySetInnerHTML`, so we guarantee no script tags,
-// inline event handlers, or `javascript:` URLs can survive a malicious or
-// accidentally-pasted prompt. We extend the default schema with the few
-// `className`s rehype-highlight emits so its colors don't get stripped.
+// The actual parse pipeline lives in `markdown-render.ts` and runs in a Web
+// Worker (`markdown.worker.ts`) for large blocks, so the synchronous
+// remark+highlight long task no longer competes with the chat composer's
+// keystrokes. Small blocks (< SYNC_LIMIT) and cache hits still render
+// synchronously on the main thread — they're cheap and avoid a paint flash.
+// If the worker can't start, we fall back to the previous gated-idle parse.
 
 import { useEffect, useRef, useState } from "react";
-import { unified, type Processor } from "unified";
-import remarkParse from "remark-parse";
-import remarkGfm from "remark-gfm";
-import remarkRehype from "remark-rehype";
-import rehypeHighlight from "rehype-highlight";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
-import rehypeStringify from "rehype-stringify";
+import { isTypingHot } from "./input-activity";
+import { parseMarkdown } from "./markdown-render";
+import MarkdownWorker from "./markdown.worker?worker";
 import "highlight.js/styles/github-dark.css";
 import { cn } from "./utils";
-
-const SANITIZE_SCHEMA = {
-  ...defaultSchema,
-  attributes: {
-    ...defaultSchema.attributes,
-    code: [...(defaultSchema.attributes?.code ?? []), ["className"]],
-    pre: [...(defaultSchema.attributes?.pre ?? []), ["className"]],
-    span: [...(defaultSchema.attributes?.span ?? []), ["className"]],
-  },
-};
-
-let processor: Processor | null = null;
-function getProcessor(): Processor {
-  if (!processor) {
-    processor = unified()
-      .use(remarkParse)
-      .use(remarkGfm)
-      .use(remarkRehype, { allowDangerousHtml: false })
-      .use(rehypeHighlight, { detect: true, plainText: ["text", "plaintext"] })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .use(rehypeSanitize, SANITIZE_SCHEMA as any)
-      .use(rehypeStringify) as unknown as Processor;
-  }
-  return processor;
-}
 
 const CACHE_MAX = 250;
 // Insertion-ordered Map → simple LRU via delete+set on hit. Bounded so a
 // thread of thousands of unique strings can't grow this unbounded.
 const cache = new Map<string, string>();
 
-function renderToHtml(src: string): string {
+// Blocks at or below this length parse synchronously on the main thread:
+// they're sub-millisecond and going async would flash empty content. Larger
+// blocks (the ones that caused the long task) go to the worker.
+const SYNC_LIMIT = 2000;
+
+function cacheGet(src: string): string | undefined {
   const cached = cache.get(src);
   if (cached !== undefined) {
     cache.delete(src);
     cache.set(src, cached);
-    return cached;
   }
-  let html: string;
-  try {
-    html = String(getProcessor().processSync(src));
-  } catch {
-    html = `<p>${escapeHtml(src)}</p>`;
-  }
+  return cached;
+}
+
+function cacheSet(src: string, html: string): void {
   cache.set(src, html);
   if (cache.size > CACHE_MAX) {
     const oldest = cache.keys().next().value;
     if (oldest !== undefined) cache.delete(oldest);
   }
+}
+
+/** Synchronous parse on the main thread, with caching. Used for small blocks,
+ *  cache misses already in hand, and the worker-unavailable fallback. */
+function renderToHtmlSync(src: string): string {
+  const cached = cacheGet(src);
+  if (cached !== undefined) return cached;
+  const html = parseMarkdown(src);
+  cacheSet(src, html);
   return html;
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+// ── Off-thread parse client ────────────────────────────────────────────────
+
+let worker: Worker | null = null;
+let workerBroken = false;
+let seq = 0;
+const waiters = new Map<number, (html: string) => void>();
+// Dedupe concurrent requests for the same source so two visible copies of an
+// identical message don't parse twice.
+const pending = new Map<string, Promise<string>>();
+
+function ensureWorker(): Worker | null {
+  if (worker || workerBroken) return worker;
+  try {
+    worker = new MarkdownWorker();
+    worker.onmessage = (e: MessageEvent<{ id: number; html: string }>) => {
+      const resolve = waiters.get(e.data.id);
+      if (resolve) {
+        waiters.delete(e.data.id);
+        resolve(e.data.html);
+      }
+    };
+    worker.onerror = () => {
+      // Reject in-flight waiters back to the sync path and stop using the worker.
+      workerBroken = true;
+    };
+  } catch {
+    workerBroken = true;
+    worker = null;
+  }
+  return worker;
+}
+
+/** Parse a large block off the main thread. Falls back to a gated-idle main-
+ *  thread parse (the pre-worker behavior) if the worker is unavailable. */
+function parseLarge(source: string): Promise<string> {
+  const hit = cacheGet(source);
+  if (hit !== undefined) return Promise.resolve(hit);
+  const existing = pending.get(source);
+  if (existing) return existing;
+
+  const w = ensureWorker();
+  let p: Promise<string>;
+  if (w) {
+    p = new Promise<string>((resolve) => {
+      const id = ++seq;
+      let settled = false;
+      const finish = (html: string) => {
+        if (settled) return;
+        settled = true;
+        waiters.delete(id);
+        cacheSet(source, html);
+        resolve(html);
+      };
+      waiters.set(id, finish);
+      // Watchdog: if the worker never answers (e.g. its script failed to load
+      // asynchronously), fall back to a main-thread parse so the message still
+      // renders instead of hanging blank.
+      window.setTimeout(() => {
+        if (!settled) {
+          workerBroken = true;
+          finish(renderToHtmlSync(source));
+        }
+      }, 3000);
+      w.postMessage({ id, source });
+    });
+  } else {
+    // Fallback: parse on the main thread but keep it out of typing bursts.
+    p = new Promise<string>((resolve) => {
+      const startedAt = performance.now();
+      const w2 = window as Window & {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
+      };
+      const schedule = () =>
+        typeof w2.requestIdleCallback === "function"
+          ? w2.requestIdleCallback(run, { timeout: 250 })
+          : window.setTimeout(run, 32);
+      function run() {
+        if (isTypingHot() && performance.now() - startedAt < 2500) {
+          schedule();
+          return;
+        }
+        resolve(renderToHtmlSync(source));
+      }
+      schedule();
+    });
+  }
+  pending.set(
+    source,
+    p.then((html) => {
+      pending.delete(source);
+      return html;
+    }),
+  );
+  return pending.get(source)!;
 }
 
 interface CachedMarkdownProps {
@@ -100,39 +165,37 @@ interface CachedMarkdownProps {
  */
 export function CachedMarkdown({ source, className }: CachedMarkdownProps) {
   const [html, setHtml] = useState<string | null>(() => {
-    if (cache.has(source)) return cache.get(source)!;
-    if (source.length < 2000) return renderToHtml(source);
+    const hit = cacheGet(source);
+    if (hit !== undefined) return hit;
+    // Small blocks parse synchronously (cheap, no flash); large blocks defer
+    // to the worker via the effect below.
+    if (source.length <= SYNC_LIMIT) return renderToHtmlSync(source);
     return null;
   });
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (cache.has(source)) {
-      const fresh = cache.get(source)!;
+    const hit = cacheGet(source);
+    if (hit !== undefined) {
+      if (hit !== html) setHtml(hit);
+      return;
+    }
+    if (source.length <= SYNC_LIMIT) {
+      const fresh = renderToHtmlSync(source);
       if (fresh !== html) setHtml(fresh);
       return;
     }
+    // Large block → parse off the main thread, then swap in the HTML.
     let cancelled = false;
-    const run = () => {
-      if (cancelled) return;
-      setHtml(renderToHtml(source));
-    };
-    type WindowWithIdle = Window & {
-      requestIdleCallback?: (
-        cb: () => void,
-        opts?: { timeout?: number },
-      ) => number;
-    };
-    const w = window as WindowWithIdle;
-    if (typeof w.requestIdleCallback === "function") {
-      w.requestIdleCallback(run, { timeout: 250 });
-    } else {
-      queueMicrotask(run);
-    }
+    void parseLarge(source).then((result) => {
+      if (!cancelled) setHtml(result);
+    });
     return () => {
       cancelled = true;
     };
-  }, [source, html]);
+    // `html` intentionally omitted: re-running on our own setHtml would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source]);
 
   // One delegated click handler: copy-code buttons + safe external links.
   useEffect(() => {

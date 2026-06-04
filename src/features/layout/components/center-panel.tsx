@@ -317,7 +317,7 @@ function TabContentContainer({ activeTab }: { activeTab: Tab | undefined }) {
                   containerHeight={height}
                 />
               ) : tab.type === "browser" ? (
-                <BrowserPanel initialUrl={tab.data.url as string | undefined} />
+                <BrowserPanel tabId={tab.id} initialUrl={tab.data.url as string | undefined} />
               ) : tab.type === "knowledge-graph" ? (
                 <KnowledgeGraph />
               ) : tab.type === "pdf" ? (
