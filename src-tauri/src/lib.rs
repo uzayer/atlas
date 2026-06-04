@@ -135,6 +135,8 @@ pub fn run() {
             commands::terminal::terminal_close,
             commands::terminal::terminal_resolve_path,
             commands::terminal::resolve_path,
+            commands::terminal::terminal_path_complete,
+            commands::terminal::terminal_list_commands,
             commands::fs::read_directory,
             commands::fs::read_file_content,
             commands::fs::read_file_base64,

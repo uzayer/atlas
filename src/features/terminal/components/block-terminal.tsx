@@ -505,6 +505,7 @@ export function BlockTerminal({ isActive, onFocus, terminalKey }: BlockTerminalP
             ref={commandInputRef}
             onSubmit={runCommand}
             onInterrupt={interrupt}
+            cwd={cwd}
           />
           <StatusBadge cwd={cwd} git={git} />
         </div>

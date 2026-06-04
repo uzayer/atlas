@@ -172,3 +172,130 @@ fn resolve_path_with_base(base: Option<&str>, raw: &str) -> Option<String> {
     let canon = std::fs::canonicalize(&path).ok()?;
     Some(canon.to_string_lossy().into_owned())
 }
+
+// ── Autocomplete (command + path) for the terminal command input ────────────
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PathCompletion {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// Complete a path token (relative to `cwd`) for the terminal input. Splits the
+/// token at the last `/` into a directory part and a filename prefix, resolves
+/// the directory (expanding `~`, honouring absolute / cwd-relative), lists it,
+/// and returns entries whose name starts with the prefix (case-insensitive).
+/// Hidden entries are included only when the prefix itself starts with `.`.
+#[tauri::command]
+pub async fn terminal_path_complete(
+    cwd: String,
+    token: String,
+) -> Result<Vec<PathCompletion>, String> {
+    tokio::task::spawn_blocking(move || path_complete(&cwd, &token))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn path_complete(cwd: &str, token: &str) -> Vec<PathCompletion> {
+    use std::path::PathBuf;
+
+    let (dir_part, prefix) = match token.rfind('/') {
+        Some(i) => (&token[..=i], &token[i + 1..]),
+        None => ("", token),
+    };
+
+    let base: PathBuf = if dir_part.is_empty() {
+        PathBuf::from(cwd)
+    } else if dir_part == "~" || dir_part == "~/" {
+        match dirs::home_dir() {
+            Some(h) => h,
+            None => return Vec::new(),
+        }
+    } else if let Some(rest) = dir_part.strip_prefix("~/") {
+        match dirs::home_dir() {
+            Some(h) => h.join(rest),
+            None => return Vec::new(),
+        }
+    } else if dir_part.starts_with('/') {
+        PathBuf::from(dir_part)
+    } else {
+        PathBuf::from(cwd).join(dir_part.strip_prefix("./").unwrap_or(dir_part))
+    };
+
+    let read = match std::fs::read_dir(&base) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let pl = prefix.to_lowercase();
+    let want_hidden = prefix.starts_with('.');
+    let mut out: Vec<PathCompletion> = Vec::new();
+    for entry in read {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && !want_hidden {
+            continue;
+        }
+        if !pl.is_empty() && !name.to_lowercase().starts_with(&pl) {
+            continue;
+        }
+        // `is_dir()` follows symlinks so a symlinked directory still completes
+        // with a trailing slash.
+        let is_dir = entry.path().is_dir();
+        out.push(PathCompletion { name, is_dir });
+    }
+    // Directories first, then case-insensitive alphabetical.
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    out.truncate(50);
+    out
+}
+
+/// Executable names on `$PATH` + a curated builtin list, deduped + sorted.
+/// Scanned once and cached for the process lifetime (`$PATH` rarely changes).
+#[tauri::command]
+pub async fn terminal_list_commands() -> Result<Vec<String>, String> {
+    use std::sync::OnceLock;
+    static COMMANDS: OnceLock<Vec<String>> = OnceLock::new();
+    if let Some(c) = COMMANDS.get() {
+        return Ok(c.clone());
+    }
+    let list = tokio::task::spawn_blocking(scan_commands)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(COMMANDS.get_or_init(|| list).clone())
+}
+
+const SHELL_BUILTINS: &[&str] = &[
+    "cd", "pwd", "echo", "export", "alias", "unalias", "source", ".", "exit", "history",
+    "jobs", "fg", "bg", "kill", "set", "unset", "which", "type", "clear", "pushd", "popd",
+    "dirs", "read", "trap", "wait", "umask", "let", "local", "return", "eval", "exec", "time",
+];
+
+fn scan_commands() -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut set: BTreeSet<String> = SHELL_BUILTINS.iter().map(|s| s.to_string()).collect();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(path) = std::env::var("PATH") {
+            for dir in path.split(':').filter(|d| !d.is_empty()) {
+                let Ok(read) = std::fs::read_dir(dir) else { continue };
+                for entry in read {
+                    let Ok(entry) = entry else { continue };
+                    let Ok(meta) = entry.metadata() else { continue };
+                    if meta.is_dir() {
+                        continue;
+                    }
+                    if meta.permissions().mode() & 0o111 == 0 {
+                        continue;
+                    }
+                    set.insert(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
+}
