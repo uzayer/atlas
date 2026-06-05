@@ -163,10 +163,6 @@ impl TerminalManager {
         self.sessions.remove(id);
     }
 
-    pub fn has_session(&self, id: &str) -> bool {
-        self.sessions.contains_key(id)
-    }
-
     /// PID of the session's login shell (for `cwd_of_pid`).
     pub fn pid(&self, id: &str) -> Option<u32> {
         self.sessions.get(id)?.pid
@@ -263,6 +259,13 @@ add-zsh-hook preexec _atlas_preexec 2>/dev/null
 # Hand the interactive session the user's ZDOTDIR.
 ZDOTDIR="$ATLAS_USER_ZDOTDIR"
 "#;
+
+/// Public accessor for the zsh integration ZDOTDIR — used to relaunch an
+/// interactive root shell (`sudo -s` / `-i` / `su`) WITH Atlas's shell
+/// integration so command blocks / prompt markers keep working as root.
+pub fn zsh_integration_dir() -> Option<std::path::PathBuf> {
+    ensure_zsh_integration_dir()
+}
 
 /// Create (idempotently) the temp ZDOTDIR holding the zsh integration rc files
 /// and return its path. `None` if the files can't be written.

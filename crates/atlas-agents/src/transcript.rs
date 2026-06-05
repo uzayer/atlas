@@ -130,7 +130,10 @@ pub fn encode_cwd(cwd: &str) -> String {
     trimmed.replace('/', "-")
 }
 
-fn is_injected_user_text(t: &str) -> bool {
+/// Identify user content injected by Claude Code itself (system tags,
+/// interruption notices, warmup pings) rather than typed by the user. Shared
+/// with the session-history reader in `src-tauri/commands/claude.rs`.
+pub fn is_injected_user_text(t: &str) -> bool {
     let trimmed = t.trim();
     if trimmed.is_empty() {
         return true;

@@ -79,14 +79,12 @@ export default defineConfig(async () => ({
       "@tiptap/extension-placeholder",
       "@tiptap/extension-typography",
       "@tiptap/extension-highlight",
-      "@tiptap/extension-underline",
       "@tiptap/extension-table",
       "@tiptap/extension-table-row",
       "@tiptap/extension-table-header",
       "@tiptap/extension-table-cell",
       "@tiptap/extension-code-block-lowlight",
       "@tiptap/extension-mention",
-      "@tiptap/extension-bubble-menu",
       "@tiptap/suggestion",
       "tiptap-markdown",
       "lowlight",
@@ -100,7 +98,6 @@ export default defineConfig(async () => ({
       // Vite's "new dependencies optimized → reloading" cycle.
       "react-pdf",
       "pdfjs-dist",
-      "pdf-lib",
       // Terminal stack — pre-bundle so first terminal open doesn't trigger a
       // "new deps optimized → reload" cycle.
       "@xterm/xterm",
@@ -142,7 +139,7 @@ export default defineConfig(async () => ({
           if (id.includes("@tanstack")) {
             return "vendor-tanstack";
           }
-          if (id.includes("pdfjs-dist") || id.includes("react-pdf") || id.includes("pdf-lib")) {
+          if (id.includes("pdfjs-dist") || id.includes("react-pdf")) {
             return "vendor-pdf";
           }
           if (id.includes("@tauri-apps")) {

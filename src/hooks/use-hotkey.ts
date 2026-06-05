@@ -15,6 +15,10 @@ function matchKey(e: KeyboardEvent, key: string) {
   if (k.length === 1 && /[a-z]/.test(k) && e.code === `Key${key.toUpperCase()}`) return true;
   if (k === "[" && e.code === "BracketLeft") return true;
   if (k === "]" && e.code === "BracketRight") return true;
+  // Punctuation that Option also rewrites (split-view shortcuts ⌥;/⌥'/⌘\).
+  if (k === ";" && e.code === "Semicolon") return true;
+  if (k === "'" && e.code === "Quote") return true;
+  if (k === "\\" && e.code === "Backslash") return true;
   return false;
 }
 

@@ -327,7 +327,6 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     // of a flex column that shrinks the chat. The session sidebar (left) stays
     // a normal flex column.
     <div ref={rootRef} className="h-full flex relative">
-      <PermissionModal tabId={tabId} />
       <SessionSidebar tabId={tabId} />
 
       <div className="flex-1 flex flex-col min-w-0">
@@ -445,6 +444,9 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         )}
 
         <div className="relative">
+          {/* Permission / question prompt — an inline card pinned above the
+              composer (plan reviews still render as a centered modal). */}
+          <PermissionModal tabId={tabId} onSendMessage={(t) => handleSend(t, [])} />
           {/* Bottom fade lives in MessagesList; the centered floating
               row (setup pill + scroll-to-bottom) lives inside
               ChatComposer below. */}

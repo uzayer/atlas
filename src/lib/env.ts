@@ -11,7 +11,6 @@
 // `.app`s.
 
 export const isDev: boolean = import.meta.env.DEV;
-export const isProd: boolean = import.meta.env.PROD;
 
 /**
  * Vite's `MODE` is "development" / "production" by default but can be

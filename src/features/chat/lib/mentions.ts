@@ -14,6 +14,7 @@ import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-meta-store";
 import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { listClaudeSessions, readClaudeSession } from "./claude-api";
+import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -296,6 +297,11 @@ export async function searchMentions(
   ctx: MentionContext,
 ): Promise<MentionData[]> {
   if (scope === "past_message") return [];
+  // File/folder mentions read from the same backend FileIndex as Cmd+P. If it
+  // got stuck/unloaded, recover here too (cheap + coalesced once confirmed).
+  if (scope === null || scope === "file" || scope === "folder") {
+    await ensureFileIndex(ctx.projectPath);
+  }
   try {
     const results = await invoke<MentionData[]>("mention_search", {
       query: stripCategoryAlias(query, scope ?? "file"),
@@ -345,12 +351,6 @@ export function publishSymbolsToMentionCache(): void {
   void invoke("mention_cache_set_symbols", { items }).catch((err) =>
     console.warn("mention_cache_set_symbols failed:", err),
   );
-}
-
-/** Drop both caches — call on project close so the next project's
- *  picker doesn't briefly show the previous project's symbols. */
-export function clearMentionCache(): void {
-  void invoke("mention_cache_clear").catch(() => {});
 }
 
 /** Build the final prompt sent to the agent. Pure pass-through to a

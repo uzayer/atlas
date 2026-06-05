@@ -49,6 +49,7 @@ import {
   type SlashTrigger,
 } from "../lib/cm-slash-extension";
 import type { MentionData } from "../lib/mentions";
+import { markInputActivity } from "@/lib/input-activity";
 
 export interface ChatInputHandle {
   focus(): void;
@@ -259,8 +260,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
             }),
             EditorView.updateListener.of((u) => {
               if (u.docChanged) {
+                // Stamp typing activity so the chat's deferred markdown parse
+                // (markdown-cache.tsx) won't fire a long highlight task in the
+                // middle of a keystroke burst and stall the composer.
+                markInputActivity();
                 onChangeRef.current?.(u.state.doc.toString());
               }
+            }),
+            // Mark activity at the very start of key handling too — earlier
+            // than the post-change updateListener — so a parse can't slip in
+            // between keydown and the resulting doc change.
+            EditorView.domEventHandlers({
+              keydown: () => {
+                markInputActivity();
+                return false;
+              },
             }),
             ...mentionExtension,
             mentionTriggerPlugin((t) => onMentionTriggerRef.current?.(t)),

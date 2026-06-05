@@ -5,22 +5,10 @@
 export type AgentId = string; // UUID
 export type AcpSessionId = string; // ACP session id (string under the hood)
 
-export interface AgentSpec {
-  spec_id: string;
-  display_name: string;
-  command: string;
-}
-
 export interface AgentInfo {
   agent_id: AgentId;
   spec_id: string;
   display_name: string;
-}
-
-export interface NewSessionInfo {
-  session_id: AcpSessionId;
-  modes?: unknown;
-  models?: unknown;
 }
 
 export type StopReason =
@@ -150,5 +138,3 @@ export type AcpEvent =
       turn_id: string;
       error: string;
     };
-
-export type AcpEventEnvelope = AcpEvent & { agent_id: AgentId };

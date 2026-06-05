@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { Inbox, Loader2, CheckCircle2, AlertCircle, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { timeAgo } from "@/lib/time-ago";
 import { useChatStore } from "../stores/chat-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 
@@ -22,19 +23,6 @@ function statusIcon(status: InboxItem["status"]) {
   if (status === "done")
     return <CheckCircle2 size={11} className="text-[var(--status-success)]" />;
   return <MessageSquare size={11} className="text-[var(--text-tertiary)]" />;
-}
-
-function timeAgo(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "";
-  const diff = Date.now() - t;
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
 }
 
 export function InboxPanel({ onClose }: { onClose: () => void }) {
@@ -129,7 +117,7 @@ export function InboxPanel({ onClose }: { onClose: () => void }) {
                   {item.sessionTitle}
                 </span>
                 <span className="text-[9px] text-[var(--text-tertiary)] shrink-0">
-                  {timeAgo(item.lastUpdated)}
+                  {timeAgo(item.lastUpdated, { suffix: true, noDateFallback: true })}
                 </span>
               </div>
               {item.lastMessageContent && (

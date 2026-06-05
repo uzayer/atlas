@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useTerminalStore, collectPanes, type TreeNode, type PaneNode } from "../stores/terminal-store";
+import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { BlockTerminal } from "./block-terminal";
 import {
   Plus,
@@ -7,6 +8,7 @@ import {
   Rows2,
   X,
   Terminal as TerminalIcon,
+  Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -94,17 +96,52 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
     return () => window.removeEventListener("resize", onResize);
   }, [measurePanes]);
 
-  // Also measure when the root container itself resizes (panel drag from main
-  // layout, or the tab becoming visible). Double RAF for the same settle
-  // reason as above.
+  // Measure when the root OR any pane container resizes. Observing the
+  // containers (not just the root) is what catches geometry changes that don't
+  // change the root's box — e.g. the center tab-bar toggling (⌘⌥T), a split
+  // column being added/removed, zen mode, or the 28px pane header settling
+  // after mount. Re-attached whenever the terminal's pane tree changes (the
+  // container elements are recreated). Double RAF for the settle reason above.
   useEffect(() => {
-    if (!rootRef.current) return;
+    const root = rootRef.current;
+    if (!root) return;
     const ro = new ResizeObserver(() =>
       requestAnimationFrame(() => requestAnimationFrame(measurePanes))
     );
-    ro.observe(rootRef.current);
+    ro.observe(root);
+    root
+      .querySelectorAll<HTMLElement>("[data-pane-container]")
+      .forEach((el) => ro.observe(el));
     return () => ro.disconnect();
-  }, [measurePanes]);
+  }, [measurePanes, tab?.root]);
+
+  // Re-measure when a surrounding panel toggles (⌘⌥B status bar = height,
+  // ⌘B / ⌘⇧B left/right panels = width). The ResizeObserver above can miss the
+  // reflow (the box change races the conditional mount/unmount), so the
+  // absolutely-positioned terminals — and their command input — would otherwise
+  // keep the old rect. Re-measuring on the visibility flags fixes it directly.
+  const leftVisible = useLayoutStore((s) => s.leftPanel.visible);
+  const rightVisible = useLayoutStore((s) => s.rightPanel.visible);
+  const bottomVisible = useLayoutStore((s) => s.bottomPanel.visible);
+  const chatSidebarVisible = useLayoutStore((s) => s.chatSidebar.visible);
+  // The center's own chrome also changes the terminal's box: the tab bar
+  // toggling (⌘⌥T), split columns being added/removed (groupOrder), and zen
+  // mode. None resize the surrounding panels, so watch them explicitly.
+  const tabBarVisible = useLayoutStore((s) => s.tabBarVisible);
+  const groupCount = useLayoutStore((s) => s.groupOrder.length);
+  const zen = useLayoutStore((s) => s.zen);
+  useEffect(() => {
+    requestAnimationFrame(() => requestAnimationFrame(measurePanes));
+  }, [
+    leftVisible,
+    rightVisible,
+    bottomVisible,
+    chatSidebarVisible,
+    tabBarVisible,
+    groupCount,
+    zen,
+    measurePanes,
+  ]);
 
   // Terminal-tab keyboard shortcuts, gated to the VISIBLE terminal panel
   // (offsetParent !== null) so background tabs never steal them:
@@ -184,6 +221,7 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
             >
               <BlockTerminal
                 isActive={isActiveInPane && isPaneActive}
+                terminalKey={ptyId}
                 onFocus={() => { setActiveTerminalInPane(tabId, pane.id, ptyId); setActivePane(tabId, pane.id); }}
               />
             </div>
@@ -218,6 +256,7 @@ function PaneChrome({ pane, tabId, isActivePane }: { pane: PaneNode; tabId: stri
   const { addTerminalToPane, splitPane, closeTerminalInPane, closePane, setActiveTerminalInPane, setActivePane } =
     useTerminalStore.use.actions();
   const tab = useTerminalStore((s) => s.tabs[tabId]);
+  const busy = useTerminalStore((s) => s.busy);
   const hasSplits = tab?.root.type === "split";
   const activePty = pane.activeTerminalId;
 
@@ -234,7 +273,7 @@ function PaneChrome({ pane, tabId, isActivePane }: { pane: PaneNode; tabId: stri
                 ptyId === activePty ? "text-text-primary bg-bg-selected" : "text-text-tertiary hover:text-text-secondary hover:bg-bg-hover"
               )}
             >
-              <TerminalIcon size={9} />
+              {busy[ptyId] ? <Loader2 size={9} className="animate-spin text-[var(--accent-primary)]" /> : <TerminalIcon size={9} />}
               <span>~</span>
               {pane.terminals.length > 1 && (
                 <button onClick={(e) => { e.stopPropagation(); closeTerminalInPane(tabId, pane.id, ptyId); }} className="opacity-0 group-hover:opacity-100 hover:text-text-primary">

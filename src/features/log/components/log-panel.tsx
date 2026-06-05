@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { cn } from "@/lib/utils";
+import { timeAgo } from "@/lib/time-ago";
 import { useLogStore, type LogEntry, type LogSource } from "../stores/log-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 
@@ -102,22 +103,6 @@ const SOURCE_COLOR: Record<LogSource, { text: string; bg: string; border: string
     border: "border-[var(--accent-primary)]/30",
   },
 };
-
-function timeAgo(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "";
-  const diff = Date.now() - t;
-  const s = Math.floor(diff / 1000);
-  if (s < 5) return "just now";
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
 
 export function LogPanel() {
   const buffer = useLogStore.use.buffer();
@@ -224,7 +209,7 @@ export function LogPanel() {
             title={new Date(row.original.timestamp).toLocaleString()}
             className="text-[10px] font-mono text-[var(--text-tertiary)]"
           >
-            {timeAgo(row.original.timestamp)}
+            {timeAgo(row.original.timestamp, { suffix: true, seconds: true })}
           </span>
         ),
         size: 86,

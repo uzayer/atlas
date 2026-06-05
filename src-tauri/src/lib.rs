@@ -1,5 +1,6 @@
 mod commands;
 mod logging;
+mod menu;
 mod state;
 
 use std::sync::Arc;
@@ -63,6 +64,16 @@ pub fn run() {
     }));
 
     builder
+        // Custom menu: replaces the default Window ▸ Close (Cmd+W) with a
+        // "Close Tab" item so Cmd+W in a focused embedded browser webview closes
+        // the tab instead of tearing down the window. See `menu.rs`.
+        .menu(|handle| menu::build(handle))
+        .on_menu_event(|app, event| {
+            if event.id() == menu::CLOSE_TAB_ID {
+                use tauri::Emitter;
+                let _ = app.emit("atlas:close-active-tab", ());
+            }
+        })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 // Opaque dark window background. Fills the brief gap between
@@ -92,6 +103,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        .manage(commands::browser::BrowserState::new())
         .manage(TerminalState::new())
         .manage(AgentRegistry::new())
         .manage(FileIndexState::new())
@@ -107,12 +119,24 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::window::window_zoom,
             commands::window::set_window_title,
+            commands::browser::browser_open_window,
+            commands::browser::browser_embed_create,
+            commands::browser::browser_embed_navigate,
+            commands::browser::browser_embed_back,
+            commands::browser::browser_embed_forward,
+            commands::browser::browser_embed_reload,
+            commands::browser::browser_embed_set_bounds,
+            commands::browser::browser_embed_set_visible,
+            commands::browser::browser_embed_destroy,
             commands::terminal::terminal_create,
+            commands::terminal::terminal_zsh_dir,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,
             commands::terminal::terminal_close,
             commands::terminal::terminal_resolve_path,
             commands::terminal::resolve_path,
+            commands::terminal::terminal_path_complete,
+            commands::terminal::terminal_list_commands,
             commands::fs::read_directory,
             commands::fs::read_file_content,
             commands::fs::read_file_base64,

@@ -83,33 +83,10 @@ fn projects_dir() -> Result<PathBuf, String> {
     Ok(home.join(".claude").join("projects"))
 }
 
-/// Claude Code encodes the project cwd as folder name by replacing `/` with `-`.
-/// E.g. `/Users/adib/Desktop/atlas` → `-Users-adib-Desktop-atlas`.
-fn encode_cwd(cwd: &str) -> String {
-    let trimmed = cwd.trim_end_matches('/');
-    trimmed.replace('/', "-")
-}
-
-/// Identify user content that's injected by Claude Code itself rather than typed by the user.
-fn is_injected_user_text(t: &str) -> bool {
-    let trimmed = t.trim();
-    if trimmed.is_empty() {
-        return true;
-    }
-    // System tags (e.g. <system-reminder>, <command-name>, <local-command-...>)
-    if trimmed.starts_with('<') {
-        return true;
-    }
-    // Claude Code interruption notice
-    if trimmed.starts_with("[Request interrupted") {
-        return true;
-    }
-    // Warmup pings issued by sub-agents
-    if trimmed.eq_ignore_ascii_case("warmup") {
-        return true;
-    }
-    false
-}
+// `encode_cwd` (Claude's cwd→folder encoding) and `is_injected_user_text` live
+// in the canonical transcript module in `atlas-agents` — reused here so the
+// history reader and the live transcript parser agree.
+use atlas_agents::transcript::{encode_cwd, is_injected_user_text};
 
 fn extract_first_user_text(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;

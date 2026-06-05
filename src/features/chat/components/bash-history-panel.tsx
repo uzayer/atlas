@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/types/agent";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { isBashToolCall, bashCommandOf } from "../lib/tool-calls";
+import { timeAgo } from "@/lib/time-ago";
 
 interface BashEntry {
   command: string;
@@ -12,20 +13,6 @@ interface BashEntry {
   messageIndex: number;
   toolCallId: string;
   timestamp: string;
-}
-
-function timeAgo(iso: string): string {
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "";
-  const diff = Date.now() - t;
-  const m = Math.floor(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d`;
-  return new Date(iso).toLocaleDateString();
 }
 
 interface BashHistoryPanelProps {

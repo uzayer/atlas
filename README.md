@@ -40,9 +40,11 @@ Concretely:
 
 | Area | What's there |
 |------|--------------|
-| **Chat / Agent** | Multi-session, multi-agent chat over [ACP (Agent Client Protocol)](https://github.com/zed-industries/agent-client-protocol). First-class support for Claude Code; the same transport plugs into any other ACP-speaking agent. Stop-button, message queue, permission-mode cycling (⇧⇥), tri-state send button (send / queue / stop), per-tab session sidebar, bash-call history panel, in-chat search (⌘F). |
+| **Chat / Agent** | Multi-session, multi-agent chat over [ACP (Agent Client Protocol)](https://github.com/zed-industries/agent-client-protocol). First-class support for Claude Code; the same transport plugs into any other ACP-speaking agent. Stop-button, message queue, permission-mode cycling (⇧⇥), tri-state send button (send / queue / stop), per-tab session sidebar, bash-call history panel, in-chat search (⌘F). Tool-permission / question prompts render as an inline card with numbered, keyboard-selectable options (1–9 / Enter / Esc) plus a free-text "tell the agent what to do instead". Assistant markdown is highlighted off the main thread in a Web Worker so long answers never block the composer. |
 | **Editor** | CodeMirror 6 with language support for JS/TS, Python, Rust, Go, Java, C++, JSON, YAML, Markdown, SQL, CSS, HTML, XML. Cmd+S writes to disk and emits an editor save event picked up by the log. |
-| **Terminal** | xterm.js v6 + Rust `portable-pty` backend. Splits, persistent buffers, RAF-batched output, multi-attempt fit on visibility change. |
+| **Terminal** | Block terminal: a zsh OSC-133 shell-integration PTY (Rust `portable-pty`) rendered as a React list of command blocks (command + output + exit code + duration), with an embedded xterm.js surface for alt-screen apps (vim/htop/less). Per-tab + tab-strip running indicators, inline masked password entry for `sudo`/`ssh` prompts, a live cwd + git-status badge, `clear` clears the block list, `sudo -s`/`-i`/`su` relaunch with shell integration preserved, and large outputs (e.g. `tree /`) are render-throttled so the UI stays responsive. |
+| **Browser** | Real in-app web browsing on a native WebKit child webview (full JS, cookies, logins) embedded in a tab, plus an "open as window" mode. Omnibox that treats input as a URL or a Google search, and a per-page **Reader** toggle that renders a clean, sanitized view of the current page. |
+| **Split view** | The center panel splits into up to **3 resizable columns**, each with its own tab strip — e.g. Agent chat │ Knowledge │ Browser side-by-side. A given module lives in one column (opening it again focuses the existing one). ⌘\ split right, ⌥;/⌥' move focus, ⌥W close split. **Zen mode** (⌥Z) snaps to a Knowledge │ Chat │ Browser 3-column layout with the side panels hidden, and restores the previous layout on the next ⌥Z. Layout persists per project. |
 | **Git** | Real commit graph (custom SVG lane-assignment), stage/unstage/commit, branch list with checkout / create / delete, file-level diff. |
 | **Explorer** | Paged file tree with lazy directory expansion. |
 | **GitHub** | Search public repos, clone into a managed directory, browse cloned READMEs, delete clones. |
@@ -157,7 +159,7 @@ Key feature stores and their responsibilities:
 - `editor/stores/editor-store.ts` — open files, dirty flags. **CodeMirror owns the document text** — the store only holds metadata so editor performance doesn't degrade with file size.
 - `git/stores/git-store.ts` — branch, status, commits, lane-assigned graph.
 - `terminal/stores/terminal-store.ts` — split layout. The terminal backend buffer is the source of truth for bytes, not the store.
-- `layout/stores/layout-store.ts` — tab system (`addTab`, `closeTab`, dedupe rules per tab type), split sizes.
+- `layout/stores/layout-store.ts` — tab system (`addTab`, `closeTab`, dedupe rules per tab type) and the center-panel **split columns** (`groupOrder` ≤ 3, per-column active tab, focused column); `activeTabId` is a maintained mirror of the focused column's active tab so existing readers don't need to know about splits.
 - `log/stores/log-store.ts` — ring-buffered event log (500 in memory) + on-disk pinned entries.
 - `knowledge/stores/knowledge-store.ts` — notes, directories, interaction log.
 - `canvas/stores/canvas-store.ts` — ReactFlow nodes + edges, persisted JSON.
@@ -174,7 +176,7 @@ LeftPanel        CenterPanel                RightPanel
 ─ GitHub         ─ each panel lazy-loaded
 ```
 
-`CenterPanel.tsx` owns the tab type registry — see `src/lib/constants.ts` for `TAB_TYPES` and the lazy-import map. Adding a new panel type is: lazy-import in `CenterPanel`, add to `TAB_TYPES`, optionally add an entry to `NEW_TAB_OPTIONS` for the `+` menu.
+`CenterPanel.tsx` owns the tab type registry — see `src/lib/constants.ts` for `TAB_TYPES` and the lazy-import map. Adding a new panel type is: lazy-import in `CenterPanel`, add to `TAB_TYPES`, optionally add an entry to `NEW_TAB_OPTIONS` for the `+` menu. The center panel itself can be **split into up to three resizable columns** (`react-resizable-panels`), each a `TabColumn` with its own tab strip; each tab carries a `groupId` for which column it lives in. Persistent module types (editor, terminal, browser, knowledge-graph, pdf) stay mounted across tab switches *within their column* via `display: contents/none` so heavy state (CodeMirror, the PTY, the native webview, Pixi) isn't rebuilt.
 
 ### Backend (Tauri + Rust)
 
@@ -185,7 +187,8 @@ LeftPanel        CenterPanel                RightPanel
 | `agents.rs` | ACP agent lifecycle — plugin discovery, spawn/kill, new/load session, send/cancel, model + mode switching, permission responses. Stream deltas reach the frontend via `atlas:agents` Tauri events. |
 | `claude.rs` | History readers — lists, reads, and deletes Claude Code session JSONL files in `~/.claude/projects/<slug>/`. Session spawn + streaming go through ACP (`agents.rs`), not this module. |
 | `claude_setup.rs` | Detects / installs the Claude Code CLI on the user's PATH. |
-| `terminal.rs` | PTY lifecycle (`terminal_create`, `_write`, `_resize`, `_close`) backed by the `atlas-terminal` workspace crate (`portable-pty`). |
+| `terminal.rs` | PTY lifecycle (`terminal_create`, `_write`, `_resize`, `_close`) backed by the `atlas-terminal` workspace crate (`portable-pty`), which injects a zsh OSC-133 shell-integration `ZDOTDIR`. `terminal_zsh_dir` exposes that dir so the UI can relaunch a root shell (`sudo -s`) with integration intact. |
+| `browser.rs` | Native WebKit browsing — `browser_open_window` (separate browser window) and the embedded child-webview verbs (`browser_embed_create`/`_navigate`/`_back`/`_forward`/`_reload`/`_set_bounds`/`_set_visible`/`_destroy`), all sharing one persistent profile so logins survive. Nav state streams back over `atlas:browser-nav`. |
 | `fs.rs` | Directory listing, file read/write, create/rename/delete/copy/duplicate, reveal-in-Finder, open-in-terminal, gitignore appends. |
 | `git.rs` + `git_graph.rs` + `git_watcher.rs` | Status, log, diff, stage/unstage, commit, branch ops, real commit-graph lane assignment, fs-watcher for live refresh. |
 | `github.rs` | GitHub search via REST, repo clone via `git clone` into `<project>/.atlas/repos/`. |
@@ -198,7 +201,7 @@ LeftPanel        CenterPanel                RightPanel
 | `canvas.rs` | Read/write `.atlas/canvas.json`. |
 | `pomodoro.rs` | Read/write `.atlas/pomodoro.json` for the focus-timer feature. |
 | `log.rs` | Append-only pinned log at `~/.atlas/log/pinned.jsonl`. |
-| `app_state.rs`, `cli.rs`, `recent_files.rs`, `sessions_watch.rs`, `compose_prompt.rs` | Bootstrap, `atlas <path>` CLI helper, recent files, session JSONL watcher, prompt composition for ACP sends. |
+| `app_state.rs`, `cli.rs`, `recent_files.rs`, `sessions_watch.rs`, `compose_prompt.rs`, `window.rs`, `menu.rs` | Bootstrap, `atlas <path>` CLI helper, recent files, session JSONL watcher, prompt composition for ACP sends, native window controls (zoom/title), and the native macOS menu (its ⌘W "Close Tab" item routes through the app so a focused browser webview can't tear down the window). |
 
 All long-running or blocking operations (`Command::output`, `Command::spawn` + line reads, file I/O on big trees) run inside `tokio::task::spawn_blocking` so the Tauri command runtime never blocks the UI's IPC channel.
 
@@ -247,7 +250,7 @@ Because `SessionWorker` owns the message log in Rust and broadcasts deltas, you 
 ├── interactions.jsonl one-line summary per significant event,
 │                       fed back to the chat as system-prompt context
 ├── canvas.json        ReactFlow node/edge state
-└── editor.json        which files were open
+└── editor.json        workspace layout — open tabs + split-column arrangement
 ```
 
 **Global state** lives in `~/.atlas/`:

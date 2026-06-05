@@ -20,7 +20,8 @@ import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta } from "@/types/agents";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { HintOverlay } from "@/features/hint-nav/components/hint-overlay";
-import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
+import { BrowserOverlayWatcher } from "@/features/browser/components/browser-overlay-watcher";
+import { fileIndex, openFileIndex, markFileIndexClosed } from "@/features/file-picker/lib/file-picker-api";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -111,6 +112,20 @@ export function App() {
     };
   }, []);
 
+  // Close-active-tab from the native menu (Cmd+W). The embedded browser is a
+  // separate native webview, so its Cmd+W can't reach the React `useHotkeys`
+  // handler — it falls through to the menu's "Close Tab" item, which emits this
+  // event. Mirrors the Cmd+W hotkey: close whichever tab is active.
+  useEffect(() => {
+    const unlisten = listen("atlas:close-active-tab", () => {
+      const current = useLayoutStore.getState().activeTabId;
+      if (current) useLayoutStore.getState().actions.closeTab(current);
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, []);
+
   // Alpha-only: nuke any legacy WebView storage. Nothing in the current
   // codebase reads from localStorage / sessionStorage — the only entries
   // are stale dust from previous zustand-persist builds. Wiping on every
@@ -188,32 +203,25 @@ export function App() {
     setActiveTab,
     closeTab,
     activateTabByIndex,
+    cycleTab,
+    addGroup,
+    closeGroup,
+    focusAdjacentGroup,
+    toggleZenMode,
   } = useLayoutStore.use.actions();
   const tabs = useLayoutStore.use.tabs();
   const activeTabId = useLayoutStore.use.activeTabId();
+  const groupOrder = useLayoutStore.use.groupOrder();
+  const focusedGroupId = useLayoutStore.use.focusedGroupId();
 
-  const cycleTab = (delta: 1 | -1) => {
-    const list = useLayoutStore.getState().tabs;
-    if (list.length === 0) return;
-    const current = useLayoutStore.getState().activeTabId;
-    const idx = list.findIndex((t) => t.id === current);
-    const next = (idx === -1 ? 0 : (idx + delta + list.length) % list.length);
-    setActiveTab(list[next].id);
-  };
-
-  // Remember the last non-terminal tab so cmd+j can toggle back to it.
-  const lastNonTerminalTabRef = useRef<string | null>(null);
-  useEffect(() => {
-    const active = tabs.find((t) => t.id === activeTabId);
-    if (active && active.type !== "terminal") {
-      lastNonTerminalTabRef.current = active.id;
-    }
-  }, [activeTabId, tabs]);
-
+  // ⌘J — toggle the terminal WITHIN the focused split column (not a global
+  // instance), so it respects which pane you're working in.
   const toggleTerminal = () => {
-    const list = useLayoutStore.getState().tabs;
-    const current = useLayoutStore.getState().activeTabId;
-    const activeTab = list.find((t) => t.id === current);
+    const st = useLayoutStore.getState();
+    const g = st.focusedGroupId;
+    const groupOf = (t: { groupId?: string }) => t.groupId ?? "main";
+    const groupTabs = st.tabs.filter((t) => groupOf(t) === g);
+    const activeTab = st.tabs.find((t) => t.id === st.activeByGroup[g]);
 
     const focusTerminalSoon = () => {
       // Ask the active block terminal to focus once the tab is mounted/visible.
@@ -223,18 +231,18 @@ export function App() {
     };
 
     if (activeTab?.type === "terminal") {
-      const target = lastNonTerminalTabRef.current;
-      const back = target && list.find((t) => t.id === target);
-      if (back) {
-        setActiveTab(back.id);
-        return;
-      }
-      const anyOther = list.find((t) => t.type !== "terminal");
-      if (anyOther) setActiveTab(anyOther.id);
+      // Toggle away: the most-recent non-terminal tab in THIS column (history),
+      // else the first non-terminal tab in the column.
+      const back = [...st.tabHistory].reverse().find((id) => {
+        const t = st.tabs.find((x) => x.id === id);
+        return t && groupOf(t) === g && t.type !== "terminal";
+      });
+      const target = back ?? groupTabs.find((t) => t.type !== "terminal")?.id;
+      if (target) setActiveTab(target);
       return;
     }
 
-    const existing = list.find((t) => t.type === "terminal");
+    const existing = groupTabs.find((t) => t.type === "terminal");
     if (existing) {
       setActiveTab(existing.id);
       focusTerminalSoon();
@@ -535,7 +543,7 @@ export function App() {
       useLayoutStore.getState().actions.saveEditorState(currentProject.path);
     }, 1000);
     return () => clearTimeout(saveTimerRef.current);
-  }, [tabs.length, activeTabId, currentProject]);
+  }, [tabs.length, activeTabId, groupOrder, focusedGroupId, currentProject]);
 
   // Maintain the chat-mention picker's "recent files" queue. Push whenever
   // an editor/media/unsupported tab appears whose data.filePath we haven't
@@ -568,6 +576,7 @@ export function App() {
   useEffect(() => {
     if (!currentProject) {
       fileIndex.closeProject().catch(() => {});
+      markFileIndexClosed();
       void invoke("git_watch_stop").catch(() => {});
       void invoke("recent_files_close_project").catch(() => {});
       // Drop the mention cache so the @-picker doesn't briefly
@@ -576,9 +585,8 @@ export function App() {
       void invoke("mention_cache_clear").catch(() => {});
       return;
     }
-    fileIndex
-      .openProject(currentProject.path)
-      .catch((e) => console.warn("fileindex open failed:", e));
+    markFileIndexClosed();
+    void openFileIndex(currentProject.path);
     // Git watcher: emits `atlas:git-changed` on commit / checkout /
     // branch ops. Replaces the 3-second polling that git-graph-panel
     // used to do via `refetchInterval` on `git_graph_signature`.
@@ -670,8 +678,12 @@ export function App() {
       // plain ⌥J (no ⌘) only matches here.
       combo: { key: "j", alt: true },
       action: () => {
-        const layout = useLayoutStore.getState();
-        const existing = layout.tabs.find((t) => t.type === "knowledge");
+        // Open/focus Knowledge WITHIN the focused split column.
+        const st = useLayoutStore.getState();
+        const g = st.focusedGroupId;
+        const existing = st.tabs.find(
+          (t) => (t.groupId ?? "main") === g && t.type === "knowledge",
+        );
         if (existing) {
           setActiveTab(existing.id);
           return;
@@ -694,13 +706,8 @@ export function App() {
       combo: { key: String(i + 1), meta: true },
       // ⌘9 always jumps to the LAST tab (browser convention), regardless
       // of how many tabs there are; ⌘1–8 select by index.
-      action:
-        i === 8
-          ? () => {
-              const n = useLayoutStore.getState().tabs.length;
-              if (n > 0) activateTabByIndex(n - 1);
-            }
-          : () => activateTabByIndex(i),
+      // ⌘9 = last tab in the focused column (the store treats i<0 as "last").
+      action: i === 8 ? () => activateTabByIndex(-1) : () => activateTabByIndex(i),
     })),
     {
       combo: { key: "w", meta: true },
@@ -716,6 +723,34 @@ export function App() {
     {
       combo: { key: "]", meta: true, shift: true },
       action: () => cycleTab(1),
+    },
+    // ── Split view ──
+    {
+      // ⌘\ — open a new split column to the right (max 3).
+      combo: { key: "\\", meta: true },
+      action: () => addGroup(),
+    },
+    {
+      // ⌥; — focus the split to the left.
+      combo: { key: ";", alt: true },
+      action: () => focusAdjacentGroup(-1),
+    },
+    {
+      // ⌥' — focus the split to the right.
+      combo: { key: "'", alt: true },
+      action: () => focusAdjacentGroup(1),
+    },
+    {
+      // ⌥W — close the focused split column (tabs move to the left neighbour).
+      combo: { key: "w", alt: true },
+      action: () => closeGroup(useLayoutStore.getState().focusedGroupId),
+    },
+    {
+      // ⌥Z — Zen mode: Knowledge │ Chat │ Browser, side panels hidden. Again restores.
+      combo: { key: "z", alt: true },
+      action: () => {
+        if (currentProject) toggleZenMode();
+      },
     },
     {
       combo: { key: "t", meta: true },
@@ -797,6 +832,7 @@ export function App() {
       <SearchOverlay open={searchOpen} onOpenChange={setSearchOpen} />
       <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />
       <HintOverlay />
+      <BrowserOverlayWatcher />
       <Toaster
         position="bottom-right"
         toastOptions={{

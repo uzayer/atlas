@@ -1,6 +1,6 @@
 [package]
 name = "atlas"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2021"
 
 [lib]
@@ -17,7 +17,10 @@ tauri-build = { version = "2", features = [] }
 # builds regardless of this feature. Add `devtools` back here only if you
 # need to debug a production-only issue and accept the binary-size and
 # attack-surface cost.
-tauri = { version = "2", features = ["protocol-asset", "macos-private-api"] }
+# `unstable` enables the multiwebview API (`Window::add_child`) used to embed a
+# real WebKit child webview inside the browser tab (see `commands::browser`).
+# Pinned to the 2.11.1 already in the lockfile — no new resolution.
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api", "unstable"] }
 # Used to embed KB cover images as `data:` URLs (covers live under the
 # hidden `.atlas/` dir, which the asset protocol won't serve). Pinned to the
 # version already in the lockfile so no new resolution is pulled in.
@@ -41,8 +44,6 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-anyhow = "1"
-thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
@@ -51,6 +52,9 @@ atlas-agents = { path = "../crates/atlas-agents" }
 atlas-terminal = { path = "../crates/atlas-terminal" }
 atlas-acp = { path = "../crates/atlas-acp" }
 dirs = "6"
+# URL parsing for the embedded browser (`commands::browser`). Already in the
+# lockfile transitively via tauri/reqwest; declared here to name the type.
+url = "2"
 # `rustls-tls` (not `native-tls`) + bundled `webpki-roots`. The macOS
 # Security.framework / Keychain code path that `native-tls` uses can fail
 # silently in sandboxed Hardened-Runtime release builds even with
