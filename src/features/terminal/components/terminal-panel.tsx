@@ -96,17 +96,24 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
     return () => window.removeEventListener("resize", onResize);
   }, [measurePanes]);
 
-  // Also measure when the root container itself resizes (panel drag from main
-  // layout, or the tab becoming visible). Double RAF for the same settle
-  // reason as above.
+  // Measure when the root OR any pane container resizes. Observing the
+  // containers (not just the root) is what catches geometry changes that don't
+  // change the root's box — e.g. the center tab-bar toggling (⌘⌥T), a split
+  // column being added/removed, zen mode, or the 28px pane header settling
+  // after mount. Re-attached whenever the terminal's pane tree changes (the
+  // container elements are recreated). Double RAF for the settle reason above.
   useEffect(() => {
-    if (!rootRef.current) return;
+    const root = rootRef.current;
+    if (!root) return;
     const ro = new ResizeObserver(() =>
       requestAnimationFrame(() => requestAnimationFrame(measurePanes))
     );
-    ro.observe(rootRef.current);
+    ro.observe(root);
+    root
+      .querySelectorAll<HTMLElement>("[data-pane-container]")
+      .forEach((el) => ro.observe(el));
     return () => ro.disconnect();
-  }, [measurePanes]);
+  }, [measurePanes, tab?.root]);
 
   // Re-measure when a surrounding panel toggles (⌘⌥B status bar = height,
   // ⌘B / ⌘⇧B left/right panels = width). The ResizeObserver above can miss the
@@ -117,9 +124,24 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
   const rightVisible = useLayoutStore((s) => s.rightPanel.visible);
   const bottomVisible = useLayoutStore((s) => s.bottomPanel.visible);
   const chatSidebarVisible = useLayoutStore((s) => s.chatSidebar.visible);
+  // The center's own chrome also changes the terminal's box: the tab bar
+  // toggling (⌘⌥T), split columns being added/removed (groupOrder), and zen
+  // mode. None resize the surrounding panels, so watch them explicitly.
+  const tabBarVisible = useLayoutStore((s) => s.tabBarVisible);
+  const groupCount = useLayoutStore((s) => s.groupOrder.length);
+  const zen = useLayoutStore((s) => s.zen);
   useEffect(() => {
     requestAnimationFrame(() => requestAnimationFrame(measurePanes));
-  }, [leftVisible, rightVisible, bottomVisible, chatSidebarVisible, measurePanes]);
+  }, [
+    leftVisible,
+    rightVisible,
+    bottomVisible,
+    chatSidebarVisible,
+    tabBarVisible,
+    groupCount,
+    zen,
+    measurePanes,
+  ]);
 
   // Terminal-tab keyboard shortcuts, gated to the VISIBLE terminal panel
   // (offsetParent !== null) so background tabs never steal them:

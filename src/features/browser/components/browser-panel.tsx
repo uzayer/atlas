@@ -3,9 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { logEvent } from "@/features/log/lib/log";
 import { cn } from "@/lib/utils";
 import { safeUnlistenPromise } from "@/lib/safe-unlisten";
+import { useBrowserOverlayStore } from "../stores/browser-overlay-store";
 import {
   Globe,
   ExternalLink,
@@ -44,6 +46,8 @@ type BrowserMode = "live" | "reader";
 interface BrowserPanelProps {
   tabId?: string;
   initialUrl?: string;
+  /** The split column this browser lives in, for keyboard-focus tracking. */
+  groupId?: string;
 }
 
 function normalizeUrl(url: string): string {
@@ -65,7 +69,7 @@ function toNavUrl(input: string): string {
   return `https://www.google.com/search?q=${encodeURIComponent(t)}`;
 }
 
-export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
+export function BrowserPanel({ tabId, initialUrl, groupId }: BrowserPanelProps) {
   // Stable embed id for the native child webview. One per browser tab.
   const embedId = useRef(tabId || `browser-${Math.random().toString(36).slice(2)}`).current;
 
@@ -78,6 +82,26 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
   const placeholderRef = useRef<HTMLDivElement>(null);
   const modeRef = useRef<BrowserMode>(mode);
   modeRef.current = mode;
+
+  // The native child webview floats above the DOM and can't be occluded, so it
+  // must hide while any DOM overlay is open (see BrowserOverlayWatcher).
+  const overlayOpen = useBrowserOverlayStore.use.overlayOpen();
+  const { registerEmbed, unregisterEmbed } = useBrowserOverlayStore.use.actions();
+  const overlayOpenRef = useRef(overlayOpen);
+  overlayOpenRef.current = overlayOpen;
+
+  // The native webview floats above the DOM, so clicks inside the page never
+  // reach the column's focus handler. Mark this browser's split column focused
+  // when the user touches the React chrome, and on user-driven navigation (only
+  // when this is the active tab in its column, so a background tab can't steal
+  // focus). Clicks PURELY inside the remote page still can't be detected — no
+  // IPC from remote webviews.
+  const focusThisGroup = useCallback(() => {
+    if (!groupId) return;
+    const st = useLayoutStore.getState();
+    if (st.focusedGroupId === groupId) return;
+    st.actions.setFocusedGroup(groupId);
+  }, [groupId]);
 
   // ── Reader (sanitized fetch) state ──────────────────────────────────────
   const [page, setPage] = useState<ReadableContent | null>(null);
@@ -109,6 +133,7 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
         if (!createdRef.current) {
           await invoke("browser_embed_create", { id: embedId, url, rect });
           createdRef.current = true;
+          registerEmbed();
         } else {
           await invoke("browser_embed_navigate", { id: embedId, url });
         }
@@ -122,7 +147,7 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
         });
       }
     },
-    [embedId, currentRect],
+    [embedId, currentRect, registerEmbed],
   );
 
   // Listen for Rust-owned navigation deltas for this embed.
@@ -132,11 +157,30 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
       setLiveNav(e.payload);
       // Keep the address bar in sync with real navigation (clicks, redirects).
       setInputUrl(e.payload.url);
+      // In-page navigation means the user is driving THIS pane — but only steal
+      // keyboard focus if this is the visible/active tab in its column.
+      if (groupId && useLayoutStore.getState().activeByGroup[groupId] === (tabId ?? embedId)) {
+        focusThisGroup();
+      }
     });
     return () => {
       safeUnlistenPromise(un);
     };
-  }, [embedId]);
+  }, [embedId, groupId, tabId, focusThisGroup]);
+
+  // Single source of truth for the native webview's visibility. The webview is
+  // shown only when it's Live, created, has a non-zero rect (visible tab), AND
+  // no DOM overlay is open on top of it. `set_bounds` keeps it positioned for
+  // the restore even while hidden.
+  const syncVisibility = useCallback(() => {
+    if (modeRef.current !== "live" || !createdRef.current) return;
+    const rect = currentRect();
+    if (rect) {
+      invoke("browser_embed_set_bounds", { id: embedId, rect }).catch(() => {});
+    }
+    const visible = !!rect && !overlayOpenRef.current;
+    invoke("browser_embed_set_visible", { id: embedId, visible }).catch(() => {});
+  }, [embedId, currentRect]);
 
   // Track geometry + visibility. ResizeObserver fires both when the panel
   // resizes AND when the tab is hidden (display:none → size 0), so it doubles
@@ -144,24 +188,19 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
   useEffect(() => {
     const el = placeholderRef.current;
     if (!el) return;
-    const sync = () => {
-      if (modeRef.current !== "live" || !createdRef.current) return;
-      const rect = currentRect();
-      if (!rect) {
-        invoke("browser_embed_set_visible", { id: embedId, visible: false }).catch(() => {});
-      } else {
-        invoke("browser_embed_set_bounds", { id: embedId, rect }).catch(() => {});
-        invoke("browser_embed_set_visible", { id: embedId, visible: true }).catch(() => {});
-      }
-    };
-    const ro = new ResizeObserver(sync);
+    const ro = new ResizeObserver(syncVisibility);
     ro.observe(el);
-    window.addEventListener("resize", sync);
+    window.addEventListener("resize", syncVisibility);
     return () => {
       ro.disconnect();
-      window.removeEventListener("resize", sync);
+      window.removeEventListener("resize", syncVisibility);
     };
-  }, [embedId, currentRect]);
+  }, [syncVisibility]);
+
+  // Hide/restore the moment a DOM overlay opens or closes.
+  useEffect(() => {
+    syncVisibility();
+  }, [overlayOpen, syncVisibility]);
 
   // Create the embed once we have an initial URL and the placeholder is laid out.
   useEffect(() => {
@@ -173,28 +212,26 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
   }, [mode, initialUrl]);
 
   // Toggle the native overlay's visibility when switching Live⇄Reader, and
-  // (re)show + reposition when returning to Live.
+  // (re)show + reposition when returning to Live. Routed through syncVisibility
+  // so it respects overlay suppression (can't re-show while a popup is open).
   useEffect(() => {
     if (!createdRef.current) return;
     if (mode === "live") {
-      const rect = currentRect();
-      if (rect) {
-        invoke("browser_embed_set_bounds", { id: embedId, rect }).catch(() => {});
-        invoke("browser_embed_set_visible", { id: embedId, visible: true }).catch(() => {});
-      }
+      syncVisibility();
     } else {
       invoke("browser_embed_set_visible", { id: embedId, visible: false }).catch(() => {});
     }
-  }, [mode, embedId, currentRect]);
+  }, [mode, embedId, syncVisibility]);
 
   // Destroy the native webview when the tab closes (panel unmounts).
   useEffect(() => {
     return () => {
       if (createdRef.current) {
         invoke("browser_embed_destroy", { id: embedId }).catch(() => {});
+        unregisterEmbed();
       }
     };
-  }, [embedId]);
+  }, [embedId, unregisterEmbed]);
 
   // ── Reader: sanitized fetch ─────────────────────────────────────────────
   const fetchPage = useCallback(async (url: string) => {
@@ -354,7 +391,7 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
   const isLoading = isLive ? !!liveNav?.loading : loading;
 
   return (
-    <div className="h-full flex flex-col bg-bg-base">
+    <div className="h-full flex flex-col bg-bg-base" onMouseDownCapture={focusThisGroup}>
       {/* Address bar */}
       <div className="flex items-center gap-1.5 px-2 h-[36px] shrink-0 border-b border-border-default bg-bg-primary">
         <button onClick={goBack} disabled={!canBack} className="p-1 rounded hover:bg-bg-hover text-text-tertiary transition-colors cursor-pointer disabled:opacity-30">
@@ -430,6 +467,44 @@ export function BrowserPanel({ tabId, initialUrl }: BrowserPanelProps) {
       {/* ── Live mode: placeholder the native webview is positioned over ── */}
       {isLive && (
         <div ref={placeholderRef} className="flex-1 relative bg-bg-base">
+          {/* Shown when an overlay forces the native webview to hide — it sits
+              UNDER the webview, so it's only visible while the webview is gone. */}
+          {createdRef.current && overlayOpen && (
+            <div className="absolute inset-0 flex items-center justify-center p-6 pointer-events-auto">
+              <div className="flex max-w-[380px] flex-col items-center gap-4 text-center">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full border border-border-default bg-bg-secondary">
+                  <Globe size={22} className="text-text-tertiary" />
+                </div>
+                <div className="space-y-1.5">
+                  <p className="text-sm font-medium text-text-primary">Browser paused</p>
+                  <p className="text-xs leading-relaxed text-text-tertiary">
+                    A menu or dialog is open on top. Keep browsing without interruption:
+                  </p>
+                  {(liveNav?.title || currentUrl()) && (
+                    <p className="truncate pt-1 font-mono text-[10px] text-text-secondary">
+                      {liveNav?.title || currentUrl()}
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-col gap-2 pt-1 w-full max-w-[280px]">
+                  <button
+                    onClick={openBrowserWindow}
+                    className="flex items-center justify-center gap-2 rounded-md bg-text-primary px-3 py-2 text-xs font-medium text-bg-base transition-opacity hover:opacity-90 cursor-pointer"
+                  >
+                    <AppWindow size={14} />
+                    Continue in a new window
+                  </button>
+                  <button
+                    onClick={openExternal}
+                    className="flex items-center justify-center gap-2 rounded-md border border-border-default bg-bg-secondary px-3 py-2 text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary cursor-pointer"
+                  >
+                    <ExternalLink size={14} />
+                    Open in default browser
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
           {!createdRef.current && !initialUrl && (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="text-center space-y-3">

@@ -181,14 +181,19 @@ function TabColumn({
   return (
     <div
       className={cn(
-        "h-full flex flex-col overflow-hidden bg-bg-surface",
-        // Subtle focused-column ring (only meaningful when split).
-        !soloColumn && isFocused && "ring-1 ring-inset ring-[#ffffff14]"
+        "h-full flex flex-col overflow-hidden bg-bg-surface"
       )}
       onMouseDownCapture={() => setFocusedGroup(groupId)}
     >
       {tabBarVisible && (
-        <div className="flex items-stretch h-[29px] shrink-0 bg-bg-base border-b border-border-default">
+        <div
+          className={cn(
+            "flex items-stretch h-[29px] shrink-0 bg-bg-base border-b border-border-default transition-opacity",
+            // When split, dim the UNFOCUSED columns' tab bars so the focused
+            // one stands out (the focused pane also shows a white dot, below).
+            !soloColumn && !isFocused && "opacity-45"
+          )}
+        >
           <div className="flex items-center gap-0.5 px-1 border-r border-border-default shrink-0">
             <button
               onClick={navigateTabBack}
@@ -272,6 +277,14 @@ function TabColumn({
               className="pointer-events-none absolute right-full top-0 h-full w-8"
               style={{ background: "linear-gradient(to right, transparent, var(--bg-base))" }}
             />
+            {/* Selected-pane indicator: a white dot before the +/x actions. */}
+            {!soloColumn && isFocused && (
+              <span
+                aria-hidden
+                title="Active pane"
+                className="self-center shrink-0 mx-1 h-1.5 w-1.5 rounded-full bg-[var(--accent-primary)]"
+              />
+            )}
             <NewTabDropdown addTab={addTab} groupId={groupId} />
             {canSplit && (
               <button
@@ -369,7 +382,7 @@ function TabContentContainer({ groupId }: { groupId: string }) {
                   containerHeight={height}
                 />
               ) : tab.type === "browser" ? (
-                <BrowserPanel tabId={tab.id} initialUrl={tab.data.url as string | undefined} />
+                <BrowserPanel tabId={tab.id} groupId={GROUP_OF(tab)} initialUrl={tab.data.url as string | undefined} />
               ) : tab.type === "knowledge-graph" ? (
                 <KnowledgeGraph />
               ) : tab.type === "pdf" ? (

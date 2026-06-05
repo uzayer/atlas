@@ -196,6 +196,17 @@ function groupOf(tab: Tab | undefined): string {
   return tab?.groupId ?? DEFAULT_GROUP;
 }
 
+/** Return `base` if no tab uses it, else a suffixed variant ("base-2", …).
+ *  Lets a singleton type (terminal/browser/settings…) be opened in more than
+ *  one split column: callers may reuse a fixed id (e.g. "terminal"), and two
+ *  tabs sharing an id would collide React keys / activeByGroup / closeTab. */
+function uniqueTabId(s: LayoutState, base: string): string {
+  if (!s.tabs.some((t) => t.id === base)) return base;
+  let i = 2;
+  while (s.tabs.some((t) => t.id === `${base}-${i}`)) i++;
+  return `${base}-${i}`;
+}
+
 /** Keep `activeTabId` pointing at the focused column's active tab. */
 function syncActiveMirror(s: LayoutState): void {
   s.activeTabId = s.activeByGroup[s.focusedGroupId] ?? null;
@@ -303,9 +314,9 @@ export const useLayoutStore = createSelectors(
           set((s) => {
             // chat: each session is its own tab (multiple parallel agent
             // chats supported). editor / diff: one per filePath. Everything
-            // else: at most one instance — opening it again focuses the
-            // existing one (incl. across split columns; "can't open the same
-            // tab in two splits").
+            // else is a singleton PER COLUMN — opening it focuses the instance
+            // in the target column if present, else opens a fresh one there, so
+            // the same tool can live in any/every split column (full freedom).
             const allowMultiple =
               tab.type === "editor" ||
               tab.type === "diff" ||
@@ -317,12 +328,16 @@ export const useLayoutStore = createSelectors(
             if (!s.groupOrder.includes(targetGroup)) targetGroup = s.focusedGroupId;
 
             if (!allowMultiple) {
-              const existingOfType = s.tabs.find((t) => t.type === tab.type);
-              if (existingOfType) {
-                targetId = existingOfType.id;
-                targetGroup = groupOf(existingOfType); // focus where it already lives
+              const existingInGroup = s.tabs.find(
+                (t) => t.type === tab.type && groupOf(t) === targetGroup,
+              );
+              if (existingInGroup) {
+                targetId = existingInGroup.id; // focus the one already in this column
               } else {
-                s.tabs.push({ ...tab, groupId: targetGroup });
+                // New instance in the target column; ensure a unique id since
+                // callers may reuse a fixed id (e.g. "terminal", "settings").
+                targetId = uniqueTabId(s, tab.id);
+                s.tabs.push({ ...tab, id: targetId, groupId: targetGroup });
               }
             } else {
               const existsById = s.tabs.find((t) => t.id === tab.id);

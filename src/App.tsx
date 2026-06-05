@@ -20,7 +20,8 @@ import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta } from "@/types/agents";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { HintOverlay } from "@/features/hint-nav/components/hint-overlay";
-import { fileIndex } from "@/features/file-picker/lib/file-picker-api";
+import { BrowserOverlayWatcher } from "@/features/browser/components/browser-overlay-watcher";
+import { fileIndex, openFileIndex, markFileIndexClosed } from "@/features/file-picker/lib/file-picker-api";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -213,19 +214,14 @@ export function App() {
   const groupOrder = useLayoutStore.use.groupOrder();
   const focusedGroupId = useLayoutStore.use.focusedGroupId();
 
-  // Remember the last non-terminal tab so cmd+j can toggle back to it.
-  const lastNonTerminalTabRef = useRef<string | null>(null);
-  useEffect(() => {
-    const active = tabs.find((t) => t.id === activeTabId);
-    if (active && active.type !== "terminal") {
-      lastNonTerminalTabRef.current = active.id;
-    }
-  }, [activeTabId, tabs]);
-
+  // ⌘J — toggle the terminal WITHIN the focused split column (not a global
+  // instance), so it respects which pane you're working in.
   const toggleTerminal = () => {
-    const list = useLayoutStore.getState().tabs;
-    const current = useLayoutStore.getState().activeTabId;
-    const activeTab = list.find((t) => t.id === current);
+    const st = useLayoutStore.getState();
+    const g = st.focusedGroupId;
+    const groupOf = (t: { groupId?: string }) => t.groupId ?? "main";
+    const groupTabs = st.tabs.filter((t) => groupOf(t) === g);
+    const activeTab = st.tabs.find((t) => t.id === st.activeByGroup[g]);
 
     const focusTerminalSoon = () => {
       // Ask the active block terminal to focus once the tab is mounted/visible.
@@ -235,18 +231,18 @@ export function App() {
     };
 
     if (activeTab?.type === "terminal") {
-      const target = lastNonTerminalTabRef.current;
-      const back = target && list.find((t) => t.id === target);
-      if (back) {
-        setActiveTab(back.id);
-        return;
-      }
-      const anyOther = list.find((t) => t.type !== "terminal");
-      if (anyOther) setActiveTab(anyOther.id);
+      // Toggle away: the most-recent non-terminal tab in THIS column (history),
+      // else the first non-terminal tab in the column.
+      const back = [...st.tabHistory].reverse().find((id) => {
+        const t = st.tabs.find((x) => x.id === id);
+        return t && groupOf(t) === g && t.type !== "terminal";
+      });
+      const target = back ?? groupTabs.find((t) => t.type !== "terminal")?.id;
+      if (target) setActiveTab(target);
       return;
     }
 
-    const existing = list.find((t) => t.type === "terminal");
+    const existing = groupTabs.find((t) => t.type === "terminal");
     if (existing) {
       setActiveTab(existing.id);
       focusTerminalSoon();
@@ -580,6 +576,7 @@ export function App() {
   useEffect(() => {
     if (!currentProject) {
       fileIndex.closeProject().catch(() => {});
+      markFileIndexClosed();
       void invoke("git_watch_stop").catch(() => {});
       void invoke("recent_files_close_project").catch(() => {});
       // Drop the mention cache so the @-picker doesn't briefly
@@ -588,9 +585,8 @@ export function App() {
       void invoke("mention_cache_clear").catch(() => {});
       return;
     }
-    fileIndex
-      .openProject(currentProject.path)
-      .catch((e) => console.warn("fileindex open failed:", e));
+    markFileIndexClosed();
+    void openFileIndex(currentProject.path);
     // Git watcher: emits `atlas:git-changed` on commit / checkout /
     // branch ops. Replaces the 3-second polling that git-graph-panel
     // used to do via `refetchInterval` on `git_graph_signature`.
@@ -682,8 +678,12 @@ export function App() {
       // plain ⌥J (no ⌘) only matches here.
       combo: { key: "j", alt: true },
       action: () => {
-        const layout = useLayoutStore.getState();
-        const existing = layout.tabs.find((t) => t.type === "knowledge");
+        // Open/focus Knowledge WITHIN the focused split column.
+        const st = useLayoutStore.getState();
+        const g = st.focusedGroupId;
+        const existing = st.tabs.find(
+          (t) => (t.groupId ?? "main") === g && t.type === "knowledge",
+        );
         if (existing) {
           setActiveTab(existing.id);
           return;
@@ -832,6 +832,7 @@ export function App() {
       <SearchOverlay open={searchOpen} onOpenChange={setSearchOpen} />
       <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />
       <HintOverlay />
+      <BrowserOverlayWatcher />
       <Toaster
         position="bottom-right"
         toastOptions={{

@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Image as ImageIcon, Film, Music, FileCode, FileX } from "lucide-react";
+import { Image as ImageIcon, Film, Music, FileCode, FileX, RotateCw } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
-import { fileIndex, type FileMatch } from "../lib/file-picker-api";
+import {
+  fileIndex,
+  ensureFileIndex,
+  openFileIndex,
+  cacheFileList,
+  getCachedFileList,
+  type FileMatch,
+} from "../lib/file-picker-api";
 import { openFile } from "@/lib/open-file";
 import { classifyFile, type FileKind } from "@/lib/file-types";
 
@@ -34,6 +41,7 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
    *  "Indexing files…" hint so users don't see a misleading "No matches"
    *  when they open Cmd+P before the walk completes. */
   const [indexing, setIndexing] = useState(false);
+  const [reindexing, setReindexing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -42,22 +50,45 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
     if (!open) return;
     setQuery("");
     setSelected(0);
-    // Initial population — empty query returns the first N files. We
-    // also probe `status()` so the empty-results case can distinguish
-    // "index not loaded yet" from "loaded but empty". If the project's
-    // walk is still in progress, mark as indexing; the
-    // `atlas:fileindex:updated` listener below will re-query the moment
-    // it completes (Rust emits the event after the initial walk lands).
-    Promise.all([
-      fileIndex.search("", RESULT_LIMIT).catch(() => [] as FileMatch[]),
-      fileIndex.status().catch(() => ({ indexed: false, count: 0, root: null })),
-    ]).then(([r, status]) => {
+    // Instant: show the last good walk from cache so the user never sees a
+    // blank "Indexing files…" screen while we verify/rebuild the index.
+    if (project) {
+      const cached = getCachedFileList(project.path);
+      if (cached.length) setResults(cached);
+    }
+    let cancelled = false;
+    (async () => {
+      // FALLBACK: if the backend has no (or a stale) index — e.g. the initial
+      // walk failed or was never triggered — reindex now instead of sitting
+      // on "Indexing files…" forever. Coalesced so it runs at most once.
+      const status = await ensureFileIndex(project?.path);
+      if (cancelled) return;
+      setIndexing(status ? !status.indexed : false);
+      const r = await fileIndex.search("", RESULT_LIMIT).catch(() => [] as FileMatch[]);
+      if (cancelled) return;
       setResults(r);
-      setIndexing(!status.indexed);
-    });
+      if (project && r.length) cacheFileList(project.path, r);
+    })();
     // Focus after the dialog mounts.
     requestAnimationFrame(() => inputRef.current?.focus());
-  }, [open]);
+    return () => {
+      cancelled = true;
+    };
+  }, [open, project]);
+
+  // Force a full reindex (the explicit button + recovery path).
+  const handleReindex = async () => {
+    if (!project || reindexing) return;
+    setReindexing(true);
+    setIndexing(true);
+    await openFileIndex(project.path).catch(() => {});
+    const r = await fileIndex.search(query, RESULT_LIMIT).catch(() => [] as FileMatch[]);
+    setResults(r);
+    setSelected(0);
+    setIndexing(false);
+    setReindexing(false);
+    if (project && query.trim() === "" && r.length) cacheFileList(project.path, r);
+  };
 
   // Debounced backend search on query change.
   useEffect(() => {
@@ -86,7 +117,13 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
     listen<{ count: number }>("atlas:fileindex:updated", () => {
       if (cancelled) return;
       setIndexing(false);
-      fileIndex.search(query, RESULT_LIMIT).then(setResults).catch(() => {});
+      fileIndex
+        .search(query, RESULT_LIMIT)
+        .then((r) => {
+          setResults(r);
+          if (project && query.trim() === "" && r.length) cacheFileList(project.path, r);
+        })
+        .catch(() => {});
     }).then((un) => {
       if (cancelled) un();
       else unlisten = un;
@@ -95,7 +132,7 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
       cancelled = true;
       unlisten?.();
     };
-  }, [open, query]);
+  }, [open, query, project]);
 
   // Kbd nav.
   useEffect(() => {
@@ -209,7 +246,21 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
             )}
           </div>
           <div className="flex items-center justify-between px-3 h-7 border-t border-[var(--border-default)] text-[10px] text-[var(--text-tertiary)] font-mono">
-            <span>{results.length} match{results.length === 1 ? "" : "es"}</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleReindex}
+                disabled={!project || reindexing}
+                title="Rebuild the file index"
+                className={cn(
+                  "flex items-center gap-1 rounded px-1 -ml-1 transition-colors",
+                  "hover:text-[var(--text-secondary)] disabled:opacity-40 disabled:cursor-default cursor-pointer outline-none"
+                )}
+              >
+                <RotateCw size={10} className={cn(reindexing && "animate-spin")} />
+                Reindex
+              </button>
+              <span>{results.length} match{results.length === 1 ? "" : "es"}</span>
+            </div>
             <span>↑↓ navigate · ↵ open · esc close</span>
           </div>
         </Dialog.Content>

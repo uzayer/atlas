@@ -144,6 +144,7 @@ export function UsageBar() {
 
       {expanded && (
         <div
+          data-browser-suppress
           className="absolute bottom-full right-0 mb-2 w-[280px] rounded-lg border border-border-default bg-bg-secondary shadow-lg p-3 space-y-2"
           style={{ zIndex: "var(--z-max)" as unknown as number }}
         >

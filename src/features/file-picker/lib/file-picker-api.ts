@@ -26,3 +26,79 @@ export const fileIndex = {
     invoke<FolderMatch[]>("fileindex_search_dirs", { query, limit }),
   status: () => invoke<FileIndexStatus>("fileindex_status"),
 };
+
+const FAIL_STATUS: FileIndexStatus = { indexed: false, count: 0, root: null };
+
+// One in-flight (re)index shared across all callers (Cmd+P, the @-mention
+// picker, the project-open effect) so a stuck/absent index is only rebuilt
+// once even if several things ask for it at the same moment.
+let reindexInFlight: Promise<FileIndexStatus> | null = null;
+// Once we've confirmed the backend has THIS project indexed, `ensureFileIndex`
+// can short-circuit with no IPC — keeps the per-keystroke mention path free.
+let confirmedRoot: string | null = null;
+
+/** (Re)open the backend index for `projectPath`. This is the single entry
+ *  point for both the initial open and an explicit reindex — `fileindex_open_project`
+ *  replaces whatever was there, re-walking the tree. */
+export function openFileIndex(projectPath: string): Promise<FileIndexStatus> {
+  reindexInFlight = fileIndex
+    .openProject(projectPath)
+    .then(async () => {
+      const s = await fileIndex.status().catch(() => FAIL_STATUS);
+      if (s.indexed) confirmedRoot = s.root;
+      return s;
+    })
+    .catch(() => FAIL_STATUS)
+    .finally(() => {
+      reindexInFlight = null;
+    });
+  return reindexInFlight;
+}
+
+/** Make sure the project is indexed; if the backend has no (or a stale) index,
+ *  trigger a reindex. Cheap when already confirmed (no IPC). Returns the status
+ *  when it had to look, or `null` on the fast path. */
+export async function ensureFileIndex(
+  projectPath: string | null | undefined,
+): Promise<FileIndexStatus | null> {
+  if (projectPath && confirmedRoot === projectPath) return null; // fast path
+  if (reindexInFlight) return reindexInFlight;
+  const status = await fileIndex.status().catch(() => FAIL_STATUS);
+  if (status.indexed && (!projectPath || status.root === projectPath)) {
+    confirmedRoot = status.root;
+    return status;
+  }
+  if (!projectPath) return status;
+  return openFileIndex(projectPath);
+}
+
+/** Reset the confirmation flag when the project closes (or changes). */
+export function markFileIndexClosed(): void {
+  confirmedRoot = null;
+}
+
+// ── Frontend cache of the file list ─────────────────────────────────────────
+// Lets Cmd+P show instant results from the last good walk while a reindex runs,
+// instead of a blank "Indexing files…" screen. Capped + per-project.
+const CACHE_CAP = 1500;
+const cacheKey = (p: string) => `atlas:fileindex-cache:${p}`;
+
+export function cacheFileList(projectPath: string, files: FileMatch[]): void {
+  try {
+    localStorage.setItem(
+      cacheKey(projectPath),
+      JSON.stringify(files.slice(0, CACHE_CAP)),
+    );
+  } catch {
+    /* quota / serialization — cache is best-effort */
+  }
+}
+
+export function getCachedFileList(projectPath: string): FileMatch[] {
+  try {
+    const raw = localStorage.getItem(cacheKey(projectPath));
+    return raw ? (JSON.parse(raw) as FileMatch[]) : [];
+  } catch {
+    return [];
+  }
+}
