@@ -13,6 +13,7 @@ import {
   Heading2,
   List,
   Quote,
+  MessageSquarePlus,
 } from "lucide-react";
 
 interface AtlasBubbleMenuProps {
@@ -182,6 +183,19 @@ export function AtlasBubbleMenu({ editor }: AtlasBubbleMenuProps) {
             icon: Quote,
             isActive: editor.isActive("blockquote"),
             onClick: () => editor.chain().focus().toggleBlockquote().run(),
+          })}
+          <span className="atlas-bubble-sep" />
+          {tool({
+            title: "Send selection to chat",
+            icon: MessageSquarePlus,
+            onClick: () => {
+              const { from, to } = editor.state.selection;
+              const text = editor.state.doc.textBetween(from, to, "\n").trim();
+              if (!text) return;
+              window.dispatchEvent(
+                new CustomEvent("atlas:chat-insert", { detail: { text } }),
+              );
+            },
           })}
         </>
       )}

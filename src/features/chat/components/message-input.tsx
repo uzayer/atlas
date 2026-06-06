@@ -345,6 +345,24 @@ export function MessageInput({
     return () => window.removeEventListener("atlas:chat-prefill", handler);
   }, []);
 
+  // Append text to the composer (e.g. the KB bubble menu's "Send selection to
+  // chat"). Unlike "prefill" this is NON-destructive (keeps any draft) and only
+  // the ACTIVE session reacts, so it doesn't fan out to every mounted chat tab.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ text: string }>).detail;
+      if (!detail?.text) return;
+      if (useChatStore.getState().activeSessionId !== tabId) return;
+      const cur = inputRef.current?.getValue() ?? "";
+      const next = cur.trim() ? `${cur}\n\n${detail.text}` : detail.text;
+      inputRef.current?.setValue(next);
+      setValue(next);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
+    window.addEventListener("atlas:chat-insert", handler);
+    return () => window.removeEventListener("atlas:chat-insert", handler);
+  }, [tabId]);
+
   const submit = useCallback(() => {
     // Hard gate: Claude Code missing or not authed — sending would just
     // surface a confusing ACP spawn error. The banner above tells the user

@@ -148,8 +148,11 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
           <Dialog.Content
             className={cn(
-              "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
-              "flex max-h-[80vh] w-[880px] max-w-[94vw] flex-col overflow-hidden",
+              // Anchor near the top (not vertically centered) with a viewport
+              // cap, so a long plan never pushes the modal — and its Cancel
+              // footer — below the window. The plan panel scrolls internally.
+              "fixed left-1/2 top-[5vh] z-50 -translate-x-1/2",
+              "flex max-h-[90vh] w-[880px] max-w-[94vw] flex-col overflow-hidden",
               "rounded-md border border-border-default bg-bg-elevated",
               "shadow-[var(--shadow-overlay)] animate-scale-in text-text-primary",
             )}
@@ -169,11 +172,11 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
               )}
             </div>
             <div className="flex min-h-0 flex-1">
-              <section className="flex min-h-0 flex-1 flex-col">
+              <section className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <div className="border-b border-border-default bg-bg-base px-5 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
                   Plan
                 </div>
-                <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+                <div className="min-h-0 min-w-0 flex-1 overflow-auto px-5 py-4">
                   <Markdown>{planMarkdown}</Markdown>
                 </div>
               </section>
@@ -181,7 +184,7 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
                 <div className="border-b border-border-default bg-bg-base px-4 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
                   Choose
                 </div>
-                <div className="min-h-0 flex-1 overflow-auto px-4 py-3">{optionList}</div>
+                <div className="min-h-0 min-w-0 flex-1 overflow-auto px-4 py-3">{optionList}</div>
                 <div className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-2.5">
                   <button
                     type="button"
@@ -267,7 +270,7 @@ function PermissionOption({
       type="button"
       onClick={onSelect}
       className={cn(
-        "flex items-center gap-2.5 rounded-md border px-2.5 py-2 text-left text-[12px] transition-colors outline-none",
+        "flex w-full min-w-0 items-center gap-2.5 rounded-md border px-2.5 py-2 text-left text-[12px] transition-colors outline-none",
         tone,
       )}
     >
@@ -280,7 +283,7 @@ function PermissionOption({
         {index}
       </span>
       <Icon className="size-3.5 shrink-0" />
-      <span className="flex-1 font-medium">{option.name}</span>
+      <span className="min-w-0 flex-1 font-medium break-words">{option.name}</span>
       {isPrimary && (
         <Kbd className="border-[var(--bg-base)]/20 bg-[var(--bg-base)]/10 text-[var(--bg-base)]">↵</Kbd>
       )}

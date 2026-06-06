@@ -116,6 +116,16 @@ pub fn run() {
         .manage(SessionsWatchState::new())
         .manage(ClaudeSessionIndex::new())
         .manage(SavedPapersIndex::new())
+        // Drop a window's per-window index + mention caches when it closes, so
+        // its file watcher stops and memory is freed (these states are keyed by
+        // webview label for multi-window project scoping).
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                let label = window.label();
+                window.state::<FileIndexState>().drop_window(label);
+                window.state::<MentionCacheState>().drop_window(label);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::window::window_zoom,
             commands::window::set_window_title,
