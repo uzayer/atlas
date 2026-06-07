@@ -28,6 +28,7 @@ const SettingsPanel = lazy(() => import("@/features/settings/components/settings
 const LogPanel = lazy(() => import("@/features/log/components/log-panel").then(m => ({ default: m.LogPanel })));
 const PomodoroPanel = lazy(() => import("@/features/pomodoro/components/pomodoro-panel").then(m => ({ default: m.PomodoroPanel })));
 const ModelChatPanel = lazy(() => import("@/features/model-chat/components/model-chat-panel").then(m => ({ default: m.ModelChatPanel })));
+const MemoryPanel = lazy(() => import("@/features/memory/components/memory-panel").then(m => ({ default: m.MemoryPanel })));
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { useChatStore } from "@/features/chat/stores/chat-store";
@@ -40,6 +41,7 @@ import {
   Code,
   BookOpen,
   Brain,
+  BrainCircuit,
   Network,
   Terminal,
   GitCompare,
@@ -66,6 +68,7 @@ const tabIcons: Record<TabType, React.ElementType> = {
   research: BookOpen,
   knowledge: Brain,
   "knowledge-graph": Network,
+  memory: BrainCircuit,
   terminal: Terminal,
   diff: GitCompare,
   settings: Settings,
@@ -425,6 +428,8 @@ function TabContent({ tab }: { tab: Tab }) {
       return <KnowledgePanel />;
     case "knowledge-graph":
       return <KnowledgeGraph />;
+    case "memory":
+      return <MemoryPanel />;
     case "research":
       return <ResearchPanel />;
     case "browser":
@@ -473,6 +478,7 @@ const NEW_TAB_OPTIONS: Array<{ type: TabType; label: string; icon: React.Element
   { type: "browser", label: "Browser", icon: Globe },
   { type: "research", label: "Research", icon: BookOpen },
   { type: "knowledge", label: "Knowledge", icon: Brain },
+  { type: "memory", label: "Memory", icon: BrainCircuit },
   { type: "log", label: "Log", icon: ScrollText },
   { type: "pomodoro", label: "Pomodoro", icon: Timer },
 ];

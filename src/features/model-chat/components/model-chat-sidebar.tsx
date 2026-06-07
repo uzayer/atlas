@@ -3,6 +3,7 @@ import { Plus, Search, Trash2, PanelLeftClose, MessageSquare } from "lucide-reac
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/time-ago";
 import { ProviderLogo, hasProviderLogo } from "@/components/provider-logo";
+import { AtlasLoader } from "@/components/atlas-loader";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useModelChatStore } from "../stores/model-chat-store";
 
@@ -10,6 +11,7 @@ export function ModelChatSidebar({ onNew }: { onNew: () => void }) {
   const sidebar = useLayoutStore.use.modelChatSidebar();
   const { toggleModelChatSidebar } = useLayoutStore.use.actions();
   const metas = useModelChatStore.use.metas();
+  const streaming = useModelChatStore.use.streaming();
   const activeId = useModelChatStore.use.activeId();
   const { selectSession, deleteSession } = useModelChatStore.use.actions();
   const [query, setQuery] = useState("");
@@ -67,8 +69,10 @@ export function ModelChatSidebar({ onNew }: { onNew: () => void }) {
                 )}
               >
                 <div className="flex items-start gap-1.5">
-                  <span className="mt-[1px] shrink-0 inline-flex items-center justify-center">
-                    {m.provider && hasProviderLogo(m.provider) ? (
+                  <span className="shrink-0 inline-flex h-[15px] items-center justify-center">
+                    {streaming[m.id] ? (
+                      <AtlasLoader size={8} className="text-[var(--accent-primary)]" />
+                    ) : m.provider && hasProviderLogo(m.provider) ? (
                       <ProviderLogo id={m.provider} size={13} />
                     ) : (
                       <MessageSquare size={11} className="text-text-tertiary" />

@@ -105,20 +105,25 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         const cwd = project?.path ?? "/";
         const key = await agents.newSession(agent.agent_id, cwd);
         if (cancelled) return;
-        useChatStore
-          .getState()
-          .actions.setAcpBinding(tabId, agent.agent_id, key.session_id);
-        // Honor the tab's selected permission mode for this fresh session.
+        // Apply the tab's permission mode BEFORE exposing the binding.
+        // `setAcpBinding` is what flushes any queued send, so if we set the
+        // mode after it the first turn can race ahead of (e.g.)
+        // bypassPermissions and still trigger a stray prompt on turn one.
+        // Awaiting here guarantees the agent is in the right mode first.
         const mode =
           useChatStore.getState().sessions[tabId]?.claudePermissionMode ??
           "default";
         if (mode !== "default") {
-          agents
-            .setMode(key, mode)
-            .catch((err) =>
-              console.warn("setMode at session create failed:", err)
-            );
+          try {
+            await agents.setMode(key, mode);
+          } catch (err) {
+            console.warn("setMode at session create failed:", err);
+          }
+          if (cancelled) return;
         }
+        useChatStore
+          .getState()
+          .actions.setAcpBinding(tabId, agent.agent_id, key.session_id);
       } catch (err) {
         console.warn("Agent session creation failed:", err);
       } finally {
@@ -162,19 +167,9 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       if (!root || !active || !root.contains(active)) return;
       e.preventDefault();
       e.stopPropagation();
+      // The store action both cycles the mode AND propagates it to the bound
+      // agent (so e.g. bypassPermissions actually stops permission prompts).
       useChatStore.getState().actions.cycleClaudePermissionMode(tabId);
-      // Propagate the new mode to the agent session so the agent actually
-      // honours it (e.g. bypassPermissions stops emitting permission requests).
-      const s = useChatStore.getState().sessions[tabId];
-      if (s?.acpAgentId && s.acpSessionId) {
-        const key: SessionKey = {
-          agent_id: s.acpAgentId,
-          session_id: s.acpSessionId,
-        };
-        agents
-          .setMode(key, s.claudePermissionMode ?? "default")
-          .catch((err) => console.warn("setMode failed:", err));
-      }
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
@@ -656,7 +651,7 @@ function WelcomeState() {
             Atlas
           </h2>
           <p className="text-sm text-[var(--text-secondary)] mt-1">
-            Code with Claude. Tools, plans, and edits all live.
+            Code with Agents. Tools, plans, and edits all live.
           </p>
         </div>
         <div className="grid grid-cols-2 gap-2 text-left">

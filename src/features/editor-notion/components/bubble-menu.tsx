@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import type { Editor } from "@tiptap/core";
 import { cn } from "@/lib/utils";
+import { useLayoutStore } from "@/features/layout/stores/layout-store";
+import { useChatStore } from "@/features/chat/stores/chat-store";
 import {
   Bold,
   Italic,
@@ -18,6 +20,38 @@ import {
 
 interface AtlasBubbleMenuProps {
   editor: Editor | null;
+}
+
+/**
+ * Push the current KB selection into the agent chat composer. The old
+ * implementation just fired `atlas:chat-insert` blindly — but that event
+ * is only honoured by the composer whose session is *active*, so while
+ * you're editing a note (agent chat not active, often unmounted) it was a
+ * silent no-op. Instead we: pick the agent chat tab, append the text to
+ * its draft (read as the composer's initial value when it mounts), bring
+ * that tab into view, then fire a tab-targeted live insert for the case
+ * where the composer is already mounted in a split.
+ */
+function sendToAgentChat(text: string) {
+  const layout = useLayoutStore.getState();
+  const chatTabs = layout.tabs.filter((t) => t.type === "chat");
+  if (chatTabs.length === 0) return;
+  const activeSession = useChatStore.getState().activeSessionId;
+  const target = chatTabs.find((t) => t.id === activeSession) ?? chatTabs[0];
+  const tabId = target.id;
+
+  const chat = useChatStore.getState();
+  const cur = chat.drafts[tabId] ?? "";
+  const next = cur.trim() ? `${cur}\n\n${text}` : text;
+  chat.actions.setDraft(tabId, next);
+
+  layout.actions.setActiveTab(tabId);
+
+  requestAnimationFrame(() =>
+    window.dispatchEvent(
+      new CustomEvent("atlas:chat-insert", { detail: { text: next, tabId } }),
+    ),
+  );
 }
 
 /**
@@ -192,9 +226,7 @@ export function AtlasBubbleMenu({ editor }: AtlasBubbleMenuProps) {
               const { from, to } = editor.state.selection;
               const text = editor.state.doc.textBetween(from, to, "\n").trim();
               if (!text) return;
-              window.dispatchEvent(
-                new CustomEvent("atlas:chat-insert", { detail: { text } }),
-              );
+              sendToAgentChat(text);
             },
           })}
         </>

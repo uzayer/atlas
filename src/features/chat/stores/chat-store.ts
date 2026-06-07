@@ -15,6 +15,24 @@ import { splitAtlasContext } from "../lib/atlas-context";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
 
+/**
+ * Push a session's permission mode to its bound ACP agent. The mode chip
+ * and the ⇧⇥ shortcut both mutate `claudePermissionMode` in the store, but
+ * that's only the UI label — without this IPC the agent keeps running in
+ * whatever mode it was started in, so "Bypass Permissions" still prompted.
+ * No-op until the session is bound (the create-time setMode in chat-panel
+ * covers the not-yet-bound case).
+ */
+function pushPermissionModeToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId) return;
+  if (session.agentType !== "claude-code") return;
+  void invoke("agents_set_mode", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    modeId: session.claudePermissionMode ?? "default",
+  }).catch((err) => console.warn("agents_set_mode failed:", err));
+}
+
 /** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
 function toChatToolCall(tc: AgentToolCall): ChatMessage["toolCalls"][number] {
   return {
@@ -434,7 +452,7 @@ export const useChatStore = createSelectors(
             }
             delete s.queues[sessionId];
           }),
-        cycleClaudePermissionMode: (sessionId) =>
+        cycleClaudePermissionMode: (sessionId) => {
           set((s) => {
             const session = s.sessions[sessionId];
             if (!session) return;
@@ -443,12 +461,16 @@ export const useChatStore = createSelectors(
             const next =
               CLAUDE_PERMISSION_MODES[(i + 1) % CLAUDE_PERMISSION_MODES.length];
             session.claudePermissionMode = next;
-          }),
-        setClaudePermissionMode: (sessionId, mode) =>
+          });
+          pushPermissionModeToAgent(get(), sessionId);
+        },
+        setClaudePermissionMode: (sessionId, mode) => {
           set((s) => {
             const session = s.sessions[sessionId];
             if (session) session.claudePermissionMode = mode;
-          }),
+          });
+          pushPermissionModeToAgent(get(), sessionId);
+        },
         replaceMessages: (sessionId, messages) =>
           set((s) => {
             const session = s.sessions[sessionId];

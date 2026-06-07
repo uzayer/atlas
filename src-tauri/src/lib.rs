@@ -324,6 +324,7 @@ pub fn run() {
             commands::pomodoro::pomodoro_save,
             commands::plans::plans_load,
             commands::plans::plans_append,
+            commands::agent_memory::agent_memory_read,
             commands::pdf_annotations::pdf_annotations_load,
             commands::pdf_annotations::pdf_annotations_save,
         ])

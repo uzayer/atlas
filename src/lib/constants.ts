@@ -8,6 +8,7 @@ export const TAB_TYPES = [
   "research",
   "knowledge",
   "knowledge-graph",
+  "memory",
   "terminal",
   "diff",
   "settings",

@@ -386,13 +386,24 @@ export function MessageInput({
   // the ACTIVE session reacts, so it doesn't fan out to every mounted chat tab.
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ text: string }>).detail;
+      const detail = (e as CustomEvent<{ text: string; tabId?: string }>).detail;
       if (!detail?.text) return;
-      if (useChatStore.getState().activeSessionId !== tabId) return;
-      const cur = inputRef.current?.getValue() ?? "";
-      const next = cur.trim() ? `${cur}\n\n${detail.text}` : detail.text;
-      inputRef.current?.setValue(next);
-      setValue(next);
+      if (detail.tabId) {
+        // Tab-targeted insert (KB "send selection to chat"). The sender
+        // already appended to this tab's draft, so `text` is the full
+        // composed value — replace, don't append, to avoid doubling.
+        if (detail.tabId !== tabId) return;
+        inputRef.current?.setValue(detail.text);
+        setValue(detail.text);
+      } else {
+        // Legacy untargeted insert — only the active session reacts and
+        // the text is appended to whatever's already in the composer.
+        if (useChatStore.getState().activeSessionId !== tabId) return;
+        const cur = inputRef.current?.getValue() ?? "";
+        const next = cur.trim() ? `${cur}\n\n${detail.text}` : detail.text;
+        inputRef.current?.setValue(next);
+        setValue(next);
+      }
       requestAnimationFrame(() => inputRef.current?.focus());
     };
     window.addEventListener("atlas:chat-insert", handler);

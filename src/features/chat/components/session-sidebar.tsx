@@ -567,7 +567,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
             >
               <div className="flex items-start gap-2 min-w-0 pr-5">
                 <span
-                  className="mt-[1px] shrink-0 inline-flex items-center justify-center text-[var(--text-secondary)]"
+                  className="shrink-0 inline-flex h-[15px] items-center justify-center text-[var(--text-secondary)]"
                   title={
                     item.kind !== "agent"
                       ? "AI Chat"
@@ -577,7 +577,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
                   }
                 >
                   {isRunning ? (
-                    <AtlasLoader size={11} className="text-[var(--accent-primary)]" />
+                    <AtlasLoader size={8} className="text-[var(--accent-primary)]" />
                   ) : item.kind === "agent" ? (
                     item.agent === "codex" ? (
                       <CodexIcon className="size-3" />

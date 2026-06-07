@@ -176,17 +176,31 @@ fn render_block(m: &MentionSpec) -> Option<String> {
             has_readme,
             ..
         } => {
-            let body = if *has_readme {
-                read_repo_readme_body(abs_path, display_name)
-                    .unwrap_or_else(|| "(README present but unreadable)".to_string())
-            } else {
-                "(no README in this repo)".to_string()
-            };
-            Some(format!(
-                "## {sf}\n\nCloned at `{abs_path}`.\n\n{body}",
+            // Lead with an explicit directive so the agent actually EXPLORES the
+            // codebase (reads the tree + source), not just the README. The
+            // absolute path is given so it can `ls`/read directly.
+            let instruction = format!(
+                "## {sf}\n\nA cloned repository is available locally at the absolute path:\n\
+                 `{abs_path}`\n\n\
+                 **Explore this codebase** using your filesystem tools — list its directory \
+                 tree, open the key source files, and trace how the pieces fit together to \
+                 understand what it does and how it works. Do NOT rely on the README alone; \
+                 read the actual source. Apply this understanding to the rest of this request.",
                 sf = m.short_form(),
-                body = clip_body(&body),
-            ))
+            );
+            let readme = if *has_readme {
+                match read_repo_readme_body(abs_path, display_name) {
+                    Some(b) => format!(
+                        "\n\nIts README is included below as a starting point only — \
+                         keep exploring the source beyond it:\n\n{}",
+                        clip_body(&b)
+                    ),
+                    None => String::new(),
+                }
+            } else {
+                String::new()
+            };
+            Some(format!("{instruction}{readme}"))
         }
         MentionSpec::Knowledge {
             file_path,
