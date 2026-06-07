@@ -70,6 +70,8 @@
   --agent-cursor-chip-bg: rgba(217, 181, 110, 0.10);
   --agent-amp-chip:       #d68aae;
   --agent-amp-chip-bg:    rgba(214, 138, 174, 0.10);
+  --agent-codex-chip:     #10a37f;
+  --agent-codex-chip-bg:  rgba(16, 163, 127, 0.10);
 
   /* === Semantic status === */
   --status-success: #4d4d4d;
@@ -211,12 +213,13 @@
 
 /* Per-agent color helpers — surface --agent / --agent-bg / --agent-chip
    so children read them off CSS custom properties. */
-.agent-claude { --agent: var(--text-primary); --agent-bg: var(--agent-claude-chip-bg); --agent-chip: var(--agent-claude-chip); }
+.agent-claude { --agent: var(--text-primary); --agent-bg: rgba(255, 255, 255, 0.06); --agent-chip: var(--text-primary); }
 .agent-gpt    { --agent: var(--text-primary); --agent-bg: var(--agent-gpt-chip-bg);    --agent-chip: var(--agent-gpt-chip); }
 .agent-gemini { --agent: var(--text-primary); --agent-bg: var(--agent-gemini-chip-bg); --agent-chip: var(--agent-gemini-chip); }
 .agent-local  { --agent: var(--text-primary); --agent-bg: var(--agent-local-chip-bg);  --agent-chip: var(--agent-local-chip); }
 .agent-cursor { --agent: var(--text-primary); --agent-bg: var(--agent-cursor-chip-bg); --agent-chip: var(--agent-cursor-chip); }
 .agent-amp    { --agent: var(--text-primary); --agent-bg: var(--agent-amp-chip-bg);    --agent-chip: var(--agent-amp-chip); }
+.agent-codex  { --agent: var(--text-primary); --agent-bg: rgba(255, 255, 255, 0.06); --agent-chip: var(--text-primary); }
 
 .amark {
   width: 22px; height: 22px;

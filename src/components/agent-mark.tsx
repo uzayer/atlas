@@ -1,0 +1,40 @@
+import { cn } from "@/lib/utils";
+import type { AgentType } from "@/types/agent";
+import { AgentIcons } from "@/components/agent-icons";
+
+/**
+ * Small per-agent identity badge. Reuses the `.amark` + `.agent-*` token
+ * system (tokens.css) and renders the agent's brand icon (agent-icons.tsx) —
+ * this is how parallel Claude / Codex chat sessions are told apart by icon.
+ */
+const AGENT_CLASS: Record<AgentType, string> = {
+  "claude-code": "agent-claude",
+  codex: "agent-codex",
+  custom: "",
+};
+
+function AgentGlyph({ agentType, size }: { agentType: AgentType; size: "sm" | "lg" }) {
+  const cls = size === "lg" ? "size-[18px]" : "size-3.5";
+  if (agentType === "claude-code") return <AgentIcons.Claude className={cls} />;
+  if (agentType === "codex") return <AgentIcons.Codex className={cls} />;
+  return <span className="font-mono">?</span>;
+}
+
+export function AgentMark({
+  agentType,
+  size = "sm",
+  className,
+}: {
+  agentType: AgentType;
+  size?: "sm" | "lg";
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn("amark", size === "lg" && "amark-lg", AGENT_CLASS[agentType], className)}
+      aria-hidden
+    >
+      <AgentGlyph agentType={agentType} size={size} />
+    </span>
+  );
+}

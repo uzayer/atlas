@@ -62,7 +62,10 @@ interface ChatState {
 
 interface ChatActions {
   actions: {
-    createSession: (tabId: string) => void;
+    createSession: (tabId: string, agentType?: "claude-code" | "codex") => void;
+    /** Re-bind a fresh (message-less) chat to a different agent. Clears the ACP
+     *  binding so the chat panel re-creates a session with the new agent. */
+    switchChatAgent: (tabId: string, agentType: "claude-code" | "codex") => void;
     setActiveSession: (id: string | null) => void;
     addMessage: (
       sessionId: string,
@@ -301,23 +304,39 @@ export const useChatStore = createSelectors(
       drafts: {},
       activeSessionId: null,
       actions: {
-        createSession: (tabId) =>
+        createSession: (tabId, agentType = "claude-code") =>
           set((s) => {
             if (s.sessions[tabId]) return;
             s.sessions[tabId] = {
               id: tabId,
               title: "New Chat",
               messages: [],
-              agentType: "claude-code",
+              agentType,
               model: "",
               status: "idle",
               workingDirectory: "",
               tasks: [],
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
-              claudePermissionMode: "default",
+              // Permission mode is a Claude Code feature; Codex drives its
+              // modes generically via ACP (acpCurrentMode).
+              claudePermissionMode: agentType === "claude-code" ? "default" : undefined,
             };
             s.activeSessionId = tabId;
+          }),
+        switchChatAgent: (tabId, agentType) =>
+          set((s) => {
+            const sess = s.sessions[tabId];
+            if (!sess) return;
+            sess.agentType = agentType;
+            sess.claudePermissionMode =
+              agentType === "claude-code" ? "default" : undefined;
+            // Drop the old ACP binding so the chat panel's mount effect re-binds
+            // to the newly chosen agent (its deps watch acpSessionId).
+            sess.acpAgentId = undefined;
+            sess.acpSessionId = undefined;
+            sess.acpCurrentMode = undefined;
+            sess.acpCurrentModel = undefined;
           }),
         setActiveSession: (id) =>
           set((s) => {

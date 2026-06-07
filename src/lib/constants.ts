@@ -1,5 +1,6 @@
 export const TAB_TYPES = [
   "chat",
+  "model-chat",
   "canvas",
   "browser",
   "tasks",
@@ -12,6 +13,7 @@ export const TAB_TYPES = [
   "settings",
   "log",
   "media",
+  "svg",
   "pdf",
   "unsupported",
   "pomodoro",

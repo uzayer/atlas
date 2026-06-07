@@ -79,7 +79,14 @@ export const agents = {
     invoke<AuthMethodWire[]>("agents_list_auth_methods", { agentId }),
   runAuthMethod: (agentId: AgentId, methodId: string) =>
     invoke<void>("agents_run_auth_method", { agentId, methodId }),
+  /** Run an agent's ACP `authenticate` flow (Codex "chatgpt" browser OAuth).
+   *  Resolves once sign-in completes. */
+  authenticate: (agentId: AgentId, methodId: string) =>
+    invoke<void>("agents_authenticate", { agentId, methodId }),
 };
+
+/** Whether Codex has stored credentials (`~/.codex/auth.json`). */
+export const codexStatus = (): Promise<boolean> => invoke<boolean>("codex_status");
 
 export const listenAuthRunDone = (
   handler: (p: AuthRunDone) => void,
@@ -95,43 +102,58 @@ export const listenAgents = (
 ): Promise<UnlistenFn> =>
   listen<AgentDelta>("atlas:agents", (e) => handler(e.payload));
 
-// ── Lazy default-agent singleton ────────────────────────────────────────────
-// One shared agent process for now — hardcoded `claude-code-ts`. App.tsx
-// pre-spawns it at startup so the first prompt doesn't pay npx/node cold-start
-// (10–30s). A multi-plugin picker UI replaces this when ready.
+// ── Lazy per-agent registry ─────────────────────────────────────────────────
+// One shared live process PER pluginId. App.tsx pre-spawns the default so the
+// first prompt doesn't pay npx/node cold-start (10–30s); a chat bound to a
+// different agent (e.g. Codex) spawns that agent the first time it's used.
 
-const DEFAULT_PLUGIN_ID = "claude-code-ts";
-let defaultAgentPromise: Promise<AgentInfo> | null = null;
-let cachedDefaultAgent: AgentInfo | null = null;
+/** The two coding agents Atlas ships. claude is the default for new chats. */
+export const DEFAULT_PLUGIN_ID = "claude-code-ts";
+export const CODEX_PLUGIN_ID = "codex";
 
-export function ensureDefaultAgent(): Promise<AgentInfo> {
-  if (cachedDefaultAgent) return Promise.resolve(cachedDefaultAgent);
-  if (!defaultAgentPromise) {
-    defaultAgentPromise = agents
-      .spawn(DEFAULT_PLUGIN_ID)
+const agentPromises = new Map<string, Promise<AgentInfo>>();
+const cachedAgents = new Map<string, AgentInfo>();
+
+/** Spawn (or reuse) the live agent process for `pluginId`. */
+export function ensureAgent(pluginId: string): Promise<AgentInfo> {
+  const cached = cachedAgents.get(pluginId);
+  if (cached) return Promise.resolve(cached);
+  let p = agentPromises.get(pluginId);
+  if (!p) {
+    p = agents
+      .spawn(pluginId)
       .then((info) => {
-        cachedDefaultAgent = info;
+        cachedAgents.set(pluginId, info);
         return info;
       })
       .catch((e) => {
-        // Reset so the next call can retry rather than caching a permanent failure.
-        defaultAgentPromise = null;
+        // Reset so the next call can retry rather than caching a failure.
+        agentPromises.delete(pluginId);
         throw e;
       });
+    agentPromises.set(pluginId, p);
   }
-  return defaultAgentPromise;
+  return p;
 }
 
-/**
- * Synchronous accessor for the default agent — `null` until the spawn
- * resolves. Used for optimistic UI bindings (e.g. binding a sidebar click to
- * a session id before awaiting the agent).
- */
-export function getDefaultAgentSync(): AgentInfo | null {
-  return cachedDefaultAgent;
+/** Synchronous accessor — `null` until that agent's spawn resolves. Used for
+ *  optimistic UI bindings (bind a session id before awaiting the agent). */
+export function getAgentSync(pluginId: string): AgentInfo | null {
+  return cachedAgents.get(pluginId) ?? null;
 }
 
-export function resetDefaultAgent(): void {
-  defaultAgentPromise = null;
-  cachedDefaultAgent = null;
+/** Drop a cached agent (or all) so the next ensure re-spawns. */
+export function resetAgent(pluginId?: string): void {
+  if (pluginId) {
+    agentPromises.delete(pluginId);
+    cachedAgents.delete(pluginId);
+  } else {
+    agentPromises.clear();
+    cachedAgents.clear();
+  }
 }
+
+// Back-compat thin wrappers (default = Claude) for existing callers.
+export const ensureDefaultAgent = (): Promise<AgentInfo> => ensureAgent(DEFAULT_PLUGIN_ID);
+export const getDefaultAgentSync = (): AgentInfo | null => getAgentSync(DEFAULT_PLUGIN_ID);
+export const resetDefaultAgent = (): void => resetAgent(DEFAULT_PLUGIN_ID);

@@ -10,8 +10,10 @@ import {
   Keyboard,
   Info,
   FlaskConical,
+  KeyRound,
 } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
+import { ProvidersSettings } from "./providers-settings";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -24,6 +26,7 @@ import { isDev } from "@/lib/env";
 const SECTIONS = [
   { id: "general", label: "General", icon: Settings },
   { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "providers", label: "API Keys", icon: KeyRound },
   { id: "keybindings", label: "Keybindings", icon: Keyboard },
   ...(isDev
     ? [{ id: "developer", label: "Developer", icon: FlaskConical }]
@@ -31,8 +34,8 @@ const SECTIONS = [
   { id: "about", label: "About", icon: Info },
 ];
 
-export function SettingsPanel() {
-  const [activeSection, setActiveSection] = useState("general");
+export function SettingsPanel({ initialSection }: { initialSection?: string } = {}) {
+  const [activeSection, setActiveSection] = useState(initialSection ?? "general");
 
   return (
     <div className="h-full flex">
@@ -55,16 +58,24 @@ export function SettingsPanel() {
         ))}
       </div>
 
-      {/* Settings content */}
-      <ScrollArea className="flex-1 p-6">
-        <div className="max-w-[500px]">
-          {activeSection === "general" && <GeneralSettings />}
-          {activeSection === "appearance" && <AppearanceSettings />}
-          {activeSection === "keybindings" && <KeybindingsSettings />}
-          {isDev && activeSection === "developer" && <DeveloperSettings />}
-          {activeSection === "about" && <AboutSettings />}
+      {/* Settings content. The providers ("API Keys") section is full-bleed —
+          it owns its own toolbar + scrolling table and fills the area edge to
+          edge, so it's rendered outside the padded/max-width wrapper. */}
+      {activeSection === "providers" ? (
+        <div className="flex-1 min-w-0 min-h-0">
+          <ProvidersSettings />
         </div>
-      </ScrollArea>
+      ) : (
+        <ScrollArea className="flex-1 p-6">
+          <div className="max-w-[500px]">
+            {activeSection === "general" && <GeneralSettings />}
+            {activeSection === "appearance" && <AppearanceSettings />}
+            {activeSection === "keybindings" && <KeybindingsSettings />}
+            {isDev && activeSection === "developer" && <DeveloperSettings />}
+            {activeSection === "about" && <AboutSettings />}
+          </div>
+        </ScrollArea>
+      )}
     </div>
   );
 }

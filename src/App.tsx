@@ -24,6 +24,7 @@ import { BrowserOverlayWatcher } from "@/features/browser/components/browser-ove
 import { fileIndex, openFileIndex, markFileIndexClosed } from "@/features/file-picker/lib/file-picker-api";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useRecentFilesStore,
   ensureRecentFilesListener,
@@ -198,6 +199,7 @@ export function App() {
     toggleRightPanel,
     toggleBottomPanel,
     toggleChatSidebar,
+    toggleModelChatSidebar,
     toggleTabBar,
     addTab,
     setActiveTab,
@@ -289,23 +291,48 @@ export function App() {
     const toolDeltaPos = new Map<string, number>(); // dedup key → index in pendingDeltas
     let rafId: number | null = null;
 
-    // Window focus is tracked here (not via document.hasFocus()) because
-    // WKWebView returns stale results for that on macOS Tauri builds.
-    // We start optimistic; the first blur corrects us.
-    let windowFocused = document.hasFocus();
-    const onFocus = () => {
-      windowFocused = true;
-    };
-    const onBlur = () => {
-      windowFocused = false;
-    };
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("blur", onBlur);
+    // "Is Atlas actually in front of the user?" — tracked via the NATIVE window
+    // focus, NOT web focus/blur. The web events keep reporting "focused" when
+    // Atlas is fullscreen on its own macOS Space and the user swipes to another
+    // desktop (the webview never blurs), so notifications would wrongly stay
+    // suppressed. The native key-window status flips correctly on a Space
+    // switch / app deactivation, which is the signal we actually want.
+    let windowFocused = true;
+    let unlistenFocus: (() => void) | null = null;
+    const appWindow = getCurrentWindow();
+    void appWindow
+      .isFocused()
+      .then((f) => {
+        windowFocused = f;
+      })
+      .catch(() => {});
+    void appWindow
+      .onFocusChanged(({ payload: focused }) => {
+        windowFocused = focused;
+      })
+      .then((un) => {
+        unlistenFocus = un;
+      })
+      .catch(() => {});
 
-    // Lazy permission prompt — only ask the OS the first time we actually
-    // want to fire a notification. Some platforms (Windows toast, Linux
-    // notify) prompt synchronously; deferring keeps app boot clean.
     let permissionState: "unknown" | "granted" | "denied" = "unknown";
+    // Establish notification permission EAGERLY at startup. The old lazy path
+    // only asked the OS the first time a notification fired while unfocused —
+    // so if every agent turn finished while Atlas was focused, permission was
+    // never granted and the first real (background) notification was lost to
+    // the permission prompt. Priming it here means later notifications just
+    // fire. (Best-effort; macOS still needs the app code-signed to deliver.)
+    void (async () => {
+      try {
+        permissionState = (await isPermissionGranted())
+          ? "granted"
+          : (await requestPermission()) === "granted"
+            ? "granted"
+            : "denied";
+      } catch {
+        /* permission unavailable — notifications silently no-op */
+      }
+    })();
     const notifyAgentDone = async () => {
       if (windowFocused) return;
       try {
@@ -498,8 +525,7 @@ export function App() {
     return () => {
       cancelled = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("blur", onBlur);
+      unlistenFocus?.();
       unlisten?.();
     };
   }, []);
@@ -673,6 +699,11 @@ export function App() {
       action: toggleChatSidebar,
     },
     {
+      // ⌘⌥K — toggle the Model-Chat history sidebar (mirror of ⌘⌥J).
+      combo: { key: "k", meta: true, alt: true },
+      action: toggleModelChatSidebar,
+    },
+    {
       // ⌥J — open the Knowledge Base, or jump to it if already open. Placed
       // after ⌘⌥J (chat sidebar) so the matcher resolves that combo first;
       // plain ⌥J (no ⌘) only matches here.
@@ -750,6 +781,28 @@ export function App() {
       combo: { key: "z", alt: true },
       action: () => {
         if (currentProject) toggleZenMode();
+      },
+    },
+    {
+      // ⌥/ — switch coding agent (Claude Code ⇄ Codex). A session is paired to
+      // one agent: an empty chat flips in place; a started chat opens a NEW
+      // chat bound to the other agent (per the agent-pairing rule).
+      combo: { key: "/", alt: true },
+      action: () => {
+        const layout = useLayoutStore.getState();
+        const tab = layout.tabs.find((t) => t.id === layout.activeTabId);
+        if (!tab || tab.type !== "chat") return;
+        const chat = useChatStore.getState();
+        const sess = chat.sessions[tab.id];
+        const cur = sess?.agentType === "codex" ? "codex" : "claude-code";
+        const next: "claude-code" | "codex" = cur === "codex" ? "claude-code" : "codex";
+        if ((sess?.messages.length ?? 0) === 0) {
+          chat.actions.switchChatAgent(tab.id, next);
+        } else {
+          const id = `chat-${Date.now()}`;
+          chat.actions.createSession(id, next);
+          addTab({ id, type: "chat", title: "New Chat", closable: true, dirty: false, data: {} });
+        }
       },
     },
     {

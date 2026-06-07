@@ -38,6 +38,10 @@ interface FlatRow {
   ghost?: { parentDir: string; isDir: boolean; depth: number };
 }
 
+/** Tab types whose `data.filePath` points at a file on disk — these must be
+ *  re-pointed/closed when that file is renamed or deleted. */
+const FILE_TAB_TYPES = new Set(["editor", "media", "svg", "pdf", "unsupported"]);
+
 /** Map a git porcelain status char to a gutter-dot color, matching the
  *  Source Control panel's convention (`changes-view.tsx:statusBadge`). */
 function gitStatusColor(status: string): string {
@@ -266,12 +270,17 @@ export function FileTree() {
       // Re-point recent-files entries so the mention picker shows the new name
       // (the file-index search already self-updates via the fs watcher).
       void invoke("recent_files_rename", { oldPath, newPath }).catch(() => {});
-      // If the renamed file is open, swap the tab to the new path.
-      const openTab = tabs.find(
-        (t) => t.type === "editor" && (t.data as { filePath?: string }).filePath === oldPath,
+      // If the renamed file is open in ANY file-backed viewer (editor, media,
+      // svg, pdf, unsupported), swap those tabs to the new path — otherwise the
+      // viewer keeps loading the old (now-missing) path and 404s. Re-opening
+      // also re-classifies, so a changed extension routes to the right viewer.
+      const stale = tabs.filter(
+        (t) =>
+          FILE_TAB_TYPES.has(t.type) &&
+          (t.data as { filePath?: string }).filePath === oldPath,
       );
-      if (openTab) {
-        closeTab(openTab.id);
+      if (stale.length) {
+        for (const t of stale) closeTab(t.id);
         handleOpenFile(newPath, name);
       }
     } catch (e) {
@@ -286,11 +295,14 @@ export function FileTree() {
       for (const entry of entries) {
         await invoke("fs_delete", { path: entry.path });
         await reconcileDirectory(dirOfPath(entry.path));
-        // Close any open editor tab pointing at this file.
-        const openTab = tabs.find(
-          (t) => t.type === "editor" && (t.data as { filePath?: string }).filePath === entry.path,
-        );
-        if (openTab) closeTab(openTab.id);
+        // Close any open file-backed tab pointing at this file.
+        for (const t of tabs.filter(
+          (t) =>
+            FILE_TAB_TYPES.has(t.type) &&
+            (t.data as { filePath?: string }).filePath === entry.path,
+        )) {
+          closeTab(t.id);
+        }
       }
     } catch (e) {
       toast.error(String(e));

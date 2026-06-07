@@ -105,6 +105,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(commands::browser::BrowserState::new())
         .manage(TerminalState::new())
+        .manage(commands::modelchat::ModelChatState::new())
         .manage(AgentRegistry::new())
         .manage(FileIndexState::new())
         .manage(GitWatcherState::new())
@@ -297,6 +298,19 @@ pub fn run() {
             commands::agents::agents_respond_permission,
             commands::agents::agents_list_auth_methods,
             commands::agents::agents_run_auth_method,
+            commands::agents::agents_authenticate,
+            commands::agents::codex_status,
+            commands::byok::byok_list,
+            commands::byok::byok_set,
+            commands::byok::byok_delete,
+            commands::byok::byok_get,
+            commands::modelchat::modelchat_models,
+            commands::modelchat::modelchat_stream,
+            commands::modelchat::modelchat_cancel,
+            commands::modelchat_sessions::modelchat_sessions_list,
+            commands::modelchat_sessions::modelchat_session_get,
+            commands::modelchat_sessions::modelchat_session_save,
+            commands::modelchat_sessions::modelchat_session_delete,
             commands::fileindex::fileindex_open_project,
             commands::fileindex::fileindex_close_project,
             commands::fileindex::fileindex_search,

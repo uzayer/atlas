@@ -31,6 +31,19 @@ const COST_TABLE: Record<string, [number, number]> = {
   "o3": [10, 40],
   "gemini-2.5-pro-preview-06-05": [1.25, 10],
   "gemini-2.5-flash-preview-05-20": [0.15, 0.6],
+  // BYOK model-chat — common direct-API models.
+  "gpt-4.1": [2, 8],
+  "gpt-4.1-mini": [0.4, 1.6],
+  "o4-mini": [1.1, 4.4],
+  "claude-opus-4-1": [15, 75],
+  "claude-sonnet-4-5": [3, 15],
+  "claude-3-5-haiku-latest": [0.8, 4],
+  "deepseek-chat": [0.27, 1.1],
+  "deepseek-reasoner": [0.55, 2.19],
+  "grok-4": [3, 15],
+  "llama-3.3-70b-versatile": [0.59, 0.79],
+  "sonar": [1, 1],
+  "sonar-pro": [3, 15],
 };
 
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number {

@@ -271,7 +271,7 @@ export function FilePicker({ open, onOpenChange }: FilePickerProps) {
 
 function KindIcon({ kind }: { kind: FileKind }) {
   const cls = "size-3 shrink-0 text-[var(--text-tertiary)]";
-  if (kind === "image") return <ImageIcon className={cls} />;
+  if (kind === "image" || kind === "svg") return <ImageIcon className={cls} />;
   if (kind === "video") return <Film className={cls} />;
   if (kind === "audio") return <Music className={cls} />;
   if (kind === "text") return <FileCode className={cls} />;

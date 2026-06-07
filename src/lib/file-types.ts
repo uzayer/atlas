@@ -8,7 +8,7 @@
  * binary bytes into CodeMirror.
  */
 
-export type FileKind = "text" | "image" | "video" | "audio" | "pdf" | "unsupported";
+export type FileKind = "text" | "image" | "svg" | "video" | "audio" | "pdf" | "unsupported";
 
 // Extensions the CodeMirror editor handles (or can usefully attempt — even
 // without a language extension, plaintext display is fine).
@@ -21,7 +21,7 @@ const TEXT_EXTS = new Set([
   "php", "lua", "r", "jl", "dart", "zig", "nim",
   // Web
   "html", "htm", "css", "scss", "sass", "less",
-  "svg", "vue", "svelte", "astro",
+  "vue", "svelte", "astro",
   // Data / config
   "json", "jsonc", "yaml", "yml", "toml", "ini", "env",
   "xml", "csv", "tsv",
@@ -50,6 +50,10 @@ const AUDIO_EXTS = new Set([
 
 const PDF_EXTS = new Set(["pdf"]);
 
+// SVG is both renderable (it's an image) AND text (copyable source), so it gets
+// its own viewer instead of the code editor or the raster image viewer.
+const SVG_EXTS = new Set(["svg"]);
+
 const EXTENSIONLESS_TEXT_NAMES = new Set([
   "readme", "license", "licence", "notice", "authors", "contributors",
   "changelog", "copying", "install", "todo", "makefile", "dockerfile",
@@ -63,6 +67,7 @@ export function classifyFile(path: string): FileKind {
   const base = (dot >= 0 ? last.slice(0, dot) : last).toLowerCase();
 
   if (ext) {
+    if (SVG_EXTS.has(ext)) return "svg";
     if (TEXT_EXTS.has(ext)) return "text";
     if (IMAGE_EXTS.has(ext)) return "image";
     if (VIDEO_EXTS.has(ext)) return "video";

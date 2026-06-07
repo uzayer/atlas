@@ -16,6 +16,7 @@ import {
   type LucideProps,
 } from "lucide-react";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
+import { AtlasIcon } from "@/components/atlas-icon";
 import { cn } from "@/lib/utils";
 import { KbdCombo } from "@/ui/kbd";
 import type { TabType } from "@/lib/constants";
@@ -35,7 +36,8 @@ interface ModuleEntry {
  * palettes read as one consistent system.
  */
 const MODULES: ModuleEntry[] = [
-  { id: "chat", type: "chat", label: "New Chat", icon: MessageSquare, shortcut: "⌘T" },
+  { id: "chat", type: "chat", label: "New Agents Chat", icon: AtlasIcon as ElementType<LucideProps>, shortcut: "⌘T" },
+  { id: "model-chat", type: "model-chat", label: "New Chat", icon: MessageSquare },
   { id: "terminal", type: "terminal", label: "New Terminal", icon: Terminal, shortcut: "⌘⇧T" },
   { id: "knowledge", type: "knowledge", label: "Knowledge", icon: Brain },
   { id: "knowledge-graph", type: "knowledge-graph", label: "Knowledge Graph", icon: Network },
@@ -93,7 +95,25 @@ export function NewTabPalette({
 
   const commit = (item: ModuleEntry) => {
     const ts = Date.now();
-    if (item.type === "editor") {
+    if (item.type === "chat") {
+      addTab({
+        id: `chat-${ts}`,
+        type: "chat",
+        title: "Agents",
+        closable: true,
+        dirty: false,
+        data: {},
+      });
+    } else if (item.type === "model-chat") {
+      addTab({
+        id: `model-chat-${ts}`,
+        type: "model-chat",
+        title: "Chat",
+        closable: true,
+        dirty: false,
+        data: {},
+      });
+    } else if (item.type === "editor") {
       addTab({
         id: `editor-untitled-${ts}`,
         type: "editor",

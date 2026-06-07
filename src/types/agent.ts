@@ -1,4 +1,25 @@
-export type AgentType = "claude-code" | "custom";
+export type AgentType = "claude-code" | "codex" | "custom";
+
+/** Map a high-level agent type to the spawnable ACP plugin id (registry.rs). */
+export const AGENT_PLUGIN_ID: Record<"claude-code" | "codex", string> = {
+  "claude-code": "claude-code-ts",
+  codex: "codex",
+};
+
+/** The two coding agents Atlas ships, in switch order (for option+/). */
+export const SWITCHABLE_AGENTS: ("claude-code" | "codex")[] = ["claude-code", "codex"];
+
+export const AGENT_LABEL: Record<"claude-code" | "codex", string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+};
+
+/** Derive the display agent type from a spawnable plugin id. */
+export function agentTypeFromPluginId(pluginId: string): AgentType {
+  if (pluginId === "codex") return "codex";
+  if (pluginId.startsWith("claude")) return "claude-code";
+  return "custom";
+}
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 export type ClaudePermissionMode =
@@ -32,7 +53,9 @@ export interface ChatSession {
   tasks: AgentTask[];
   createdAt: string;
   updatedAt: string;
-  claudePermissionMode: ClaudePermissionMode;
+  /** Claude-only permission mode. Absent for non-Claude agents (e.g. Codex),
+   *  which drive their modes via the generic ACP `acpCurrentMode`/snapshot. */
+  claudePermissionMode?: ClaudePermissionMode;
   /** ACP agent process bound to this tab (set eagerly when the tab mounts). */
   acpAgentId?: string;
   /**

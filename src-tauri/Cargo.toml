@@ -88,6 +88,7 @@ mimalloc = { version = "0.1", default-features = false }
 # notes to HTML (single-note export, workspace export, and the standalone
 # server crate template).
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+rig-core = "0.38.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Native NSWindow access for the titlebar double-click "zoom" (AppKit

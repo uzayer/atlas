@@ -19,6 +19,7 @@ function matchKey(e: KeyboardEvent, key: string) {
   if (k === ";" && e.code === "Semicolon") return true;
   if (k === "'" && e.code === "Quote") return true;
   if (k === "\\" && e.code === "Backslash") return true;
+  if (k === "/" && e.code === "Slash") return true;
   return false;
 }
 

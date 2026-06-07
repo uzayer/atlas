@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { KbdCombo } from "@/ui/kbd";
+import { AtlasIcon } from "@/components/atlas-icon";
 import {
   MessageSquare,
   Map,
@@ -64,16 +65,31 @@ export function CommandPalette({
         action: handleOpenFolder,
       },
       {
-        id: "new-chat",
-        label: "New Chat",
+        id: "new-agents-chat",
+        label: "New Agents Chat",
         shortcut: "⌘T",
-        icon: MessageSquare,
+        icon: AtlasIcon,
         category: "Tabs",
         action: () =>
           addTab({
             id: `chat-${Date.now()}`,
             type: "chat",
-            title: "New Chat",
+            title: "Agents",
+            closable: true,
+            dirty: false,
+            data: {},
+          }),
+      },
+      {
+        id: "new-model-chat",
+        label: "New Chat",
+        icon: MessageSquare,
+        category: "Tabs",
+        action: () =>
+          addTab({
+            id: `model-chat-${Date.now()}`,
+            type: "model-chat",
+            title: "Chat",
             closable: true,
             dirty: false,
             data: {},

@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
-import { agents, ensureDefaultAgent } from "../lib/agents-api";
+import { agents, ensureAgent, CODEX_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
 import type { SessionKey } from "@/types/agents";
 import { composePrompt, type MentionData } from "../lib/mentions";
+import { usePaneFind } from "../lib/use-pane-find";
 import { MessageInput } from "./message-input";
 import { SessionSidebar } from "./session-sidebar";
 import { PermissionModal } from "./permission-modal";
@@ -30,7 +31,7 @@ const MessagesList = lazy(() =>
   import("./messages-list").then((m) => ({ default: m.MessagesList }))
 );
 import type { MessagesListHandle } from "./messages-list";
-import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight } from "lucide-react";
+import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight, LogIn } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
@@ -57,7 +58,8 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   const [roleFilter, setRoleFilter] = useState<"all" | "user" | "assistant">("all");
   const [bashPanelOpen, setBashPanelOpen] = useState(false);
   const [plansPanelOpen, setPlansPanelOpen] = useState(false);
-  const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
+  // Cmd+F find — scoped to this pane + tab (see usePaneFind).
+  const [searchPaletteOpen, setSearchPaletteOpen] = usePaneFind(tabId);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Scroll-to-bottom state is owned here so the floating button can live
@@ -92,7 +94,12 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       if (cancelled || pending) return;
       pending = true;
       try {
-        const agent = await ensureDefaultAgent();
+        // Bind to THIS session's chosen agent (Claude by default, or Codex),
+        // not a single global default — so per-tab agents run in parallel.
+        const at = useChatStore.getState().sessions[tabId]?.agentType;
+        const pluginId =
+          at === "codex" ? CODEX_PLUGIN_ID : DEFAULT_PLUGIN_ID;
+        const agent = await ensureAgent(pluginId);
         if (cancelled) return;
         const project = useProjectStore.getState().currentProject;
         const cwd = project?.path ?? "/";
@@ -143,18 +150,6 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     // the queue forever — the exact "messages get queued on a
     // brand-new project" symptom.
   }, [tabId, !!session, session?.acpSessionId]);
-
-  // Cmd+F → open the message-jump palette (ChatPanel only mounts when its tab is active).
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f" && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        setSearchPaletteOpen(true);
-      }
-    };
-    window.addEventListener("keydown", handler, true); // capture phase to beat browser default
-    return () => window.removeEventListener("keydown", handler, true);
-  }, []);
 
   // Shift+Tab → cycle the agent permission mode. Registered on the window in
   // capture phase so the browser's default focus traversal never steals it.
@@ -533,20 +528,57 @@ function ChatComposer({
   jumpCount: number;
   onScrollToBottom: () => void;
 }) {
+  // The Claude install/auth gating only applies to Claude sessions. A Codex
+  // chat must not be blocked by Claude's status (Codex inherits its own
+  // ~/.codex / OPENAI auth); it surfaces its own errors from the spawn path.
+  const isClaude =
+    useChatStore((s) => s.sessions[tabId]?.agentType ?? "claude-code") === "claude-code";
   const phase = useClaudeSetupStore.use.phase();
-  const disabled = phase !== "ready";
-  const disabledReason =
-    phase === "not-installed"
-      ? "Install Claude Code to start chatting"
-      : phase === "not-authed"
-        ? "Sign in to Claude Code to start chatting"
-        : phase === "installing"
-          ? "Installing Claude Code…"
-          : phase === "authing"
-            ? "Finishing sign-in…"
-            : undefined;
 
-  const setupVisible = phase !== "ready";
+  // Codex sign-in state (only for Codex sessions). `null` = still probing.
+  const [codexAuthed, setCodexAuthed] = useState<boolean | null>(null);
+  const [codexSigningIn, setCodexSigningIn] = useState(false);
+  useEffect(() => {
+    if (isClaude) return;
+    let cancelled = false;
+    codexStatus()
+      .then((a) => !cancelled && setCodexAuthed(a))
+      .catch(() => !cancelled && setCodexAuthed(true)); // probe failure → don't block
+    return () => {
+      cancelled = true;
+    };
+  }, [isClaude]);
+  const codexNeedsAuth = !isClaude && codexAuthed === false;
+  const signInCodex = async () => {
+    setCodexSigningIn(true);
+    try {
+      const agent = await ensureAgent(CODEX_PLUGIN_ID);
+      // Blocks while codex-acp runs the OpenAI browser OAuth.
+      await agents.authenticate(agent.agent_id, "chatgpt");
+      setCodexAuthed(await codexStatus());
+    } catch (err) {
+      logEvent({ source: "atlas", kind: "codex-auth", summary: "Codex sign-in failed", status: "failure", payload: { error: String(err) } });
+    } finally {
+      setCodexSigningIn(false);
+    }
+  };
+
+  const disabled = (isClaude && phase !== "ready") || codexNeedsAuth;
+  const disabledReason = codexNeedsAuth
+    ? "Sign in to Codex to start chatting"
+    : !isClaude
+      ? undefined
+      : phase === "not-installed"
+        ? "Install Claude Code to start chatting"
+        : phase === "not-authed"
+          ? "Sign in to Claude Code to start chatting"
+          : phase === "installing"
+            ? "Installing Claude Code…"
+            : phase === "authing"
+              ? "Finishing sign-in…"
+              : undefined;
+
+  const setupVisible = (isClaude && phase !== "ready") || codexNeedsAuth;
   const showRow = setupVisible || showJumpToBottom;
 
   return (
@@ -559,10 +591,21 @@ function ChatComposer({
         {showRow && (
           <div className="pointer-events-none absolute bottom-full inset-x-0 mb-2 z-20 flex justify-center">
             <div className="pointer-events-auto flex items-center gap-2">
-              {setupVisible && (
+              {setupVisible && isClaude && (
                 <span key={`setup-${phase}`} className="atlas-pill-in">
                   <ClaudeSetupBanner />
                 </span>
+              )}
+              {codexNeedsAuth && (
+                <button
+                  key="codex-signin"
+                  onClick={signInCodex}
+                  disabled={codexSigningIn}
+                  className="atlas-pill-in inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[11px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {codexSigningIn ? <Loader2 size={11} className="animate-spin" /> : <LogIn size={11} />}
+                  {codexSigningIn ? "Opening OpenAI sign-in…" : "Sign in to Codex with ChatGPT"}
+                </button>
               )}
               {showJumpToBottom && (
                 <button
@@ -598,7 +641,7 @@ function ChatComposer({
           disabledReason={disabledReason}
         />
       </div>
-      <ClaudeLoginDialog />
+      {isClaude && <ClaudeLoginDialog />}
     </>
   );
 }
