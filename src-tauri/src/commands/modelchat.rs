@@ -22,9 +22,10 @@ use tauri::{AppHandle, Emitter, State};
 
 use rig_core::agent::{MultiTurnStreamItem, StreamingResult};
 use rig_core::client::completion::CompletionClient;
-use rig_core::message::Message as RigMessage;
+use rig_core::message::{ImageMediaType, Message as RigMessage, UserContent};
 use rig_core::providers::{anthropic, gemini, openai};
 use rig_core::streaming::{StreamedAssistantContent, StreamingChat};
+use rig_core::OneOrMany;
 
 use super::byok;
 
@@ -103,15 +104,52 @@ fn emit(app: &AppHandle, stream_id: &str, event: ModelChatEvent) {
 // ── Messages ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
+pub struct ImageData {
+    pub mime: String,
+    /// Base64-encoded image bytes (no data-URL prefix).
+    pub data: String,
+}
+
+#[derive(Deserialize)]
 pub struct ChatMsg {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub images: Vec<ImageData>,
+}
+
+fn image_media_type(mime: &str) -> Option<ImageMediaType> {
+    Some(match mime {
+        "image/jpeg" | "image/jpg" => ImageMediaType::JPEG,
+        "image/png" => ImageMediaType::PNG,
+        "image/gif" => ImageMediaType::GIF,
+        "image/webp" => ImageMediaType::WEBP,
+        _ => return None,
+    })
 }
 
 fn to_rig(m: &ChatMsg) -> Option<RigMessage> {
     match m.role.as_str() {
         "assistant" => Some(RigMessage::assistant(m.content.clone())),
-        "user" => Some(RigMessage::user(m.content.clone())),
+        "user" => {
+            if m.images.is_empty() {
+                return Some(RigMessage::user(m.content.clone()));
+            }
+            // Multimodal turn: text (if any) + one block per image.
+            let mut parts: Vec<UserContent> = Vec::new();
+            if !m.content.is_empty() {
+                parts.push(UserContent::text(m.content.clone()));
+            }
+            for img in &m.images {
+                parts.push(UserContent::image_base64(
+                    img.data.clone(),
+                    image_media_type(&img.mime),
+                    None,
+                ));
+            }
+            let content = OneOrMany::many(parts).ok()?;
+            Some(RigMessage::User { content })
+        }
         _ => None,
     }
 }

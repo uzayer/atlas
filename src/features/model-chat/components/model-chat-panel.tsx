@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import * as Popover from "@radix-ui/react-popover";
 import {
   ChevronDown,
   ArrowUp,
@@ -11,8 +12,17 @@ import {
   Link2,
   PanelLeftOpen,
   Search,
+  Paperclip,
+  X,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import {
+  modelSupportsVision,
+  imageMimeFromPath,
+} from "../lib/model-capabilities";
+import type { ComposerAttachment } from "../stores/model-chat-store";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { MessageItem } from "@/features/chat/components/message-item";
 import { ChatSearchPalette } from "@/features/chat/components/chat-search-palette";
@@ -216,6 +226,7 @@ function Conversation({
           <div className="mx-auto w-full max-w-[760px] px-4">
             {messages.map((m, i) => (
               <div key={m.id} data-mc-index={i}>
+                <MessageAttachments messageId={m.id} />
                 <MessageItem
                   message={m}
                   model={m.role === "assistant" ? session.model : null}
@@ -234,7 +245,7 @@ function Conversation({
         sessionId={sessionId}
         configuredIds={configuredIds}
         running={isStreaming}
-        onSend={(text) => void send(sessionId, text)}
+        onSend={(text, atts) => void send(sessionId, text, atts)}
         onStop={() => stop(sessionId)}
       />
 
@@ -269,7 +280,7 @@ function Composer({
   sessionId: string;
   configuredIds: string[];
   running: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments?: ComposerAttachment[]) => void;
   onStop: () => void;
 }) {
   const session = useModelChatStore((s) => s.sessions[sessionId]);
@@ -278,10 +289,38 @@ function Composer({
   const provider = session?.provider ?? "";
   const model = session?.model ?? "";
   const providerLocked = (session?.messages.length ?? 0) > 0;
+  const canAttach = modelSupportsVision(provider, model);
 
   const [models, setModels] = useState<string[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [hasText, setHasText] = useState(false);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+
+  // Drop attachments if the user switches to a non-vision model.
+  useEffect(() => {
+    if (!canAttach && attachments.length) setAttachments([]);
+  }, [canAttach, attachments.length]);
+
+  const pickImages = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const sel = await open({
+        multiple: true,
+        filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+      });
+      const paths = Array.isArray(sel) ? sel : sel ? [sel] : [];
+      const next: ComposerAttachment[] = [];
+      for (const path of paths) {
+        const mime = imageMimeFromPath(path);
+        if (!mime) continue;
+        const data = await invoke<string>("read_file_base64", { path });
+        next.push({ mime, data, dataUrl: `data:${mime};base64,${data}` });
+      }
+      if (next.length) setAttachments((a) => [...a, ...next]);
+    } catch (e) {
+      toast.error(`Couldn't attach image: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   const inputRef = useRef<ChatInputHandle>(null);
   // Mention/reference picker (reused from the agent chat; @ = all, ~ = notes).
@@ -353,10 +392,11 @@ function Composer({
       return;
     }
     const text = inputRef.current?.getValue()?.trim() ?? "";
-    if (!text || !model) return;
-    onSend(text);
+    if ((!text && attachments.length === 0) || !model) return;
+    onSend(text, attachments.length ? attachments : undefined);
     inputRef.current?.clear();
     setHasText(false);
+    setAttachments([]);
   };
 
   return (
@@ -377,9 +417,41 @@ function Composer({
           keyInterceptor={keyInterceptor}
         />
 
-        {/* Control row: provider + model pickers · send/stop */}
+        {/* Attached image thumbnails */}
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-3 pb-1">
+            {attachments.map((a, i) => (
+              <div
+                key={i}
+                className="group relative h-12 w-12 overflow-hidden rounded-md border border-border-default"
+              >
+                <img src={a.dataUrl} alt="" className="h-full w-full object-cover" />
+                <button
+                  type="button"
+                  onClick={() => setAttachments((arr) => arr.filter((_, j) => j !== i))}
+                  className="absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                  title="Remove"
+                >
+                  <X size={9} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Control row: attach · provider + model pickers · send/stop */}
         <div className="flex items-center justify-between px-2 pb-2 pt-1">
           <div className="flex min-w-0 items-center gap-1">
+            {canAttach && (
+              <button
+                type="button"
+                onClick={() => void pickImages()}
+                className="grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full border border-border-default bg-bg-elevated text-text-tertiary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
+                title="Attach image"
+              >
+                <Paperclip size={12} />
+              </button>
+            )}
             {providerLocked ? (
               <span
                 className="flex items-center gap-1.5 h-[26px] rounded-full border border-border-default bg-bg-elevated px-2 text-[10px] font-medium text-text-secondary"
@@ -417,48 +489,25 @@ function Composer({
               </PickerDropdown>
             )}
 
-            <PickerDropdown
-              wide
-              trigger={
-                <>
-                  {loadingModels && (
-                    <Loader2 size={11} className="animate-spin text-text-tertiary" />
-                  )}
-                  <span className="max-w-[200px] truncate font-mono">
-                    {model || (loadingModels ? "Loading…" : "Select model")}
-                  </span>
-                  <ChevronDown size={11} className="text-text-tertiary" />
-                </>
-              }
-            >
-              {models.length === 0 ? (
-                <div className="px-2.5 py-2 text-[11px] text-text-tertiary">
-                  {loadingModels ? "Loading models…" : "No models"}
-                </div>
-              ) : (
-                models.map((id) => (
-                  <DropdownMenu.Item
-                    key={id}
-                    onSelect={() => setModel(sessionId, id)}
-                    className="flex items-center gap-2 px-2.5 h-[26px] text-[11px] font-mono text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer outline-none"
-                  >
-                    <span className="flex-1 truncate">{id}</span>
-                    {id === model && <Check size={11} className="text-text-primary" />}
-                  </DropdownMenu.Item>
-                ))
-              )}
-            </PickerDropdown>
+            <ModelCombo
+              models={models}
+              value={model}
+              loading={loadingModels}
+              onSelect={(id) => setModel(sessionId, id)}
+            />
           </div>
 
           <button
             type="button"
             onClick={submit}
-            disabled={!running && (!hasText || !model)}
+            disabled={
+              !running && ((!hasText && attachments.length === 0) || !model)
+            }
             className={cn(
               "flex items-center justify-center w-7 h-7 shrink-0 rounded-full transition-colors",
               running
                 ? "bg-bg-elevated text-text-secondary hover:text-text-primary cursor-pointer"
-                : !hasText || !model
+                : (!hasText && attachments.length === 0) || !model
                   ? "bg-bg-elevated text-text-tertiary cursor-not-allowed"
                   : "bg-[var(--text-primary)] text-[var(--bg-primary)] hover:bg-[var(--text-secondary)] cursor-pointer",
             )}
@@ -518,6 +567,105 @@ function PickerDropdown({
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+  );
+}
+
+/** Searchable model picker — a combobox with a filter input on top. */
+function ModelCombo({
+  models,
+  value,
+  loading,
+  onSelect,
+}: {
+  models: string[];
+  value: string;
+  loading: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    return s ? models.filter((m) => m.toLowerCase().includes(s)) : models;
+  }, [models, q]);
+
+  return (
+    <Popover.Root
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o);
+        if (!o) setQ("");
+      }}
+    >
+      <Popover.Trigger asChild>
+        <button className="flex min-w-0 items-center gap-1.5 h-[26px] rounded-full border border-border-default bg-bg-elevated px-2 text-[10px] font-medium text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors outline-none cursor-pointer">
+          {loading && <Loader2 size={11} className="animate-spin text-text-tertiary" />}
+          <span className="max-w-[200px] truncate font-mono">
+            {value || (loading ? "Loading…" : "Select model")}
+          </span>
+          <ChevronDown size={11} className="text-text-tertiary" />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="start"
+          side="top"
+          sideOffset={6}
+          className="z-[9999] w-[260px] overflow-hidden rounded-md border border-border-default bg-bg-elevated shadow-[var(--shadow-overlay)]"
+        >
+          <div className="flex items-center gap-1.5 h-8 border-b border-border-subtle px-2.5">
+            <Search size={12} className="shrink-0 text-text-tertiary" />
+            <input
+              autoFocus
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search models…"
+              spellCheck={false}
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-text-primary outline-none placeholder:text-text-tertiary"
+            />
+          </div>
+          <div className="max-h-[300px] overflow-y-auto hide-scrollbar py-1">
+            {filtered.length === 0 ? (
+              <div className="px-2.5 py-2 text-[11px] text-text-tertiary">
+                {loading ? "Loading…" : "No models"}
+              </div>
+            ) : (
+              filtered.map((id) => (
+                <button
+                  key={id}
+                  onClick={() => {
+                    onSelect(id);
+                    setOpen(false);
+                  }}
+                  className="flex w-full items-center gap-2 px-2.5 h-[26px] text-left text-[11px] font-mono text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer outline-none"
+                >
+                  <span className="flex-1 truncate">{id}</span>
+                  {id === value && <Check size={11} className="text-text-primary" />}
+                </button>
+              ))
+            )}
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
+/** Thumbnails for images attached to a user message (transient, in-memory). */
+function MessageAttachments({ messageId }: { messageId: string }) {
+  const urls = useModelChatStore((s) => s.attachmentsByMsg[messageId]);
+  if (!urls?.length) return null;
+  return (
+    <div className="flex flex-wrap gap-2 px-2 pt-4">
+      {urls.map((u, i) => (
+        <img
+          key={i}
+          src={u}
+          alt=""
+          className="max-h-44 rounded-lg border border-border-default object-contain"
+        />
+      ))}
+    </div>
   );
 }
 

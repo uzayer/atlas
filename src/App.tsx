@@ -37,6 +37,8 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { logEvent } from "@/features/log/lib/log";
+import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
+import { NotificationPanel } from "@/features/notifications/components/notification-panel";
 import { Toaster } from "sonner";
 
 export function App() {
@@ -418,6 +420,16 @@ export function App() {
       pendingDeltas.push(env);
     };
 
+    // Resolve the chat tab + title for an ACP session, for in-app notifications.
+    const agentSessionInfo = (acpSessionId: string) => {
+      const sessions = useChatStore.getState().sessions;
+      for (const [tabId, s] of Object.entries(sessions)) {
+        if (s.acpSessionId === acpSessionId) return { tabId, title: s.title };
+      }
+      return { tabId: undefined as string | undefined, title: undefined as string | undefined };
+    };
+    const notify = () => useNotificationsStore.getState().actions;
+
     listenAgents((env) => {
       if (cancelled) return;
       const actions = useChatStore.getState().actions;
@@ -457,6 +469,17 @@ export function App() {
             (typeof tc?.kind === "string" && tc.kind) ||
             "tool call";
           void notifyPermissionRequested(toolTitle);
+          {
+            const info = agentSessionInfo(env.session_id);
+            notify().add({
+              kind: "permission",
+              source: "agent",
+              title: "Permission needed",
+              body: `${info.title ? `${info.title} — ` : ""}approve "${toolTitle}" to continue.`,
+              sessionId: env.session_id,
+              tabId: info.tabId,
+            });
+          }
           return;
         }
         case "permission_resolved":
@@ -502,8 +525,31 @@ export function App() {
           // they don't need to be told about it.
           if (env.stop_reason !== "cancelled") {
             void notifyAgentDone();
+            const info = agentSessionInfo(env.session_id);
+            notify().add({
+              kind: "agent-done",
+              source: "agent",
+              title: info.title || "Agent",
+              body: "Task finished.",
+              sessionId: env.session_id,
+              tabId: info.tabId,
+            });
           }
           return;
+        case "turn_failed": {
+          bufferDelta(env);
+          schedule();
+          const info = agentSessionInfo(env.session_id);
+          notify().add({
+            kind: "agent-failed",
+            source: "agent",
+            title: info.title || "Agent failed",
+            body: (env as { error?: string }).error || "The agent run failed.",
+            sessionId: env.session_id,
+            tabId: info.tabId,
+          });
+          return;
+        }
         default:
           bufferDelta(env);
           schedule();
@@ -885,6 +931,7 @@ export function App() {
       <SearchOverlay open={searchOpen} onOpenChange={setSearchOpen} />
       <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />
       <HintOverlay />
+      <NotificationPanel />
       <BrowserOverlayWatcher />
       <Toaster
         position="bottom-right"

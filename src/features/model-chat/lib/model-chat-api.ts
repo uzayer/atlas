@@ -26,9 +26,16 @@ export interface ModelChatSessionWire {
   updatedAt: string;
 }
 
+export interface WireImage {
+  mime: string;
+  /** Base64 (no data-URL prefix). */
+  data: string;
+}
+
 export interface WireMsg {
   role: string;
   content: string;
+  images?: WireImage[];
 }
 
 /** Streaming events from Rust (Rig), tagged by `stream_id`. */

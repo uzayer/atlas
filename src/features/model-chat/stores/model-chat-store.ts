@@ -10,6 +10,8 @@ import { toast } from "sonner";
 import { createSelectors } from "@/lib/create-selectors";
 import type { ChatMessage } from "@/types/agent";
 import { useUsageStore } from "@/features/monitor/stores/usage-store";
+import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
+import { providerById } from "@/features/settings/lib/providers";
 import {
   modelchat,
   listenModelChat,
@@ -17,6 +19,8 @@ import {
   type SessionMeta,
   type ModelChatSessionWire,
 } from "../lib/model-chat-api";
+
+const notify = () => useNotificationsStore.getState().actions;
 
 export interface ModelChatSession {
   id: string;
@@ -30,6 +34,15 @@ export interface ModelChatSession {
   loaded: boolean;
 }
 
+/** An image picked in the composer, before send. */
+export interface ComposerAttachment {
+  mime: string;
+  /** Base64 (no prefix) — sent to the model. */
+  data: string;
+  /** `data:` URL — for the thumbnail preview. */
+  dataUrl: string;
+}
+
 interface ModelChatState {
   metas: SessionMeta[];
   sessions: Record<string, ModelChatSession>;
@@ -38,6 +51,8 @@ interface ModelChatState {
   streaming: Record<string, boolean>;
   /** streamId → sessionId, for routing delta events. */
   streamToSession: Record<string, string>;
+  /** messageId → attachment thumbnail data-URLs (transient, NOT persisted). */
+  attachmentsByMsg: Record<string, string[]>;
   actions: {
     init: () => Promise<void>;
     loadList: () => Promise<void>;
@@ -46,7 +61,7 @@ interface ModelChatState {
     deleteSession: (id: string) => Promise<void>;
     setProvider: (id: string, provider: string) => void;
     setModel: (id: string, model: string) => void;
-    send: (id: string, text: string) => Promise<void>;
+    send: (id: string, text: string, attachments?: ComposerAttachment[]) => Promise<void>;
     stop: (id: string) => void;
   };
 }
@@ -95,6 +110,7 @@ export const useModelChatStore = createSelectors(
       activeId: null,
       streaming: {},
       streamToSession: {},
+      attachmentsByMsg: {},
       actions: {
         init: async () => {
           if (!listenerInstalled) {
@@ -200,16 +216,19 @@ export const useModelChatStore = createSelectors(
               : st,
           ),
 
-        send: async (id, text) => {
+        send: async (id, text, attachments) => {
           const session = get().sessions[id];
           const trimmed = text.trim();
-          if (!session || !trimmed || !session.provider || !session.model) return;
+          if (!session || !session.provider || !session.model) return;
+          if (!trimmed && !attachments?.length) return;
           if (get().streaming[id]) return;
 
           const userMsg = makeMessage("user", trimmed);
           const assistantMsg = makeMessage("assistant", "");
           const title =
-            session.title === "New Chat" ? trimmed.slice(0, 60) : session.title;
+            session.title === "New Chat"
+              ? trimmed.slice(0, 60) || "Image"
+              : session.title;
           const messages = [...session.messages, userMsg, assistantMsg];
 
           const streamId = uid();
@@ -225,13 +244,22 @@ export const useModelChatStore = createSelectors(
             },
             streaming: { ...st.streaming, [id]: true },
             streamToSession: { ...st.streamToSession, [streamId]: id },
+            attachmentsByMsg: attachments?.length
+              ? { ...st.attachmentsByMsg, [userMsg.id]: attachments.map((a) => a.dataUrl) }
+              : st.attachmentsByMsg,
           }));
 
           // Conversation sent to Rust = everything up to & including the new
-          // user turn (exclude the empty assistant placeholder).
-          const wire = messages
-            .slice(0, -1)
-            .map((m) => ({ role: m.role, content: m.content }));
+          // user turn (exclude the empty assistant placeholder). The new user
+          // turn carries any attached images.
+          const wire = messages.slice(0, -1).map((m) => ({
+            role: m.role,
+            content: m.content,
+            images:
+              m.id === userMsg.id && attachments?.length
+                ? attachments.map((a) => ({ mime: a.mime, data: a.data }))
+                : undefined,
+          }));
 
           try {
             await modelchat.stream(streamId, session.provider, session.model, wire);
@@ -290,12 +318,35 @@ export const useModelChatStore = createSelectors(
 
       if (e.kind === "error") {
         const s = getFn().sessions[id];
+        const name = providerById(s?.provider ?? "")?.name ?? s?.provider ?? "Chat";
         toast.error(`${s?.provider ?? "chat"}: ${e.message}`);
+        notify().add({
+          kind: "chat-error",
+          source: "chat",
+          title: `${name} error`,
+          body: e.message,
+          provider: s?.provider,
+          sessionId: id,
+        });
         finish(setFn, getFn, id, e.stream_id);
         return;
       }
 
       if (e.kind === "done") {
+        const s = getFn().sessions[id];
+        const name = providerById(s?.provider ?? "")?.name ?? s?.provider ?? "Chat";
+        const last = s?.messages[s.messages.length - 1];
+        const snippet = (last?.role === "assistant" ? last.content : "").trim();
+        if (snippet) {
+          notify().add({
+            kind: "chat-done",
+            source: "chat",
+            title: `${name} replied`,
+            body: snippet.slice(0, 140),
+            provider: s?.provider,
+            sessionId: id,
+          });
+        }
         finish(setFn, getFn, id, e.stream_id);
       }
     }
