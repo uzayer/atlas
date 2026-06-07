@@ -302,6 +302,12 @@ export async function searchMentions(
   if (scope === null || scope === "file" || scope === "folder") {
     await ensureFileIndex(ctx.projectPath);
   }
+  // Knowledge lives in the Rust mention cache, which only fills when the KB
+  // store loads. Self-heal it here so `~`/`@` work in chat even if the
+  // Knowledge panel was never opened this session (coalesced + cached).
+  if ((scope === null || scope === "knowledge") && ctx.projectPath) {
+    await ensureKnowledgeMentionCache(ctx.projectPath);
+  }
   try {
     const results = await invoke<MentionData[]>("mention_search", {
       query: stripCategoryAlias(query, scope ?? "file"),
@@ -318,7 +324,7 @@ export async function searchMentions(
 /** Push knowledge entries into the Rust mention cache. Call from
  *  the JS knowledge store whenever `entries` is replaced or mutated,
  *  and from the meta store whenever a page-header title changes. */
-export function publishKnowledgeToMentionCache(): void {
+export function publishKnowledgeToMentionCache(): Promise<void> {
   const pages = useKnowledgeMetaStore.getState().pages;
   const items = useKnowledgeStore.getState().entries.map((e) => {
     const override = pages[e.id]?.title?.trim();
@@ -333,9 +339,41 @@ export function publishKnowledgeToMentionCache(): void {
       filePath: e.file_path,
     };
   });
-  void invoke("mention_cache_set_knowledge", { items }).catch((err) =>
+  return invoke<void>("mention_cache_set_knowledge", { items }).catch((err) =>
     console.warn("mention_cache_set_knowledge failed:", err),
   );
+}
+
+// Coalesce the knowledge self-heal: which project we've already ensured this
+// session, plus any in-flight ensure so concurrent keystrokes share one run.
+let knowledgeEnsuredFor: string | null = null;
+let knowledgeEnsuring: Promise<void> | null = null;
+
+/** Mirror of `ensureFileIndex` for knowledge. The @-/~ picker reads knowledge
+ *  from the Rust `MentionCacheState`, which is only populated when the JS
+ *  knowledge store loads its entries — and that used to happen lazily, only
+ *  when the Knowledge panel first mounted. So `~` in chat showed nothing until
+ *  the user opened the KB. This loads the entries (if the panel never mounted)
+ *  and (re)publishes them to this window's cache, coalesced + cached per
+ *  project so it's a no-op cost after the first picker open. */
+export async function ensureKnowledgeMentionCache(projectPath: string): Promise<void> {
+  if (knowledgeEnsuredFor === projectPath) return;
+  if (!knowledgeEnsuring) {
+    knowledgeEnsuring = (async () => {
+      const ks = useKnowledgeStore.getState();
+      if (ks.entries.length === 0) {
+        await ks.actions.loadEntries(projectPath);
+      }
+      // loadEntries publishes via a fire-and-forget dynamic import, so publish
+      // explicitly here and await it to guarantee the cache is warm before the
+      // first search reads it.
+      await publishKnowledgeToMentionCache();
+      knowledgeEnsuredFor = projectPath;
+    })().finally(() => {
+      knowledgeEnsuring = null;
+    });
+  }
+  return knowledgeEnsuring;
 }
 
 /** Push symbols into the Rust mention cache. Call from the analysis
