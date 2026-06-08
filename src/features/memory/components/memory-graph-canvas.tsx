@@ -58,9 +58,11 @@ const MAX_SCALE = 4;
 const ZOOM_STEP = 0.004;
 const HIDE_LABEL_BELOW = 0.5;
 const DOUBLE_CLICK_MS = 280;
+/** Constant screen-px gap between a node's disc and its label (counter-scaled). */
+const LABEL_GAP = 6;
 
 function nodeRadiusForDegree(degree: number): number {
-  return Math.min(10 + Math.sqrt(Math.max(0, degree)) * 3, 32);
+  return Math.min(3 + Math.sqrt(Math.max(0, degree)) * 1.6, 14);
 }
 
 interface NodeView {
@@ -415,7 +417,7 @@ function buildScene(
     nodeLayer.addChild(graphics);
 
     const label = new Text({ text: node.title, style: styleFor("#c4c4c4") });
-    label.anchor.set(0.5);
+    label.anchor.set(0.5, 0); // top-center: hangs below the disc
     labelLayer.addChild(label);
 
     nodesById.set(node.id, {
@@ -596,6 +598,7 @@ function buildScene(
     const hasDrag = !hasSelection && draggingId !== null;
     const hasMatches = !hasSelection && !hasDrag && matched.size > 0;
     const showLabels = zoom >= HIDE_LABEL_BELOW;
+    const inv = 1 / zoom; // counter-scale for constant screen-space sizes
     const isFuture = (ts: number) => cutoff !== null && ts > 0 && ts > cutoff;
 
     for (const node of nodesById.values()) {
@@ -632,13 +635,19 @@ function buildScene(
 
       node.graphics.clear();
       if (ring) {
-        node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius + 3);
-        node.graphics.stroke({ width: 2, color, alpha: 0.6 });
+        node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius + 3 * inv);
+        node.graphics.stroke({ width: 2 * inv, color, alpha: 0.6 });
       }
       node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius);
       node.graphics.fill({ color, alpha });
 
-      node.label.position.set(node.body.position.x, node.body.position.y + node.radius + 12);
+      // Parallax: counter-scale the label so it stays a constant readable
+      // screen size, with a constant screen-space gap below the disc.
+      node.label.scale.set(inv);
+      node.label.position.set(
+        node.body.position.x,
+        node.body.position.y + drawRadius + LABEL_GAP * inv,
+      );
       if (!showLabels || future) node.label.alpha = 0;
       else if (!hasSelection && !hasDrag && !hasMatches) { node.label.alpha = 0.85; node.label.style = styleFor("#c4c4c4"); }
       else if (lit) { node.label.alpha = 1; node.label.style = styleFor("#fafafa"); }
@@ -658,7 +667,7 @@ function buildScene(
         // One endpoint not born yet — keep faint.
         edge.graphics.moveTo(a.body.position.x, a.body.position.y);
         edge.graphics.lineTo(b.body.position.x, b.body.position.y);
-        edge.graphics.stroke({ width: 1, color: COLOR_EDGE_DIM, alpha: 0.04 });
+        edge.graphics.stroke({ width: 1 * inv, color: COLOR_EDGE_DIM, alpha: 0.04 });
         continue;
       }
 
@@ -684,7 +693,7 @@ function buildScene(
       const by = b.body.position.y;
       edge.graphics.moveTo(ax, ay);
       edge.graphics.lineTo(bx, by);
-      edge.graphics.stroke({ width: arrow !== null ? 1.5 : 1, color, alpha });
+      edge.graphics.stroke({ width: (arrow !== null ? 1.5 : 1) * inv, color, alpha });
 
       if (arrow !== null) {
         // Arrowhead just outside the target node, pointing older → newer.
@@ -693,9 +702,9 @@ function buildScene(
         const len = Math.hypot(dx, dy) || 1;
         const ux = dx / len;
         const uy = dy / len;
-        const tipX = bx - ux * (b.radius + 2);
-        const tipY = by - uy * (b.radius + 2);
-        const size = 6;
+        const tipX = bx - ux * (b.radius + 2 * inv);
+        const tipY = by - uy * (b.radius + 2 * inv);
+        const size = 6 * inv;
         const leftX = tipX - ux * size - uy * size * 0.6;
         const leftY = tipY - uy * size + ux * size * 0.6;
         const rightX = tipX - ux * size + uy * size * 0.6;

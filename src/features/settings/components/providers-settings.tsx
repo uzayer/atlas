@@ -104,8 +104,6 @@ export function ProvidersSettings() {
     return list;
   }, [category, query, sortKey, configuredOnly, keys]);
 
-  const configuredCount = Object.keys(keys).length;
-
   const tabs: Array<{ id: ProviderCategory | "All"; label: string; count: number }> =
     useMemo(
       () => [
@@ -202,17 +200,6 @@ export function ProvidersSettings() {
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
-      </div>
-
-      {/* Subtitle line — what this surface is, kept subtle. */}
-      <div className="flex items-center gap-2 px-3 h-[24px] shrink-0 border-b border-border-subtle text-[10px] text-text-tertiary">
-        Keys are stored in the macOS Keychain — never written to disk in
-        plaintext.
-        {configuredCount > 0 && (
-          <span className="text-text-secondary">
-            · {configuredCount} configured
-          </span>
-        )}
       </div>
 
       {/* Table — both-axis scroll. The min-width track keeps columns from

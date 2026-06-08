@@ -51,9 +51,11 @@ const MAX_SCALE = 4;
 const ZOOM_STEP = 0.004;
 const HIDE_LABEL_BELOW = 0.5;
 const DOUBLE_CLICK_MS = 280;
+/** Constant screen-px gap between a node's disc and its label (counter-scaled). */
+const LABEL_GAP = 6;
 
 function nodeRadiusForDegree(degree: number): number {
-  return Math.min(10 + Math.sqrt(Math.max(0, degree)) * 3, 32);
+  return Math.min(3 + Math.sqrt(Math.max(0, degree)) * 1.6, 14);
 }
 
 interface NodeView {
@@ -445,7 +447,7 @@ function buildScene(
     nodeLayer.addChild(graphics);
 
     const label = new Text({ text: node.title, style: styleFor("#c4c4c4") });
-    label.anchor.set(0.5);
+    label.anchor.set(0.5, 0); // top-center: hangs below the disc
     labelLayer.addChild(label);
 
     nodesById.set(node.id, { id: node.id, body, radius, graphics, label });
@@ -687,6 +689,7 @@ function buildScene(
     const focusNeighbors = selectedId ? neighbors : draggingNeighbors;
     const hasFocus = focusId !== null;
     const showLabels = zoom >= HIDE_LABEL_BELOW;
+    const inv = 1 / zoom; // counter-scale for constant screen-space sizes
 
     for (const node of nodesById.values()) {
       const isFocused = focusId === node.id;
@@ -707,15 +710,18 @@ function buildScene(
       }
       node.graphics.clear();
       if (isFocused) {
-        node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius + 3);
-        node.graphics.stroke({ width: 2, color: COLOR_PRIMARY, alpha: 0.6 });
+        node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius + 3 * inv);
+        node.graphics.stroke({ width: 2 * inv, color: COLOR_PRIMARY, alpha: 0.6 });
       }
       node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius);
       node.graphics.fill({ color, alpha });
 
+      // Parallax: counter-scale the label so it stays a constant readable
+      // screen size, and keep a constant screen-space gap below the disc.
+      node.label.scale.set(inv);
       node.label.position.set(
         node.body.position.x,
-        node.body.position.y + node.radius + 12,
+        node.body.position.y + drawRadius + LABEL_GAP * inv,
       );
       if (!showLabels) {
         node.label.alpha = 0;
@@ -751,7 +757,7 @@ function buildScene(
       }
       edge.graphics.moveTo(a.body.position.x, a.body.position.y);
       edge.graphics.lineTo(b.body.position.x, b.body.position.y);
-      edge.graphics.stroke({ width: 1, color, alpha });
+      edge.graphics.stroke({ width: (touchesFocus ? 2 : 1) * inv, color, alpha });
     }
   };
   app.ticker.add(tick);
