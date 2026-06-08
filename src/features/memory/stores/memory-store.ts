@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { createSelectors } from "@/lib/create-selectors";
 import type { AgentMemory, MemorySubTab } from "../lib/memory-types";
 import { memoryPolicy, type Policy } from "../lib/memory-policy-api";
+import { memoryTimeline, type MemoryTimeline } from "../lib/memory-timeline-api";
 
 /**
  * Module-level cache for the Memory module. The Memory tab isn't persistent —
@@ -38,12 +39,29 @@ interface MemoryStoreState {
   policyPhase: PolicyPhase;
   policyError: string | null;
 
+  // Timeline.
+  timeline: MemoryTimeline | null;
+  timelineLoading: boolean;
+  /** Project path of an in-flight background refresh (coalesces duplicates). */
+  timelineRefreshing: string | null;
+
+  /**
+   * Cross-tab navigation request: jump to a sub-tab AND select a specific item
+   * (e.g. Timeline → the Claude/Codex memory file it came from). The `nonce`
+   * lets the same target re-fire. `id` is the memory-doc id ("claude:<name>",
+   * "codex:<threadId>", "codex:AGENTS.md") or a raw Codex thread id.
+   */
+  navTarget: { sub: MemorySubTab; id: string; nonce: number } | null;
+
   actions: {
     setSubTab: (t: MemorySubTab) => void;
+    /** Switch to `sub` and ask its view to select/scroll to `id`. */
+    navigateToMemory: (sub: MemorySubTab, id: string) => void;
     /** Drop caches when the project changes. */
     ensureProject: (projectPath: string | null) => void;
     loadAgentMemory: (projectPath: string, force?: boolean) => Promise<void>;
     loadPolicies: (projectPath: string, force?: boolean) => Promise<void>;
+    loadTimeline: (projectPath: string, force?: boolean) => Promise<void>;
     setPolicyPhase: (phase: PolicyPhase, error?: string | null) => void;
     setPolicies: (rows: Policy[]) => void;
     /** Optimistic in-place value update after an edit saves. */
@@ -60,8 +78,18 @@ export const useMemoryStore = createSelectors(
     policies: null,
     policyPhase: "idle",
     policyError: null,
+    timeline: null,
+    timelineLoading: false,
+    timelineRefreshing: null,
+    navTarget: null,
     actions: {
       setSubTab: (t) => set({ subTab: t }),
+
+      navigateToMemory: (sub, id) =>
+        set((st) => ({
+          subTab: sub,
+          navTarget: { sub, id, nonce: (st.navTarget?.nonce ?? 0) + 1 },
+        })),
 
       ensureProject: (projectPath) => {
         if (get().project === projectPath) return;
@@ -73,6 +101,10 @@ export const useMemoryStore = createSelectors(
           policies: null,
           policyPhase: "idle",
           policyError: null,
+          timeline: null,
+          timelineLoading: false,
+          timelineRefreshing: null,
+          navTarget: null,
         });
       },
 
@@ -104,6 +136,46 @@ export const useMemoryStore = createSelectors(
           } else {
             set({ policyError: msg, policyPhase: "error" });
           }
+        }
+      },
+
+      loadTimeline: async (projectPath, force = false) => {
+        const s = get();
+
+        // Optimistic: the first time we see a project, paint the disk cache
+        // instantly (survives app restarts). On revisits we already hold the
+        // in-memory result, so skip the disk read and just refresh below.
+        if (!s.timeline || s.project !== projectPath) {
+          try {
+            const cached = await memoryTimeline.loadCached(projectPath);
+            if (cached && get().project === projectPath) {
+              set({ timeline: cached, project: projectPath });
+            }
+          } catch {
+            /* no cache yet */
+          }
+        }
+
+        // Always recompute in the background so new commits/sessions/memory
+        // (and their influence links) appear without a manual refresh — the
+        // old in-memory short-circuit left the view stale until Refresh.
+        // Coalesce duplicate in-flight refreshes (tab switches, StrictMode
+        // double-mount) so we don't fire several git walks at once.
+        if (!force && get().timelineRefreshing === projectPath) return;
+        set({ timelineRefreshing: projectPath });
+
+        // Only show the blocking spinner when nothing is on screen; otherwise
+        // update silently (optimistic).
+        const hadData = !!get().timeline && get().project === projectPath;
+        set({ timelineLoading: !hadData });
+        try {
+          const t = await memoryTimeline.load(projectPath);
+          set({ timeline: t, timelineLoading: false, project: projectPath });
+        } catch {
+          set({ timelineLoading: false });
+          if (!hadData) set({ timeline: null });
+        } finally {
+          if (get().timelineRefreshing === projectPath) set({ timelineRefreshing: null });
         }
       },
 

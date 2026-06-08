@@ -151,6 +151,7 @@ pub fn run() {
             commands::fs::read_directory,
             commands::fs::read_file_content,
             commands::fs::read_file_base64,
+            commands::fs::file_mtime_ms,
             commands::fs::write_file_content,
             commands::fs::write_file_base64,
             commands::fs::ensure_atlas_gitignore,
@@ -333,6 +334,8 @@ pub fn run() {
             commands::memory_graph::memory_graph_layout_save,
             commands::memory_policy::memory_policies,
             commands::memory_policy::memory_policy_update,
+            commands::memory_timeline::memory_timeline,
+            commands::memory_timeline::memory_timeline_cached,
             commands::pdf_annotations::pdf_annotations_load,
             commands::pdf_annotations::pdf_annotations_save,
         ])

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Loader2,
   RefreshCw,
@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { MemoryGraphView } from "./memory-graph-view";
 import { MemoryPolicyView } from "./memory-policy-view";
+import { MemoryTimelineView } from "./memory-timeline-view";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/lib/markdown";
 import { timeAgo } from "@/lib/time-ago";
@@ -86,6 +87,13 @@ export function MemoryPanel() {
             label="Policy"
             count={0}
           />
+          <SubTabButton
+            active={sub === "timeline"}
+            onClick={() => setSub("timeline")}
+            icon={<GitBranch size={13} />}
+            label="Timeline"
+            count={0}
+          />
         </div>
         <button
           onClick={load}
@@ -101,6 +109,8 @@ export function MemoryPanel() {
           <MemoryGraphView />
         ) : sub === "policy" ? (
           <MemoryPolicyView />
+        ) : sub === "timeline" ? (
+          <MemoryTimelineView />
         ) : loading && !data ? (
           <Centered>
             <Loader2 size={18} className="animate-spin text-[var(--text-tertiary)]" />
@@ -231,6 +241,20 @@ function ClaudeView({ claude }: { claude: ClaudeMemory | null }) {
   const selected =
     items.find((i) => i.id === selectedId) ?? items[0] ?? null;
 
+  // Cross-tab navigation (e.g. from Timeline): select + scroll to the doc.
+  const navTarget = useMemoryStore.use.navTarget();
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  useEffect(() => {
+    if (!navTarget || navTarget.sub !== "claude") return;
+    const itemId = claudeItemIdForDoc(navTarget.id);
+    if (itemId && items.some((i) => i.id === itemId)) {
+      setSelectedId(itemId);
+      requestAnimationFrame(() =>
+        rowRefs.current.get(itemId)?.scrollIntoView({ block: "nearest" }),
+      );
+    }
+  }, [navTarget, items]);
+
   const grouped = useMemo(() => {
     const order: ClaudeItem["section"][] = ["Instructions", "Index", "Memories"];
     return order
@@ -270,6 +294,10 @@ function ClaudeView({ claude }: { claude: ClaudeMemory | null }) {
               return (
                 <button
                   key={it.id}
+                  ref={(el) => {
+                    if (el) rowRefs.current.set(it.id, el);
+                    else rowRefs.current.delete(it.id);
+                  }}
                   onClick={() => setSelectedId(it.id)}
                   className={cn(
                     "w-full text-left px-3 py-2 border-b border-[var(--border-subtle)] transition-colors cursor-pointer flex flex-col gap-0.5",
@@ -361,6 +389,24 @@ function CodexView({ codex }: { codex: CodexMemory | null }) {
 
   const hasAgents = !!(codex?.agents_md || codex?.global_agents_md);
 
+  // Cross-tab navigation (e.g. from Timeline): expand + scroll to the thread,
+  // or reveal AGENTS.md. Thread id may arrive raw or as "codex:<id>".
+  const navTarget = useMemoryStore.use.navTarget();
+  const rowRefs = useRef(new Map<string, HTMLDivElement>());
+  useEffect(() => {
+    if (!navTarget || navTarget.sub !== "codex") return;
+    const rest = navTarget.id.startsWith("codex:")
+      ? navTarget.id.slice("codex:".length)
+      : navTarget.id;
+    if (rest === "AGENTS.md") {
+      setShowAgents(true);
+      return;
+    }
+    setQuery(""); // clear any filter so the row is in the list
+    setExpandedId(rest);
+    requestAnimationFrame(() => rowRefs.current.get(rest)?.scrollIntoView({ block: "center" }));
+  }, [navTarget]);
+
   const rows = useMemo(() => {
     const list = codex?.threads ?? [];
     const q = query.trim().toLowerCase();
@@ -401,7 +447,7 @@ function CodexView({ codex }: { codex: CodexMemory | null }) {
   return (
     <div className="h-full flex flex-col bg-[var(--bg-base)]">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-3 h-[40px] shrink-0 border-b border-[var(--border-default)]">
+      <div className="flex items-center gap-2 px-3 h-[32px] shrink-0 border-b border-[var(--border-default)]">
         <span className="text-[11px] font-medium text-[var(--text-secondary)]">
           Sessions
           <span className="ml-1.5 text-[9px] text-[var(--text-tertiary)] tabular-nums">
@@ -469,17 +515,21 @@ function CodexView({ codex }: { codex: CodexMemory | null }) {
               No sessions match.
             </div>
           ) : (
-            rows.map((t) => (
-              <CodexRow
-                key={t.id || `${t.created_at}-${t.updated_at}`}
-                thread={t}
-                expanded={expandedId === (t.id || `${t.created_at}`)}
-                onToggle={() => {
-                  const k = t.id || `${t.created_at}`;
-                  setExpandedId((cur) => (cur === k ? null : k));
-                }}
-              />
-            ))
+            rows.map((t) => {
+              const k = t.id || `${t.created_at}`;
+              return (
+                <CodexRow
+                  key={t.id || `${t.created_at}-${t.updated_at}`}
+                  thread={t}
+                  expanded={expandedId === k}
+                  innerRef={(el) => {
+                    if (el) rowRefs.current.set(k, el);
+                    else rowRefs.current.delete(k);
+                  }}
+                  onToggle={() => setExpandedId((cur) => (cur === k ? null : k))}
+                />
+              );
+            })
           )}
         </div>
       </div>
@@ -497,13 +547,15 @@ function CodexRow({
   thread: t,
   expanded,
   onToggle,
+  innerRef,
 }: {
   thread: CodexThread;
   expanded: boolean;
   onToggle: () => void;
+  innerRef?: (el: HTMLDivElement | null) => void;
 }) {
   return (
-    <div className="border-b border-[var(--border-subtle)]">
+    <div ref={innerRef} className="border-b border-[var(--border-subtle)]">
       <button
         onClick={onToggle}
         className={cn(
@@ -637,6 +689,16 @@ function AgentsCard({ label, body }: { label: string; body: string }) {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+/** Map a memory-doc id ("claude:…") to a ClaudeView list-item id. */
+function claudeItemIdForDoc(docId: string): string | null {
+  if (!docId.startsWith("claude:")) return null;
+  const rest = docId.slice("claude:".length);
+  if (rest === "MEMORY.md") return "index";
+  if (rest === "CLAUDE.md") return "claude-md";
+  if (rest === "CLAUDE.md@global") return "claude-md-global";
+  return rest; // a memory entry — its id is the file name
+}
 
 /** Strip the appended Atlas-context block + collapse whitespace for table rows. */
 function cleanTitle(s: string): string {

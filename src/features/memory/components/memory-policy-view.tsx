@@ -179,7 +179,7 @@ export function MemoryPolicyView() {
   // phase === "ready"
   return (
     <div className="h-full flex flex-col bg-[var(--bg-base)]">
-      <div className="flex items-center gap-2 px-3 h-[40px] shrink-0 border-b border-[var(--border-default)]">
+      <div className="flex items-center gap-2 px-3 h-[32px] shrink-0 border-b border-[var(--border-default)]">
         <span className="text-[11px] font-medium text-[var(--text-secondary)]">
           Preferences
           <span className="ml-1.5 text-[9px] text-[var(--text-tertiary)] tabular-nums">

@@ -59,6 +59,8 @@ pub struct CodexThread {
     #[serde(default)]
     git_branch: Option<String>,
     #[serde(default)]
+    git_sha: Option<String>,
+    #[serde(default)]
     approval_mode: String,
     #[serde(default)]
     tokens_used: i64,
@@ -255,6 +257,46 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
     }
 
     docs
+}
+
+/// A Codex session with its recorded git context — the strong agent→branch→
+/// commit link for the timeline (Codex stamps `git_branch`/`git_sha` per run).
+#[derive(Debug, Clone, Serialize)]
+pub struct CodexSession {
+    pub id: String,
+    pub title: String,
+    pub branch: Option<String>,
+    pub sha: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub model: String,
+    pub tokens: i64,
+    pub approval_mode: String,
+}
+
+/// Codex sessions for a project (from the SQLite `threads` table), mapped to a
+/// timeline-friendly shape.
+pub async fn collect_codex_sessions(project_path: &str) -> Vec<CodexSession> {
+    let codex = read_codex(project_path.trim_end_matches('/')).await;
+    codex
+        .threads
+        .into_iter()
+        .map(|t| CodexSession {
+            title: short_title(if t.title.trim().is_empty() {
+                &t.first_user_message
+            } else {
+                &t.title
+            }),
+            id: t.id,
+            branch: t.git_branch.filter(|b| !b.is_empty()),
+            sha: t.git_sha.filter(|s| !s.is_empty()),
+            created_at_ms: t.created_at.saturating_mul(1000),
+            updated_at_ms: t.updated_at.saturating_mul(1000),
+            model: t.model,
+            tokens: t.tokens_used,
+            approval_mode: t.approval_mode,
+        })
+        .collect()
 }
 
 /// File mtime as unix ms, or 0 if unavailable.
@@ -463,7 +505,7 @@ async fn query_codex_threads(db: &Path, project_path: &str) -> Vec<CodexThread> 
     // normally contain quotes, but be safe.
     let escaped = project_path.replace('\'', "''");
     let sql = format!(
-        "SELECT id, title, first_user_message, model, git_branch, approval_mode, \
+        "SELECT id, title, first_user_message, model, git_branch, git_sha, approval_mode, \
          tokens_used, created_at, updated_at FROM threads \
          WHERE cwd = '{escaped}' AND archived = 0 \
          ORDER BY updated_at DESC LIMIT 300;"

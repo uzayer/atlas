@@ -27,6 +27,9 @@ pub struct GitLogEntry {
     pub author: String,
     pub email: String,
     pub date: String,
+    /// Committer time as unix milliseconds (0 if unparsable). Added for the
+    /// memory timeline; `date` stays the relative string the git-graph uses.
+    pub committed_at_ms: i64,
     pub parents: Vec<String>,
     pub refs: Vec<String>,
 }
@@ -258,7 +261,7 @@ pub(crate) fn git_log_compute(
         format!("-{}", n),
         "--topo-order".into(),
         "--decorate=short".into(),
-        "--pretty=format:%H%x1f%h%x1f%s%x1f%an%x1f%ae%x1f%cr%x1f%P%x1f%D%x1e".into(),
+        "--pretty=format:%H%x1f%h%x1f%s%x1f%an%x1f%ae%x1f%cr%x1f%P%x1f%D%x1f%ct%x1e".into(),
     ];
     if all {
         args.push("--all".into());
@@ -288,6 +291,11 @@ pub(crate) fn git_log_compute(
                 .map(|r| r.trim().to_string())
                 .filter(|r| !r.is_empty())
                 .collect();
+            let committed_at_ms = parts
+                .get(8)
+                .and_then(|s| s.trim().parse::<i64>().ok())
+                .map(|secs| secs * 1000)
+                .unwrap_or(0);
             Some(GitLogEntry {
                 hash: parts[0].to_string(),
                 short_hash: parts[1].to_string(),
@@ -295,6 +303,7 @@ pub(crate) fn git_log_compute(
                 author: parts[3].to_string(),
                 email: parts[4].to_string(),
                 date: parts[5].to_string(),
+                committed_at_ms,
                 parents,
                 refs,
             })

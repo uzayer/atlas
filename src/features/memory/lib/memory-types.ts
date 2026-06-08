@@ -38,4 +38,4 @@ export interface AgentMemory {
   codex: CodexMemory;
 }
 
-export type MemorySubTab = "claude" | "codex" | "graph" | "policy";
+export type MemorySubTab = "claude" | "codex" | "graph" | "policy" | "timeline";

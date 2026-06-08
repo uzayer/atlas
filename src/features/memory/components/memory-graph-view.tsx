@@ -264,7 +264,7 @@ function GraphReady({
   return (
     <div className="h-full flex flex-col bg-[var(--bg-base)]">
       {/* Query bar */}
-      <div className="flex items-center gap-2 px-3 h-[40px] shrink-0 border-b border-[var(--border-default)]">
+      <div className="flex items-center gap-2 px-3 h-[32px] shrink-0 border-b border-[var(--border-default)]">
         <div className="flex items-center gap-1.5 h-6 flex-1 max-w-[440px] rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 focus-within:border-[var(--border-strong)]">
           <Search size={12} className="text-[var(--text-tertiary)] shrink-0" />
           <input
