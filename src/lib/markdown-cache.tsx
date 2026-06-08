@@ -87,6 +87,22 @@ function ensureWorker(): Worker | null {
   return worker;
 }
 
+/** Nudge the markdown worker awake. WebKit can suspend Web Workers while the
+ *  window is idle/occluded; calling this on window-wake means the first large
+ *  message scrolled into view after idle doesn't pay a cold-worker round-trip
+ *  (or hit the 3s watchdog → main-thread sync fallback). The echoed reply
+ *  carries an id no waiter is registered for, so it's harmlessly ignored. */
+export function warmMarkdownWorker(): void {
+  const w = ensureWorker();
+  if (w) {
+    try {
+      w.postMessage({ id: -1, source: "" });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 /** Parse a large block off the main thread. Falls back to a gated-idle main-
  *  thread parse (the pre-worker behavior) if the worker is unavailable. */
 function parseLarge(source: string): Promise<string> {

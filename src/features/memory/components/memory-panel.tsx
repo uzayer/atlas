@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useMemo, useState } from "react";
 import {
   Loader2,
   RefreshCw,
@@ -13,77 +12,39 @@ import {
   Clock,
   ShieldCheck,
   Cpu,
+  Share2,
+  SlidersHorizontal,
 } from "lucide-react";
+import { MemoryGraphView } from "./memory-graph-view";
+import { MemoryPolicyView } from "./memory-policy-view";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/lib/markdown";
 import { timeAgo } from "@/lib/time-ago";
 import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
 import { useProjectStore } from "@/features/project/stores/project-store";
-
-// ── Wire types (mirror src-tauri/src/commands/agent_memory.rs) ──────────────
-
-interface MemoryFile {
-  name: string;
-  title: string;
-  description: string;
-  kind: string;
-  body: string;
-  modified_ms: number;
-}
-interface ClaudeMemory {
-  memory_dir: string;
-  index: string | null;
-  entries: MemoryFile[];
-  project_md: string | null;
-  global_md: string | null;
-}
-interface CodexThread {
-  id: string;
-  title: string;
-  first_user_message: string;
-  model: string;
-  git_branch: string | null;
-  approval_mode: string;
-  tokens_used: number;
-  created_at: number;
-  updated_at: number;
-}
-interface CodexMemory {
-  db_path: string | null;
-  agents_md: string | null;
-  global_agents_md: string | null;
-  threads: CodexThread[];
-}
-interface AgentMemory {
-  claude: ClaudeMemory;
-  codex: CodexMemory;
-}
-
-type SubTab = "claude" | "codex";
+import { useMemoryStore } from "../stores/memory-store";
+import type { ClaudeMemory, CodexMemory, CodexThread } from "../lib/memory-types";
 
 // ── Panel shell ─────────────────────────────────────────────────────────────
 
 export function MemoryPanel() {
   const projectPath = useProjectStore.use.currentProject()?.path ?? null;
-  const [data, setData] = useState<AgentMemory | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [sub, setSub] = useState<SubTab>("claude");
+  const sub = useMemoryStore.use.subTab();
+  const data = useMemoryStore.use.agentMemory();
+  const loading = useMemoryStore.use.agentMemoryLoading();
+  const { setSubTab, ensureProject, loadAgentMemory } = useMemoryStore.use.actions();
+  const setSub = setSubTab;
 
-  const load = useCallback(() => {
-    if (!projectPath) {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    void invoke<AgentMemory>("agent_memory_read", { projectPath })
-      .then(setData)
-      .catch(() => setData(null))
-      .finally(() => setLoading(false));
-  }, [projectPath]);
-
+  // Cached: only fetches on first load / project change. Switching sub-tabs or
+  // leaving and returning to the Memory tab renders the cached data instantly.
   useEffect(() => {
-    load();
-  }, [load]);
+    ensureProject(projectPath);
+    if (projectPath) void loadAgentMemory(projectPath);
+  }, [projectPath, ensureProject, loadAgentMemory]);
+
+  const load = () => {
+    if (projectPath) void loadAgentMemory(projectPath, true);
+  };
 
   const codexCount = data?.codex.threads.length ?? 0;
   const claudeCount =
@@ -111,6 +72,20 @@ export function MemoryPanel() {
             label="Codex"
             count={codexCount}
           />
+          <SubTabButton
+            active={sub === "graph"}
+            onClick={() => setSub("graph")}
+            icon={<Share2 size={13} />}
+            label="Graph"
+            count={0}
+          />
+          <SubTabButton
+            active={sub === "policy"}
+            onClick={() => setSub("policy")}
+            icon={<SlidersHorizontal size={13} />}
+            label="Policy"
+            count={0}
+          />
         </div>
         <button
           onClick={load}
@@ -122,7 +97,11 @@ export function MemoryPanel() {
       </div>
 
       <div className="flex-1 min-h-0">
-        {loading && !data ? (
+        {sub === "graph" ? (
+          <MemoryGraphView />
+        ) : sub === "policy" ? (
+          <MemoryPolicyView />
+        ) : loading && !data ? (
           <Centered>
             <Loader2 size={18} className="animate-spin text-[var(--text-tertiary)]" />
           </Centered>

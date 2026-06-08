@@ -51,7 +51,9 @@ chrono = { version = "0.4", features = ["serde"] }
 atlas-agents = { path = "../crates/atlas-agents" }
 atlas-terminal = { path = "../crates/atlas-terminal" }
 atlas-acp = { path = "../crates/atlas-acp" }
+atlas-embed = { path = "../crates/atlas-embed" }
 dirs = "6"
+sha2 = "0.10"
 # URL parsing for the embedded browser (`commands::browser`). Already in the
 # lockfile transitively via tauri/reqwest; declared here to name the type.
 url = "2"
@@ -71,6 +73,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "gzip",
     "brotli",
+    "stream",
 ] }
 futures = "0.3"
 ignore = "0.4"

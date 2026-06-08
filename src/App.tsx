@@ -308,14 +308,27 @@ export function App() {
         windowFocused = f;
       })
       .catch(() => {});
+    // Front-load the "cold wake" after the window has been idle/occluded: WebKit
+    // throttles the WKWebView's main thread + rAF + layout while inactive, so the
+    // first interaction (e.g. scrolling the chat) eats the catch-up. Firing this
+    // on the focus/visibility RISING edge lets listeners (chat virtualizer,
+    // markdown worker) warm the pipeline before the user touches anything.
+    const signalActive = () => window.dispatchEvent(new CustomEvent("atlas:window-active"));
     void appWindow
       .onFocusChanged(({ payload: focused }) => {
+        if (focused && !windowFocused) signalActive();
         windowFocused = focused;
       })
       .then((un) => {
         unlistenFocus = un;
       })
       .catch(() => {});
+    // Space switches / occlusion don't always flip native key-window focus, so
+    // also wake on the page becoming visible again.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") signalActive();
+    };
+    document.addEventListener("visibilitychange", onVisible);
 
     let permissionState: "unknown" | "granted" | "denied" = "unknown";
     // Establish notification permission EAGERLY at startup. The old lazy path
@@ -572,6 +585,7 @@ export function App() {
       cancelled = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
       unlistenFocus?.();
+      document.removeEventListener("visibilitychange", onVisible);
       unlisten?.();
     };
   }, []);

@@ -24,6 +24,8 @@ pub mod knowledge_graph_layout;
 pub mod knowledge_links;
 pub mod knowledge_meta;
 pub mod log;
+pub mod memory_graph;
+pub mod memory_policy;
 pub mod mention_search;
 pub mod papers;
 pub mod pdf_annotations;

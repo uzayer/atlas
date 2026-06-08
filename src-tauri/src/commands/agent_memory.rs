@@ -102,6 +102,203 @@ pub async fn agent_memory_read(project_path: String) -> Result<AgentMemory, Stri
     Ok(AgentMemory { claude, codex })
 }
 
+// ── Corpus collection (for the Graph / embeddings feature) ──────────────────
+
+/// One embeddable memory document, flattened across the Claude + Codex sources.
+/// Reused by `memory_graph` to embed + relate the whole memory system.
+#[derive(Debug, Clone)]
+pub struct MemoryDoc {
+    /// Stable id, e.g. `claude:feedback_x.md`, `codex:<thread-id>`.
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub source: String, // "claude" | "codex"
+    /// Absolute path of the editable file this doc came from (memory `.md`,
+    /// `CLAUDE.md`, `AGENTS.md`). `None` for non-file sources (Codex threads).
+    /// Used by the policy editor to rewrite the exact text in place.
+    pub file_path: Option<String>,
+    /// Unix ms when this memory came into being (file mtime / thread created_at).
+    /// 0 when unknown. Drives the temporal influence graph.
+    pub timestamp_ms: i64,
+    /// Text to embed (title is prepended by the caller if desired).
+    pub text: String,
+    /// Names this doc can be referenced by in `[[wikilinks]]` (slug + stem).
+    pub aliases: Vec<String>,
+    /// `[[wikilink]]` targets found in this doc's body.
+    pub links: Vec<String>,
+}
+
+/// Flatten Claude markdown memory + Codex threads into embeddable documents.
+pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
+    let project_path = project_path.trim_end_matches('/').to_string();
+
+    let pp = project_path.clone();
+    let claude = tokio::task::spawn_blocking(move || read_claude(&pp))
+        .await
+        .unwrap_or_else(|_| ClaudeMemory {
+            memory_dir: String::new(),
+            index: None,
+            entries: Vec::new(),
+            project_md: None,
+            global_md: None,
+        });
+    let codex = read_codex(&project_path).await;
+
+    let home = dirs::home_dir().unwrap_or_default();
+    let mem_dir = std::path::Path::new(&claude.memory_dir);
+    let mut docs: Vec<MemoryDoc> = Vec::new();
+
+    if let Some(idx) = &claude.index {
+        docs.push(MemoryDoc {
+            id: "claude:MEMORY.md".into(),
+            title: "Memory Index".into(),
+            kind: "index".into(),
+            source: "claude".into(),
+            file_path: Some(mem_dir.join("MEMORY.md").to_string_lossy().to_string()),
+            timestamp_ms: file_mtime_ms(&mem_dir.join("MEMORY.md")),
+            text: idx.clone(),
+            aliases: vec!["MEMORY".into(), "MEMORY.md".into()],
+            links: extract_wikilinks(idx),
+        });
+    }
+    for e in &claude.entries {
+        let stem = e.name.trim_end_matches(".md").to_string();
+        let title = if e.title.is_empty() { stem.clone() } else { e.title.clone() };
+        let body = if e.description.is_empty() {
+            e.body.clone()
+        } else {
+            format!("{}\n\n{}", e.description, e.body)
+        };
+        docs.push(MemoryDoc {
+            id: format!("claude:{}", e.name),
+            title,
+            kind: if e.kind.is_empty() { "memory".into() } else { e.kind.clone() },
+            source: "claude".into(),
+            file_path: Some(mem_dir.join(&e.name).to_string_lossy().to_string()),
+            timestamp_ms: e.modified_ms as i64,
+            text: body,
+            aliases: vec![e.title.clone(), stem],
+            links: extract_wikilinks(&e.body),
+        });
+    }
+    if let Some(md) = &claude.project_md {
+        docs.push(MemoryDoc {
+            id: "claude:CLAUDE.md".into(),
+            title: "CLAUDE.md".into(),
+            kind: "instruction".into(),
+            source: "claude".into(),
+            file_path: Some(
+                std::path::Path::new(&project_path)
+                    .join("CLAUDE.md")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            timestamp_ms: file_mtime_ms(&std::path::Path::new(&project_path).join("CLAUDE.md")),
+            text: md.clone(),
+            aliases: vec![],
+            links: vec![],
+        });
+    }
+    if let Some(md) = &claude.global_md {
+        docs.push(MemoryDoc {
+            id: "claude:CLAUDE.md@global".into(),
+            title: "CLAUDE.md (global)".into(),
+            kind: "instruction".into(),
+            source: "claude".into(),
+            file_path: Some(home.join(".claude").join("CLAUDE.md").to_string_lossy().to_string()),
+            timestamp_ms: file_mtime_ms(&home.join(".claude").join("CLAUDE.md")),
+            text: md.clone(),
+            aliases: vec![],
+            links: vec![],
+        });
+    }
+
+    if let Some(md) = &codex.agents_md {
+        docs.push(MemoryDoc {
+            id: "codex:AGENTS.md".into(),
+            title: "AGENTS.md".into(),
+            kind: "instruction".into(),
+            source: "codex".into(),
+            file_path: Some(
+                std::path::Path::new(&project_path)
+                    .join("AGENTS.md")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            timestamp_ms: file_mtime_ms(&std::path::Path::new(&project_path).join("AGENTS.md")),
+            text: md.clone(),
+            aliases: vec![],
+            links: vec![],
+        });
+    }
+    for t in &codex.threads {
+        let text = if t.first_user_message.trim().is_empty() {
+            t.title.clone()
+        } else {
+            t.first_user_message.clone()
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let raw_title = if t.title.trim().is_empty() { &t.first_user_message } else { &t.title };
+        docs.push(MemoryDoc {
+            id: format!("codex:{}", t.id),
+            title: short_title(raw_title),
+            kind: "thread".into(),
+            source: "codex".into(),
+            file_path: None, // Codex threads live in SQLite, not an editable file.
+            timestamp_ms: t.created_at.saturating_mul(1000),
+            text,
+            aliases: vec![],
+            links: vec![],
+        });
+    }
+
+    docs
+}
+
+/// File mtime as unix ms, or 0 if unavailable.
+fn file_mtime_ms(path: &std::path::Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Strip the appended Atlas-context block, collapse whitespace, truncate.
+fn short_title(s: &str) -> String {
+    let cut = s.split("\n---\n").next().unwrap_or(s);
+    let collapsed: String = cut.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > 80 {
+        let head: String = collapsed.chars().take(80).collect();
+        format!("{head}…")
+    } else {
+        collapsed
+    }
+}
+
+/// Pull `[[name]]` (and `[[name|alias]]` → name) targets out of a body.
+fn extract_wikilinks(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("[[") {
+        rest = &rest[start + 2..];
+        if let Some(end) = rest.find("]]") {
+            let inner = &rest[..end];
+            let name = inner.split('|').next().unwrap_or(inner).trim();
+            if !name.is_empty() {
+                out.push(name.to_string());
+            }
+            rest = &rest[end + 2..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 /// `/Users/adib/Desktop/atlas` → `-Users-adib-Desktop-atlas` (Claude's
 /// per-project dir naming: every `/` becomes `-`).
 fn encode_project_dir(project_path: &str) -> String {

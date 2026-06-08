@@ -901,6 +901,17 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
     }
     case "mode_changed": {
       session.acpCurrentMode = env.mode_id;
+      // Reflect agent-driven permission-mode changes back into the composer
+      // pill. Claude Code emits `current_mode_update` when the user picks a
+      // mode at the plan-review prompt (e.g. "bypass permissions") — without
+      // this the pill kept showing the old mode. Guarded to claude-code + a
+      // known permission mode so Codex's own modes don't leak into the pill.
+      if (
+        session.agentType === "claude-code" &&
+        (CLAUDE_PERMISSION_MODES as readonly string[]).includes(env.mode_id)
+      ) {
+        session.claudePermissionMode = env.mode_id as ClaudePermissionMode;
+      }
       return;
     }
     case "model_changed": {
