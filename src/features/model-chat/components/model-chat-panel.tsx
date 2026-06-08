@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Popover from "@radix-ui/react-popover";
 import {
@@ -45,6 +46,55 @@ import { useModelChatStore } from "../stores/model-chat-store";
 import { modelchat } from "../lib/model-chat-api";
 
 const JUMP_EVENT = "atlas:modelchat-jump";
+
+// ── Model-list cache (P1) ───────────────────────────────────────────────────
+// `modelchat.models(provider)` hit the provider API on every provider/session
+// change and every tab remount, flashing "Loading…". Cache the id list per
+// provider for the app session and dedupe in-flight requests.
+const modelListCache = new Map<string, string[]>();
+const modelListInFlight = new Map<string, Promise<string[]>>();
+function loadModelIds(provider: string): Promise<string[]> {
+  const cached = modelListCache.get(provider);
+  if (cached) return Promise.resolve(cached);
+  const inflight = modelListInFlight.get(provider);
+  if (inflight) return inflight;
+  const p = modelchat
+    .models(provider)
+    .then((list) => {
+      const ids = list.map((m) => m.id);
+      modelListCache.set(provider, ids);
+      modelListInFlight.delete(provider);
+      return ids;
+    })
+    .catch((e) => {
+      modelListInFlight.delete(provider);
+      throw e;
+    });
+  modelListInFlight.set(provider, p);
+  return p;
+}
+
+// ── Virtualized-list height cache (P1) ──────────────────────────────────────
+// Module-level so measured row heights survive remounts (tab switches), giving
+// the virtualizer real sizes on first paint instead of snapping from estimate.
+const mcHeights = new Map<string, number>();
+let mcHeightSum = 0;
+let mcHeightCount = 0;
+const MC_DEFAULT_ROW = 96;
+function mcRecordHeight(id: string, h: number) {
+  const prev = mcHeights.get(id);
+  if (prev === h) return;
+  if (prev === undefined) {
+    mcHeightCount += 1;
+    mcHeightSum += h;
+  } else {
+    mcHeightSum += h - prev;
+  }
+  mcHeights.set(id, h);
+}
+function mcAverageHeight(): number {
+  return mcHeightCount > 0 ? Math.round(mcHeightSum / mcHeightCount) : MC_DEFAULT_ROW;
+}
 
 // `tabId` is the center-panel tab id — used to scope the Cmd+F finder to this
 // pane. Model chat keeps its own session history independent of the tab.
@@ -135,21 +185,50 @@ function Conversation({
 
   const messages = useMemo(() => session?.messages ?? [], [session]);
 
-  // Jump-to-message (from search or the links panel).
+  // Virtualize the thread so a long BYOK chat doesn't mount every MessageItem
+  // (each pulling CachedMarkdown) at once. Reuses the agent chat's height-cache
+  // technique via a module-level map keyed by message id.
+  const virtualizer = useVirtualizer({
+    count: messages.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (i) => {
+      const id = messages[i]?.id;
+      const cached = id ? mcHeights.get(id) : undefined;
+      return cached ?? mcAverageHeight();
+    },
+    overscan: 10,
+    getItemKey: (i) => messages[i]?.id ?? i,
+    measureElement:
+      typeof window !== "undefined" && !navigator.userAgent.includes("Firefox")
+        ? (el) => {
+            const h = Math.round(el?.getBoundingClientRect().height ?? mcAverageHeight());
+            const id = el?.getAttribute("data-message-id");
+            if (id) mcRecordHeight(id, h);
+            return h;
+          }
+        : undefined,
+  });
+
+  // Jump-to-message (from search or the links panel). With virtualization the
+  // target row may be unmounted, so scroll the virtualizer to it first, then
+  // flash it once it's in the DOM.
   useEffect(() => {
     const handler = (e: Event) => {
       const idx = (e as CustomEvent<{ index: number }>).detail?.index;
       if (idx == null) return;
-      const el = scrollRef.current?.querySelector(`[data-mc-index="${idx}"]`);
-      el?.scrollIntoView({ block: "center", behavior: "smooth" });
-      el?.classList.add("atlas-jump-flash");
-      window.setTimeout(() => el?.classList.remove("atlas-jump-flash"), 1200);
+      virtualizer.scrollToIndex(idx, { align: "center" });
+      requestAnimationFrame(() => {
+        const el = scrollRef.current?.querySelector(`[data-mc-index="${idx}"]`);
+        el?.classList.add("atlas-jump-flash");
+        window.setTimeout(() => el?.classList.remove("atlas-jump-flash"), 1200);
+      });
     };
     window.addEventListener(JUMP_EVENT, handler);
     return () => window.removeEventListener(JUMP_EVENT, handler);
-  }, []);
+  }, [virtualizer]);
 
-  // Auto-scroll while near the bottom.
+  // Auto-scroll while near the bottom (covers both new messages and streaming
+  // growth, since the store hands back a fresh messages array per delta).
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -209,7 +288,7 @@ function Conversation({
       </div>
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto [overflow-anchor:none]">
         {messages.length === 0 ? (
           <div className="grid h-full place-items-center px-6">
             <div className="max-w-[420px] text-center">
@@ -224,19 +303,45 @@ function Conversation({
           </div>
         ) : (
           <div className="mx-auto w-full max-w-[760px] px-4">
-            {messages.map((m, i) => (
-              <div key={m.id} data-mc-index={i}>
-                <MessageAttachments messageId={m.id} />
-                <MessageItem
-                  message={m}
-                  model={m.role === "assistant" ? session.model : null}
-                  streaming={
-                    isStreaming && i === messages.length - 1 && m.role === "assistant"
-                  }
-                  isLastInGroup
-                />
-              </div>
-            ))}
+            <div
+              style={{
+                height: virtualizer.getTotalSize(),
+                width: "100%",
+                position: "relative",
+              }}
+            >
+              {virtualizer.getVirtualItems().map((vItem) => {
+                const m = messages[vItem.index];
+                return (
+                  <div
+                    key={m.id}
+                    ref={virtualizer.measureElement}
+                    data-index={vItem.index}
+                    data-mc-index={vItem.index}
+                    data-message-id={m.id}
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      transform: `translateY(${vItem.start}px)`,
+                    }}
+                  >
+                    <MessageAttachments messageId={m.id} />
+                    <MessageItem
+                      message={m}
+                      model={m.role === "assistant" ? session.model : null}
+                      streaming={
+                        isStreaming &&
+                        vItem.index === messages.length - 1 &&
+                        m.role === "assistant"
+                      }
+                      isLastInGroup
+                    />
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -332,16 +437,24 @@ function Composer({
   useEffect(() => {
     if (!provider) return;
     let cancelled = false;
+    const applyIds = (ids: string[]) => {
+      if (cancelled) return;
+      setModels(ids);
+      const cur = useModelChatStore.getState().sessions[sessionId]?.model;
+      if (!cur && ids.length > 0) setModel(sessionId, ids[0]);
+    };
+
+    // Cache hit → paint instantly, no spinner, no API call.
+    const cached = modelListCache.get(provider);
+    if (cached) {
+      applyIds(cached);
+      setLoadingModels(false);
+      return;
+    }
+
     setLoadingModels(true);
-    void modelchat
-      .models(provider)
-      .then((list) => {
-        if (cancelled) return;
-        const ids = list.map((m) => m.id);
-        setModels(ids);
-        const cur = useModelChatStore.getState().sessions[sessionId]?.model;
-        if (!cur && ids.length > 0) setModel(sessionId, ids[0]);
-      })
+    loadModelIds(provider)
+      .then(applyIds)
       .catch(() => {
         if (!cancelled) setModels([]);
       })

@@ -576,7 +576,17 @@ function buildScene(
   window.addEventListener("pointerdown", wake);
   window.addEventListener("pointermove", wake);
   window.addEventListener("wheel", wake, { passive: true });
+  // Cold-wake warm-up: repaint fresh on the window-active rising edge so a
+  // slept graph isn't caught by WebKit's post-idle throttle on first touch.
+  window.addEventListener("atlas:window-active", wake);
 
+  // Every scene mutation (selection, search, timeline cutoff, drag, zoom)
+  // reassigns `sceneRef.current` to a NEW object; pan only moves the viewport
+  // and intentionally does not. So object identity is a complete dirty signal:
+  // skip the full node+edge+label redraw when the physics is asleep AND the
+  // scene object is unchanged (a static idle graph otherwise repaints every
+  // node — incl. per-node Pixi text restyle — at up to 120 Hz).
+  let lastScene: typeof sceneRef.current | null = null;
   const tick = (ticker: Ticker) => {
     if (awake) {
       Matter.Engine.update(engine, ticker.deltaMS);
@@ -592,8 +602,12 @@ function buildScene(
       else sleepFrames = 0;
     }
 
+    const scene = sceneRef.current;
+    if (!awake && scene === lastScene) return;
+    lastScene = scene;
+
     const { selectedId, impact, ancestors, matched, draggingId, draggingNeighbors, cutoff, zoom } =
-      sceneRef.current;
+      scene;
     const hasSelection = selectedId !== null;
     const hasDrag = !hasSelection && draggingId !== null;
     const hasMatches = !hasSelection && !hasDrag && matched.size > 0;
@@ -757,6 +771,7 @@ function buildScene(
     window.removeEventListener("pointerdown", wake);
     window.removeEventListener("pointermove", wake);
     window.removeEventListener("wheel", wake);
+    window.removeEventListener("atlas:window-active", wake);
     exitPanMode();
     Matter.Composite.clear(engine.world, false, true);
     Matter.Engine.clear(engine);

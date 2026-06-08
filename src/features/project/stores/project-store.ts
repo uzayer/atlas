@@ -137,6 +137,11 @@ export const useProjectStore = createSelectors(
         // Idempotent + setting-gated. Safe to fire on every open.
         maybeEnsureAtlasGitignore(path, get().settings);
 
+        // Grant the asset protocol access to this project's tree so the media
+        // viewer can serve its images/video/audio. The static scope is narrow
+        // ($HOME); this covers projects on external volumes too. Fire-and-forget.
+        invoke("asset_allow_dir", { path }).catch(() => {});
+
         logEvent({
           source: "project",
           kind: "open",

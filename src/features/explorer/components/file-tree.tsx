@@ -13,6 +13,7 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { useGitStore } from "@/features/git/stores/git-store";
 import { FolderPlus, FoldVertical, UnfoldVertical } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { PanelSkeleton } from "@/components/panel-skeleton";
 import { TreeRow } from "./tree-row";
 import { openFile } from "@/lib/open-file";
 import { useFileTreeDragDrop, ROOT_DROP } from "../hooks/use-file-tree-drag-drop";
@@ -168,6 +169,14 @@ export function FileTree() {
     estimateSize: () => ROW_HEIGHT,
     overscan: 15,
   });
+
+  // Cold-wake warm-up: re-measure on the window-active rising edge so the first
+  // scroll after a long idle doesn't eat WebKit's main-thread throttle catch-up.
+  useEffect(() => {
+    const onActive = () => virtualizer.measure();
+    window.addEventListener("atlas:window-active", onActive);
+    return () => window.removeEventListener("atlas:window-active", onActive);
+  }, [virtualizer]);
 
   const handleOpenFile = useCallback((path: string, _name: string) => {
     // Single entry point: classifies by extension and routes text → editor,
@@ -685,9 +694,7 @@ export function FileTree() {
             }}
           >
             {loading ? (
-              <div className="px-3 py-4 text-[11px] text-text-tertiary text-center">
-                Loading…
-              </div>
+              <PanelSkeleton rows={10} className="p-2 gap-1.5" />
             ) : flat.length === 0 ? (
               <div className="px-3 py-4 text-[11px] text-text-tertiary text-center">
                 Empty folder

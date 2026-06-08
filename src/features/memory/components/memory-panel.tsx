@@ -19,6 +19,7 @@ import { MemoryGraphView } from "./memory-graph-view";
 import { MemoryPolicyView } from "./memory-policy-view";
 import { MemoryTimelineView } from "./memory-timeline-view";
 import { cn } from "@/lib/utils";
+import { PanelSkeleton } from "@/components/panel-skeleton";
 import { Markdown } from "@/lib/markdown";
 import { timeAgo } from "@/lib/time-ago";
 import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
@@ -112,9 +113,7 @@ export function MemoryPanel() {
         ) : sub === "timeline" ? (
           <MemoryTimelineView />
         ) : loading && !data ? (
-          <Centered>
-            <Loader2 size={18} className="animate-spin text-[var(--text-tertiary)]" />
-          </Centered>
+          <PanelSkeleton rows={8} />
         ) : !projectPath ? (
           <Centered>
             <p className="text-[12px] text-[var(--text-tertiary)]">

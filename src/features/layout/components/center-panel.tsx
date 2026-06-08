@@ -30,6 +30,7 @@ const PomodoroPanel = lazy(() => import("@/features/pomodoro/components/pomodoro
 const ModelChatPanel = lazy(() => import("@/features/model-chat/components/model-chat-panel").then(m => ({ default: m.ModelChatPanel })));
 const MemoryPanel = lazy(() => import("@/features/memory/components/memory-panel").then(m => ({ default: m.MemoryPanel })));
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { PanelSkeleton } from "@/components/panel-skeleton";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { useShallow } from "zustand/react/shallow";
@@ -87,6 +88,12 @@ const PERSISTENT_TYPES: ReadonlySet<TabType> = new Set([
   "browser",
   "knowledge-graph",
   "pdf",
+  // Keep chat + knowledge mounted across tab switches too: chat preserves the
+  // virtualizer's measurement cache + scroll position (remounting re-ran the
+  // "loading transcript" path and rebuilt scroll), and knowledge avoids
+  // re-walking its tree/graph on every revisit.
+  "chat",
+  "knowledge",
 ]);
 
 /**
@@ -389,6 +396,10 @@ function TabContentContainer({ groupId }: { groupId: string }) {
                   filePath={tab.data.filePath as string | undefined}
                   containerHeight={height}
                 />
+              ) : tab.type === "chat" ? (
+                <ChatPanel tabId={tab.id} />
+              ) : tab.type === "knowledge" ? (
+                <KnowledgePanel />
               ) : tab.type === "browser" ? (
                 <BrowserPanel tabId={tab.id} groupId={GROUP_OF(tab)} initialUrl={tab.data.url as string | undefined} />
               ) : tab.type === "knowledge-graph" ? (
@@ -409,11 +420,9 @@ function TabContentContainer({ groupId }: { groupId: string }) {
 }
 
 function PanelLoading() {
-  return (
-    <div className="h-full flex items-center justify-center text-text-tertiary text-sm">
-      Loading…
-    </div>
-  );
+  // Structural skeleton (not centered text) so the first open of a lazy panel
+  // while its JS chunk downloads reads as "loading content" rather than blank.
+  return <PanelSkeleton rows={7} />;
 }
 
 function TabContent({ tab }: { tab: Tab }) {

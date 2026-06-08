@@ -318,21 +318,23 @@ pub fn fileindex_search_dirs(
     webview: WebviewWindow,
     state: State<'_, FileIndexState>,
 ) -> Vec<FolderMatch> {
-    let snapshot: Option<(Vec<IndexedFile>, PathBuf)> = {
+    // Clone the Arc (pointer copy) + root, not the whole file Vec, then hold the
+    // inner read lock across the folder derivation (avoids a multi-MB per-call
+    // clone on large repos — same fix as fileindex_search).
+    let (files_arc, root) = {
         let guard = state.per_window.read();
-        guard
-            .get(webview.label())
-            .map(|p| (p.files.read().clone(), p.root.clone()))
+        match guard.get(webview.label()) {
+            Some(p) => (p.files.clone(), p.root.clone()),
+            None => return Vec::new(),
+        }
     };
-    let Some((files, root)) = snapshot else {
-        return Vec::new();
-    };
+    let files = files_arc.read();
 
     // Collect unique parent directories, in first-seen order. We walk each
     // file's `rel` up to (but not including) the project root.
     let mut seen = std::collections::HashSet::<String>::new();
     let mut folders: Vec<(String, PathBuf)> = Vec::new();
-    for f in &files {
+    for f in files.iter() {
         let mut cur = Path::new(&f.rel).parent();
         while let Some(p) = cur {
             let rel = p.to_string_lossy();
@@ -389,16 +391,24 @@ pub fn fileindex_search(
     webview: WebviewWindow,
     state: State<'_, FileIndexState>,
 ) -> Vec<FileMatch> {
-    let Some(idx) = ({
+    // Clone the Arc (a pointer copy), not the whole file Vec, then hold the
+    // inner read lock across the match. The old code deep-cloned every
+    // IndexedFile (path + rel String) on *each keystroke* just to read it —
+    // multi-MB per search on a large repo. Matching is pure CPU (no .await),
+    // so holding the read lock is fine; a concurrent re-index inserts a fresh
+    // ProjectIndex, leaving this Arc as a safe snapshot.
+    let files_arc = {
         let guard = state.per_window.read();
-        guard.get(webview.label()).map(|p| p.files.read().clone())
-    }) else {
-        return Vec::new();
+        match guard.get(webview.label()) {
+            Some(p) => p.files.clone(),
+            None => return Vec::new(),
+        }
     };
+    let files = files_arc.read();
 
     let trimmed = query.trim();
     if trimmed.is_empty() {
-        return idx
+        return files
             .iter()
             .take(limit.max(1))
             .map(|f| FileMatch {
@@ -411,7 +421,7 @@ pub fn fileindex_search(
     let mut matcher = Matcher::default();
     let pattern = Pattern::parse(trimmed, CaseMatching::Smart, Normalization::Smart);
 
-    let mut scored: Vec<(u32, &IndexedFile)> = idx
+    let mut scored: Vec<(u32, &IndexedFile)> = files
         .iter()
         .filter_map(|f| {
             pattern

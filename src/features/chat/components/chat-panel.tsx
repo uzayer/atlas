@@ -33,6 +33,7 @@ const MessagesList = lazy(() =>
 import type { MessagesListHandle } from "./messages-list";
 import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight, LogIn } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
+import { PanelSkeleton } from "@/components/panel-skeleton";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -490,11 +491,12 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
 }
 
 function LoadingTranscriptState() {
+  // Structural skeleton over a centered transcript-width column, so opening a
+  // historical chat reads as "loading messages" instead of a blank spinner.
   return (
-    <div className="h-full flex items-center justify-center">
-      <div className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
-        <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
-        <span>Loading transcript…</span>
+    <div className="h-full overflow-hidden">
+      <div className="mx-auto w-full max-w-[760px]">
+        <PanelSkeleton rows={6} />
       </div>
     </div>
   );

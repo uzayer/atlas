@@ -152,6 +152,7 @@ pub fn run() {
             commands::fs::read_file_content,
             commands::fs::read_file_base64,
             commands::fs::file_mtime_ms,
+            commands::fs::asset_allow_dir,
             commands::fs::write_file_content,
             commands::fs::write_file_base64,
             commands::fs::ensure_atlas_gitignore,

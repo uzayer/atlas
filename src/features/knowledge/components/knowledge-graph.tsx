@@ -660,8 +660,21 @@ function buildScene(
   window.addEventListener("pointerdown", wake);
   window.addEventListener("pointermove", wake);
   window.addEventListener("wheel", wake, { passive: true });
+  // Cold-wake warm-up: after a long idle WebKit throttles the main thread, so
+  // the first interaction with a slept graph eats the catch-up. Wake on the
+  // window-active rising edge so it repaints fresh before the user touches it.
+  window.addEventListener("atlas:window-active", wake);
 
   // ── Per-tick draw ────────────────────────────────────────────
+  // When the physics is asleep AND nothing that affects the drawing changed
+  // (selection/drag/zoom), skip the whole node+edge+label redraw. Otherwise the
+  // graph repaints every node (incl. per-node Pixi text restyle) at display
+  // refresh — up to 120 Hz on ProMotion — for a static, idle graph.
+  // Every scene mutation (selection, drag, zoom) reassigns `sceneRef.current`
+  // to a NEW object; pan only moves the viewport and intentionally does not.
+  // So object identity is a complete dirty signal: skip the redraw when the
+  // physics is asleep AND the scene object is unchanged.
+  let lastScene: typeof sceneRef.current | null = null;
   const tick = (ticker: Ticker) => {
     if (awake) {
       Matter.Engine.update(engine, ticker.deltaMS);
@@ -681,8 +694,11 @@ function buildScene(
       }
     }
 
-    const { selectedId, neighbors, draggingId, draggingNeighbors, zoom } =
-      sceneRef.current;
+    const scene = sceneRef.current;
+    if (!awake && scene === lastScene) return;
+    lastScene = scene;
+
+    const { selectedId, neighbors, draggingId, draggingNeighbors, zoom } = scene;
     // Drag-highlight uses the same visual treatment as selection.
     // Selection wins if both are active.
     const focusId = selectedId ?? draggingId;
@@ -815,6 +831,7 @@ function buildScene(
     window.removeEventListener("pointerdown", wake);
     window.removeEventListener("pointermove", wake);
     window.removeEventListener("wheel", wake);
+    window.removeEventListener("atlas:window-active", wake);
     exitPanMode();
     Matter.Composite.clear(engine.world, false, true);
     Matter.Engine.clear(engine);
