@@ -52,6 +52,8 @@ atlas-agents = { path = "../crates/atlas-agents" }
 atlas-terminal = { path = "../crates/atlas-terminal" }
 atlas-acp = { path = "../crates/atlas-acp" }
 atlas-embed = { path = "../crates/atlas-embed" }
+# Native code-review engine (Cersei-backed). Drives `commands::review`.
+atlas-review = { path = "../crates/atlas-review" }
 dirs = "6"
 sha2 = "0.10"
 # URL parsing for the embedded browser (`commands::browser`). Already in the

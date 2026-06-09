@@ -39,7 +39,7 @@ interface LayoutState {
   rightPanel: {
     visible: boolean;
     width: number;
-    activeSection: "changes" | "analysis" | "explore" | "github";
+    activeSection: "review-agents" | "changes" | "analysis" | "explore" | "github";
   };
   /** Per-app KB tab layout — survives tab switches (each KB tab gets the
    *  same panel layout, matching the global-left/right model). */
@@ -150,7 +150,7 @@ const initialState: LayoutState = {
   rightPanel: {
     visible: true,
     width: 280,
-    activeSection: "changes",
+    activeSection: "review-agents",
   },
   knowledgePanel: {
     showSidebar: true,
