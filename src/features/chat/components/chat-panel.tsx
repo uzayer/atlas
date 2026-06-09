@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
-import { agents, ensureDefaultAgent } from "../lib/agents-api";
+import { agents, ensureAgent, CODEX_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
 import type { SessionKey } from "@/types/agents";
 import { composePrompt, type MentionData } from "../lib/mentions";
+import { usePaneFind } from "../lib/use-pane-find";
 import { MessageInput } from "./message-input";
 import { SessionSidebar } from "./session-sidebar";
 import { PermissionModal } from "./permission-modal";
@@ -30,8 +31,9 @@ const MessagesList = lazy(() =>
   import("./messages-list").then((m) => ({ default: m.MessagesList }))
 );
 import type { MessagesListHandle } from "./messages-list";
-import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight } from "lucide-react";
+import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight, LogIn, GitCompare, FlaskConical } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
+import { PanelSkeleton } from "@/components/panel-skeleton";
 import { Kbd, KbdGroup } from "@/ui/kbd";
 import { logEvent } from "@/features/log/lib/log";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -57,7 +59,8 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   const [roleFilter, setRoleFilter] = useState<"all" | "user" | "assistant">("all");
   const [bashPanelOpen, setBashPanelOpen] = useState(false);
   const [plansPanelOpen, setPlansPanelOpen] = useState(false);
-  const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
+  // Cmd+F find — scoped to this pane + tab (see usePaneFind).
+  const [searchPaletteOpen, setSearchPaletteOpen] = usePaneFind(tabId);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Scroll-to-bottom state is owned here so the floating button can live
@@ -92,26 +95,36 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       if (cancelled || pending) return;
       pending = true;
       try {
-        const agent = await ensureDefaultAgent();
+        // Bind to THIS session's chosen agent (Claude by default, or Codex),
+        // not a single global default — so per-tab agents run in parallel.
+        const at = useChatStore.getState().sessions[tabId]?.agentType;
+        const pluginId =
+          at === "codex" ? CODEX_PLUGIN_ID : DEFAULT_PLUGIN_ID;
+        const agent = await ensureAgent(pluginId);
         if (cancelled) return;
         const project = useProjectStore.getState().currentProject;
         const cwd = project?.path ?? "/";
         const key = await agents.newSession(agent.agent_id, cwd);
         if (cancelled) return;
-        useChatStore
-          .getState()
-          .actions.setAcpBinding(tabId, agent.agent_id, key.session_id);
-        // Honor the tab's selected permission mode for this fresh session.
+        // Apply the tab's permission mode BEFORE exposing the binding.
+        // `setAcpBinding` is what flushes any queued send, so if we set the
+        // mode after it the first turn can race ahead of (e.g.)
+        // bypassPermissions and still trigger a stray prompt on turn one.
+        // Awaiting here guarantees the agent is in the right mode first.
         const mode =
           useChatStore.getState().sessions[tabId]?.claudePermissionMode ??
           "default";
         if (mode !== "default") {
-          agents
-            .setMode(key, mode)
-            .catch((err) =>
-              console.warn("setMode at session create failed:", err)
-            );
+          try {
+            await agents.setMode(key, mode);
+          } catch (err) {
+            console.warn("setMode at session create failed:", err);
+          }
+          if (cancelled) return;
         }
+        useChatStore
+          .getState()
+          .actions.setAcpBinding(tabId, agent.agent_id, key.session_id);
       } catch (err) {
         console.warn("Agent session creation failed:", err);
       } finally {
@@ -144,18 +157,6 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     // brand-new project" symptom.
   }, [tabId, !!session, session?.acpSessionId]);
 
-  // Cmd+F → open the message-jump palette (ChatPanel only mounts when its tab is active).
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f" && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        setSearchPaletteOpen(true);
-      }
-    };
-    window.addEventListener("keydown", handler, true); // capture phase to beat browser default
-    return () => window.removeEventListener("keydown", handler, true);
-  }, []);
-
   // Shift+Tab → cycle the agent permission mode. Registered on the window in
   // capture phase so the browser's default focus traversal never steals it.
   useEffect(() => {
@@ -167,19 +168,9 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       if (!root || !active || !root.contains(active)) return;
       e.preventDefault();
       e.stopPropagation();
+      // The store action both cycles the mode AND propagates it to the bound
+      // agent (so e.g. bypassPermissions actually stops permission prompts).
       useChatStore.getState().actions.cycleClaudePermissionMode(tabId);
-      // Propagate the new mode to the agent session so the agent actually
-      // honours it (e.g. bypassPermissions stops emitting permission requests).
-      const s = useChatStore.getState().sessions[tabId];
-      if (s?.acpAgentId && s.acpSessionId) {
-        const key: SessionKey = {
-          agent_id: s.acpAgentId,
-          session_id: s.acpSessionId,
-        };
-        agents
-          .setMode(key, s.claudePermissionMode ?? "default")
-          .catch((err) => console.warn("setMode failed:", err));
-      }
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
@@ -500,11 +491,12 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
 }
 
 function LoadingTranscriptState() {
+  // Structural skeleton over a centered transcript-width column, so opening a
+  // historical chat reads as "loading messages" instead of a blank spinner.
   return (
-    <div className="h-full flex items-center justify-center">
-      <div className="flex items-center gap-2 text-[12px] text-[var(--text-tertiary)]">
-        <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
-        <span>Loading transcript…</span>
+    <div className="h-full overflow-hidden">
+      <div className="mx-auto w-full max-w-[760px]">
+        <PanelSkeleton rows={6} />
       </div>
     </div>
   );
@@ -533,20 +525,57 @@ function ChatComposer({
   jumpCount: number;
   onScrollToBottom: () => void;
 }) {
+  // The Claude install/auth gating only applies to Claude sessions. A Codex
+  // chat must not be blocked by Claude's status (Codex inherits its own
+  // ~/.codex / OPENAI auth); it surfaces its own errors from the spawn path.
+  const isClaude =
+    useChatStore((s) => s.sessions[tabId]?.agentType ?? "claude-code") === "claude-code";
   const phase = useClaudeSetupStore.use.phase();
-  const disabled = phase !== "ready";
-  const disabledReason =
-    phase === "not-installed"
-      ? "Install Claude Code to start chatting"
-      : phase === "not-authed"
-        ? "Sign in to Claude Code to start chatting"
-        : phase === "installing"
-          ? "Installing Claude Code…"
-          : phase === "authing"
-            ? "Finishing sign-in…"
-            : undefined;
 
-  const setupVisible = phase !== "ready";
+  // Codex sign-in state (only for Codex sessions). `null` = still probing.
+  const [codexAuthed, setCodexAuthed] = useState<boolean | null>(null);
+  const [codexSigningIn, setCodexSigningIn] = useState(false);
+  useEffect(() => {
+    if (isClaude) return;
+    let cancelled = false;
+    codexStatus()
+      .then((a) => !cancelled && setCodexAuthed(a))
+      .catch(() => !cancelled && setCodexAuthed(true)); // probe failure → don't block
+    return () => {
+      cancelled = true;
+    };
+  }, [isClaude]);
+  const codexNeedsAuth = !isClaude && codexAuthed === false;
+  const signInCodex = async () => {
+    setCodexSigningIn(true);
+    try {
+      const agent = await ensureAgent(CODEX_PLUGIN_ID);
+      // Blocks while codex-acp runs the OpenAI browser OAuth.
+      await agents.authenticate(agent.agent_id, "chatgpt");
+      setCodexAuthed(await codexStatus());
+    } catch (err) {
+      logEvent({ source: "atlas", kind: "codex-auth", summary: "Codex sign-in failed", status: "failure", payload: { error: String(err) } });
+    } finally {
+      setCodexSigningIn(false);
+    }
+  };
+
+  const disabled = (isClaude && phase !== "ready") || codexNeedsAuth;
+  const disabledReason = codexNeedsAuth
+    ? "Sign in to Codex to start chatting"
+    : !isClaude
+      ? undefined
+      : phase === "not-installed"
+        ? "Install Claude Code to start chatting"
+        : phase === "not-authed"
+          ? "Sign in to Claude Code to start chatting"
+          : phase === "installing"
+            ? "Installing Claude Code…"
+            : phase === "authing"
+              ? "Finishing sign-in…"
+              : undefined;
+
+  const setupVisible = (isClaude && phase !== "ready") || codexNeedsAuth;
   const showRow = setupVisible || showJumpToBottom;
 
   return (
@@ -559,10 +588,21 @@ function ChatComposer({
         {showRow && (
           <div className="pointer-events-none absolute bottom-full inset-x-0 mb-2 z-20 flex justify-center">
             <div className="pointer-events-auto flex items-center gap-2">
-              {setupVisible && (
+              {setupVisible && isClaude && (
                 <span key={`setup-${phase}`} className="atlas-pill-in">
                   <ClaudeSetupBanner />
                 </span>
+              )}
+              {codexNeedsAuth && (
+                <button
+                  key="codex-signin"
+                  onClick={signInCodex}
+                  disabled={codexSigningIn}
+                  className="atlas-pill-in inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[11px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {codexSigningIn ? <Loader2 size={11} className="animate-spin" /> : <LogIn size={11} />}
+                  {codexSigningIn ? "Opening OpenAI sign-in…" : "Sign in to Codex with ChatGPT"}
+                </button>
               )}
               {showJumpToBottom && (
                 <button
@@ -598,46 +638,76 @@ function ChatComposer({
           disabledReason={disabledReason}
         />
       </div>
-      <ClaudeLoginDialog />
+      {isClaude && <ClaudeLoginDialog />}
     </>
   );
 }
 
+const WELCOME_SUGGESTIONS = [
+  { text: "Analyze this codebase", Icon: Search },
+  { text: "Create a new feature", Icon: Sparkles },
+  { text: "Review recent changes", Icon: GitCompare },
+  { text: "Write tests for...", Icon: FlaskConical },
+] as const;
+
 function WelcomeState() {
   return (
-    <div className="h-full flex items-center justify-center">
-      <div className="text-center space-y-4 max-w-[400px] px-6">
-        <AtlasIcon size={56} className="mx-auto rounded-2xl" />
-        <div>
-          <h2 className="text-lg font-semibold text-[var(--text-primary)]">
-            Atlas
-          </h2>
-          <p className="text-sm text-[var(--text-secondary)] mt-1">
-            Code with Claude. Tools, plans, and edits all live.
-          </p>
+    <div className="h-full flex items-center justify-center px-6">
+      <div className="w-full max-w-[440px] flex flex-col items-center text-center">
+        {/* Hero: Atlas mark over a soft accent glow (radial gradient, no
+            backdrop-filter — cheap + static in WKWebView). */}
+        <div className="relative mb-5">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-[260px] w-[260px] -translate-x-1/2 -translate-y-1/2 rounded-full opacity-[0.16]"
+            style={{
+              background:
+                "radial-gradient(circle, var(--accent-primary) 0%, transparent 68%)",
+            }}
+          />
+          <AtlasIcon
+            size={60}
+            className="atlas-fade-in rounded-[18px] ring-1 ring-white/10 shadow-[0_12px_50px_-12px_rgba(0,0,0,0.85)]"
+          />
         </div>
-        <div className="grid grid-cols-2 gap-2 text-left">
-          {[
-            "Analyze this codebase",
-            "Create a new feature",
-            "Review recent changes",
-            "Write tests for...",
-          ].map((prompt, i) => (
+
+        <h2
+          className="atlas-fade-in bg-gradient-to-b from-white to-white/55 bg-clip-text text-[22px] font-semibold tracking-tight text-transparent"
+          style={{ animationDelay: "40ms" }}
+        >
+          Atlas
+        </h2>
+        <p
+          className="atlas-fade-in mt-1.5 text-[13px] text-[var(--text-tertiary)]"
+          style={{ animationDelay: "80ms" }}
+        >
+          Code with Agents. Tools, plans, and edits all live.
+        </p>
+
+        <div className="mt-7 grid w-full grid-cols-2 gap-2.5">
+          {WELCOME_SUGGESTIONS.map(({ text, Icon }, i) => (
             <button
-              key={prompt}
+              key={text}
               onClick={() =>
                 window.dispatchEvent(
-                  new CustomEvent("atlas:chat-prefill", { detail: { text: prompt } }),
+                  new CustomEvent("atlas:chat-prefill", { detail: { text } }),
                 )
               }
-              style={{ animationDelay: `${i * 40}ms` }}
-              className="group atlas-fade-in flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors text-left cursor-pointer"
+              style={{ animationDelay: `${120 + i * 50}ms` }}
+              className="group atlas-fade-in relative flex flex-col gap-2.5 rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)] p-3 text-left transition-all duration-150 hover:-translate-y-0.5 hover:border-[var(--border-strong)] hover:bg-[var(--bg-elevated)] hover:shadow-[0_8px_24px_-12px_rgba(0,0,0,0.7)] cursor-pointer"
             >
-              <span className="truncate">{prompt}</span>
-              <ArrowRight
-                size={11}
-                className="shrink-0 text-[var(--text-tertiary)] opacity-0 -translate-x-1 transition-all group-hover:opacity-100 group-hover:translate-x-0"
-              />
+              <div className="flex items-center justify-between">
+                <span className="grid h-7 w-7 place-items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-tertiary)] transition-colors group-hover:text-[var(--text-primary)]">
+                  <Icon size={13} />
+                </span>
+                <ArrowRight
+                  size={13}
+                  className="-translate-x-1 text-[var(--text-ghost)] opacity-0 transition-all group-hover:translate-x-0 group-hover:text-[var(--text-secondary)] group-hover:opacity-100"
+                />
+              </div>
+              <span className="text-[12px] font-medium leading-snug text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]">
+                {text}
+              </span>
             </button>
           ))}
         </div>

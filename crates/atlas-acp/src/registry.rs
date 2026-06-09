@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
-    PermissionOptionId, PromptRequest, RequestPermissionOutcome, SelectedPermissionOutcome,
-    SessionId, SessionModeId, SetSessionModeRequest, StopReason, TextContent,
+    AuthenticateRequest, CancelNotification, ContentBlock, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, PermissionOptionId, PromptRequest, RequestPermissionOutcome,
+    SelectedPermissionOutcome, SessionId, SessionModeId, SetSessionModeRequest, StopReason,
+    TextContent,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -58,14 +59,16 @@ impl AgentSpec {
         }
     }
 
-    /// Codex ACP bridge. The actual command is a placeholder until OpenAI ships
-    /// an official ACP adapter — once it's live, swap the command string and
-    /// the multi-agent UI picks it up automatically.
+    /// Codex ACP bridge — Zed Industries' `codex-acp`, which embeds the Codex
+    /// engine and speaks ACP over stdio. Launched via `npx` (mirrors
+    /// `claude_code_ts`); the npm package ships a `codex-acp` bin launcher.
+    /// Auth is inherited from the host env / `~/.codex` (ChatGPT login or
+    /// `OPENAI_API_KEY`) — see `sanitize_host_env`.
     pub fn codex() -> Self {
         Self {
             spec_id: "codex".into(),
             display_name: "Codex (ACP)".into(),
-            command: "codex-acp".into(),
+            command: "npx -y @zed-industries/codex-acp".into(),
         }
     }
 
@@ -221,6 +224,19 @@ impl AgentRegistry {
             .block_task()
             .await?;
         self.register_session(agent_id, session_id)?;
+        Ok(())
+    }
+
+    /// Run the agent's ACP `authenticate` flow for `method_id`. For Codex's
+    /// "chatgpt" method this blocks while codex-acp runs a local login server
+    /// and opens the browser to OpenAI (OAuth/PKCE); it resolves once the user
+    /// completes sign-in (credentials land in `~/.codex/auth.json`).
+    pub async fn authenticate(&self, agent_id: AgentId, method_id: String) -> Result<()> {
+        let connection = self.connection(agent_id)?;
+        connection
+            .send_request(AuthenticateRequest::new(method_id))
+            .block_task()
+            .await?;
         Ok(())
     }
 

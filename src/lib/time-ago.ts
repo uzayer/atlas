@@ -34,5 +34,14 @@ export function timeAgo(
   if (h < 24) return `${h}h${ago}`;
   const d = Math.floor(h / 24);
   if (noDateFallback || d < 7) return `${d}d${ago}`;
-  return new Date(iso).toLocaleDateString();
+  // Older than a week → a human date. Drop the year for the current year
+  // ("20 May"), include it otherwise ("20 May 2025"). Nicer than DD/MM/YYYY.
+  const date = new Date(iso);
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  return date.toLocaleDateString(
+    undefined,
+    sameYear
+      ? { day: "numeric", month: "short" }
+      : { day: "numeric", month: "short", year: "numeric" },
+  );
 }

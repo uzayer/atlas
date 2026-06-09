@@ -21,13 +21,14 @@
 //! scope — it's a two-level pick-session-then-search flow that
 //! doesn't fit the unified shape.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Matcher, Utf32Str};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 use super::fileindex::FileIndexState;
 use super::git::{GitRef, GitRefs};
@@ -52,38 +53,62 @@ const TOTAL_LIMIT: usize = 30;
 /// typing lag in the picker. With the cache the per-keystroke
 /// payload is just `(query, scope, project_path)` (a few hundred
 /// bytes) and the heavy data sits hot in Rust.
+/// Per-WINDOW caches (keyed by webview label), for the same reason as
+/// `FileIndexState`: `.manage()` state is process-global, so a single cache
+/// would let window B's knowledge/symbols leak into window A's @-mentions.
+#[derive(Default)]
+struct WindowCache {
+    knowledge: Vec<KnowledgeInput>,
+    symbols: Vec<SymbolInput>,
+}
+
 #[derive(Default)]
 pub struct MentionCacheState {
-    knowledge: RwLock<Vec<KnowledgeInput>>,
-    symbols: RwLock<Vec<SymbolInput>>,
+    per_window: RwLock<HashMap<String, WindowCache>>,
 }
 
 impl MentionCacheState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Drop a window's cache (called on window close).
+    pub fn drop_window(&self, label: &str) {
+        self.per_window.write().remove(label);
+    }
 }
 
 #[tauri::command]
 pub fn mention_cache_set_knowledge(
     items: Vec<KnowledgeInput>,
+    webview: WebviewWindow,
     state: State<'_, MentionCacheState>,
 ) {
-    *state.knowledge.write() = items;
+    state
+        .per_window
+        .write()
+        .entry(webview.label().to_string())
+        .or_default()
+        .knowledge = items;
 }
 
 #[tauri::command]
 pub fn mention_cache_set_symbols(
     items: Vec<SymbolInput>,
+    webview: WebviewWindow,
     state: State<'_, MentionCacheState>,
 ) {
-    *state.symbols.write() = items;
+    state
+        .per_window
+        .write()
+        .entry(webview.label().to_string())
+        .or_default()
+        .symbols = items;
 }
 
 #[tauri::command]
-pub fn mention_cache_clear(state: State<'_, MentionCacheState>) {
-    state.knowledge.write().clear();
-    state.symbols.write().clear();
+pub fn mention_cache_clear(webview: WebviewWindow, state: State<'_, MentionCacheState>) {
+    state.per_window.write().remove(webview.label());
 }
 
 /// Frontend-supplied caches for kinds whose source-of-truth state
@@ -178,11 +203,13 @@ pub async fn mention_search(
     query: String,
     scope: Option<String>,
     project_path: Option<String>,
+    webview: WebviewWindow,
     fileindex: State<'_, FileIndexState>,
     papers: State<'_, SavedPapersIndex>,
     git_watcher: State<'_, GitWatcherState>,
     cache: State<'_, MentionCacheState>,
 ) -> Result<Vec<MentionResult>, String> {
+    let label = webview.label().to_string();
     let scope_ref = scope.as_deref();
     let trimmed = query.trim().to_string();
 
@@ -199,12 +226,12 @@ pub async fn mention_search(
     // watcher-invalidated cache so the O(files × depth) derivation
     // only runs after a real file-set change — not per keystroke.
     let files_snapshot: Option<Vec<(String, PathBuf)>> = if want_file {
-        fileindex.snapshot_files().map(|(files, _)| files)
+        fileindex.snapshot_files(&label).map(|(files, _)| files)
     } else {
         None
     };
     let folders_snapshot: Option<Vec<(String, PathBuf)>> = if want_folder {
-        fileindex.snapshot_folders()
+        fileindex.snapshot_folders(&label)
     } else {
         None
     };
@@ -290,7 +317,12 @@ pub async fn mention_search(
     // path could push 100-500 KB per keystroke on a project with
     // many symbols, which was the visible typing lag).
     let symbols_data: Vec<SymbolInput> = if want_symbol {
-        cache.symbols.read().clone()
+        cache
+            .per_window
+            .read()
+            .get(&label)
+            .map(|c| c.symbols.clone())
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -302,7 +334,12 @@ pub async fn mention_search(
     };
 
     let knowledge_data: Vec<KnowledgeInput> = if want_knowledge {
-        cache.knowledge.read().clone()
+        cache
+            .per_window
+            .read()
+            .get(&label)
+            .map(|c| c.knowledge.clone())
+            .unwrap_or_default()
     } else {
         Vec::new()
     };

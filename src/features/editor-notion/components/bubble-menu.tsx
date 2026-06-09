@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { BubbleMenu } from "@tiptap/react/menus";
 import type { Editor } from "@tiptap/core";
 import { cn } from "@/lib/utils";
+import { sendToAgentChat } from "@/features/chat/lib/send-to-agent";
 import {
   Bold,
   Italic,
@@ -13,6 +14,7 @@ import {
   Heading2,
   List,
   Quote,
+  MessageSquarePlus,
 } from "lucide-react";
 
 interface AtlasBubbleMenuProps {
@@ -182,6 +184,17 @@ export function AtlasBubbleMenu({ editor }: AtlasBubbleMenuProps) {
             icon: Quote,
             isActive: editor.isActive("blockquote"),
             onClick: () => editor.chain().focus().toggleBlockquote().run(),
+          })}
+          <span className="atlas-bubble-sep" />
+          {tool({
+            title: "Send selection to chat",
+            icon: MessageSquarePlus,
+            onClick: () => {
+              const { from, to } = editor.state.selection;
+              const text = editor.state.doc.textBetween(from, to, "\n").trim();
+              if (!text) return;
+              sendToAgentChat(text);
+            },
           })}
         </>
       )}

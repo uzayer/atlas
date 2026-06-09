@@ -105,6 +105,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(commands::browser::BrowserState::new())
         .manage(TerminalState::new())
+        .manage(commands::modelchat::ModelChatState::new())
         .manage(AgentRegistry::new())
         .manage(FileIndexState::new())
         .manage(GitWatcherState::new())
@@ -116,6 +117,16 @@ pub fn run() {
         .manage(SessionsWatchState::new())
         .manage(ClaudeSessionIndex::new())
         .manage(SavedPapersIndex::new())
+        // Drop a window's per-window index + mention caches when it closes, so
+        // its file watcher stops and memory is freed (these states are keyed by
+        // webview label for multi-window project scoping).
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                let label = window.label();
+                window.state::<FileIndexState>().drop_window(label);
+                window.state::<MentionCacheState>().drop_window(label);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::window::window_zoom,
             commands::window::set_window_title,
@@ -140,6 +151,8 @@ pub fn run() {
             commands::fs::read_directory,
             commands::fs::read_file_content,
             commands::fs::read_file_base64,
+            commands::fs::file_mtime_ms,
+            commands::fs::asset_allow_dir,
             commands::fs::write_file_content,
             commands::fs::write_file_base64,
             commands::fs::ensure_atlas_gitignore,
@@ -287,6 +300,19 @@ pub fn run() {
             commands::agents::agents_respond_permission,
             commands::agents::agents_list_auth_methods,
             commands::agents::agents_run_auth_method,
+            commands::agents::agents_authenticate,
+            commands::agents::codex_status,
+            commands::byok::byok_list,
+            commands::byok::byok_set,
+            commands::byok::byok_delete,
+            commands::byok::byok_get,
+            commands::modelchat::modelchat_models,
+            commands::modelchat::modelchat_stream,
+            commands::modelchat::modelchat_cancel,
+            commands::modelchat_sessions::modelchat_sessions_list,
+            commands::modelchat_sessions::modelchat_session_get,
+            commands::modelchat_sessions::modelchat_session_save,
+            commands::modelchat_sessions::modelchat_session_delete,
             commands::fileindex::fileindex_open_project,
             commands::fileindex::fileindex_close_project,
             commands::fileindex::fileindex_search,
@@ -300,6 +326,17 @@ pub fn run() {
             commands::pomodoro::pomodoro_save,
             commands::plans::plans_load,
             commands::plans::plans_append,
+            commands::agent_memory::agent_memory_read,
+            commands::memory_graph::memory_embed_status,
+            commands::memory_graph::memory_embed_download,
+            commands::memory_graph::memory_index_build,
+            commands::memory_graph::memory_index_query,
+            commands::memory_graph::memory_graph_layout_load,
+            commands::memory_graph::memory_graph_layout_save,
+            commands::memory_policy::memory_policies,
+            commands::memory_policy::memory_policy_update,
+            commands::memory_timeline::memory_timeline,
+            commands::memory_timeline::memory_timeline_cached,
             commands::pdf_annotations::pdf_annotations_load,
             commands::pdf_annotations::pdf_annotations_save,
         ])

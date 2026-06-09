@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import {
   ArrowUp,
@@ -8,7 +8,8 @@ import {
   X,
 } from "lucide-react";
 import { useChatStore } from "../stores/chat-store";
-import { CLAUDE_PERMISSION_MODE_LABEL } from "@/types/agent";
+import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL } from "@/types/agent";
+import { AgentMark } from "@/components/agent-mark";
 // `ChatInput` pulls in CodeMirror (~870 KB) via `cm-mention-extension`.
 // We import it dynamically so the chunk is not in the initial preload set.
 // The import is kicked off at module-evaluation time (below, outside the
@@ -31,6 +32,7 @@ import type {
   SlashCommand,
 } from "./slash-command-picker";
 import { commandRequiresArgs } from "./slash-command-picker";
+import { CodexLoginDialog } from "./codex-login-dialog";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import type { MentionTrigger } from "../lib/cm-mention-extension";
@@ -93,6 +95,38 @@ export function MessageInput({
   const permissionMode = useChatStore(
     (s) => s.sessions[tabId]?.claudePermissionMode ?? "default"
   );
+  const agentType = useChatStore(
+    (s) => s.sessions[tabId]?.agentType ?? "claude-code"
+  );
+  // ACP-reported slash commands for this session (Codex). Claude keeps its
+  // curated catalogue (the picker's default).
+  const availableCommands = useChatStore((s) => s.sessions[tabId]?.availableCommands);
+  const agentSlashCommands = useMemo<SlashCommand[] | undefined>(() => {
+    if (agentType !== "codex") return undefined;
+    const fromAgent: SlashCommand[] = (availableCommands ?? [])
+      .map((c) => {
+        const o = (c ?? {}) as { name?: string; description?: string; input?: unknown };
+        const name = (o.name ?? "").replace(/^\//, "");
+        return {
+          name,
+          signature: o.input != null ? `/${name} <args>` : `/${name}`,
+          description: o.description ?? "",
+          handler: "passthrough" as const,
+        };
+      })
+      .filter((c) => c.name && c.name !== "login");
+    // Custom Atlas-handled command (not advertised by codex-acp): opens the
+    // Codex sign-in modal — mirrors Claude's `/login`.
+    return [
+      {
+        name: "login",
+        signature: "/login",
+        description: "Sign in to Codex (ChatGPT or API key).",
+        handler: "codex-login" as const,
+      },
+      ...fromAgent,
+    ];
+  }, [agentType, availableCommands]);
   const queue = useChatStore((s) => s.queues[tabId] ?? EMPTY_QUEUE);
 
   // The composer's plain-text content is mirrored into local state so the
@@ -172,6 +206,7 @@ export function MessageInput({
 
   // ── Slash-command picker orchestration ────────────────────────────────
   const [slashTrigger, setSlashTrigger] = useState<SlashTrigger | null>(null);
+  const [codexLoginOpen, setCodexLoginOpen] = useState(false);
   const slashPickerRef = useRef<SlashCommandPickerHandle>(null);
   const slashTriggerRef = useRef<SlashTrigger | null>(null);
   slashTriggerRef.current = slashTrigger;
@@ -194,12 +229,13 @@ export function MessageInput({
       const view = inputRef.current?.view();
       if (!t || !view) return;
 
-      if (cmd.handler === "atlas-login") {
-        // `/login` doesn't pass through to the agent — the adapter
-        // filters it. Open Atlas's own dialog instead.
+      if (cmd.handler === "atlas-login" || cmd.handler === "codex-login") {
+        // `/login` doesn't pass through to the agent — open Atlas's own sign-in
+        // dialog (Claude's setup dialog, or the Codex auth modal).
         clearSlashRange(view, t.from, t.to);
         setSlashTrigger(null);
-        openLoginDialog();
+        if (cmd.handler === "codex-login") setCodexLoginOpen(true);
+        else openLoginDialog();
         inputRef.current?.focus();
         return;
       }
@@ -345,6 +381,35 @@ export function MessageInput({
     return () => window.removeEventListener("atlas:chat-prefill", handler);
   }, []);
 
+  // Append text to the composer (e.g. the KB bubble menu's "Send selection to
+  // chat"). Unlike "prefill" this is NON-destructive (keeps any draft) and only
+  // the ACTIVE session reacts, so it doesn't fan out to every mounted chat tab.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ text: string; tabId?: string }>).detail;
+      if (!detail?.text) return;
+      if (detail.tabId) {
+        // Tab-targeted insert (KB "send selection to chat"). The sender
+        // already appended to this tab's draft, so `text` is the full
+        // composed value — replace, don't append, to avoid doubling.
+        if (detail.tabId !== tabId) return;
+        inputRef.current?.setValue(detail.text);
+        setValue(detail.text);
+      } else {
+        // Legacy untargeted insert — only the active session reacts and
+        // the text is appended to whatever's already in the composer.
+        if (useChatStore.getState().activeSessionId !== tabId) return;
+        const cur = inputRef.current?.getValue() ?? "";
+        const next = cur.trim() ? `${cur}\n\n${detail.text}` : detail.text;
+        inputRef.current?.setValue(next);
+        setValue(next);
+      }
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
+    window.addEventListener("atlas:chat-insert", handler);
+    return () => window.removeEventListener("atlas:chat-insert", handler);
+  }, [tabId]);
+
   const submit = useCallback(() => {
     // Hard gate: Claude Code missing or not authed — sending would just
     // surface a confusing ACP spawn error. The banner above tells the user
@@ -433,12 +498,12 @@ export function MessageInput({
             "focus-within:border-[var(--border-focus)]",
             "focus-within:ring-1 focus-within:ring-[var(--accent-primary)]/20",
             // Hard-disable when Claude Code isn't ready. `pointer-events-none`
-            // also blocks the focus event so we never trigger the agent-bind
-            // listener (which would try to spawn a session against a CLI
-            // that isn't ready). The error tint makes the dead input
-            // obviously dead rather than just dimmed on black.
-            disabled &&
-              "opacity-70 pointer-events-none border-[var(--status-error)]/25 bg-[var(--status-error)]/[0.04]",
+            // disables the textarea (no click-to-focus/type) and also blocks
+            // the focus event so we never trigger the agent-bind listener
+            // (which would try to spawn a session against a CLI that isn't
+            // ready). Just dim it — no red tint — since the send button is
+            // already disabled and submit()/Cmd+Enter are gated on `disabled`.
+            disabled && "opacity-60 pointer-events-none",
           )}
           onFocusCapture={handleFocusCapture}
         >
@@ -465,6 +530,16 @@ export function MessageInput({
           )}
           <div className="flex items-center justify-between px-2 pb-2 pt-1">
             <div className="flex items-center gap-1">
+              {/* Which coding agent this chat is bound to (Claude / Codex).
+                  Switch with ⌥/ (only on a fresh chat). */}
+              <span
+                className="flex items-center gap-1.5 px-1.5 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-secondary)] select-none"
+                title="Coding agent (switch with ⌥/ on a new chat)"
+              >
+                <AgentMark agentType={agentType} className="!h-4 !w-4 !text-[9px] !rounded" />
+                {AGENT_LABEL[agentType === "codex" ? "codex" : "claude-code"]}
+              </span>
+              {agentType === "claude-code" && (
               <button
                 onClick={() => cycleClaudePermissionMode(tabId)}
                 className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
@@ -481,6 +556,7 @@ export function MessageInput({
                 />
                 {CLAUDE_PERMISSION_MODE_LABEL[permissionMode]}
               </button>
+              )}
               <button
                 onClick={() => {
                   // Insert a literal `@` at the caret and refocus the
@@ -550,8 +626,11 @@ export function MessageInput({
           anchor={slashTrigger?.anchor ?? null}
           onSelect={handleSlashSelect}
           onClose={() => setSlashTrigger(null)}
+          commands={agentSlashCommands}
+          footerLabel={agentType === "codex" ? "Codex commands" : undefined}
         />
       )}
+      <CodexLoginDialog open={codexLoginOpen} onOpenChange={setCodexLoginOpen} />
     </div>
   );
 }

@@ -1,11 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import * as Popover from "@radix-ui/react-popover";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
-import { useChatStore } from "@/features/chat/stores/chat-store";
-import { InboxPanel } from "@/features/chat/components/inbox-panel";
-import { ChevronDown, Folder, FolderOpen, X, PanelLeft, PanelRight, Search, Inbox } from "lucide-react";
+import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
+import { ChevronDown, Folder, FolderOpen, X, PanelLeft, PanelRight, Search, Bell } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
@@ -206,52 +204,33 @@ function LeftPanelToggle() {
 }
 
 function NotificationButton() {
-  const [open, setOpen] = useState(false);
-  // Narrow selectors return primitives — Object.is equality means this
-  // component only re-renders when the actual counts flip, not on every
-  // streaming chunk.
-  const runningCount = useChatStore(
-    (s) => Object.values(s.sessions).filter((x) => x.status === "running").length
+  const { toggle } = useNotificationsStore.use.actions();
+  // Select PRIMITIVES (booleans) — returning a filtered array from the selector
+  // would create a new reference every render and trigger an infinite loop.
+  const hasUnread = useNotificationsStore((s) => s.items.some((i) => !i.read));
+  const hasError = useNotificationsStore((s) =>
+    s.items.some(
+      (i) => !i.read && (i.kind === "agent-failed" || i.kind === "chat-error"),
+    ),
   );
-  const errorCount = useChatStore(
-    (s) => Object.values(s.sessions).filter((x) => x.status === "error").length
-  );
-  const badgeCount = runningCount + errorCount;
 
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          className="relative flex items-center justify-center w-6 h-6 rounded text-[#555] hover:text-[#aaa] hover:bg-[#ffffff08] transition-all duration-150 outline-none focus:outline-none"
-          title="Inbox"
-        >
-          <Inbox size={14} />
-          {badgeCount > 0 && (
-            // Presence dot, not a count badge. Positioned just above the
-            // icon's top-right corner so it reads as "there's something
-            // here" without obscuring the inbox glyph. The ring matches the
-            // titlebar background so the dot looks detached on hover too.
-            <span
-              className={cn(
-                "absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full ring-1 ring-[#000] pointer-events-none",
-                errorCount > 0 ? "bg-[var(--status-error)]" : "bg-white"
-              )}
-              aria-label={`${badgeCount} active`}
-            />
+    <button
+      onClick={toggle}
+      className="relative flex items-center justify-center w-6 h-6 rounded text-[#555] hover:text-[#aaa] hover:bg-[#ffffff08] transition-all duration-150 outline-none focus:outline-none"
+      title="Notifications"
+    >
+      <Bell size={14} />
+      {hasUnread && (
+        <span
+          className={cn(
+            "absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full ring-1 ring-[#000] pointer-events-none",
+            hasError ? "bg-[var(--status-error)]" : "bg-white",
           )}
-        </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          align="end"
-          sideOffset={6}
-          className="rounded-lg border border-[var(--border-default)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)] overflow-hidden"
-          style={{ zIndex: "var(--z-max)" as unknown as number }}
-        >
-          <InboxPanel onClose={() => setOpen(false)} />
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+          aria-label="Unread notifications"
+        />
+      )}
+    </button>
   );
 }
 

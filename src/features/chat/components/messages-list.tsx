@@ -13,6 +13,7 @@ import type { ChatMessage } from "@/types/agent";
 import { MessageItem } from "./message-item";
 import { useChatStore } from "../stores/chat-store";
 import { cn } from "@/lib/utils";
+import { warmMarkdownWorker } from "@/lib/markdown-cache";
 
 // Render a faint "· Xh ago ·" divider between turns separated by more
 // than this gap, so a long thread reads in sessions.
@@ -302,6 +303,37 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     };
     requestAnimationFrame(tick);
   }, [cacheKey]);
+
+  // Cold-wake warm-up. When the window becomes active after a long idle, WebKit
+  // has throttled the main thread / rAF / layout; the first scroll otherwise
+  // eats the catch-up (a measurement + re-render storm), which reads as lag.
+  // Front-load it here — re-measure the virtualizer and re-anchor scroll the
+  // moment we regain focus, plus nudge the markdown worker awake — so the user's
+  // first scroll lands on an already-warm pipeline.
+  useEffect(() => {
+    const onActive = () => {
+      warmMarkdownWorker();
+      virtualizer.measure();
+      const cached = scrollPositionCache.get(cacheKey);
+      let rafs = 0;
+      const tick = () => {
+        const n = parentRef.current;
+        if (!n) return;
+        if (!cached || cached.isAtBottom) {
+          n.scrollTop = n.scrollHeight;
+        } else {
+          n.scrollTop = Math.max(
+            0,
+            n.scrollHeight - n.clientHeight - cached.distanceFromBottom,
+          );
+        }
+        if (++rafs < 3) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    };
+    window.addEventListener("atlas:window-active", onActive);
+    return () => window.removeEventListener("atlas:window-active", onActive);
+  }, [virtualizer, cacheKey]);
 
   // Save scroll continuously + on unmount. Publishes the "scrolled up"
   // bit to the parent via `onShowJumpChange` so the chat composer can

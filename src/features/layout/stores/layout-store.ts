@@ -57,6 +57,10 @@ interface LayoutState {
     visible: boolean;
     width: number;
   };
+  modelChatSidebar: {
+    visible: boolean;
+    width: number;
+  };
   bashPanel: {
     width: number;
   };
@@ -92,6 +96,7 @@ interface LayoutActions {
     toggleRightPanel: () => void;
     toggleBottomPanel: () => void;
     toggleChatSidebar: () => void;
+    toggleModelChatSidebar: () => void;
     toggleUsagePanel: () => void;
     toggleKnowledgeSidebar: () => void;
     toggleKnowledgeInspector: () => void;
@@ -161,6 +166,10 @@ const initialState: LayoutState = {
     visible: true,
     width: 220,
   },
+  modelChatSidebar: {
+    visible: true,
+    width: 230,
+  },
   bashPanel: {
     width: 260,
   },
@@ -171,7 +180,7 @@ const initialState: LayoutState = {
     {
       id: "welcome-chat",
       type: "chat",
-      title: "Chat",
+      title: "Agents",
       closable: false,
       dirty: false,
       data: {},
@@ -270,6 +279,10 @@ export const useLayoutStore = createSelectors(
           set((s) => {
             s.chatSidebar.visible = !s.chatSidebar.visible;
           }),
+        toggleModelChatSidebar: () =>
+          set((s) => {
+            s.modelChatSidebar.visible = !s.modelChatSidebar.visible;
+          }),
         toggleUsagePanel: () =>
           set((s) => {
             s.leftPanel.usagePanelVisible = !s.leftPanel.usagePanelVisible;
@@ -312,15 +325,20 @@ export const useLayoutStore = createSelectors(
           }),
         addTab: (tab, groupId) =>
           set((s) => {
-            // chat: each session is its own tab (multiple parallel agent
-            // chats supported). editor / diff: one per filePath. Everything
-            // else is a singleton PER COLUMN — opening it focuses the instance
-            // in the target column if present, else opens a fresh one there, so
-            // the same tool can live in any/every split column (full freedom).
+            // chat: each session is its own tab. File-backed viewers (editor /
+            // diff / media / svg / pdf / unsupported) are one-per-FILE (deduped
+            // by id, which is `${type}:${path}`) so opening a different file
+            // always gets its own tab. Everything else is a singleton PER COLUMN
+            // (focus the existing instance in the target column, else open one).
             const allowMultiple =
               tab.type === "editor" ||
               tab.type === "diff" ||
-              tab.type === "chat";
+              tab.type === "chat" ||
+              tab.type === "model-chat" ||
+              tab.type === "media" ||
+              tab.type === "svg" ||
+              tab.type === "pdf" ||
+              tab.type === "unsupported";
 
             let targetId = tab.id;
             // Where the tab lands: caller-specified column, else the focused one.
@@ -677,6 +695,7 @@ export const useLayoutStore = createSelectors(
           knowledgePanel: s.knowledgePanel,
           bottomPanel: s.bottomPanel,
           chatSidebar: s.chatSidebar,
+          modelChatSidebar: s.modelChatSidebar,
           bashPanel: s.bashPanel,
           plansPanel: s.plansPanel,
           tabBarVisible: s.tabBarVisible,
@@ -694,6 +713,7 @@ export const useLayoutStore = createSelectors(
             knowledgePanel: { ...current.knowledgePanel, ...(p.knowledgePanel ?? {}) },
             bottomPanel: { ...current.bottomPanel, ...(p.bottomPanel ?? {}) },
             chatSidebar: { ...current.chatSidebar, ...(p.chatSidebar ?? {}) },
+            modelChatSidebar: { ...current.modelChatSidebar, ...(p.modelChatSidebar ?? {}) },
             bashPanel: { ...current.bashPanel, ...(p.bashPanel ?? {}) },
             plansPanel: { ...current.plansPanel, ...(p.plansPanel ?? {}) },
           };

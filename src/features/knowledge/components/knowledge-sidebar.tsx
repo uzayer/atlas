@@ -214,7 +214,7 @@ export function KnowledgeSidebar({
             <div className="px-2 pt-3 pb-1 text-[10px] font-semibold text-text-tertiary uppercase tracking-wider">
               Recently opened
             </div>
-            <div className="flex flex-col gap-px">
+            <div className="flex flex-col gap-px max-h-[160px] overflow-y-auto hide-scrollbar">
               {recents.map((r) => (
                 <button
                   key={r.id}
@@ -237,7 +237,7 @@ export function KnowledgeSidebar({
           <div className="px-2 pb-1.5 text-[10px] font-semibold text-text-tertiary uppercase tracking-wider">
             Repositories
           </div>
-          <div className="flex flex-col gap-px">
+          <div className="flex flex-col gap-px max-h-[208px] overflow-y-auto hide-scrollbar">
             {clonedRepos.map((repo) => {
               const isActive = activeRepoName === repo.name;
               return (

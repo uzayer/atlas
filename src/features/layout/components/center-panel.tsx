@@ -18,6 +18,7 @@ const TerminalPanel = lazy(() => import("@/features/terminal/components/terminal
 const EditorPanel = lazy(() => import("@/features/editor/components/editor-panel").then(m => ({ default: m.EditorPanel })));
 const BrowserPanel = lazy(() => import("@/features/browser/components/browser-panel").then(m => ({ default: m.BrowserPanel })));
 const MediaViewer = lazy(() => import("@/features/media/components/media-viewer").then(m => ({ default: m.MediaViewer })));
+const SvgViewer = lazy(() => import("@/features/svg/components/svg-viewer").then(m => ({ default: m.SvgViewer })));
 const PdfViewer = lazy(() => import("@/features/pdf/components/pdf-viewer").then(m => ({ default: m.PdfViewer })));
 const CanvasPanel = lazy(() => import("@/features/canvas/components/canvas-panel").then(m => ({ default: m.CanvasPanel })));
 const KnowledgePanel = lazy(() => import("@/features/knowledge/components/knowledge-panel").then(m => ({ default: m.KnowledgePanel })));
@@ -26,7 +27,11 @@ const ResearchPanel = lazy(() => import("@/features/research/components/research
 const SettingsPanel = lazy(() => import("@/features/settings/components/settings-panel").then(m => ({ default: m.SettingsPanel })));
 const LogPanel = lazy(() => import("@/features/log/components/log-panel").then(m => ({ default: m.LogPanel })));
 const PomodoroPanel = lazy(() => import("@/features/pomodoro/components/pomodoro-panel").then(m => ({ default: m.PomodoroPanel })));
+const ModelChatPanel = lazy(() => import("@/features/model-chat/components/model-chat-panel").then(m => ({ default: m.ModelChatPanel })));
+const MemoryPanel = lazy(() => import("@/features/memory/components/memory-panel").then(m => ({ default: m.MemoryPanel })));
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { PanelSkeleton } from "@/components/panel-skeleton";
+import { AtlasIcon } from "@/components/atlas-icon";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -37,6 +42,7 @@ import {
   Code,
   BookOpen,
   Brain,
+  BrainCircuit,
   Network,
   Terminal,
   GitCompare,
@@ -54,7 +60,8 @@ import {
 import type { TabType } from "@/lib/constants";
 
 const tabIcons: Record<TabType, React.ElementType> = {
-  chat: MessageSquare,
+  chat: AtlasIcon,
+  "model-chat": MessageSquare,
   canvas: Map,
   browser: Globe,
   tasks: CheckSquare,
@@ -62,11 +69,13 @@ const tabIcons: Record<TabType, React.ElementType> = {
   research: BookOpen,
   knowledge: Brain,
   "knowledge-graph": Network,
+  memory: BrainCircuit,
   terminal: Terminal,
   diff: GitCompare,
   settings: Settings,
   log: ScrollText,
   media: Code,
+  svg: Code,
   pdf: FileText,
   unsupported: Code,
   pomodoro: Timer,
@@ -79,6 +88,12 @@ const PERSISTENT_TYPES: ReadonlySet<TabType> = new Set([
   "browser",
   "knowledge-graph",
   "pdf",
+  // Keep chat + knowledge mounted across tab switches too: chat preserves the
+  // virtualizer's measurement cache + scroll position (remounting re-ran the
+  // "loading transcript" path and rebuilt scroll), and knowledge avoids
+  // re-walking its tree/graph on every revisit.
+  "chat",
+  "knowledge",
 ]);
 
 /**
@@ -381,6 +396,10 @@ function TabContentContainer({ groupId }: { groupId: string }) {
                   filePath={tab.data.filePath as string | undefined}
                   containerHeight={height}
                 />
+              ) : tab.type === "chat" ? (
+                <ChatPanel tabId={tab.id} />
+              ) : tab.type === "knowledge" ? (
+                <KnowledgePanel />
               ) : tab.type === "browser" ? (
                 <BrowserPanel tabId={tab.id} groupId={GROUP_OF(tab)} initialUrl={tab.data.url as string | undefined} />
               ) : tab.type === "knowledge-graph" ? (
@@ -401,35 +420,39 @@ function TabContentContainer({ groupId }: { groupId: string }) {
 }
 
 function PanelLoading() {
-  return (
-    <div className="h-full flex items-center justify-center text-text-tertiary text-sm">
-      Loading…
-    </div>
-  );
+  // Structural skeleton (not centered text) so the first open of a lazy panel
+  // while its JS chunk downloads reads as "loading content" rather than blank.
+  return <PanelSkeleton rows={7} />;
 }
 
 function TabContent({ tab }: { tab: Tab }) {
   switch (tab.type) {
     case "chat":
       return <ChatPanel tabId={tab.id} />;
+    case "model-chat":
+      return <ModelChatPanel tabId={tab.id} />;
     case "canvas":
       return <CanvasPanel />;
     case "knowledge":
       return <KnowledgePanel />;
     case "knowledge-graph":
       return <KnowledgeGraph />;
+    case "memory":
+      return <MemoryPanel />;
     case "research":
       return <ResearchPanel />;
     case "browser":
       return <BrowserPanel initialUrl={tab.data.url as string | undefined} />;
     case "settings":
-      return <SettingsPanel />;
+      return <SettingsPanel initialSection={tab.data.section as string | undefined} />;
     case "log":
       return <LogPanel />;
     case "pomodoro":
       return <PomodoroPanel />;
     case "media":
       return <MediaViewer filePath={tab.data.filePath as string} />;
+    case "svg":
+      return <SvgViewer filePath={tab.data.filePath as string} />;
     case "pdf":
       return <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />;
     case "unsupported":
@@ -457,12 +480,14 @@ function PlaceholderContent({ tab }: { tab: Tab }) {
 }
 
 const NEW_TAB_OPTIONS: Array<{ type: TabType; label: string; icon: React.ElementType }> = [
-  { type: "chat", label: "Chat", icon: MessageSquare },
+  { type: "chat", label: "Agents", icon: AtlasIcon },
+  { type: "model-chat", label: "Chat", icon: MessageSquare },
   { type: "terminal", label: "Terminal", icon: Terminal },
   { type: "canvas", label: "Spaces", icon: Map },
   { type: "browser", label: "Browser", icon: Globe },
   { type: "research", label: "Research", icon: BookOpen },
   { type: "knowledge", label: "Knowledge", icon: Brain },
+  { type: "memory", label: "Memory", icon: BrainCircuit },
   { type: "log", label: "Log", icon: ScrollText },
   { type: "pomodoro", label: "Pomodoro", icon: Timer },
 ];

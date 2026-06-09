@@ -15,6 +15,24 @@ import { splitAtlasContext } from "../lib/atlas-context";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
 
+/**
+ * Push a session's permission mode to its bound ACP agent. The mode chip
+ * and the ⇧⇥ shortcut both mutate `claudePermissionMode` in the store, but
+ * that's only the UI label — without this IPC the agent keeps running in
+ * whatever mode it was started in, so "Bypass Permissions" still prompted.
+ * No-op until the session is bound (the create-time setMode in chat-panel
+ * covers the not-yet-bound case).
+ */
+function pushPermissionModeToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId) return;
+  if (session.agentType !== "claude-code") return;
+  void invoke("agents_set_mode", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    modeId: session.claudePermissionMode ?? "default",
+  }).catch((err) => console.warn("agents_set_mode failed:", err));
+}
+
 /** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
 function toChatToolCall(tc: AgentToolCall): ChatMessage["toolCalls"][number] {
   return {
@@ -62,7 +80,10 @@ interface ChatState {
 
 interface ChatActions {
   actions: {
-    createSession: (tabId: string) => void;
+    createSession: (tabId: string, agentType?: "claude-code" | "codex") => void;
+    /** Re-bind a fresh (message-less) chat to a different agent. Clears the ACP
+     *  binding so the chat panel re-creates a session with the new agent. */
+    switchChatAgent: (tabId: string, agentType: "claude-code" | "codex") => void;
     setActiveSession: (id: string | null) => void;
     addMessage: (
       sessionId: string,
@@ -301,23 +322,39 @@ export const useChatStore = createSelectors(
       drafts: {},
       activeSessionId: null,
       actions: {
-        createSession: (tabId) =>
+        createSession: (tabId, agentType = "claude-code") =>
           set((s) => {
             if (s.sessions[tabId]) return;
             s.sessions[tabId] = {
               id: tabId,
               title: "New Chat",
               messages: [],
-              agentType: "claude-code",
+              agentType,
               model: "",
               status: "idle",
               workingDirectory: "",
               tasks: [],
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
-              claudePermissionMode: "default",
+              // Permission mode is a Claude Code feature; Codex drives its
+              // modes generically via ACP (acpCurrentMode).
+              claudePermissionMode: agentType === "claude-code" ? "default" : undefined,
             };
             s.activeSessionId = tabId;
+          }),
+        switchChatAgent: (tabId, agentType) =>
+          set((s) => {
+            const sess = s.sessions[tabId];
+            if (!sess) return;
+            sess.agentType = agentType;
+            sess.claudePermissionMode =
+              agentType === "claude-code" ? "default" : undefined;
+            // Drop the old ACP binding so the chat panel's mount effect re-binds
+            // to the newly chosen agent (its deps watch acpSessionId).
+            sess.acpAgentId = undefined;
+            sess.acpSessionId = undefined;
+            sess.acpCurrentMode = undefined;
+            sess.acpCurrentModel = undefined;
           }),
         setActiveSession: (id) =>
           set((s) => {
@@ -415,7 +452,7 @@ export const useChatStore = createSelectors(
             }
             delete s.queues[sessionId];
           }),
-        cycleClaudePermissionMode: (sessionId) =>
+        cycleClaudePermissionMode: (sessionId) => {
           set((s) => {
             const session = s.sessions[sessionId];
             if (!session) return;
@@ -424,12 +461,16 @@ export const useChatStore = createSelectors(
             const next =
               CLAUDE_PERMISSION_MODES[(i + 1) % CLAUDE_PERMISSION_MODES.length];
             session.claudePermissionMode = next;
-          }),
-        setClaudePermissionMode: (sessionId, mode) =>
+          });
+          pushPermissionModeToAgent(get(), sessionId);
+        },
+        setClaudePermissionMode: (sessionId, mode) => {
           set((s) => {
             const session = s.sessions[sessionId];
             if (session) session.claudePermissionMode = mode;
-          }),
+          });
+          pushPermissionModeToAgent(get(), sessionId);
+        },
         replaceMessages: (sessionId, messages) =>
           set((s) => {
             const session = s.sessions[sessionId];
@@ -860,6 +901,17 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
     }
     case "mode_changed": {
       session.acpCurrentMode = env.mode_id;
+      // Reflect agent-driven permission-mode changes back into the composer
+      // pill. Claude Code emits `current_mode_update` when the user picks a
+      // mode at the plan-review prompt (e.g. "bypass permissions") — without
+      // this the pill kept showing the old mode. Guarded to claude-code + a
+      // known permission mode so Codex's own modes don't leak into the pill.
+      if (
+        session.agentType === "claude-code" &&
+        (CLAUDE_PERMISSION_MODES as readonly string[]).includes(env.mode_id)
+      ) {
+        session.claudePermissionMode = env.mode_id as ClaudePermissionMode;
+      }
       return;
     }
     case "model_changed": {

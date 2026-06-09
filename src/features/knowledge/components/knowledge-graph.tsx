@@ -16,6 +16,8 @@ import {
 } from "pixi.js";
 import Matter from "matter-js";
 import { invoke } from "@tauri-apps/api/core";
+import { forceLayout } from "@/lib/graph-layout";
+import { GraphRuler, type Viewport } from "@/components/graph-ruler";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useKnowledgeStore } from "../stores/knowledge-store";
 import { useKnowledgeMetaStore } from "../stores/knowledge-meta-store";
@@ -49,9 +51,11 @@ const MAX_SCALE = 4;
 const ZOOM_STEP = 0.004;
 const HIDE_LABEL_BELOW = 0.5;
 const DOUBLE_CLICK_MS = 280;
+/** Constant screen-px gap between a node's disc and its label (counter-scaled). */
+const LABEL_GAP = 6;
 
 function nodeRadiusForDegree(degree: number): number {
-  return Math.min(10 + Math.sqrt(Math.max(0, degree)) * 3, 32);
+  return Math.min(3 + Math.sqrt(Math.max(0, degree)) * 1.6, 14);
 }
 
 interface NodeView {
@@ -216,6 +220,9 @@ function GraphCanvas({
   projectPath: string;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, scale: 1 });
+  const vpRef = useRef<Viewport>({ x: 0, y: 0, scale: 1 });
+  const vpRafRef = useRef(false);
   // Selection state is pushed in via a ref so it doesn't force a Pixi
   // teardown/recreate cycle.
   const sceneRef = useRef<SceneState>({
@@ -282,6 +289,16 @@ function GraphCanvas({
           try { app.destroy(true, { children: true }); } catch { /* ignore */ }
           return;
         }
+        const pushViewport = (v: Viewport) => {
+          vpRef.current = v;
+          if (!vpRafRef.current) {
+            vpRafRef.current = true;
+            requestAnimationFrame(() => {
+              vpRafRef.current = false;
+              setViewport(vpRef.current);
+            });
+          }
+        };
         teardown = buildScene(
           app,
           graph,
@@ -292,6 +309,7 @@ function GraphCanvas({
           onActivate,
           initialLayout,
           projectPath,
+          pushViewport,
         );
       })
       .catch(() => {
@@ -311,7 +329,12 @@ function GraphCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graph, width, height]);
 
-  return <div ref={hostRef} style={{ width: "100%", height: "100%" }} />;
+  return (
+    <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      <div ref={hostRef} style={{ width: "100%", height: "100%" }} />
+      <GraphRuler width={width} height={height} viewport={viewport} />
+    </div>
+  );
 }
 
 /**
@@ -328,6 +351,7 @@ function buildScene(
   onActivate: (id: string) => void,
   initialLayout: GraphLayout,
   projectPath: string,
+  onViewport: (v: Viewport) => void,
 ): () => void {
   // ── Physics ──────────────────────────────────────────────────
   const engine = Matter.Engine.create();
@@ -362,8 +386,15 @@ function buildScene(
   const nodesById = new Map<string, NodeView>();
   const cx = width / 2;
   const cy = height / 2;
-  const r = Math.min(width, height) * 0.35;
-  const n = graph.nodes.length;
+
+  // Obsidian-style spider seed: force-directed initial positions so hubs sit
+  // central and leaves fan out, instead of a flat ring. Saved layouts win.
+  const seedMap = forceLayout(
+    graph.nodes.map((nd) => ({ id: nd.id, degree: nd.inDegree + nd.outDegree })),
+    graph.edges,
+    width,
+    height,
+  );
 
   const labelStyles = new Map<string, TextStyle>();
   const styleFor = (fill: string): TextStyle => {
@@ -381,14 +412,13 @@ function buildScene(
     return s;
   };
 
-  graph.nodes.forEach((node, i) => {
+  graph.nodes.forEach((node) => {
     // Use the persisted position when one's on file; otherwise fall back
-    // to the deterministic circular seed so the simulation has a balanced
-    // starting state.
+    // to the force-directed spider seed so the graph opens hub-and-spoke.
     const saved = initialLayout.positions[node.id];
-    const angle = (i / Math.max(1, n)) * Math.PI * 2;
-    const x = saved ? saved.x : cx + Math.cos(angle) * r;
-    const y = saved ? saved.y : cy + Math.sin(angle) * r;
+    const seed = seedMap[node.id];
+    const x = saved ? saved.x : seed ? seed.x : cx;
+    const y = saved ? saved.y : seed ? seed.y : cy;
     const radius = nodeRadiusForDegree(node.inDegree + node.outDegree);
     const body = Matter.Bodies.circle(x, y, radius, {
       friction: 1,
@@ -417,7 +447,7 @@ function buildScene(
     nodeLayer.addChild(graphics);
 
     const label = new Text({ text: node.title, style: styleFor("#c4c4c4") });
-    label.anchor.set(0.5);
+    label.anchor.set(0.5, 0); // top-center: hangs below the disc
     labelLayer.addChild(label);
 
     nodesById.set(node.id, { id: node.id, body, radius, graphics, label });
@@ -456,6 +486,7 @@ function buildScene(
       x: -viewport.position.x / z,
       y: -viewport.position.y / z,
     });
+    onViewport({ x: viewport.position.x, y: viewport.position.y, scale: z });
   };
   syncMouseToViewport();
 
@@ -629,8 +660,21 @@ function buildScene(
   window.addEventListener("pointerdown", wake);
   window.addEventListener("pointermove", wake);
   window.addEventListener("wheel", wake, { passive: true });
+  // Cold-wake warm-up: after a long idle WebKit throttles the main thread, so
+  // the first interaction with a slept graph eats the catch-up. Wake on the
+  // window-active rising edge so it repaints fresh before the user touches it.
+  window.addEventListener("atlas:window-active", wake);
 
   // ── Per-tick draw ────────────────────────────────────────────
+  // When the physics is asleep AND nothing that affects the drawing changed
+  // (selection/drag/zoom), skip the whole node+edge+label redraw. Otherwise the
+  // graph repaints every node (incl. per-node Pixi text restyle) at display
+  // refresh — up to 120 Hz on ProMotion — for a static, idle graph.
+  // Every scene mutation (selection, drag, zoom) reassigns `sceneRef.current`
+  // to a NEW object; pan only moves the viewport and intentionally does not.
+  // So object identity is a complete dirty signal: skip the redraw when the
+  // physics is asleep AND the scene object is unchanged.
+  let lastScene: typeof sceneRef.current | null = null;
   const tick = (ticker: Ticker) => {
     if (awake) {
       Matter.Engine.update(engine, ticker.deltaMS);
@@ -650,14 +694,18 @@ function buildScene(
       }
     }
 
-    const { selectedId, neighbors, draggingId, draggingNeighbors, zoom } =
-      sceneRef.current;
+    const scene = sceneRef.current;
+    if (!awake && scene === lastScene) return;
+    lastScene = scene;
+
+    const { selectedId, neighbors, draggingId, draggingNeighbors, zoom } = scene;
     // Drag-highlight uses the same visual treatment as selection.
     // Selection wins if both are active.
     const focusId = selectedId ?? draggingId;
     const focusNeighbors = selectedId ? neighbors : draggingNeighbors;
     const hasFocus = focusId !== null;
     const showLabels = zoom >= HIDE_LABEL_BELOW;
+    const inv = 1 / zoom; // counter-scale for constant screen-space sizes
 
     for (const node of nodesById.values()) {
       const isFocused = focusId === node.id;
@@ -678,15 +726,18 @@ function buildScene(
       }
       node.graphics.clear();
       if (isFocused) {
-        node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius + 3);
-        node.graphics.stroke({ width: 2, color: COLOR_PRIMARY, alpha: 0.6 });
+        node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius + 3 * inv);
+        node.graphics.stroke({ width: 2 * inv, color: COLOR_PRIMARY, alpha: 0.6 });
       }
       node.graphics.circle(node.body.position.x, node.body.position.y, drawRadius);
       node.graphics.fill({ color, alpha });
 
+      // Parallax: counter-scale the label so it stays a constant readable
+      // screen size, and keep a constant screen-space gap below the disc.
+      node.label.scale.set(inv);
       node.label.position.set(
         node.body.position.x,
-        node.body.position.y + node.radius + 12,
+        node.body.position.y + drawRadius + LABEL_GAP * inv,
       );
       if (!showLabels) {
         node.label.alpha = 0;
@@ -722,7 +773,7 @@ function buildScene(
       }
       edge.graphics.moveTo(a.body.position.x, a.body.position.y);
       edge.graphics.lineTo(b.body.position.x, b.body.position.y);
-      edge.graphics.stroke({ width: 1, color, alpha });
+      edge.graphics.stroke({ width: (touchesFocus ? 2 : 1) * inv, color, alpha });
     }
   };
   app.ticker.add(tick);
@@ -780,6 +831,7 @@ function buildScene(
     window.removeEventListener("pointerdown", wake);
     window.removeEventListener("pointermove", wake);
     window.removeEventListener("wheel", wake);
+    window.removeEventListener("atlas:window-active", wake);
     exitPanMode();
     Matter.Composite.clear(engine.world, false, true);
     Matter.Engine.clear(engine);

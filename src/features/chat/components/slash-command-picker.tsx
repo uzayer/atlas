@@ -30,7 +30,7 @@ import { cn } from "@/lib/utils";
  *   as `<local-command-stdout>…</local-command-stdout>` blocks which flow
  *   through the normal `agent_message_chunk` pipeline and render in the
  *   chat thread alongside regular assistant output. */
-export type SlashCommandHandler = "atlas-login" | "passthrough";
+export type SlashCommandHandler = "atlas-login" | "codex-login" | "passthrough";
 
 export interface SlashCommand {
   /** Unique slug used both as the visible command name and matched query. */
@@ -61,6 +61,11 @@ export interface SlashCommandPickerProps {
   anchor: { x: number; y: number } | null;
   onSelect: (cmd: SlashCommand) => void;
   onClose: () => void;
+  /** Override the catalogue (e.g. Codex's ACP-reported commands). When absent
+   *  the curated Claude Code list is used. */
+  commands?: SlashCommand[];
+  /** Footer label (e.g. "Codex commands"). */
+  footerLabel?: string;
 }
 
 // ── Command catalogue ──────────────────────────────────────────────────────
@@ -109,24 +114,26 @@ const GAP = 6;
 export const SlashCommandPicker = forwardRef<
   SlashCommandPickerHandle,
   SlashCommandPickerProps
->(function SlashCommandPicker({ open, query, anchor, onSelect, onClose }, ref) {
+>(function SlashCommandPicker({ open, query, anchor, onSelect, onClose, commands, footerLabel }, ref) {
   const [active, setActive] = useState(0);
 
   useEffect(() => {
     if (open) setActive(0);
   }, [open, query]);
 
-  // Filter by query against name + description. Cheap linear scan — the
-  // catalogue is ~25 entries.
+  // The agent's own commands when provided (Codex), else the curated Claude list.
+  const catalogue = commands ?? SLASH_COMMANDS;
+
+  // Filter by query against name + description. Cheap linear scan.
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return SLASH_COMMANDS;
-    return SLASH_COMMANDS.filter(
+    if (!q) return catalogue;
+    return catalogue.filter(
       (c) =>
         c.name.toLowerCase().includes(q) ||
         c.description.toLowerCase().includes(q),
     );
-  }, [query]);
+  }, [query, catalogue]);
 
   useEffect(() => {
     if (active >= rows.length) setActive(0);
@@ -244,7 +251,7 @@ export const SlashCommandPicker = forwardRef<
         )}
       </div>
       <div className="border-t border-[var(--border-default)] px-3 h-[24px] flex items-center justify-between text-[9px] text-[var(--text-tertiary)] uppercase tracking-wider shrink-0">
-        <span>Claude Code commands</span>
+        <span>{footerLabel ?? "Claude Code commands"}</span>
         <span>↑↓ · ↵ run · ⎋ close</span>
       </div>
     </div>,

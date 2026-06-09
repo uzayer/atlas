@@ -97,6 +97,37 @@ pub async fn read_file_base64(path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Grant the asset protocol read access to a project directory (recursive), so
+/// the media viewer can serve images/video/audio from it via `convertFileSrc`.
+/// The static scope (tauri.conf.json) is intentionally narrow ($HOME) rather
+/// than `**`; this adds the open project's tree at runtime so projects on
+/// external volumes (outside $HOME) also work without serving the whole disk.
+#[tauri::command]
+pub fn asset_allow_dir(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    app.asset_protocol_scope()
+        .allow_directory(&path, true)
+        .map_err(|e| e.to_string())
+}
+
+/// File modification time as unix milliseconds (0 if the file is missing).
+/// Used as a cache-buster for the media viewer: the Tauri asset URL is keyed by
+/// path, so the webview would otherwise serve a stale image after a file at the
+/// same path is deleted and recreated.
+#[tauri::command]
+pub async fn file_mtime_ms(path: String) -> Result<i64, String> {
+    tokio::task::spawn_blocking(move || {
+        Ok(fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn write_file_content(path: String, content: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {

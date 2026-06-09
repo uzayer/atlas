@@ -13,6 +13,7 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { useGitStore } from "@/features/git/stores/git-store";
 import { FolderPlus, FoldVertical, UnfoldVertical } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { PanelSkeleton } from "@/components/panel-skeleton";
 import { TreeRow } from "./tree-row";
 import { openFile } from "@/lib/open-file";
 import { useFileTreeDragDrop, ROOT_DROP } from "../hooks/use-file-tree-drag-drop";
@@ -37,6 +38,10 @@ interface FlatRow {
   node: ReturnType<typeof flattenTree>[number] | null;
   ghost?: { parentDir: string; isDir: boolean; depth: number };
 }
+
+/** Tab types whose `data.filePath` points at a file on disk — these must be
+ *  re-pointed/closed when that file is renamed or deleted. */
+const FILE_TAB_TYPES = new Set(["editor", "media", "svg", "pdf", "unsupported"]);
 
 /** Map a git porcelain status char to a gutter-dot color, matching the
  *  Source Control panel's convention (`changes-view.tsx:statusBadge`). */
@@ -165,6 +170,14 @@ export function FileTree() {
     overscan: 15,
   });
 
+  // Cold-wake warm-up: re-measure on the window-active rising edge so the first
+  // scroll after a long idle doesn't eat WebKit's main-thread throttle catch-up.
+  useEffect(() => {
+    const onActive = () => virtualizer.measure();
+    window.addEventListener("atlas:window-active", onActive);
+    return () => window.removeEventListener("atlas:window-active", onActive);
+  }, [virtualizer]);
+
   const handleOpenFile = useCallback((path: string, _name: string) => {
     // Single entry point: classifies by extension and routes text → editor,
     // images/video/audio → media viewer, everything else → unsupported view.
@@ -266,12 +279,17 @@ export function FileTree() {
       // Re-point recent-files entries so the mention picker shows the new name
       // (the file-index search already self-updates via the fs watcher).
       void invoke("recent_files_rename", { oldPath, newPath }).catch(() => {});
-      // If the renamed file is open, swap the tab to the new path.
-      const openTab = tabs.find(
-        (t) => t.type === "editor" && (t.data as { filePath?: string }).filePath === oldPath,
+      // If the renamed file is open in ANY file-backed viewer (editor, media,
+      // svg, pdf, unsupported), swap those tabs to the new path — otherwise the
+      // viewer keeps loading the old (now-missing) path and 404s. Re-opening
+      // also re-classifies, so a changed extension routes to the right viewer.
+      const stale = tabs.filter(
+        (t) =>
+          FILE_TAB_TYPES.has(t.type) &&
+          (t.data as { filePath?: string }).filePath === oldPath,
       );
-      if (openTab) {
-        closeTab(openTab.id);
+      if (stale.length) {
+        for (const t of stale) closeTab(t.id);
         handleOpenFile(newPath, name);
       }
     } catch (e) {
@@ -286,11 +304,14 @@ export function FileTree() {
       for (const entry of entries) {
         await invoke("fs_delete", { path: entry.path });
         await reconcileDirectory(dirOfPath(entry.path));
-        // Close any open editor tab pointing at this file.
-        const openTab = tabs.find(
-          (t) => t.type === "editor" && (t.data as { filePath?: string }).filePath === entry.path,
-        );
-        if (openTab) closeTab(openTab.id);
+        // Close any open file-backed tab pointing at this file.
+        for (const t of tabs.filter(
+          (t) =>
+            FILE_TAB_TYPES.has(t.type) &&
+            (t.data as { filePath?: string }).filePath === entry.path,
+        )) {
+          closeTab(t.id);
+        }
       }
     } catch (e) {
       toast.error(String(e));
@@ -673,9 +694,7 @@ export function FileTree() {
             }}
           >
             {loading ? (
-              <div className="px-3 py-4 text-[11px] text-text-tertiary text-center">
-                Loading…
-              </div>
+              <PanelSkeleton rows={10} className="p-2 gap-1.5" />
             ) : flat.length === 0 ? (
               <div className="px-3 py-4 text-[11px] text-text-tertiary text-center">
                 Empty folder

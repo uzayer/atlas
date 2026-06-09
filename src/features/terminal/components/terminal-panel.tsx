@@ -262,7 +262,7 @@ function PaneChrome({ pane, tabId, isActivePane }: { pane: PaneNode; tabId: stri
 
   return (
     <div className={cn("h-full flex flex-col", isActivePane && "ring-1 ring-[#ffffff08] ring-inset")}>
-      <div className="flex items-center h-[28px] shrink-0 border-b border-border-default bg-bg-primary px-1 gap-0.5">
+      <div className="flex items-center h-[32px] shrink-0 border-b border-border-default bg-bg-primary px-1 gap-0.5">
         <div className="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto hide-scrollbar">
           {pane.terminals.map((ptyId) => (
             <div

@@ -87,6 +87,30 @@ pub async fn agents_new_session(
         .map_err(|e| e.to_string())
 }
 
+/// Whether Codex has stored credentials (`~/.codex/auth.json` exists). Drives
+/// the "Sign in with ChatGPT" prompt on a Codex chat. Cheap file check.
+#[tauri::command]
+pub fn codex_status() -> bool {
+    dirs::home_dir()
+        .map(|h| h.join(".codex").join("auth.json").is_file())
+        .unwrap_or(false)
+}
+
+/// Run an agent's ACP `authenticate` flow (e.g. Codex's "chatgpt" browser
+/// OAuth). Awaits until the agent reports success — for Codex this resolves
+/// once the OpenAI sign-in completes and `~/.codex/auth.json` is written.
+#[tauri::command]
+pub async fn agents_authenticate(
+    agent_id: AgentId,
+    method_id: String,
+    manager: State<'_, AgentManager>,
+) -> Result<(), String> {
+    manager
+        .authenticate(agent_id, method_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn agents_load_session(
     agent_id: AgentId,

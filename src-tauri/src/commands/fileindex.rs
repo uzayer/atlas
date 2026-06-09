@@ -15,7 +15,8 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::Matcher;
 use parking_lot::RwLock;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use std::collections::HashMap;
+use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
 /// One indexed file. `path` is absolute; `rel` is relative to the project
 /// root so the UI can render `crates/foo/src/lib.rs` instead of the full
@@ -53,9 +54,14 @@ struct ProjectIndex {
     >,
 }
 
+/// Per-WINDOW index. Tauri `.manage()` state is one instance per process, so a
+/// single `Option<ProjectIndex>` would be shared across every window — opening a
+/// project in window B would clobber window A's Cmd+P / @-mention results. We
+/// key by the calling webview's label (`main`, `atlas-<ts>`) so each window has
+/// its own index. Entries are dropped on `WindowEvent::Destroyed` (see lib.rs).
 #[derive(Default)]
 pub struct FileIndexState {
-    current: RwLock<Option<ProjectIndex>>,
+    per_window: RwLock<HashMap<String, ProjectIndex>>,
 }
 
 impl FileIndexState {
@@ -63,14 +69,12 @@ impl FileIndexState {
         Self::default()
     }
 
-    /// Snapshot the current project's file list + root for consumers
-    /// outside this module (e.g. `mention_search`) that need to run
-    /// their own ranking over the same data the Cmd+P palette uses.
-    /// Returns `(rel paths + absolute paths, project root)` or `None`
-    /// when no project is indexed yet.
-    pub fn snapshot_files(&self) -> Option<(Vec<(String, PathBuf)>, PathBuf)> {
-        let guard = self.current.read();
-        guard.as_ref().map(|p| {
+    /// Snapshot a window's project file list + root for consumers outside this
+    /// module (e.g. `mention_search`). Returns `None` when that window has no
+    /// project indexed yet.
+    pub fn snapshot_files(&self, label: &str) -> Option<(Vec<(String, PathBuf)>, PathBuf)> {
+        let guard = self.per_window.read();
+        guard.get(label).map(|p| {
             let files = p
                 .files
                 .read()
@@ -81,15 +85,21 @@ impl FileIndexState {
         })
     }
 
+    /// Drop a window's index (called on window close). Dropping `ProjectIndex`
+    /// also drops its `_debouncer`, stopping the fs watcher.
+    pub fn drop_window(&self, label: &str) {
+        self.per_window.write().remove(label);
+    }
+
     /// Snapshot the derived unique-folder list. Lazily built on first
     /// access (cost: ~O(files × depth)), cached, invalidated by the
     /// fs watcher on the next file-set change. After warmup this is
     /// a constant-time clone of a small vec (~100s of entries for a
     /// typical project) — what makes the @-mention picker's folder
     /// kind sub-millisecond per keystroke.
-    pub fn snapshot_folders(&self) -> Option<Vec<(String, PathBuf)>> {
-        let guard = self.current.read();
-        let project = guard.as_ref()?;
+    pub fn snapshot_folders(&self, label: &str) -> Option<Vec<(String, PathBuf)>> {
+        let guard = self.per_window.read();
+        let project = guard.get(label)?;
         if let Some(cached) = project.folders.read().as_ref() {
             return Some(cached.clone());
         }
@@ -142,8 +152,10 @@ fn derive_folders(files: &[IndexedFile], root: &Path) -> Vec<(String, PathBuf)> 
 pub async fn fileindex_open_project(
     path: String,
     app: AppHandle,
+    webview: WebviewWindow,
     state: State<'_, FileIndexState>,
 ) -> Result<usize, String> {
+    let label = webview.label().to_string();
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
@@ -154,6 +166,7 @@ pub async fn fileindex_open_project(
     // path tree before returning a stream handle.
     let root_for_task = root.clone();
     let app_for_task = app.clone();
+    let label_for_task = label.clone();
     let (files, folders, debouncer): (
         Arc<RwLock<Vec<IndexedFile>>>,
         Arc<RwLock<Option<Vec<(String, PathBuf)>>>>,
@@ -173,6 +186,7 @@ pub async fn fileindex_open_project(
         let folders_for_watch = folders.clone();
         let root_for_watch = root_for_task.clone();
         let app_for_watch = app_for_task.clone();
+        let label_for_watch = label_for_task.clone();
 
         let mut debouncer = new_debouncer(
             Duration::from_millis(150),
@@ -192,11 +206,13 @@ pub async fn fileindex_open_project(
                     // Files just changed — drop the derived folder
                     // cache so the next mention_search rebuilds it.
                     *folders_for_watch.write() = None;
-                    let _ = app_for_watch.emit(
+                    let _ = app_for_watch.emit_to(
+                        label_for_watch.as_str(),
                         "atlas:fileindex:updated",
                         serde_json::json!({ "count": files_for_watch.read().len() }),
                     );
-                    let _ = app_for_watch.emit(
+                    let _ = app_for_watch.emit_to(
+                        label_for_watch.as_str(),
                         "atlas:explorer:changed",
                         serde_json::json!({
                             "dirs": dirs_touched
@@ -230,18 +246,22 @@ pub async fn fileindex_open_project(
     .map_err(|e| e.to_string())??;
 
     let count = files.read().len();
-    *state.current.write() = Some(ProjectIndex {
-        root,
-        files,
-        folders,
-        _debouncer: debouncer,
-    });
+    state.per_window.write().insert(
+        label.clone(),
+        ProjectIndex {
+            root,
+            files,
+            folders,
+            _debouncer: debouncer,
+        },
+    );
 
-    // Tell the frontend the index is now searchable. Mirrors the event
-    // the watcher fires on file-set changes — palette + mention picker
-    // both already listen for it, so a re-query lands the user's first
-    // results the instant the walk finishes (no manual reopen needed).
-    let _ = app.emit(
+    // Tell THIS window the index is now searchable. Mirrors the event the
+    // watcher fires on file-set changes — palette + mention picker both listen
+    // for it, so a re-query lands the user's first results the instant the walk
+    // finishes (no manual reopen needed).
+    let _ = app.emit_to(
+        label.as_str(),
         "atlas:fileindex:updated",
         serde_json::json!({ "count": count }),
     );
@@ -250,8 +270,8 @@ pub async fn fileindex_open_project(
 }
 
 #[tauri::command]
-pub fn fileindex_close_project(state: State<'_, FileIndexState>) {
-    *state.current.write() = None;
+pub fn fileindex_close_project(webview: WebviewWindow, state: State<'_, FileIndexState>) {
+    state.per_window.write().remove(webview.label());
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,8 +282,11 @@ pub struct FileIndexStatus {
 }
 
 #[tauri::command]
-pub fn fileindex_status(state: State<'_, FileIndexState>) -> FileIndexStatus {
-    match state.current.read().as_ref() {
+pub fn fileindex_status(
+    webview: WebviewWindow,
+    state: State<'_, FileIndexState>,
+) -> FileIndexStatus {
+    match state.per_window.read().get(webview.label()) {
         Some(idx) => FileIndexStatus {
             indexed: true,
             count: idx.files.read().len(),
@@ -292,21 +315,26 @@ pub struct FolderMatch {
 pub fn fileindex_search_dirs(
     query: String,
     limit: usize,
+    webview: WebviewWindow,
     state: State<'_, FileIndexState>,
 ) -> Vec<FolderMatch> {
-    let snapshot: Option<(Vec<IndexedFile>, PathBuf)> = {
-        let guard = state.current.read();
-        guard.as_ref().map(|p| (p.files.read().clone(), p.root.clone()))
+    // Clone the Arc (pointer copy) + root, not the whole file Vec, then hold the
+    // inner read lock across the folder derivation (avoids a multi-MB per-call
+    // clone on large repos — same fix as fileindex_search).
+    let (files_arc, root) = {
+        let guard = state.per_window.read();
+        match guard.get(webview.label()) {
+            Some(p) => (p.files.clone(), p.root.clone()),
+            None => return Vec::new(),
+        }
     };
-    let Some((files, root)) = snapshot else {
-        return Vec::new();
-    };
+    let files = files_arc.read();
 
     // Collect unique parent directories, in first-seen order. We walk each
     // file's `rel` up to (but not including) the project root.
     let mut seen = std::collections::HashSet::<String>::new();
     let mut folders: Vec<(String, PathBuf)> = Vec::new();
-    for f in &files {
+    for f in files.iter() {
         let mut cur = Path::new(&f.rel).parent();
         while let Some(p) = cur {
             let rel = p.to_string_lossy();
@@ -360,15 +388,27 @@ pub fn fileindex_search_dirs(
 pub fn fileindex_search(
     query: String,
     limit: usize,
+    webview: WebviewWindow,
     state: State<'_, FileIndexState>,
 ) -> Vec<FileMatch> {
-    let Some(idx) = state.current.read().as_ref().cloned_files() else {
-        return Vec::new();
+    // Clone the Arc (a pointer copy), not the whole file Vec, then hold the
+    // inner read lock across the match. The old code deep-cloned every
+    // IndexedFile (path + rel String) on *each keystroke* just to read it —
+    // multi-MB per search on a large repo. Matching is pure CPU (no .await),
+    // so holding the read lock is fine; a concurrent re-index inserts a fresh
+    // ProjectIndex, leaving this Arc as a safe snapshot.
+    let files_arc = {
+        let guard = state.per_window.read();
+        match guard.get(webview.label()) {
+            Some(p) => p.files.clone(),
+            None => return Vec::new(),
+        }
     };
+    let files = files_arc.read();
 
     let trimmed = query.trim();
     if trimmed.is_empty() {
-        return idx
+        return files
             .iter()
             .take(limit.max(1))
             .map(|f| FileMatch {
@@ -381,7 +421,7 @@ pub fn fileindex_search(
     let mut matcher = Matcher::default();
     let pattern = Pattern::parse(trimmed, CaseMatching::Smart, Normalization::Smart);
 
-    let mut scored: Vec<(u32, &IndexedFile)> = idx
+    let mut scored: Vec<(u32, &IndexedFile)> = files
         .iter()
         .filter_map(|f| {
             pattern
@@ -402,16 +442,6 @@ pub fn fileindex_search(
 }
 
 // ── internals ────────────────────────────────────────────────────────────
-
-trait IndexClone {
-    fn cloned_files(&self) -> Option<Vec<IndexedFile>>;
-}
-
-impl IndexClone for Option<&ProjectIndex> {
-    fn cloned_files(&self) -> Option<Vec<IndexedFile>> {
-        self.map(|p| p.files.read().clone())
-    }
-}
 
 fn walk_project(root: &Path) -> Vec<IndexedFile> {
     let walker = WalkBuilder::new(root)

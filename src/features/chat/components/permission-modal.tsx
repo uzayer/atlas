@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Shield, CheckCircle2, XCircle, AlertTriangle, ClipboardList } from "lucide-react";
+import {
+  Shield,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  ClipboardList,
+  CircleHelp,
+} from "lucide-react";
 import { toast } from "sonner";
 import { useChatStore } from "../stores/chat-store";
 import { agents } from "../lib/agents-api";
@@ -8,6 +15,7 @@ import { cn } from "@/lib/utils";
 import { Kbd } from "@/ui/kbd";
 import { Markdown } from "@/lib/markdown";
 import { extractPlanMarkdown } from "../lib/plans";
+import { extractQuestions } from "../lib/questions";
 import type { PermissionOptionRef, PendingPermission } from "@/types/acp";
 
 function isAllow(kind: string) {
@@ -72,6 +80,10 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
         send({ kind: "cancelled" });
         return;
       }
+      // AskUserQuestion answers are picked by click (the card's button order
+      // can differ from the raw ACP option order), so don't let digits/Enter
+      // resolve a possibly-mismatched option here.
+      if (extractQuestions(current.toolCall)) return;
       if (inText) return; // let the field handle digits / Enter
       if (e.key === "Enter") {
         if (primaryId) {
@@ -122,6 +134,7 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
 
   const title = current.toolCall.title ?? current.toolCall.kind ?? "Tool call";
   const planMarkdown = extractPlanMarkdown(current.toolCall);
+  const questions = extractQuestions(current.toolCall);
   const queueNote = queueLength > 1 ? `${queueLength - 1} more pending after this` : null;
 
   // Numbered option list — shared by both layouts.
@@ -148,8 +161,11 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
           <Dialog.Content
             className={cn(
-              "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
-              "flex max-h-[80vh] w-[880px] max-w-[94vw] flex-col overflow-hidden",
+              // Anchor near the top (not vertically centered) with a viewport
+              // cap, so a long plan never pushes the modal — and its Cancel
+              // footer — below the window. The plan panel scrolls internally.
+              "fixed left-1/2 top-[5vh] z-50 -translate-x-1/2",
+              "flex max-h-[90vh] w-[880px] max-w-[94vw] flex-col overflow-hidden",
               "rounded-md border border-border-default bg-bg-elevated",
               "shadow-[var(--shadow-overlay)] animate-scale-in text-text-primary",
             )}
@@ -169,11 +185,11 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
               )}
             </div>
             <div className="flex min-h-0 flex-1">
-              <section className="flex min-h-0 flex-1 flex-col">
+              <section className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <div className="border-b border-border-default bg-bg-base px-5 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
                   Plan
                 </div>
-                <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+                <div className="min-h-0 min-w-0 flex-1 overflow-auto px-5 py-4">
                   <Markdown>{planMarkdown}</Markdown>
                 </div>
               </section>
@@ -181,7 +197,7 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
                 <div className="border-b border-border-default bg-bg-base px-4 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
                   Choose
                 </div>
-                <div className="min-h-0 flex-1 overflow-auto px-4 py-3">{optionList}</div>
+                <div className="min-h-0 min-w-0 flex-1 overflow-auto px-4 py-3">{optionList}</div>
                 <div className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-2.5">
                   <button
                     type="button"
@@ -196,6 +212,111 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+    );
+  }
+
+  // AskUserQuestion — render the rich question(s) + answer choices inline.
+  // Each answer maps to the matching ACP option when the adapter exposed the
+  // choices as permission options; otherwise clicking it answers in words via
+  // the free-text path (cancel + send). Esc still backs out.
+  if (questions) {
+    const primaryQ = questions[0];
+    const acpByName = new Map(
+      current.options.map((o) => [o.name.trim().toLowerCase(), o] as const),
+    );
+    const answer = (o: { label: string }) => {
+      const match = acpByName.get(o.label.trim().toLowerCase());
+      if (match) resolve(match.optionId);
+      else {
+        cancel();
+        onSendMessage?.(o.label);
+      }
+    };
+    // ACP options with no corresponding answer choice (e.g. an explicit
+    // reject/cancel) — surfaced below so the user can still decline.
+    const specLabels = new Set(
+      questions.flatMap((q) => q.options.map((o) => o.label.trim().toLowerCase())),
+    );
+    const extraOptions = current.options.filter(
+      (o) => !specLabels.has(o.name.trim().toLowerCase()),
+    );
+
+    return (
+      <div className="px-4 pt-2">
+        <div className="mx-auto w-full max-w-[720px] overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--bg-elevated)] shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
+          <div className="flex items-start gap-2 px-3 pt-3">
+            <CircleHelp className="mt-0.5 size-3.5 shrink-0 text-accent" />
+            <div className="flex-1 min-w-0">
+              {primaryQ.header && (
+                <div className="text-[11px] uppercase tracking-wide text-text-secondary">
+                  {primaryQ.header}
+                </div>
+              )}
+              <div className="text-[13px] font-medium leading-snug text-text-primary">
+                {primaryQ.question || "The agent has a question"}
+              </div>
+              {primaryQ.multiSelect && (
+                <div className="mt-0.5 text-[11px] text-text-tertiary">
+                  Multiple choices apply — pick the closest, or answer in your
+                  own words below.
+                </div>
+              )}
+              {queueNote && (
+                <div className="mt-0.5 text-[11px] text-text-secondary">{queueNote}</div>
+              )}
+            </div>
+          </div>
+
+          {/* Additional questions (rare) shown as context. */}
+          {questions.length > 1 && (
+            <div className="mx-3 mt-2 space-y-1 rounded-md border border-border-default bg-bg-base px-3 py-2">
+              {questions.slice(1).map((q, i) => (
+                <div key={i} className="text-[11px] text-text-secondary">
+                  {q.header && <span className="text-text-tertiary">{q.header}: </span>}
+                  {q.question}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-1 px-3 py-2.5">
+            {primaryQ.options.map((o, i) => (
+              <QuestionOption
+                key={`${o.label}-${i}`}
+                index={i + 1}
+                label={o.label}
+                description={o.description}
+                onSelect={() => answer(o)}
+              />
+            ))}
+            {extraOptions.map((opt) => (
+              <PermissionOption
+                key={opt.optionId}
+                index={0}
+                option={opt}
+                onSelect={() => resolve(opt.optionId)}
+              />
+            ))}
+          </div>
+
+          <div className="border-t border-border-default px-3 py-2.5">
+            <textarea
+              ref={textRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submitText();
+                }
+              }}
+              rows={1}
+              placeholder="Answer in your own words…"
+              className="w-full resize-none rounded-md border border-border-default bg-bg-base px-2.5 py-1.5 text-[12px] text-text-primary outline-none placeholder:text-text-tertiary focus:border-[var(--border-focus)]"
+            />
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -267,23 +388,64 @@ function PermissionOption({
       type="button"
       onClick={onSelect}
       className={cn(
-        "flex items-center gap-2.5 rounded-md border px-2.5 py-2 text-left text-[12px] transition-colors outline-none",
+        "flex w-full min-w-0 items-center gap-2.5 rounded-md border px-2.5 py-2 text-left text-[12px] transition-colors outline-none",
         tone,
       )}
     >
-      <span
-        className={cn(
-          "flex h-4 w-4 shrink-0 items-center justify-center rounded text-[10px] font-semibold",
-          isPrimary ? "bg-[var(--bg-base)]/15 text-[var(--bg-base)]" : "bg-bg-elevated text-text-secondary",
-        )}
-      >
-        {index}
-      </span>
+      {index > 0 && (
+        <span
+          className={cn(
+            "flex h-4 w-4 shrink-0 items-center justify-center rounded text-[10px] font-semibold",
+            isPrimary ? "bg-[var(--bg-base)]/15 text-[var(--bg-base)]" : "bg-bg-elevated text-text-secondary",
+          )}
+        >
+          {index}
+        </span>
+      )}
       <Icon className="size-3.5 shrink-0" />
-      <span className="flex-1 font-medium">{option.name}</span>
+      <span className="min-w-0 flex-1 font-medium break-words">{option.name}</span>
       {isPrimary && (
         <Kbd className="border-[var(--bg-base)]/20 bg-[var(--bg-base)]/10 text-[var(--bg-base)]">↵</Kbd>
       )}
+    </button>
+  );
+}
+
+/**
+ * An AskUserQuestion answer choice — label + optional description. Distinct from
+ * PermissionOption (which is allow/reject-shaped): every answer is a neutral,
+ * equally-weighted pick, numbered for quick scanning.
+ */
+function QuestionOption({
+  index,
+  label,
+  description,
+  onSelect,
+}: {
+  index: number;
+  label: string;
+  description?: string;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "flex w-full min-w-0 items-start gap-2.5 rounded-md border border-border-default bg-bg-base px-2.5 py-2 text-left text-[12px] transition-colors outline-none hover:bg-bg-hover",
+      )}
+    >
+      <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded bg-bg-elevated text-[10px] font-semibold text-text-secondary">
+        {index}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block font-medium break-words text-text-primary">{label}</span>
+        {description && (
+          <span className="mt-0.5 block text-[11px] font-normal leading-snug text-text-secondary break-words">
+            {description}
+          </span>
+        )}
+      </span>
     </button>
   );
 }

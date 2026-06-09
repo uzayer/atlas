@@ -3,16 +3,16 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   X,
   MessageSquare,
-  Terminal,
   Search,
   PanelLeftClose,
   Plus,
-  Loader2,
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
+import { AtlasLoader } from "@/components/atlas-loader";
 import { timeAgo } from "@/lib/time-ago";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
@@ -54,6 +54,9 @@ interface SidebarItem {
   subtitle: string | null;
   lastUpdated: string | null;
   messageCount: number;
+  /** Which coding agent ran this session (drives the row icon). Defaults to
+   *  "claude" — historical Claude-only sessions + anything without metadata. */
+  agent: "claude" | "codex";
   // agent-only
   filePath?: string;
   // chat-only
@@ -101,6 +104,8 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         "|" +
         (x.userMessageCount ?? 0) +
         "|" +
+        (x.agentType ?? "claude-code") +
+        "|" +
         (x.messages.length > 0 ? 1 : 0) +
         "\n";
     }
@@ -121,6 +126,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         updatedAt: string;
         firstUserContent: string;
         userMessageCount: number;
+        agentType: string;
         hasAnyMessage: boolean;
       }
     > = {};
@@ -134,6 +140,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         updatedAt: sess.updatedAt,
         firstUserContent: sess.firstUserContent ?? "",
         userMessageCount: sess.userMessageCount ?? 0,
+        agentType: sess.agentType ?? "claude-code",
         hasAnyMessage: sess.messages.length > 0,
       };
     }
@@ -268,6 +275,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         messageCount: live
           ? live.userMessageCount
           : (disk?.message_count ?? 0),
+        // Agent metadata comes from the live session (Codex only persists
+        // in-session for now); disk-backed Claude sessions default to claude.
+        agent: live?.agentType === "codex" ? "codex" : "claude",
         filePath: disk?.file_path,
       };
     });
@@ -541,7 +551,6 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
           const active = isActiveItem(item);
           const isRunning = runningKeys.has(`${item.kind}:${item.id}`);
           const isLast = idx === filtered.length - 1;
-          const Icon = item.kind === "agent" ? Terminal : MessageSquare;
           return (
             <div
               key={`${item.kind}-${item.id}`}
@@ -553,38 +562,39 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
                 active
                   ? "bg-[var(--bg-selected)] text-[var(--text-primary)] opacity-100"
                   : "text-[var(--text-secondary)] opacity-80 hover:opacity-100 hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]",
-                !isLast && "border-b border-[var(--border-subtle)]"
+                !isLast && "border-b border-[var(--border-default)]"
               )}
             >
-              <div className="flex items-center gap-2 min-w-0 pr-5">
+              <div className="flex items-start gap-2 min-w-0 pr-5">
                 <span
-                  className="shrink-0 inline-flex items-center justify-center"
-                  title={item.kind === "agent" ? "Claude Code" : "AI Chat"}
+                  className="shrink-0 inline-flex h-[15px] items-center justify-center text-[var(--text-secondary)]"
+                  title={
+                    item.kind !== "agent"
+                      ? "AI Chat"
+                      : item.agent === "codex"
+                        ? "Codex"
+                        : "Claude Code"
+                  }
                 >
                   {isRunning ? (
-                    <Loader2
-                      size={11}
-                      className="animate-spin text-[var(--accent-primary)]"
-                    />
+                    <AtlasLoader size={8} className="text-[var(--accent-primary)]" />
+                  ) : item.kind === "agent" ? (
+                    item.agent === "codex" ? (
+                      <CodexIcon className="size-3" />
+                    ) : (
+                      <ClaudeIcon className="size-3" />
+                    )
                   ) : (
-                    <Icon
-                      size={11}
-                      className={cn(
-                        item.kind === "agent"
-                          ? "text-[var(--status-success)]"
-                          : "text-[var(--accent-primary)]"
-                      )}
-                    />
+                    <MessageSquare size={11} className="text-[var(--accent-primary)]" />
                   )}
                 </span>
-                <span className="text-[11px] truncate flex-1">{item.title}</span>
-              </div>
-              <div className="flex items-center justify-between pl-[18px]">
-                <span className="text-[9px] text-[var(--text-tertiary)]">
-                  {timeAgo(item.lastUpdated)}
+                <span className="text-[11px] leading-snug line-clamp-2 flex-1">
+                  {item.title}
                 </span>
+              </div>
+              <div className="pl-[18px]">
                 <span className="text-[9px] text-[var(--text-tertiary)]">
-                  {item.messageCount} msg
+                  {timeAgo(item.lastUpdated, { suffix: true })}
                 </span>
               </div>
 

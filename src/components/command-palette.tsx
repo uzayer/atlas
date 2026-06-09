@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { KbdCombo } from "@/ui/kbd";
+import { AtlasIcon } from "@/components/atlas-icon";
 import {
   MessageSquare,
   Map,
@@ -13,11 +14,26 @@ import {
   Settings,
   PanelLeft,
   PanelRight,
+  PanelBottom,
+  PanelTop,
+  Sidebar,
+  Columns2,
+  Maximize2,
+  Activity,
+  Network,
+  BrainCircuit,
+  ScrollText,
+  Timer,
+  Code,
+  GitBranch,
+  ArrowLeftToLine,
+  ArrowRightToLine,
   BookOpen,
   Brain,
   Search,
   FolderOpen,
 } from "lucide-react";
+import type { TabType } from "@/lib/constants";
 
 interface Command {
   id: string;
@@ -38,8 +54,22 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { addTab, toggleLeftPanel, toggleRightPanel } =
-    useLayoutStore.use.actions();
+  const {
+    addTab,
+    toggleLeftPanel,
+    toggleRightPanel,
+    toggleBottomPanel,
+    toggleChatSidebar,
+    toggleModelChatSidebar,
+    toggleTabBar,
+    toggleZenMode,
+    toggleUsagePanel,
+    setLeftSection,
+    setRightSection,
+    addGroup,
+    focusAdjacentGroup,
+    closeGroup,
+  } = useLayoutStore.use.actions();
   const { openProject } = useProjectStore.use.actions();
 
   const handleOpenFolder = async () => {
@@ -54,156 +84,98 @@ export function CommandPalette({
     }
   };
 
+  // Open a tab. Singletons get a stable id so re-running focuses the existing
+  // one instead of stacking duplicates; multi-instance types get a fresh id.
+  const SINGLETON: ReadonlySet<TabType> = new Set([
+    "knowledge",
+    "knowledge-graph",
+    "memory",
+    "log",
+    "pomodoro",
+    "settings",
+  ]);
+  const openTab = (type: TabType, title: string) =>
+    addTab({
+      id: SINGLETON.has(type) ? type : `${type}-${Date.now()}`,
+      type,
+      title,
+      closable: true,
+      dirty: false,
+      data: {},
+    });
+
+  // Reveal the sidebar (toggle it on if hidden) then switch its active section.
+  const showLeft = (section: "files" | "knowledge" | "git-graph") => {
+    if (!useLayoutStore.getState().leftPanel.visible) toggleLeftPanel();
+    setLeftSection(section);
+  };
+  const showRight = (section: "changes" | "analysis" | "explore" | "github") => {
+    if (!useLayoutStore.getState().rightPanel.visible) toggleRightPanel();
+    setRightSection(section);
+  };
+
   const commands = useMemo<Command[]>(
     () => [
-      {
-        id: "open-folder",
-        label: "Open Folder",
-        icon: FolderOpen,
-        category: "Project",
-        action: handleOpenFolder,
-      },
-      {
-        id: "new-chat",
-        label: "New Chat",
-        shortcut: "⌘T",
-        icon: MessageSquare,
-        category: "Tabs",
-        action: () =>
-          addTab({
-            id: `chat-${Date.now()}`,
-            type: "chat",
-            title: "New Chat",
-            closable: true,
-            dirty: false,
-            data: {},
-          }),
-      },
-      {
-        id: "new-canvas",
-        label: "New Spaces",
-        icon: Map,
-        category: "Tabs",
-        action: () =>
-          addTab({
-            id: `canvas-${Date.now()}`,
-            type: "canvas",
-            title: "Spaces",
-            closable: true,
-            dirty: false,
-            data: {},
-          }),
-      },
-      {
-        id: "new-terminal",
-        label: "New Terminal",
-        shortcut: "⌘⇧T",
-        icon: Terminal,
-        category: "Tabs",
-        action: () =>
-          addTab({
-            id: `terminal-${Date.now()}`,
-            type: "terminal",
-            title: "Terminal",
-            closable: true,
-            dirty: false,
-            data: {},
-          }),
-      },
-      {
-        id: "new-browser",
-        label: "Open Browser",
-        icon: Globe,
-        category: "Tabs",
-        action: () =>
-          addTab({
-            id: `browser-${Date.now()}`,
-            type: "browser",
-            title: "Browser",
-            closable: true,
-            dirty: false,
-            data: {},
-          }),
-      },
-      {
-        id: "new-tasks",
-        label: "Task Board",
-        icon: CheckSquare,
-        category: "Tabs",
-        action: () =>
-          addTab({
-            id: `tasks-${Date.now()}`,
-            type: "tasks",
-            title: "Tasks",
-            closable: true,
-            dirty: false,
-            data: {},
-          }),
-      },
-      {
-        id: "new-research",
-        label: "Research",
-        icon: BookOpen,
-        category: "Tabs",
-        action: () =>
-          addTab({
-            id: `research-${Date.now()}`,
-            type: "research",
-            title: "Research",
-            closable: true,
-            dirty: false,
-            data: {},
-          }),
-      },
-      {
-        id: "new-knowledge",
-        label: "Knowledge Base",
-        icon: Brain,
-        category: "Tabs",
-        action: () =>
-          addTab({
-            id: `knowledge-${Date.now()}`,
-            type: "knowledge",
-            title: "Knowledge",
-            closable: true,
-            dirty: false,
-            data: {},
-          }),
-      },
-      {
-        id: "toggle-left",
-        label: "Toggle Left Panel",
-        shortcut: "⌘B",
-        icon: PanelLeft,
-        category: "Layout",
-        action: toggleLeftPanel,
-      },
-      {
-        id: "toggle-right",
-        label: "Toggle Right Panel",
-        shortcut: "⌘⇧B",
-        icon: PanelRight,
-        category: "Layout",
-        action: toggleRightPanel,
-      },
-      {
-        id: "settings",
-        label: "Open Settings",
-        shortcut: "⌘,",
-        icon: Settings,
-        category: "App",
-        action: () =>
-          addTab({
-            id: "settings",
-            type: "settings",
-            title: "Settings",
-            closable: true,
-            dirty: false,
-            data: {},
-          }),
-      },
+      // ── Project ──
+      { id: "open-folder", label: "Open Folder", icon: FolderOpen, category: "Project", action: handleOpenFolder },
+
+      // ── Open tabs ──
+      { id: "new-agents-chat", label: "New Agents Chat", shortcut: "⌘T", icon: AtlasIcon, category: "Open", action: () => openTab("chat", "Agents") },
+      { id: "new-model-chat", label: "New Chat", icon: MessageSquare, category: "Open", action: () => openTab("model-chat", "Chat") },
+      { id: "new-terminal", label: "New Terminal", shortcut: "⌘⇧T", icon: Terminal, category: "Open", action: () => openTab("terminal", "Terminal") },
+      { id: "new-editor", label: "New Untitled Editor", shortcut: "⌘N", icon: Code, category: "Open", action: () => openTab("editor", "Untitled") },
+      { id: "new-canvas", label: "New Spaces", icon: Map, category: "Open", action: () => openTab("canvas", "Spaces") },
+      { id: "new-browser", label: "Open Browser", icon: Globe, category: "Open", action: () => openTab("browser", "Browser") },
+      { id: "new-tasks", label: "Task Board", icon: CheckSquare, category: "Open", action: () => openTab("tasks", "Tasks") },
+      { id: "new-research", label: "Research", icon: BookOpen, category: "Open", action: () => openTab("research", "Research") },
+      { id: "new-knowledge", label: "Knowledge Base", icon: Brain, category: "Open", action: () => openTab("knowledge", "Knowledge") },
+      { id: "new-knowledge-graph", label: "Knowledge Graph", icon: Network, category: "Open", action: () => openTab("knowledge-graph", "Graph") },
+      { id: "new-memory", label: "Memory", icon: BrainCircuit, category: "Open", action: () => openTab("memory", "Memory") },
+      { id: "new-log", label: "Log", icon: ScrollText, category: "Open", action: () => openTab("log", "Log") },
+      { id: "new-pomodoro", label: "Pomodoro", icon: Timer, category: "Open", action: () => openTab("pomodoro", "Pomodoro") },
+
+      // ── Layout toggles ──
+      { id: "toggle-left", label: "Toggle Left Panel", shortcut: "⌘B", icon: PanelLeft, category: "Layout", action: toggleLeftPanel },
+      { id: "toggle-right", label: "Toggle Right Panel", shortcut: "⌘⇧B", icon: PanelRight, category: "Layout", action: toggleRightPanel },
+      { id: "toggle-bottom", label: "Toggle Bottom Panel", shortcut: "⌘⌥B", icon: PanelBottom, category: "Layout", action: toggleBottomPanel },
+      { id: "toggle-chat-sidebar", label: "Toggle Chat Sidebar", shortcut: "⌘⌥J", icon: Sidebar, category: "Layout", action: toggleChatSidebar },
+      { id: "toggle-model-chat-sidebar", label: "Toggle Chat History Sidebar", shortcut: "⌘⌥K", icon: Sidebar, category: "Layout", action: toggleModelChatSidebar },
+      { id: "toggle-tab-bar", label: "Toggle Tab Bar", shortcut: "⌘⌥T", icon: PanelTop, category: "Layout", action: toggleTabBar },
+      { id: "toggle-usage", label: "Toggle Usage Report", icon: Activity, category: "Layout", action: toggleUsagePanel },
+      { id: "toggle-zen", label: "Toggle Zen Mode", shortcut: "⌥Z", icon: Maximize2, category: "Layout", action: toggleZenMode },
+
+      // ── Splits ──
+      { id: "split-new", label: "Split: New Column", shortcut: "⌘\\", icon: Columns2, category: "Split", action: () => addGroup() },
+      { id: "split-focus-left", label: "Split: Focus Left", shortcut: "⌥;", icon: ArrowLeftToLine, category: "Split", action: () => focusAdjacentGroup(-1) },
+      { id: "split-focus-right", label: "Split: Focus Right", shortcut: "⌥'", icon: ArrowRightToLine, category: "Split", action: () => focusAdjacentGroup(1) },
+      { id: "split-close", label: "Split: Close Column", shortcut: "⌥W", icon: Columns2, category: "Split", action: () => closeGroup(useLayoutStore.getState().focusedGroupId) },
+
+      // ── Views (reveal the panel, then switch its section) ──
+      { id: "view-files", label: "Show File Explorer", icon: PanelLeft, category: "View", action: () => showLeft("files") },
+      { id: "view-knowledge", label: "Show Knowledge Sidebar", icon: Brain, category: "View", action: () => showLeft("knowledge") },
+      { id: "view-git-graph", label: "Show Git Graph", icon: GitBranch, category: "View", action: () => showLeft("git-graph") },
+      { id: "view-changes", label: "Show Source Control", icon: PanelRight, category: "View", action: () => showRight("changes") },
+      { id: "view-analysis", label: "Show Analysis", icon: Activity, category: "View", action: () => showRight("analysis") },
+
+      // ── App ──
+      { id: "settings", label: "Open Settings", shortcut: "⌘,", icon: Settings, category: "App", action: () => openTab("settings", "Settings") },
     ],
-    [addTab, toggleLeftPanel, toggleRightPanel]
+    [
+      addTab,
+      toggleLeftPanel,
+      toggleRightPanel,
+      toggleBottomPanel,
+      toggleChatSidebar,
+      toggleModelChatSidebar,
+      toggleTabBar,
+      toggleZenMode,
+      toggleUsagePanel,
+      setLeftSection,
+      setRightSection,
+      addGroup,
+      focusAdjacentGroup,
+      closeGroup,
+    ]
   );
 
   const filtered = useMemo(() => {

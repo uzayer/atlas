@@ -90,6 +90,14 @@ impl AgentManager {
         Ok(self.inner.acp.auth_methods(agent_id)?)
     }
 
+    /// Run the agent's ACP `authenticate` flow for `method_id` (e.g. Codex's
+    /// "chatgpt" browser OAuth). Used by agents whose auth methods don't ship a
+    /// terminal command (so the terminal-subprocess path doesn't apply).
+    pub async fn authenticate(&self, agent_id: AgentId, method_id: String) -> Result<()> {
+        self.inner.acp.authenticate(agent_id, method_id).await?;
+        Ok(())
+    }
+
     pub fn kill(&self, agent_id: AgentId) -> Result<()> {
         // Tear down any sessions owned by this agent first (drops their cmd
         // channels which makes the worker tasks exit).
