@@ -70,8 +70,6 @@ interface MessageInputProps {
   running?: boolean;
   /** Hard-disable the composer (e.g. Claude Code isn't installed/authed). */
   disabled?: boolean;
-  /** Placeholder text when `disabled` is true. */
-  disabledReason?: string;
   placeholder?: string;
 }
 
@@ -81,7 +79,6 @@ export function MessageInput({
   onStop,
   running = false,
   disabled = false,
-  disabledReason,
   placeholder = "Message Atlas... (@ to mention, / for commands)",
 }: MessageInputProps) {
   const {
@@ -452,11 +449,11 @@ export function MessageInput({
       ? true
       : trimmed.length > 0;
 
-  const effectivePlaceholder = disabled
-    ? (disabledReason ?? "Set up Claude Code to start chatting")
-    : running
-      ? "Type to queue the next message…"
-      : placeholder;
+  // A fixed, generic placeholder ("Ask Claude Code / Codex what to do…") — the
+  // composer no longer mirrors the setup phase here (the setup pill above the
+  // input already communicates install/auth state). Only the queue hint
+  // overrides it.
+  const effectivePlaceholder = running ? "Type to queue the next message…" : placeholder;
 
   return (
     <div className="px-4 pb-4 pt-2 bg-transparent">

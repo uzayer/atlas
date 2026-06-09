@@ -350,6 +350,34 @@ pub async fn git_stash_push(
     .map_err(|e| e.to_string())?
 }
 
+/// Stash only the given paths (e.g. a single file flagged in a review).
+/// Only affects working-tree/index changes for those paths.
+#[tauri::command]
+pub async fn git_stash_paths(
+    path: String,
+    paths: Vec<String>,
+    message: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("no paths to stash".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        let mut args = vec!["stash".to_string(), "push".to_string()];
+        if let Some(m) = message.filter(|m| !m.trim().is_empty()) {
+            args.push("-m".into());
+            args.push(m);
+        }
+        args.push("--".into());
+        args.extend(paths);
+        let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        git_mut(&app, &path, &argv)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn git_stash_apply(path: String, index: u32, app: AppHandle) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {

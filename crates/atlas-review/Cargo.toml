@@ -14,5 +14,7 @@ cersei = "0.1.9"
 # CancellationToken for cooperative cancel of an in-flight review. Same TLS /
 # tokio stack as the host app, so the dependency trees unify.
 tokio-util = "0.7"
+# Bounded-concurrency fan-out (buffer_unordered) for per-file review agents.
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

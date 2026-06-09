@@ -1,21 +1,23 @@
 //! AI code-review commands — the Tauri bridge over the `atlas-review` engine.
 //!
-//! Mirrors the Model-Chat streaming pattern: the frontend calls `review_start`
-//! with a diff `source`, Rust resolves the BYOK key + git diff and drives the
-//! Cersei-backed reviewer, streaming `atlas:review` events (`delta`, `thinking`,
-//! `complete`, `error`) tagged by review id. Completed verdicts are persisted to
-//! `<project>/.atlas/reviews.json` so they survive reload.
+//! The frontend calls `review_start` with a diff `source`; Rust resolves the
+//! BYOK key + git diff and drives the Cersei-backed reviewer, which reviews each
+//! changed file with its own agent then synthesizes an overall report + a
+//! Mermaid architecture diagram. Progress streams over `atlas:review` events
+//! (`file_started`, `file_done`, `delta`, `complete`, `error`) tagged by review
+//! id. Completed reports are persisted to `<project>/.atlas/reviews.json`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use atlas_review::{
-    run_review, CancellationToken, ReviewEvent, ReviewOptions, ReviewVerdict,
+    run_report, CancellationToken, FileVerdict, ReviewEvent, ReviewOptions, ReviewReport,
     DEFAULT_MAX_INPUT_TOKENS,
 };
 
@@ -40,18 +42,14 @@ impl ReviewState {
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ReviewEvt {
-    Delta {
-        delta: String,
-    },
-    Thinking {
-        delta: String,
-    },
-    Complete {
-        record: ReviewRecord,
-    },
-    Error {
-        message: String,
-    },
+    FileStarted { path: String },
+    FileDone { verdict: FileVerdict },
+    /// A single file's review failed — non-fatal, the run continues.
+    FileError { message: String },
+    Delta { delta: String },
+    Complete { record: ReviewRecord },
+    /// The whole review failed.
+    Error { message: String },
 }
 
 #[derive(Serialize, Clone)]
@@ -76,12 +74,7 @@ pub struct ReviewRecord {
     pub provider: String,
     pub model: String,
     pub created_at: String,
-    pub verdict: Option<ReviewVerdict>,
-    pub raw_text: String,
-    pub omitted_files: Vec<String>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost_usd: Option<f64>,
+    pub report: ReviewReport,
 }
 
 // ── Diff source ──────────────────────────────────────────────────────────────
@@ -98,6 +91,8 @@ pub enum ReviewSource {
     Commit { sha: String },
     /// A commit range `from..to`.
     Range { from: String, to: String },
+    /// The whole branch vs its base (diff against the merge-base).
+    Branch { base: Option<String> },
 }
 
 fn git(path: &str, args: &[&str]) -> Result<String, String> {
@@ -112,6 +107,25 @@ fn git(path: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Best-guess base branch for a branch review: remote default → main → master.
+fn detect_base(path: &str) -> Option<String> {
+    if let Ok(s) = git(path, &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) {
+        let s = s.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    for cand in ["main", "master", "develop"] {
+        let exists = git(path, &["rev-parse", "--verify", "--quiet", cand])
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if exists {
+            return Some(cand.to_string());
+        }
+    }
+    None
+}
+
 /// Resolve `(raw_diff, human_title)` for a source. Blocking; call off-thread.
 fn resolve_diff(path: &str, source: &ReviewSource) -> Result<(String, String), String> {
     match source {
@@ -124,7 +138,6 @@ fn resolve_diff(path: &str, source: &ReviewSource) -> Result<(String, String), S
             Ok((diff, "Staged changes".to_string()))
         }
         ReviewSource::Commit { sha } => {
-            // `--format=` suppresses the commit header so we get just the patch.
             let diff = git(path, &["show", "--no-color", "--format=", sha])?;
             let subject = git(path, &["show", "-s", "--format=%s", sha])
                 .unwrap_or_default()
@@ -141,6 +154,23 @@ fn resolve_diff(path: &str, source: &ReviewSource) -> Result<(String, String), S
         ReviewSource::Range { from, to } => {
             let diff = git(path, &["diff", "--no-color", &format!("{from}..{to}")])?;
             Ok((diff, format!("{from}..{to}")))
+        }
+        ReviewSource::Branch { base } => {
+            let base = base
+                .clone()
+                .filter(|b| !b.trim().is_empty())
+                .or_else(|| detect_base(path))
+                .ok_or_else(|| "could not determine a base branch".to_string())?;
+            let merge_base = git(path, &["merge-base", &base, "HEAD"])?.trim().to_string();
+            if merge_base.is_empty() {
+                return Err(format!("no common ancestor with {base}"));
+            }
+            let diff = git(path, &["diff", "--no-color", &format!("{merge_base}..HEAD")])?;
+            let branch = git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            Ok((diff, format!("{base} … {branch}")))
         }
     }
 }
@@ -186,6 +216,40 @@ pub fn review_providers(app: AppHandle) -> Vec<String> {
         .collect()
 }
 
+/// Candidate base branches + the detected default, for the Branch-mode picker.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaseBranches {
+    branches: Vec<String>,
+    default: Option<String>,
+}
+
+#[tauri::command]
+pub async fn review_base_branches(project: String) -> Result<BaseBranches, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut branches: Vec<String> = git(&project, &["branch", "--format=%(refname:short)"])
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        if let Ok(r) = git(&project, &["branch", "-r", "--format=%(refname:short)"]) {
+            for l in r.lines() {
+                let l = l.trim();
+                if !l.is_empty() && !l.contains("->") {
+                    branches.push(l.to_string());
+                }
+            }
+        }
+        branches.sort();
+        branches.dedup();
+        let default = detect_base(&project);
+        Ok(BaseBranches { branches, default })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// List persisted reviews for a project, newest first.
 #[tauri::command]
 pub fn review_list(project: String) -> Vec<ReviewRecord> {
@@ -207,7 +271,7 @@ pub fn review_cancel(state: State<'_, ReviewState>, id: String) {
 }
 
 /// Start a review. Resolves the diff + key, streams `atlas:review` events, and
-/// on success persists the verdict. Resolves when the review finishes.
+/// on success persists the report. Resolves when the review finishes.
 #[tauri::command]
 pub async fn review_start(
     app: AppHandle,
@@ -234,14 +298,18 @@ pub async fn review_start(
     let cancel = CancellationToken::new();
     state.inflight.lock().insert(id.clone(), cancel.clone());
 
-    let on_event = {
+    let on_event: Arc<dyn Fn(ReviewEvent) + Send + Sync> = {
         let app = app.clone();
         let id = id.clone();
-        move |ev: ReviewEvent| match ev {
+        Arc::new(move |ev: ReviewEvent| match ev {
+            ReviewEvent::FileStarted { path } => emit(&app, &id, ReviewEvt::FileStarted { path }),
+            ReviewEvent::FileDone { verdict } => emit(&app, &id, ReviewEvt::FileDone { verdict }),
             ReviewEvent::Delta(d) => emit(&app, &id, ReviewEvt::Delta { delta: d }),
-            ReviewEvent::Thinking(d) => emit(&app, &id, ReviewEvt::Thinking { delta: d }),
-            ReviewEvent::Error(e) => emit(&app, &id, ReviewEvt::Error { message: e }),
-        }
+            ReviewEvent::Thinking(_) => {}
+            // Engine `Error` events are per-file (non-fatal); the run continues.
+            // A fatal failure surfaces as the `run_report` Err below.
+            ReviewEvent::Error(e) => emit(&app, &id, ReviewEvt::FileError { message: e }),
+        })
     };
 
     let opts = ReviewOptions {
@@ -254,23 +322,18 @@ pub async fn review_start(
         max_input_tokens: DEFAULT_MAX_INPUT_TOKENS,
     };
 
-    let result = run_review(opts, cancel.clone(), on_event).await;
+    let result = run_report(opts, cancel.clone(), on_event).await;
     state.inflight.lock().remove(&id);
 
     match result {
-        Ok(r) => {
+        Ok(report) => {
             let record = ReviewRecord {
                 id: id.clone(),
                 title,
                 provider,
                 model,
                 created_at: chrono::Utc::now().to_rfc3339(),
-                verdict: r.verdict,
-                raw_text: r.raw_text,
-                omitted_files: r.omitted_files,
-                input_tokens: r.input_tokens,
-                output_tokens: r.output_tokens,
-                cost_usd: r.cost_usd,
+                report,
             };
             let project_for_save = project.clone();
             let record_for_save = record.clone();

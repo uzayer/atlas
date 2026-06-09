@@ -2,14 +2,30 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { openFile } from "@/lib/open-file";
+import { Markdown } from "@/lib/markdown";
 import { useProjectStore } from "@/features/project/stores/project-store";
-import { useReviewStore } from "../stores/review-store";
-import { VerdictCards } from "./verdict-cards";
-import { Combobox, type ComboOption } from "./combobox";
+import { sendToAgentChat } from "@/features/chat/lib/send-to-agent";
 import { providerById } from "@/features/settings/lib/providers";
 import { ProviderLogo } from "@/components/provider-logo";
-import type { ReviewRecord, ReviewSource } from "../lib/review-api";
-import { Play, Square, Loader2, CheckCheck, ChevronLeft, KeyRound } from "lucide-react";
+import { useReviewStore } from "../stores/review-store";
+import { ReportView, FileCard } from "./verdict-cards";
+import { Combobox, type ComboOption } from "./combobox";
+import {
+  review,
+  reportToMarkdown,
+  fileToMarkdown,
+  type FileVerdict,
+  type ReviewRecord,
+} from "../lib/review-api";
+import {
+  Play,
+  Square,
+  Loader2,
+  CheckCheck,
+  ChevronLeft,
+  KeyRound,
+  Link as LinkIcon,
+} from "lucide-react";
 
 interface GitLogEntry {
   hash: string;
@@ -19,7 +35,7 @@ interface GitLogEntry {
   date: string;
 }
 
-type SourceMode = "working" | "staged" | "commit";
+type SourceMode = "working" | "staged" | "commit" | "branch";
 
 export function ReviewAgentsPanel() {
   const project = useProjectStore.use.currentProject();
@@ -34,7 +50,6 @@ export function ReviewAgentsPanel() {
   const records = useReviewStore.use.records();
   const selectedRecord = useReviewStore.use.selectedRecord();
   const streaming = useReviewStore.use.streaming();
-  const streamText = useReviewStore.use.streamText();
   const streamError = useReviewStore.use.streamError();
   const pendingSource = useReviewStore.use.pendingSource();
   const actions = useReviewStore.use.actions();
@@ -42,30 +57,25 @@ export function ReviewAgentsPanel() {
   const [mode, setMode] = useState<SourceMode>("working");
   const [commits, setCommits] = useState<GitLogEntry[]>([]);
   const [commitSha, setCommitSha] = useState<string | null>(null);
+  const [bases, setBases] = useState<string[]>([]);
+  const [baseSel, setBaseSel] = useState<string | null>(null);
 
-  // Load providers + records when the project becomes available.
   useEffect(() => {
     if (projectPath) void actions.init(projectPath);
   }, [projectPath, actions]);
 
-  // Apply a source preset requested from elsewhere (Source Control), then clear
-  // it so a back/forth to the panel doesn't re-apply a stale request.
+  // Apply a source preset requested from elsewhere (Source Control).
   useEffect(() => {
     if (!pendingSource) return;
     setMode(pendingSource.mode);
     if (pendingSource.mode === "commit" && pendingSource.sha) {
-      setCommitSha(pendingSource.sha);
+      const sha = pendingSource.sha;
+      setCommitSha(sha);
       setCommits((prev) =>
-        prev.some((c) => c.hash === pendingSource.sha)
+        prev.some((c) => c.hash === sha)
           ? prev
           : [
-              {
-                hash: pendingSource.sha!,
-                short_hash: pendingSource.sha!.slice(0, 7),
-                message: "(selected commit)",
-                author: "",
-                date: "",
-              },
+              { hash: sha, short_hash: sha.slice(0, 7), message: "(selected commit)", author: "", date: "" },
               ...prev,
             ],
       );
@@ -73,7 +83,7 @@ export function ReviewAgentsPanel() {
     actions.consumePending();
   }, [pendingSource, actions]);
 
-  // Fetch recent commits the first time the user switches to "commit" mode.
+  // Lazily load commits when entering commit mode.
   useEffect(() => {
     if (mode !== "commit" || !projectPath || commits.length > 0) return;
     void invoke<GitLogEntry[]>("git_log", { path: projectPath, limit: 50 })
@@ -84,16 +94,30 @@ export function ReviewAgentsPanel() {
       .catch(() => setCommits([]));
   }, [mode, projectPath, commits.length]);
 
-  // Keep the store's source in sync with the local picker.
+  // Lazily load base branches when entering branch mode.
   useEffect(() => {
-    const source: ReviewSource =
+    if (mode !== "branch" || !projectPath || bases.length > 0) return;
+    void review
+      .baseBranches(projectPath)
+      .then((b) => {
+        setBases(b.branches);
+        setBaseSel((s) => s ?? b.default ?? b.branches[0] ?? null);
+      })
+      .catch(() => setBases([]));
+  }, [mode, projectPath, bases.length]);
+
+  // Keep the store source in sync with the picker.
+  useEffect(() => {
+    actions.setSource(
       mode === "working"
         ? { type: "working" }
         : mode === "staged"
           ? { type: "staged" }
-          : { type: "commit", sha: commitSha ?? "" };
-    actions.setSource(source);
-  }, [mode, commitSha, actions]);
+          : mode === "commit"
+            ? { type: "commit", sha: commitSha ?? "" }
+            : { type: "branch", base: baseSel },
+    );
+  }, [mode, commitSha, baseSel, actions]);
 
   const providerOptions: ComboOption[] = useMemo(
     () =>
@@ -117,14 +141,18 @@ export function ReviewAgentsPanel() {
       })),
     [commits],
   );
+  const baseOptions: ComboOption[] = useMemo(
+    () => bases.map((b) => ({ value: b, label: b })),
+    [bases],
+  );
 
   const onOpenIssue = (relativeFile: string) => {
     if (!projectPath) return;
-    const full = relativeFile.startsWith("/")
-      ? relativeFile
-      : `${projectPath}/${relativeFile}`;
+    const full = relativeFile.startsWith("/") ? relativeFile : `${projectPath}/${relativeFile}`;
     openFile(full);
   };
+
+  const onShareFile = (file: FileVerdict) => sendToAgentChat(fileToMarkdown(file));
 
   const canRun =
     !!projectPath &&
@@ -138,24 +166,23 @@ export function ReviewAgentsPanel() {
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#0D0E0D] text-[11px]">
+    <div className="atlas-vibrant-panel h-full flex flex-col bg-[#0D0E0D] text-[11px]">
       {/* Controls */}
       <div className="border-b border-border-default p-2 flex flex-col gap-2 shrink-0">
-        {/* Source segmented control */}
         <div className="flex gap-0.5">
-          {(["working", "staged", "commit"] as const).map((m) => (
+          {(["working", "staged", "commit", "branch"] as const).map((m) => (
             <button
               key={m}
               onClick={() => setMode(m)}
               disabled={streaming}
               className={cn(
-                "flex-1 px-2 py-1 rounded capitalize transition-colors cursor-pointer disabled:opacity-50",
+                "flex-1 px-1.5 py-1 rounded capitalize transition-colors cursor-pointer disabled:opacity-50",
                 mode === m
                   ? "bg-bg-selected text-text-primary"
                   : "text-text-tertiary hover:text-text-secondary hover:bg-bg-hover",
               )}
             >
-              {m === "working" ? "Working" : m === "staged" ? "Staged" : "Commit"}
+              {m}
             </button>
           ))}
         </div>
@@ -170,14 +197,21 @@ export function ReviewAgentsPanel() {
             disabled={streaming}
           />
         )}
+        {mode === "branch" && (
+          <Combobox
+            value={baseSel}
+            options={baseOptions}
+            onChange={setBaseSel}
+            placeholder="Base branch (auto)"
+            emptyLabel="Detecting…"
+            disabled={streaming}
+          />
+        )}
 
-        {/* Provider + model */}
         {providersLoaded && providers.length === 0 ? (
           <div className="flex items-start gap-1.5 text-text-tertiary rounded border border-border-default bg-bg-selected/20 p-2">
             <KeyRound size={12} className="mt-0.5 shrink-0" />
-            <span>
-              No API keys configured. Add one in Settings → API keys to run reviews.
-            </span>
+            <span>No API keys configured. Add one in Settings → API keys to run reviews.</span>
           </div>
         ) : (
           <div className="flex gap-1.5">
@@ -201,11 +235,10 @@ export function ReviewAgentsPanel() {
           </div>
         )}
 
-        {/* Run / Cancel */}
         {streaming ? (
           <button
             onClick={() => actions.cancel()}
-            className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded bg-red-500/15 text-red-300 hover:bg-red-500/25 transition-colors cursor-pointer"
+            className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded bg-[var(--status-error)]/15 text-[var(--status-error)] hover:bg-[var(--status-error)]/25 transition-colors cursor-pointer"
           >
             <Square size={12} /> Cancel review
           </button>
@@ -223,15 +256,21 @@ export function ReviewAgentsPanel() {
       {/* Body */}
       <div className="flex-1 min-h-0 overflow-auto hide-scrollbar">
         {streaming ? (
-          <Streaming text={streamText} />
+          <LiveProgress
+            onOpenIssue={onOpenIssue}
+            projectPath={projectPath}
+            onShareFile={onShareFile}
+          />
         ) : streamError ? (
-          <div className="m-2 rounded border border-red-500/40 bg-red-500/10 p-2 text-red-300">
+          <div className="m-2 rounded border border-[var(--status-error)]/40 bg-[var(--status-error)]/10 p-2 text-[var(--status-error)]">
             {streamError}
           </div>
         ) : selectedRecord ? (
           <RecordView
             record={selectedRecord}
             onOpenIssue={onOpenIssue}
+            projectPath={projectPath}
+            onShareFile={onShareFile}
             onBack={records.length > 0 ? () => actions.selectRecord(null) : undefined}
           />
         ) : (
@@ -242,15 +281,60 @@ export function ReviewAgentsPanel() {
   );
 }
 
-function Streaming({ text }: { text: string }) {
+function LiveProgress({
+  onOpenIssue,
+  projectPath,
+  onShareFile,
+}: {
+  onOpenIssue: (file: string, line?: number) => void;
+  projectPath: string | null;
+  onShareFile: (file: FileVerdict) => void;
+}) {
+  const pending = useReviewStore.use.pendingFiles();
+  const liveFiles = useReviewStore.use.liveFiles();
+  const synthesisText = useReviewStore.use.synthesisText();
+  const fileErrors = useReviewStore.use.fileErrors();
+  const done = liveFiles.length;
+  const total = done + pending.length;
+
   return (
-    <div className="p-2">
-      <div className="flex items-center gap-1.5 text-text-tertiary mb-2">
-        <Loader2 size={12} className="animate-spin" /> Reviewing…
+    <div className="p-2 flex flex-col gap-2 animate-fade-in">
+      <div className="flex items-center gap-1.5 text-text-tertiary">
+        <Loader2 size={12} className="animate-spin" />
+        {synthesisText ? "Synthesizing report…" : `Reviewing files… (${done}/${total})`}
       </div>
-      <pre className="whitespace-pre-wrap break-words font-mono text-[10.5px] text-text-secondary leading-relaxed">
-        {text || "Waiting for the model…"}
-      </pre>
+
+      {pending.map((p) => (
+        <div
+          key={p}
+          className="flex items-center gap-1.5 rounded-lg border border-border-subtle bg-[var(--bg-elevated)]/30 px-2 py-1.5 text-text-tertiary"
+        >
+          <Loader2 size={11} className="animate-spin shrink-0" />
+          <span className="truncate">{p.split("/").pop()}</span>
+        </div>
+      ))}
+
+      {liveFiles.map((f) => (
+        <FileCard
+          key={f.path}
+          file={f}
+          onOpenIssue={onOpenIssue}
+          projectPath={projectPath ?? undefined}
+          onShare={onShareFile}
+        />
+      ))}
+
+      {fileErrors.map((e, i) => (
+        <div key={i} className="text-[10px] text-[var(--status-error)]/80 px-1">
+          {e}
+        </div>
+      ))}
+
+      {synthesisText && (
+        <div className="rounded-lg border border-border-subtle bg-[var(--bg-elevated)]/50 p-2.5 mt-1">
+          <Markdown className="text-[11px]">{synthesisText}</Markdown>
+        </div>
+      )}
     </div>
   );
 }
@@ -258,37 +342,42 @@ function Streaming({ text }: { text: string }) {
 function RecordView({
   record,
   onOpenIssue,
+  projectPath,
+  onShareFile,
   onBack,
 }: {
   record: ReviewRecord;
   onOpenIssue: (file: string, line?: number) => void;
+  projectPath: string | null;
+  onShareFile: (file: FileVerdict) => void;
   onBack?: () => void;
 }) {
   return (
     <div>
-      <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border-default text-text-tertiary">
+      <div className="flex items-center gap-2 px-2 py-1.5 border-b border-border-default sticky top-0 bg-[#0D0E0D]/90 backdrop-blur-sm z-10">
         {onBack && (
           <button
             onClick={onBack}
-            className="flex items-center gap-0.5 hover:text-text-secondary cursor-pointer"
+            className="flex items-center gap-0.5 text-text-tertiary hover:text-text-secondary cursor-pointer"
           >
             <ChevronLeft size={12} /> Back
           </button>
         )}
-        <span className="truncate ml-auto text-[10px]">{record.title}</span>
+        <span className="truncate text-[10px] text-text-tertiary">{record.title}</span>
+        <button
+          onClick={() => sendToAgentChat(reportToMarkdown(record))}
+          className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] text-text-secondary hover:bg-bg-hover transition-colors cursor-pointer shrink-0"
+          title="Send this review to the coding agent"
+        >
+          <LinkIcon size={10} /> Share
+        </button>
       </div>
-      {record.verdict ? (
-        <VerdictCards
-          verdict={record.verdict}
-          omittedFiles={record.omittedFiles}
-          onOpenIssue={onOpenIssue}
-        />
-      ) : (
-        // Parsing failed — show the raw model output so the review isn't lost.
-        <pre className="whitespace-pre-wrap break-words font-mono text-[10.5px] text-text-secondary leading-relaxed p-2">
-          {record.rawText || "No output."}
-        </pre>
-      )}
+      <ReportView
+        report={record.report}
+        onOpenIssue={onOpenIssue}
+        projectPath={projectPath ?? undefined}
+        onShareFile={onShareFile}
+      />
     </div>
   );
 }
@@ -309,7 +398,7 @@ function RecordList({
         <button
           key={r.id}
           onClick={() => onPick(r)}
-          className="text-left px-2 py-2 border-b border-border-default hover:bg-bg-hover transition-colors cursor-pointer"
+          className="text-left px-2 py-2 border-b border-border-subtle hover:bg-bg-hover transition-colors cursor-pointer"
         >
           <div className="flex items-center gap-1.5">
             <CheckCheck size={12} className="text-text-tertiary shrink-0" />
@@ -317,10 +406,8 @@ function RecordList({
           </div>
           <div className="mt-0.5 flex items-center gap-2 text-[10px] text-text-tertiary">
             <span>{r.model}</span>
-            {typeof r.verdict?.score === "number" && <span>· {r.verdict.score}/100</span>}
-            {r.verdict && r.verdict.key_issues.length > 0 && (
-              <span>· {r.verdict.key_issues.length} issues</span>
-            )}
+            {typeof r.report?.score === "number" && <span>· {r.report.score}/100</span>}
+            <span>· {r.report?.files.length ?? 0} files</span>
             <span className="ml-auto">{relativeTime(r.createdAt)}</span>
           </div>
         </button>

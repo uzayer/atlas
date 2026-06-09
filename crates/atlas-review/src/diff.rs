@@ -28,14 +28,14 @@ pub fn estimate_tokens(s: &str) -> usize {
 }
 
 /// One file's section of a unified diff.
-struct FilePatch {
-    path: String,
-    body: String,
+pub struct FilePatch {
+    pub path: String,
+    pub body: String,
 }
 
 /// Split a unified diff into per-file patches on `diff --git` boundaries.
 /// Anything before the first boundary (rare preamble) is ignored.
-fn split_files(diff: &str) -> Vec<FilePatch> {
+pub fn split_files(diff: &str) -> Vec<FilePatch> {
     let mut files = Vec::new();
     let mut current: Option<FilePatch> = None;
     for line in diff.lines() {

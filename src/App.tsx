@@ -37,6 +37,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { logEvent } from "@/features/log/lib/log";
+import { warmMarkdownWorker } from "@/lib/markdown-cache";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
 import { NotificationPanel } from "@/features/notifications/components/notification-panel";
 import { Toaster } from "sonner";
@@ -330,6 +331,37 @@ export function App() {
     };
     document.addEventListener("visibilitychange", onVisible);
 
+    // ── Idle-while-focused cold wake ─────────────────────────────────────────
+    // The focus/visibility edges above never fire when Atlas stays the focused,
+    // visible window through a long idle stretch (the user steps away without
+    // switching apps or Spaces). WebKit still throttles the idle main thread and
+    // the OS can reclaim JIT/worker pages, so the first interactions on return
+    // are cold and recover only gradually (the "slow for ~10-15s" symptom). Two
+    // mitigations:
+    //   1. Fire the same warm-up on the FIRST real interaction after an idle gap
+    //      so the whole pipeline (chat virtualizer, graphs, markdown worker)
+    //      warms at once instead of path-by-path as each is lazily exercised.
+    //   2. While focused+visible, ping the markdown worker on an idle cadence so
+    //      WebKit doesn't suspend it out from under us (a suspended worker costs
+    //      a 3s watchdog → main-thread sync fallback on the first big message).
+    const IDLE_RETURN_MS = 30_000;
+    const KEEP_WARM_MS = 20_000;
+    let lastActivityAt = Date.now();
+    const onUserActivity = () => {
+      const now = Date.now();
+      if (now - lastActivityAt > IDLE_RETURN_MS) signalActive();
+      lastActivityAt = now;
+    };
+    // Discrete inputs only (not pointermove) to keep this effectively free.
+    window.addEventListener("pointerdown", onUserActivity, { passive: true });
+    window.addEventListener("keydown", onUserActivity, { passive: true });
+    window.addEventListener("wheel", onUserActivity, { passive: true });
+    const keepWarm = window.setInterval(() => {
+      if (windowFocused && document.visibilityState === "visible") {
+        warmMarkdownWorker();
+      }
+    }, KEEP_WARM_MS);
+
     let permissionState: "unknown" | "granted" | "denied" = "unknown";
     // Establish notification permission EAGERLY at startup. The old lazy path
     // only asked the OS the first time a notification fired while unfocused —
@@ -586,6 +618,10 @@ export function App() {
       if (rafId !== null) cancelAnimationFrame(rafId);
       unlistenFocus?.();
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pointerdown", onUserActivity);
+      window.removeEventListener("keydown", onUserActivity);
+      window.removeEventListener("wheel", onUserActivity);
+      window.clearInterval(keepWarm);
       unlisten?.();
     };
   }, []);

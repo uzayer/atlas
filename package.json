@@ -81,6 +81,7 @@
     "lowlight": "^3.3.0",
     "lucide-react": "^0.468",
     "matter-js": "^0.20.0",
+    "mermaid": "^11.15.0",
     "pdfjs-dist": "^5.4.296",
     "pixi.js": "^8.18.1",
     "react": "^19",

@@ -1,13 +1,14 @@
 // Review-Agents store. Owns provider/model selection, the diff source, the
-// streaming state of an in-flight review, and the list of persisted past
-// reviews (loaded from Rust). A single global `atlas:review` listener routes
-// streamed deltas + completion into state, keyed by the active review id.
+// live state of an in-flight report (per-file progress + streamed synthesis),
+// and the list of persisted past reviews. A single global `atlas:review`
+// listener routes events into state, keyed by the active review id.
 
 import { create } from "zustand";
 import { createSelectors } from "@/lib/create-selectors";
 import {
   review,
   listenReview,
+  type FileVerdict,
   type ReviewRecord,
   type ReviewSource,
 } from "../lib/review-api";
@@ -32,11 +33,19 @@ interface ReviewState {
   /** Id of the in-flight (or last-started) review. */
   activeId: string | null;
   streaming: boolean;
-  streamText: string;
+  // ── Live run state ──
+  /** Files started but not yet done (in-flight). */
+  pendingFiles: string[];
+  /** Per-file verdicts as they complete. */
+  liveFiles: FileVerdict[];
+  /** Streamed synthesis summary text. */
+  synthesisText: string;
+  /** Non-fatal per-file errors during the current run. */
+  fileErrors: string[];
+  /** Fatal error that aborted the run. */
   streamError: string | null;
-  /** A source preset requested from elsewhere (e.g. Source Control's "Review
-   *  this commit"); the panel consumes it to set its picker, then clears it. */
-  pendingSource: { mode: "working" | "staged" | "commit"; sha?: string } | null;
+  /** A source preset requested from elsewhere (Source Control). */
+  pendingSource: { mode: "working" | "staged" | "commit" | "branch"; sha?: string } | null;
   actions: {
     init: (project: string) => Promise<void>;
     refreshRecords: (project: string) => Promise<void>;
@@ -46,9 +55,7 @@ interface ReviewState {
     start: (project: string) => Promise<void>;
     cancel: () => void;
     selectRecord: (record: ReviewRecord | null) => void;
-    /** Preset the diff source from another feature (does not auto-run). */
-    requestReview: (mode: "working" | "staged" | "commit", sha?: string) => void;
-    /** Clear the pending preset after the panel applies it. */
+    requestReview: (mode: "working" | "staged" | "commit" | "branch", sha?: string) => void;
     consumePending: () => void;
   };
 }
@@ -68,7 +75,10 @@ export const useReviewStore = createSelectors(
     selectedRecord: null,
     activeId: null,
     streaming: false,
-    streamText: "",
+    pendingFiles: [],
+    liveFiles: [],
+    synthesisText: "",
+    fileErrors: [],
     streamError: null,
     pendingSource: null,
     actions: {
@@ -76,18 +86,32 @@ export const useReviewStore = createSelectors(
         if (!listenerReady) {
           listenerReady = true;
           await listenReview((e) => {
-            const { activeId } = get();
-            if (e.id !== activeId) return;
+            if (e.id !== get().activeId) return;
             switch (e.kind) {
-              case "delta":
-                set((s) => ({ streamText: s.streamText + e.delta }));
+              case "file_started":
+                set((s) => ({ pendingFiles: [...s.pendingFiles, e.path] }));
                 break;
-              case "thinking":
-                break; // not surfaced in the UI
+              case "file_done":
+                set((s) => ({
+                  pendingFiles: s.pendingFiles.filter((p) => p !== e.verdict.path),
+                  liveFiles: [
+                    ...s.liveFiles.filter((f) => f.path !== e.verdict.path),
+                    e.verdict,
+                  ],
+                }));
+                break;
+              case "file_error":
+                set((s) => ({ fileErrors: [...s.fileErrors, e.message] }));
+                break;
+              case "delta":
+                set((s) => ({ synthesisText: s.synthesisText + e.delta }));
+                break;
               case "complete":
                 set((s) => ({
                   streaming: false,
-                  streamText: "",
+                  synthesisText: "",
+                  liveFiles: [],
+                  pendingFiles: [],
                   selectedRecord: e.record,
                   records: [e.record, ...s.records.filter((r) => r.id !== e.record.id)],
                 }));
@@ -99,14 +123,12 @@ export const useReviewStore = createSelectors(
           });
         }
 
-        // Records + providers in parallel.
         const [providers] = await Promise.all([
           review.providers().catch(() => [] as string[]),
           get().actions.refreshRecords(project),
         ]);
         set({ providers, providersLoaded: true });
 
-        // Restore the saved provider/model if still valid, else first available.
         const saved = localStorage.getItem(LS_PROVIDER);
         const provider = saved && providers.includes(saved) ? saved : providers[0] ?? null;
         if (provider) {
@@ -132,9 +154,7 @@ export const useReviewStore = createSelectors(
         } catch {
           liveIds = [];
         }
-        // Curate to coding-strong models for this provider (live ∪ preferred).
         const models = curateModels(provider, liveIds);
-        // Restore this provider's saved model if still offered, else its default.
         const saved = localStorage.getItem(lsModelKey(provider));
         const selectedModel =
           saved && models.includes(saved) ? saved : defaultModelFor(provider, models);
@@ -157,16 +177,16 @@ export const useReviewStore = createSelectors(
         set({
           activeId: id,
           streaming: true,
-          streamText: "",
+          pendingFiles: [],
+          liveFiles: [],
+          synthesisText: "",
+          fileErrors: [],
           streamError: null,
           selectedRecord: null,
         });
         try {
           await review.start(id, project, selectedProvider, selectedModel, source);
         } catch (err) {
-          // resolve-diff / no-key errors come back as a rejected promise with no
-          // event. Only surface if this review is still the active in-flight one
-          // (the `complete`/`error` event may have already settled it).
           if (get().activeId === id && get().streaming) {
             set({ streaming: false, streamError: String(err) });
           }

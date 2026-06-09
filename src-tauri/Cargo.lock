@@ -438,6 +438,7 @@ name = "atlas-review"
 version = "0.1.0"
 dependencies = [
  "cersei",
+ "futures",
  "serde",
  "serde_json",
  "tokio-util",

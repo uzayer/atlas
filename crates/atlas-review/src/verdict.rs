@@ -70,8 +70,15 @@ fn no_concern() -> String {
 /// Extract a [`ReviewVerdict`] from model output. Tries a fenced ```json block
 /// first, then the outermost `{...}` span. Returns `None` if nothing parses.
 pub fn parse(text: &str) -> Option<ReviewVerdict> {
+    extract_json(text)
+}
+
+/// Tolerantly extract a JSON value of type `T` from model output: try a fenced
+/// ```json block first, then the outermost balanced `{...}` span. Returns
+/// `None` if nothing parses. Shared by every structured-output parser.
+pub fn extract_json<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
     for candidate in candidates(text) {
-        if let Ok(v) = serde_json::from_str::<ReviewVerdict>(&candidate) {
+        if let Ok(v) = serde_json::from_str::<T>(&candidate) {
             return Some(v);
         }
     }
