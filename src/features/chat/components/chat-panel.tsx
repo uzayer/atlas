@@ -31,7 +31,7 @@ const MessagesList = lazy(() =>
   import("./messages-list").then((m) => ({ default: m.MessagesList }))
 );
 import type { MessagesListHandle } from "./messages-list";
-import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight, LogIn } from "lucide-react";
+import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight, LogIn, GitCompare, FlaskConical } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { PanelSkeleton } from "@/components/panel-skeleton";
 import { Kbd, KbdGroup } from "@/ui/kbd";
@@ -643,41 +643,71 @@ function ChatComposer({
   );
 }
 
+const WELCOME_SUGGESTIONS = [
+  { text: "Analyze this codebase", Icon: Search },
+  { text: "Create a new feature", Icon: Sparkles },
+  { text: "Review recent changes", Icon: GitCompare },
+  { text: "Write tests for...", Icon: FlaskConical },
+] as const;
+
 function WelcomeState() {
   return (
-    <div className="h-full flex items-center justify-center">
-      <div className="text-center space-y-4 max-w-[400px] px-6">
-        <AtlasIcon size={56} className="mx-auto rounded-2xl" />
-        <div>
-          <h2 className="text-lg font-semibold text-[var(--text-primary)]">
-            Atlas
-          </h2>
-          <p className="text-sm text-[var(--text-secondary)] mt-1">
-            Code with Agents. Tools, plans, and edits all live.
-          </p>
+    <div className="h-full flex items-center justify-center px-6">
+      <div className="w-full max-w-[440px] flex flex-col items-center text-center">
+        {/* Hero: Atlas mark over a soft accent glow (radial gradient, no
+            backdrop-filter — cheap + static in WKWebView). */}
+        <div className="relative mb-5">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute left-1/2 top-1/2 -z-10 h-[260px] w-[260px] -translate-x-1/2 -translate-y-1/2 rounded-full opacity-[0.16]"
+            style={{
+              background:
+                "radial-gradient(circle, var(--accent-primary) 0%, transparent 68%)",
+            }}
+          />
+          <AtlasIcon
+            size={60}
+            className="atlas-fade-in rounded-[18px] ring-1 ring-white/10 shadow-[0_12px_50px_-12px_rgba(0,0,0,0.85)]"
+          />
         </div>
-        <div className="grid grid-cols-2 gap-2 text-left">
-          {[
-            "Analyze this codebase",
-            "Create a new feature",
-            "Review recent changes",
-            "Write tests for...",
-          ].map((prompt, i) => (
+
+        <h2
+          className="atlas-fade-in bg-gradient-to-b from-white to-white/55 bg-clip-text text-[22px] font-semibold tracking-tight text-transparent"
+          style={{ animationDelay: "40ms" }}
+        >
+          Atlas
+        </h2>
+        <p
+          className="atlas-fade-in mt-1.5 text-[13px] text-[var(--text-tertiary)]"
+          style={{ animationDelay: "80ms" }}
+        >
+          Code with Agents. Tools, plans, and edits all live.
+        </p>
+
+        <div className="mt-7 grid w-full grid-cols-2 gap-2.5">
+          {WELCOME_SUGGESTIONS.map(({ text, Icon }, i) => (
             <button
-              key={prompt}
+              key={text}
               onClick={() =>
                 window.dispatchEvent(
-                  new CustomEvent("atlas:chat-prefill", { detail: { text: prompt } }),
+                  new CustomEvent("atlas:chat-prefill", { detail: { text } }),
                 )
               }
-              style={{ animationDelay: `${i * 40}ms` }}
-              className="group atlas-fade-in flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-secondary)] text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] transition-colors text-left cursor-pointer"
+              style={{ animationDelay: `${120 + i * 50}ms` }}
+              className="group atlas-fade-in relative flex flex-col gap-2.5 rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)] p-3 text-left transition-all duration-150 hover:-translate-y-0.5 hover:border-[var(--border-strong)] hover:bg-[var(--bg-elevated)] hover:shadow-[0_8px_24px_-12px_rgba(0,0,0,0.7)] cursor-pointer"
             >
-              <span className="truncate">{prompt}</span>
-              <ArrowRight
-                size={11}
-                className="shrink-0 text-[var(--text-tertiary)] opacity-0 -translate-x-1 transition-all group-hover:opacity-100 group-hover:translate-x-0"
-              />
+              <div className="flex items-center justify-between">
+                <span className="grid h-7 w-7 place-items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-tertiary)] transition-colors group-hover:text-[var(--text-primary)]">
+                  <Icon size={13} />
+                </span>
+                <ArrowRight
+                  size={13}
+                  className="-translate-x-1 text-[var(--text-ghost)] opacity-0 transition-all group-hover:translate-x-0 group-hover:text-[var(--text-secondary)] group-hover:opacity-100"
+                />
+              </div>
+              <span className="text-[12px] font-medium leading-snug text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]">
+                {text}
+              </span>
             </button>
           ))}
         </div>

@@ -153,6 +153,17 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
               minHeight: `${minHeight}px`,
               maxHeight: `${maxHeight}px`,
               overflowY: "auto",
+              // Hide the scrollbar (matches the app's `hide-scrollbar`
+              // convention). The global ::-webkit-scrollbar reserves 8px of
+              // layout width — with `overflow:auto` WebKit reveals that bar on
+              // hover, which rewraps the text, flips the overflow condition,
+              // and oscillates the composer for a couple frames (the hover
+              // "flicker"). Removing the layout-taking bar kills it; content
+              // still scrolls via wheel/trackpad.
+              scrollbarWidth: "none",
+            },
+            ".cm-scroller::-webkit-scrollbar": {
+              display: "none",
             },
             ".cm-content": {
               padding: "12px 16px 4px",

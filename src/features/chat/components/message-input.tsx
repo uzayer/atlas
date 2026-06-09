@@ -498,12 +498,12 @@ export function MessageInput({
             "focus-within:border-[var(--border-focus)]",
             "focus-within:ring-1 focus-within:ring-[var(--accent-primary)]/20",
             // Hard-disable when Claude Code isn't ready. `pointer-events-none`
-            // also blocks the focus event so we never trigger the agent-bind
-            // listener (which would try to spawn a session against a CLI
-            // that isn't ready). The error tint makes the dead input
-            // obviously dead rather than just dimmed on black.
-            disabled &&
-              "opacity-70 pointer-events-none border-[var(--status-error)]/25 bg-[var(--status-error)]/[0.04]",
+            // disables the textarea (no click-to-focus/type) and also blocks
+            // the focus event so we never trigger the agent-bind listener
+            // (which would try to spawn a session against a CLI that isn't
+            // ready). Just dim it — no red tint — since the send button is
+            // already disabled and submit()/Cmd+Enter are gated on `disabled`.
+            disabled && "opacity-60 pointer-events-none",
           )}
           onFocusCapture={handleFocusCapture}
         >
