@@ -196,7 +196,7 @@ export function NewTabPalette({
           }}
         >
           <Dialog.Title className="sr-only">Open module</Dialog.Title>
-          <div className="flex items-center gap-2 px-4 h-[44px] border-b border-[var(--border-default)]">
+          <div className="flex items-center gap-2 px-4 h-[44px] shrink-0 border-b border-[var(--border-default)]">
             <Search size={14} className="text-[var(--text-tertiary)] shrink-0" />
             <input
               ref={inputRef}
