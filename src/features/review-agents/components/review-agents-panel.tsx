@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import { openFile } from "@/lib/open-file";
 import { Markdown } from "@/lib/markdown";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useByokStore } from "@/features/settings/stores/byok-store";
 import { sendToAgentChat } from "@/features/chat/lib/send-to-agent";
 import { providerById } from "@/features/settings/lib/providers";
 import { ProviderLogo } from "@/components/provider-logo";
@@ -53,6 +54,9 @@ export function ReviewAgentsPanel() {
   const streamError = useReviewStore.use.streamError();
   const pendingSource = useReviewStore.use.pendingSource();
   const actions = useReviewStore.use.actions();
+  // Configured BYOK keys — drives a live refresh of the provider picker when a
+  // key is added/removed in Settings while this panel is open.
+  const byokKeys = useByokStore.use.keys();
 
   const [mode, setMode] = useState<SourceMode>("working");
   const [commits, setCommits] = useState<GitLogEntry[]>([]);
@@ -63,6 +67,18 @@ export function ReviewAgentsPanel() {
   useEffect(() => {
     if (projectPath) void actions.init(projectPath);
   }, [projectPath, actions]);
+
+  // React to BYOK key add/remove in Settings: refresh the usable providers
+  // (and switch off a provider whose key was just deleted). Skip the first run
+  // since `init` already loaded providers.
+  const byokFirstRef = useRef(true);
+  useEffect(() => {
+    if (byokFirstRef.current) {
+      byokFirstRef.current = false;
+      return;
+    }
+    void actions.refreshProviders();
+  }, [byokKeys, actions]);
 
   // Apply a source preset requested from elsewhere (Source Control).
   useEffect(() => {

@@ -21,7 +21,22 @@ interface CommandInputProps {
   onInterrupt: () => void;
   /** Live cwd (OSC-7) used to resolve path completions. */
   cwd?: string;
+  /** A command is currently running — the composer feeds its stdin (answering
+   *  interactive prompts like create-next-app) instead of composing a command. */
+  busy?: boolean;
+  /** Send raw bytes to the PTY (for forwarding nav keys to a running prompt). */
+  writeRaw?: (data: number[]) => void;
 }
+
+// Escape sequences for keys a running interactive prompt expects.
+const KEY_BYTES: Record<string, number[]> = {
+  ArrowUp: [0x1b, 0x5b, 0x41],
+  ArrowDown: [0x1b, 0x5b, 0x42],
+  ArrowRight: [0x1b, 0x5b, 0x43],
+  ArrowLeft: [0x1b, 0x5b, 0x44],
+  Escape: [0x1b],
+  Tab: [0x09],
+};
 
 interface RawPathCompletion {
   name: string;
@@ -39,7 +54,7 @@ interface CycleState {
 }
 
 export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(
-  function CommandInput({ onSubmit, onInterrupt, cwd }, ref) {
+  function CommandInput({ onSubmit, onInterrupt, cwd, busy, writeRaw }, ref) {
     const taRef = useRef<HTMLTextAreaElement>(null);
     const [value, setValue] = useState("");
     // Command history + a cursor into it (-1 = the live, un-submitted line).
@@ -261,6 +276,42 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(
     const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
       const ta = e.currentTarget;
 
+      // While a command runs, the composer feeds the running process's stdin so
+      // interactive prompts (create-next-app, etc.) work. Navigation keys are
+      // forwarded raw to the PTY; typed text is sent as a line on Enter.
+      if (busy && writeRaw) {
+        if (e.key === "c" && e.ctrlKey && ta.selectionStart === ta.selectionEnd) {
+          e.preventDefault();
+          onInterrupt();
+          return;
+        }
+        const bytes = KEY_BYTES[e.key];
+        if (bytes && (e.key !== "Tab" || !value)) {
+          // Forward nav keys (and Tab only when there's nothing typed, so Tab can
+          // still answer a prompt's default). Esc closes any open suggestion first.
+          if (e.key === "Escape" && open) {
+            e.preventDefault();
+            closeSuggest();
+            return;
+          }
+          e.preventDefault();
+          writeRaw(bytes);
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          // Send the typed answer straight to the process's stdin ("" → just a
+          // newline = confirm the default). NOT through `onSubmit` — this is
+          // stdin, not a shell command, so it skips clear/sudo command handling.
+          writeRaw([...new TextEncoder().encode(value), 0x0a]);
+          setValue("");
+          closeSuggest();
+          return;
+        }
+        // Other keys: let the textarea handle them (typing the answer).
+        return;
+      }
+
       // Tab drives completion cycling (Shift+Tab cycles backward). Never inserts
       // a literal tab.
       if (e.key === "Tab") {
@@ -330,7 +381,8 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(
           value={value}
           onChange={(e) => {
             setValue(e.target.value);
-            scheduleRecompute();
+            // No shell completions while feeding a running prompt.
+            if (!busy) scheduleRecompute();
           }}
           onKeyDown={onKeyDown}
           onBlur={closeSuggest}
@@ -338,7 +390,7 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
-          placeholder="Run a command…"
+          placeholder={busy ? "Type a response, then press Enter…" : "Run a command…"}
           className="flex-1 resize-none overflow-hidden border-none bg-transparent p-0 text-[13px] leading-[18px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
           style={{ fontFamily: 'var(--font-mono, "JetBrains Mono", monospace)' }}
         />

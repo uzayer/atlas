@@ -49,6 +49,9 @@ interface ReviewState {
   actions: {
     init: (project: string) => Promise<void>;
     refreshRecords: (project: string) => Promise<void>;
+    /** Re-read which BYOK providers are usable (after a key is added/removed in
+     *  Settings). Switches off a provider whose key was just deleted. */
+    refreshProviders: () => Promise<void>;
     setProvider: (provider: string) => Promise<void>;
     setModel: (model: string) => void;
     setSource: (source: ReviewSource) => void;
@@ -142,6 +145,28 @@ export const useReviewStore = createSelectors(
           set({ records });
         } catch {
           set({ records: [] });
+        }
+      },
+
+      refreshProviders: async () => {
+        let providers: string[] = [];
+        try {
+          providers = await review.providers();
+        } catch {
+          providers = [];
+        }
+        set({ providers, providersLoaded: true });
+        const { selectedProvider } = get();
+        if (!selectedProvider) {
+          // Nothing selected yet (or was cleared) — pick the first available.
+          if (providers.length > 0) await get().actions.setProvider(providers[0]);
+        } else if (!providers.includes(selectedProvider)) {
+          // The selected provider's key was removed — switch or clear.
+          if (providers.length > 0) {
+            await get().actions.setProvider(providers[0]);
+          } else {
+            set({ selectedProvider: null, models: [], selectedModel: null });
+          }
         }
       },
 
