@@ -4,6 +4,7 @@ import { immer } from "zustand/middleware/immer";
 import { createSelectors } from "@/lib/create-selectors";
 import { invoke } from "@tauri-apps/api/core";
 import type { TabType } from "@/lib/constants";
+import type { LayoutTemplate } from "../templates";
 
 export interface Tab {
   id: string;
@@ -150,6 +151,10 @@ interface LayoutActions {
     /** Toggle Zen mode: a Knowledge │ Chat │ Browser 3-column split with the
      *  global side panels hidden; toggling again restores the prior layout. */
     toggleZenMode: () => void;
+    /** Apply a predefined layout template to the active workspace: set panels +
+     *  split columns + a tab of each template type per column (reusing existing
+     *  tabs; other open tabs are preserved in the first column). */
+    applyLayoutTemplate: (template: LayoutTemplate) => void;
     saveEditorState: (projectPath: string) => void;
     /** Awaitable variant of `saveEditorState` used by the workspace flush
      *  coordinator — resolves only once the editor-state write hits disk. */
@@ -639,6 +644,62 @@ export const useLayoutStore = createSelectors(
             s.rightPanel.visible = false;
             s.zen = true;
             syncActiveMirror(s);
+          }),
+        applyLayoutTemplate: (template) =>
+          set((s) => {
+            // Leaving zen if we were in it.
+            s.zen = false;
+            s.zenPrev = null;
+
+            // One column per template cell. Reuse an existing tab of the cell's
+            // type when present (preserve open work), else create one.
+            const order: string[] = [];
+            const active: Record<string, string | null> = {};
+            template.columns.forEach((col, i) => {
+              const gid = i === 0 ? DEFAULT_GROUP : `tpl-${i}`;
+              order.push(gid);
+              const existing = s.tabs.find((t) => t.type === col.type);
+              let id: string;
+              if (existing) {
+                existing.groupId = gid;
+                id = existing.id;
+              } else {
+                const ts = Date.now().toString(36);
+                id = `${col.type}-tpl-${i}-${ts}`;
+                // A fresh editor needs a buffer key or it renders blank; seed an
+                // untitled scratch buffer (same convention as ⌘N).
+                const data =
+                  col.type === "editor"
+                    ? { filePath: `untitled:tpl-${i}-${ts}` }
+                    : {};
+                s.tabs.push({
+                  id,
+                  type: col.type,
+                  title: col.title,
+                  closable: col.type !== "chat",
+                  dirty: false,
+                  data,
+                  groupId: gid,
+                });
+              }
+              active[gid] = id;
+            });
+
+            s.groupOrder = order;
+            s.activeByGroup = active;
+            s.focusedGroupId = order[Math.min(template.focus ?? order.length - 1, order.length - 1)];
+
+            // Park any OTHER open tabs in the first column (kept, not lost) and
+            // validate actives/focus.
+            reconcileGroups(s);
+
+            // Panels — left/right are explicitly controlled by templates;
+            // bottom (status bar) is only touched when a template opts in.
+            s.leftPanel.visible = !!template.panels.left;
+            s.rightPanel.visible = !!template.panels.right;
+            if (template.panels.bottom !== undefined) s.bottomPanel.visible = template.panels.bottom;
+            if (template.leftSection) s.leftPanel.activeSection = template.leftSection;
+            if (template.rightSection) s.rightPanel.activeSection = template.rightSection;
           }),
         setTabDirty: (id, dirty) =>
           set((s) => {

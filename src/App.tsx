@@ -4,6 +4,7 @@ import { AppLayout } from "@/features/layout/components/app-layout";
 import { AppContextMenu } from "@/components/app-context-menu";
 import { CommandPalette } from "@/components/command-palette";
 import { NewTabPalette } from "@/components/new-tab-palette";
+import { LayoutSwitcher } from "@/features/layout/components/layout-switcher";
 import { SearchOverlay } from "@/components/search-overlay";
 import { useHotkeys } from "@/hooks/use-hotkey";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
@@ -201,6 +202,7 @@ export function App() {
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [newTabPaletteOpen, setNewTabPaletteOpen] = useState(false);
+  const [layoutSwitcherOpen, setLayoutSwitcherOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const {
@@ -999,6 +1001,12 @@ export function App() {
       action: () => setNewTabPaletteOpen(true),
     },
     {
+      // ⌘⌥L — open the layout switcher (Windows-task-view-style grid of
+      // predefined layout templates, navigable by arrow keys or mouse).
+      combo: { key: "l", meta: true, alt: true },
+      action: () => setLayoutSwitcherOpen(true),
+    },
+    {
       combo: { key: "t", meta: true, shift: true },
       action: () =>
         addTab({
@@ -1038,6 +1046,10 @@ export function App() {
       <NewTabPalette
         open={newTabPaletteOpen}
         onOpenChange={setNewTabPaletteOpen}
+      />
+      <LayoutSwitcher
+        open={layoutSwitcherOpen}
+        onOpenChange={setLayoutSwitcherOpen}
       />
       <SearchOverlay open={searchOpen} onOpenChange={setSearchOpen} />
       <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />

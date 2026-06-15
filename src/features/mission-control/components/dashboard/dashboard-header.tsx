@@ -20,9 +20,9 @@ export function DashboardHeader({
   loading: boolean;
 }) {
   return (
-    <div className="flex items-center gap-2 px-4 h-[44px] shrink-0 border-b border-[var(--border-default)]">
-      <AtlasIcon size={16} className="rounded-[4px]" />
-      <span className="text-[14px] font-semibold text-[var(--text-primary)]">Console</span>
+    <div className="flex items-center gap-2 px-3 h-[32px] shrink-0 border-b border-[var(--border-default)]">
+      <AtlasIcon size={14} className="rounded-[3px]" />
+      <span className="text-[12px] font-semibold text-[var(--text-primary)]">Console</span>
       <div className="flex-1" />
 
       {/* Time range segmented control */}
