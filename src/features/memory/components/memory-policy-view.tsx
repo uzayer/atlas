@@ -44,6 +44,20 @@ export function MemoryPolicyView() {
     useMemoryStore.use.actions();
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
 
+  // ── Filters ──────────────────────────────────────────────────────────────
+  const [matchF, setMatchF] = useState<"all" | "semantic" | "keyword">("all");
+  const [strengthF, setStrengthF] = useState<"all" | "soft" | "strong">("all");
+  const [originF, setOriginF] = useState<"all" | "preference" | "codebase">("all");
+  const [query, setQuery] = useState("");
+  const visible = policies.filter(
+    (p) =>
+      (matchF === "all" || p.match_kind === matchF) &&
+      (strengthF === "all" || p.category === strengthF) &&
+      (originF === "all" || p.origin === originF) &&
+      (query.trim() === "" ||
+        `${p.key} ${p.value}`.toLowerCase().includes(query.trim().toLowerCase())),
+  );
+
   const loadPolicies = useCallback(
     (pp: string, force = false) => storeLoadPolicies(pp, force),
     [storeLoadPolicies],
@@ -196,10 +210,6 @@ export function MemoryPolicyView() {
         </button>
       </div>
 
-      <div className="flex items-center gap-2 px-3 h-[24px] shrink-0 border-b border-[var(--border-subtle)] text-[10px] text-[var(--text-tertiary)]">
-        Learned from your agent memory · edits rewrite the source memory file.
-      </div>
-
       {policies.length === 0 ? (
         <Centered>
           <p className="text-[12px] text-[var(--text-tertiary)] max-w-[300px] text-center px-4">
@@ -208,21 +218,82 @@ export function MemoryPolicyView() {
           </p>
         </Centered>
       ) : (
-        <div className="flex-1 min-h-0 overflow-auto hide-scrollbar">
-          <div style={{ minWidth: TABLE_MIN_W }}>
-            <div className="sticky top-0 z-10 flex items-center h-[28px] border-b border-[var(--border-default)] bg-[var(--bg-base)] px-3 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
-              <span className={COL.policy}>Policy</span>
-              <span className={COL.value}>Value</span>
-              <span className={COL.source}>Source</span>
-              <span className={cn(COL.score, "text-right")}>Match</span>
-              <span className={COL.actions} />
-            </div>
-            {policies.map((p) => (
-              <PolicyRow key={p.id} policy={p} onSaved={onSaved} />
-            ))}
+        <>
+          {/* Filter bar */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 shrink-0 border-b border-[var(--border-subtle)]">
+            <FilterGroup
+              value={originF}
+              onChange={setOriginF}
+              options={[["all", "All"], ["preference", "Preferences"], ["codebase", "Codebase"]] as const}
+            />
+            <FilterGroup
+              value={matchF}
+              onChange={setMatchF}
+              options={[["all", "Any match"], ["semantic", "Semantic"], ["keyword", "Keyword"]] as const}
+            />
+            <FilterGroup
+              value={strengthF}
+              onChange={setStrengthF}
+              options={[["all", "Any"], ["soft", "Soft"], ["strong", "Strong"]] as const}
+            />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter…"
+              className="ml-auto h-[22px] w-[130px] rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 text-[11px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)] focus:border-[var(--border-focus)]"
+            />
           </div>
-        </div>
+
+          <div className="flex-1 min-h-0 overflow-auto hide-scrollbar">
+            <div style={{ minWidth: TABLE_MIN_W }}>
+              <div className="sticky top-0 z-10 flex items-center h-[28px] border-b border-[var(--border-default)] bg-[var(--bg-base)] px-3 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
+                <span className={COL.policy}>Policy</span>
+                <span className={COL.value}>Value</span>
+                <span className={COL.source}>Source</span>
+                <span className={cn(COL.score, "text-right")}>Match</span>
+                <span className={COL.actions} />
+              </div>
+              {visible.length === 0 ? (
+                <div className="px-3 py-6 text-center text-[11px] text-[var(--text-tertiary)]">
+                  No policies match these filters.
+                </div>
+              ) : (
+                visible.map((p) => <PolicyRow key={p.id} policy={p} onSaved={onSaved} />)
+              )}
+            </div>
+          </div>
+        </>
       )}
+    </div>
+  );
+}
+
+/** Compact segmented filter (origin / match type / strength). */
+function FilterGroup<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: readonly (readonly [T, string])[];
+}) {
+  return (
+    <div className="flex items-center gap-0.5 rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)] p-0.5">
+      {options.map(([v, label]) => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className={cn(
+            "h-[18px] rounded px-1.5 text-[10px] transition-colors cursor-pointer",
+            value === v
+              ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
+              : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]",
+          )}
+        >
+          {label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -259,8 +330,21 @@ function PolicyRow({
   return (
     <div className="flex items-center min-h-[42px] px-3 border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)]/40 transition-colors">
       <div className={cn(COL.policy, "pr-3 min-w-0")}>
-        <div className="text-[12px] text-[var(--text-primary)] truncate">{policy.key}</div>
-        <div className="text-[10px] text-[var(--text-tertiary)] truncate">{policy.hint}</div>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span
+            className={cn(
+              "shrink-0 rounded px-1 py-px text-[8.5px] font-semibold uppercase tracking-wide border",
+              policy.category === "strong"
+                ? "border-[var(--status-error)]/40 bg-[var(--status-error)]/10 text-[var(--status-error)]"
+                : "border-[var(--border-default)] bg-[var(--bg-elevated)] text-[var(--text-tertiary)]",
+            )}
+            title={policy.category === "strong" ? "Strong rule — must follow" : "Soft preference — guidance"}
+          >
+            {policy.category}
+          </span>
+          <span className="text-[12px] text-[var(--text-primary)] truncate">{policy.key}</span>
+        </div>
+        <div className="text-[10px] text-[var(--text-tertiary)] truncate mt-0.5">{policy.hint}</div>
       </div>
 
       <div className={cn(COL.value, "pr-3")}>

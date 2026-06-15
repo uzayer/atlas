@@ -210,7 +210,7 @@ export function ChangesView() {
                 key={f.path}
                 file={f}
                 selected={selected === f.path}
-                onSelect={() => setSelected(f.path)}
+                onSelect={() => setSelected((cur) => (cur === f.path ? null : f.path))}
                 action="unstage"
                 onAction={() => run(() => actions.unstageFiles([f.path]))}
               />
@@ -238,7 +238,7 @@ export function ChangesView() {
               key={f.path}
               file={f}
               selected={selected === f.path}
-              onSelect={() => setSelected(f.path)}
+              onSelect={() => setSelected((cur) => (cur === f.path ? null : f.path))}
               action="stage"
               onAction={() => run(() => actions.stageFiles([f.path]))}
               onDiscard={() => run(() => actions.discard([f.path]))}

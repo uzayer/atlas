@@ -109,7 +109,11 @@ function WorkspaceRow({
       onClick={() => void switchTo(ws.id)}
       style={{ height: WS_CARD, paddingLeft: indented ? 16 : 6 }}
       className={cn(
-        "group relative flex items-center gap-2 pr-2 rounded-md cursor-pointer transition-colors",
+        // `transform-gpu` keeps the row on a stable composited layer so the
+        // `transition-colors` hover never promotes/demotes it mid-transition —
+        // which was re-rasterizing the git dot at a fractional pixel and making
+        // it visibly "jump" on hover.
+        "group relative flex items-center gap-2 pr-2 rounded-md cursor-pointer transition-colors transform-gpu [backface-visibility:hidden]",
         active ? "bg-[var(--bg-active)]" : "hover:bg-[var(--bg-hover)]",
       )}
       title={ws.path}
