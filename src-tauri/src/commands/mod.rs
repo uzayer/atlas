@@ -28,6 +28,7 @@ pub mod memory_graph;
 pub mod memory_policy;
 pub mod memory_timeline;
 pub mod mention_search;
+pub mod mission_control;
 pub mod papers;
 pub mod pdf_annotations;
 pub mod plans;

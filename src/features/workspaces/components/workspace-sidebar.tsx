@@ -10,7 +10,6 @@ import {
   Folder,
   FolderOpen,
   X,
-  LayoutDashboard,
   ScrollText,
   Settings,
   Bot,
@@ -35,6 +34,8 @@ import { useRunningByPath } from "../lib/agent-activity";
 import { useRecentChatsStore, type RecentChat } from "../stores/recent-chats-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
+import { AtlasIcon } from "@/components/atlas-icon";
+import { useFullscreen } from "@/hooks/use-fullscreen";
 import { cn } from "@/lib/utils";
 
 interface GitSummary {
@@ -299,6 +300,7 @@ export function WorkspaceSidebar() {
   const recentProjects = useProjectStore.use.recentProjects();
   const recentChats = useRecentChatsStore.use.items();
   const runningByPath = useRunningByPath();
+  const fullscreen = useFullscreen();
 
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const toggle = (id: string) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
@@ -429,9 +431,13 @@ export function WorkspaceSidebar() {
     <aside className="flex flex-col h-screen w-[244px] shrink-0 border-r border-[var(--border-default)] bg-[var(--bg-secondary)]/80 backdrop-blur-xl" data-tauri-drag-region>
       {/* Top bar: aligned to the titlebar height (h-[30px] + border-b) so the
        *  line under the traffic lights matches the rest of the title bar.
-       *  Right side: collapse-all + add-project. */}
+       *  Buttons sit right to dodge the traffic lights — but in fullscreen the
+       *  lights are gone, so reclaim the left edge. */}
       <div
-        className="h-[30px] shrink-0 flex items-center justify-end gap-1 px-2 border-b border-[var(--border-default)]"
+        className={cn(
+          "h-[30px] shrink-0 flex items-center gap-1 px-2 border-b border-[var(--border-default)]",
+          fullscreen ? "justify-start" : "justify-end",
+        )}
         data-tauri-drag-region
       >
         <button
@@ -446,7 +452,7 @@ export function WorkspaceSidebar() {
 
       {/* Header actions. */}
       <div className="px-1.5 pb-1 shrink-0 space-y-0.5">
-        <HeaderButton icon={<LayoutDashboard size={13} className="text-[var(--accent-primary)]" />} label="Mission Control" onClick={() => openTabSingleton("mission-control", "Mission Control")} />
+        <HeaderButton icon={<AtlasIcon size={14} className="rounded-[3px]" />} label="Console" onClick={() => openTabSingleton("mission-control", "Console")} />
         <HeaderButton icon={<ScrollText size={13} />} label="See Logs" onClick={() => openTabSingleton("log", "Log")} />
         <HeaderButton icon={<Settings size={13} />} label="Settings" onClick={() => openTabSingleton("settings", "Settings")} />
       </div>
