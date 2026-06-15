@@ -83,6 +83,7 @@ interface ProjectState {
      *  downstream loaders (that's `loadProjectStores`). */
     setActiveProject: (project: Project | null) => void;
     removeRecent: (path: string) => void;
+    clearRecents: () => void;
     updateSettings: (partial: Partial<AppSettings>) => void;
     /** One-shot hydration from Rust. Called once on app boot. */
     hydrate: (payload: AppStateWire) => void;
@@ -263,6 +264,10 @@ export const useProjectStore = createSelectors(
         set((s) => ({
           recentProjects: s.recentProjects.filter((r) => r.path !== path),
         }));
+        scheduleAppStateSave();
+      },
+      clearRecents: () => {
+        set({ recentProjects: [] });
         scheduleAppStateSave();
       },
       updateSettings: (partial: Partial<AppSettings>) => {

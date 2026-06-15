@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { useWorkspaceGitStore, type GitSummary } from "../stores/workspace-git-store";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
@@ -23,6 +22,7 @@ import {
   Search,
   MessageSquare,
   Loader2,
+  Trash2,
 } from "lucide-react";
 import {
   useWorkspaceStore,
@@ -37,15 +37,6 @@ import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { useFullscreen } from "@/hooks/use-fullscreen";
 import { cn } from "@/lib/utils";
-
-interface GitSummary {
-  isRepo: boolean;
-  branch: string;
-  headSubject: string;
-  dirty: boolean;
-  additions: number;
-  deletions: number;
-}
 
 // Slot heights (include the inter-row gap so the virtualizer spaces rows out);
 // the visible card is a few px shorter than its slot.
@@ -168,28 +159,28 @@ function WorkspaceRow({
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content align="end" sideOffset={4} onClick={(e) => e.stopPropagation()}
-            className="z-[var(--z-max)] min-w-[160px] rounded-md border border-[var(--border-default)] bg-[var(--bg-overlay)] py-1 shadow-lg text-[12px] text-[var(--text-secondary)]">
+            className="z-[var(--z-max)] min-w-[148px] rounded-md border border-[var(--border-default)] bg-black py-0.5 shadow-[var(--shadow-overlay)] text-[11px] text-[var(--text-secondary)]">
             <DropdownMenu.Sub>
-              <DropdownMenu.SubTrigger className="flex items-center justify-between px-3 h-7 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
-                Move to group <ChevronRight size={12} />
+              <DropdownMenu.SubTrigger className="flex items-center justify-between px-2.5 h-6 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
+                Move to group <ChevronRight size={11} />
               </DropdownMenu.SubTrigger>
               <DropdownMenu.Portal>
-                <DropdownMenu.SubContent className="z-[var(--z-max)] min-w-[150px] rounded-md border border-[var(--border-default)] bg-[var(--bg-overlay)] py-1 shadow-lg">
+                <DropdownMenu.SubContent className="z-[var(--z-max)] min-w-[140px] rounded-md border border-[var(--border-default)] bg-black py-0.5 shadow-[var(--shadow-overlay)] text-[11px] text-[var(--text-secondary)]">
                   {groups.map((g) => (
                     <DropdownMenu.Item key={g.id} onSelect={() => setGroup(ws.id, g.id)}
-                      className="px-3 h-7 flex items-center outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
+                      className="px-2.5 h-6 flex items-center outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
                       {g.name}
                     </DropdownMenu.Item>
                   ))}
                   <DropdownMenu.Item onSelect={() => { const gid = addGroup("New Group"); setGroup(ws.id, gid); }}
-                    className="px-3 h-7 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
+                    className="px-2.5 h-6 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
                     <FolderPlus size={11} /> New group
                   </DropdownMenu.Item>
                   {ws.groupId && (
                     <>
-                      <DropdownMenu.Separator className="my-1 h-px bg-[var(--border-default)]" />
+                      <DropdownMenu.Separator className="my-0.5 h-px bg-[var(--border-default)]" />
                       <DropdownMenu.Item onSelect={() => setGroup(ws.id, null)}
-                        className="px-3 h-7 flex items-center outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
+                        className="px-2.5 h-6 flex items-center outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
                         Remove from group
                       </DropdownMenu.Item>
                     </>
@@ -197,9 +188,9 @@ function WorkspaceRow({
                 </DropdownMenu.SubContent>
               </DropdownMenu.Portal>
             </DropdownMenu.Sub>
-            <DropdownMenu.Separator className="my-1 h-px bg-[var(--border-default)]" />
+            <DropdownMenu.Separator className="my-0.5 h-px bg-[var(--border-default)]" />
             <DropdownMenu.Item onSelect={() => void closeWorkspace(ws.id)}
-              className="px-3 h-7 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--status-error,#f44)] cursor-default">
+              className="px-2.5 h-6 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--status-error,#f44)] cursor-default">
               <X size={11} /> Remove from list
             </DropdownMenu.Item>
           </DropdownMenu.Content>
@@ -243,12 +234,23 @@ function GroupHeaderRow({ group, count, collapsed, onToggle }: { group: Workspac
   );
 }
 
-function SectionHeaderRow({ label, collapsed, onToggle }: { label: string; collapsed: boolean; onToggle: () => void }) {
+function SectionHeaderRow({
+  label,
+  collapsed,
+  onToggle,
+  action,
+}: {
+  label: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  /** Optional hover-revealed action on the right (e.g. clear-all). */
+  action?: { icon: React.ReactNode; title: string; onClick: () => void };
+}) {
   return (
-    <button
+    <div
       onClick={onToggle}
       style={{ height: HEADER_H }}
-      className="group/s w-full flex items-center gap-1 px-1.5 rounded-md hover:bg-[var(--bg-hover)] outline-none"
+      className="group/s w-full flex items-center gap-1 px-1.5 rounded-md hover:bg-[var(--bg-hover)] outline-none cursor-pointer"
     >
       {collapsed ? (
         <ChevronRight size={12} className="text-[var(--text-tertiary)]" />
@@ -256,7 +258,16 @@ function SectionHeaderRow({ label, collapsed, onToggle }: { label: string; colla
         <ChevronDown size={12} className="text-[var(--text-tertiary)]" />
       )}
       <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--text-tertiary)]">{label}</span>
-    </button>
+      {action && (
+        <button
+          onClick={(e) => { e.stopPropagation(); action.onClick(); }}
+          title={action.title}
+          className="ml-auto p-0.5 rounded text-[var(--text-tertiary)] opacity-0 group-hover/s:opacity-100 hover:bg-[var(--bg-elevated)] hover:text-[var(--status-error,#f44)] transition-opacity outline-none"
+        >
+          {action.icon}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -298,6 +309,7 @@ export function WorkspaceSidebar() {
   const { addWorkspace } = useWorkspaceStore.use.actions();
   const { addTab, setActiveTab } = useLayoutStore.use.actions();
   const recentProjects = useProjectStore.use.recentProjects();
+  const { clearRecents } = useProjectStore.use.actions();
   const recentChats = useRecentChatsStore.use.items();
   const runningByPath = useRunningByPath();
   const fullscreen = useFullscreen();
@@ -370,29 +382,13 @@ export function WorkspaceSidebar() {
     else setCollapsed(Object.fromEntries(allCollapsibleIds.map((id) => [id, true])));
   };
 
-  // ── Git summaries: fetch lazily for the currently-VISIBLE workspace rows
-  // (never all of a 100s-long list), cached + refreshed on git-changed.
-  const [summaries, setSummaries] = useState<Record<string, GitSummary>>({});
-  const fetchedRef = useRef<Set<string>>(new Set());
-  const fetchSummary = useCallback(async (path: string) => {
-    if (fetchedRef.current.has(path)) return;
-    fetchedRef.current.add(path);
-    try {
-      const s = await invoke<GitSummary>("git_workspace_summary", { path });
-      setSummaries((m) => ({ ...m, [path]: s }));
-    } catch {
-      fetchedRef.current.delete(path);
-    }
-  }, []);
-  useEffect(() => {
-    const un = listen<{ project?: string }>("atlas:git-changed", (e) => {
-      const p = e.payload?.project;
-      if (!p) return;
-      fetchedRef.current.delete(p);
-      void fetchSummary(p);
-    });
-    return () => { void un.then((off) => off()); };
-  }, [fetchSummary]);
+  // ── Git summaries: cached at module scope (`workspace-git-store`) so opening
+  // / closing the switcher renders instantly from cache and NEVER recalculates.
+  // First sight fetches; a global git-changed listener silently refreshes in the
+  // background. We only `ensure` the currently-VISIBLE rows (never the whole
+  // 100s-long list).
+  const summaries = useWorkspaceGitStore.use.summaries();
+  const { ensure: ensureSummary } = useWorkspaceGitStore.use.actions();
 
   const parentRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
@@ -413,8 +409,8 @@ export function WorkspaceSidebar() {
   const items = virtualizer.getVirtualItems();
   const visiblePaths = items.map((v) => { const r = rows[v.index]; return r?.kind === "ws" ? r.ws.path : null; }).filter(Boolean).join("|");
   useEffect(() => {
-    for (const p of visiblePaths.split("|")) if (p) void fetchSummary(p);
-  }, [visiblePaths, fetchSummary]);
+    for (const p of visiblePaths.split("|")) if (p) ensureSummary(p);
+  }, [visiblePaths, ensureSummary]);
 
   const openChat = useCallback(async (chat: RecentChat) => {
     const ws = useWorkspaceStore.getState().workspaces.find((w) => w.path === chat.projectPath);
@@ -469,7 +465,16 @@ export function WorkspaceSidebar() {
               return (
                 <div key={row.key} style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${v.start}px)` }}>
                   {row.kind === "section" ? (
-                    <SectionHeaderRow label={row.label} collapsed={!!collapsed[row.id]} onToggle={() => toggle(row.id)} />
+                    <SectionHeaderRow
+                      label={row.label}
+                      collapsed={!!collapsed[row.id]}
+                      onToggle={() => toggle(row.id)}
+                      action={
+                        row.id === "sec:recent"
+                          ? { icon: <Trash2 size={11} />, title: "Clear recent projects", onClick: () => clearRecents() }
+                          : undefined
+                      }
+                    />
                   ) : row.kind === "group" ? (
                     <GroupHeaderRow group={row.group} count={row.count} collapsed={!!collapsed[row.group.id]} onToggle={() => toggle(row.group.id)} />
                   ) : row.kind === "ws" ? (
@@ -504,6 +509,7 @@ function HeaderButton({ icon, label, onClick }: { icon: React.ReactNode; label: 
 function AddProjectMenu() {
   const { addWorkspace } = useWorkspaceStore.use.actions();
   const recentProjects = useProjectStore.use.recentProjects();
+  const { clearRecents } = useProjectStore.use.actions();
   const [query, setQuery] = useState("");
   const filtered = recentProjects.filter(
     (p) => p.name.toLowerCase().includes(query.toLowerCase()) || p.path.toLowerCase().includes(query.toLowerCase()),
@@ -512,7 +518,7 @@ function AddProjectMenu() {
     <DropdownMenu.Root onOpenChange={(o) => { if (!o) setQuery(""); }}>
       <DropdownMenu.Trigger asChild>
         <button
-          className="flex items-center justify-center h-6 w-6 rounded-full border border-[var(--border-default)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] outline-none transition-colors"
+          className="flex items-center justify-center h-6 w-6 rounded-full border border-[var(--border-default)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] outline-none transition-colors cursor-pointer"
           title="Add project"
         >
           <Plus size={14} />
@@ -549,6 +555,11 @@ function AddProjectMenu() {
                   ))
                 )}
               </div>
+              <DropdownMenu.Item onSelect={() => clearRecents()}
+                className="w-full flex items-center gap-2 px-3 h-[28px] text-[11px] outline-none border-t border-[var(--border-default)] text-[var(--text-tertiary)] hover:bg-[var(--bg-hover)] hover:text-[var(--status-error,#f44)] cursor-pointer shrink-0">
+                <Trash2 size={12} className="shrink-0" />
+                <span className="flex-1 text-left">Clear recent projects</span>
+              </DropdownMenu.Item>
             </>
           )}
         </DropdownMenu.Content>
