@@ -47,3 +47,20 @@ export function useRunningByPath(): Record<string, number> {
     return map;
   }, [signature]);
 }
+
+/** Reactive: set of LIVE running chat keys (each running session's tab id +
+ *  acp session id). The workspace "Chats" section uses this to mark a recent
+ *  chat as active from the live chat-store rather than a persisted (and
+ *  restart-stale) status field. */
+export function useRunningChatKeys(): Set<string> {
+  const keys = useChatStore(
+    useShallow((s) =>
+      Object.values(s.sessions)
+        .filter((sess) => ACTIVE.has(sess.status))
+        .flatMap((sess) => [sess.id, sess.acpSessionId])
+        .filter((x): x is string => !!x)
+        .sort(),
+    ),
+  );
+  return useMemo(() => new Set(keys), [keys]);
+}

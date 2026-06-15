@@ -137,19 +137,12 @@ export function App() {
     };
   }, []);
 
-  // Alpha-only: nuke any legacy WebView storage. Nothing in the current
-  // codebase reads from localStorage / sessionStorage — the only entries
-  // are stale dust from previous zustand-persist builds. Wiping on every
-  // boot keeps the WebView storage budget zero. Remove this once we have
-  // real users to worry about.
-  useEffect(() => {
-    try {
-      window.localStorage.clear();
-      window.sessionStorage.clear();
-    } catch {
-      // ignore — some WebView sandboxes refuse storage access
-    }
-  }, []);
+  // NOTE: we intentionally do NOT wipe localStorage on boot anymore. Several
+  // stores legitimately persist there via zustand `persist` — the workspace
+  // "Chats" list (`atlas-recent-chats`), layout prefs (`atlas-layout-prefs`),
+  // the review provider/model selection — and a blanket clear was silently
+  // dropping all of them on every restart. Each store carries its own
+  // `version`/`migrate`, so stale keys from old builds are handled per-store.
 
   // One-shot bootstrap of the Rust-owned `AppState` (currentProject +
   // recentProjects). Replaces the zustand `persist` middleware that used
@@ -498,6 +491,8 @@ export function App() {
           projectName: path.split("/").pop() || path,
           title: s.title || "Chat",
           status: s.status,
+          agentType: s.agentType,
+          acpSessionId: s.acpSessionId,
           updatedAt: Date.now(),
         });
         return;

@@ -139,7 +139,9 @@ interface ChatActions {
     setAcpBinding: (
       tabId: string,
       agentId: string,
-      acpSessionId: string
+      acpSessionId: string,
+      /** Project root the session was created with — stamps `workingDirectory`. */
+      cwd?: string
     ) => void;
     /**
      * Apply one `atlas:acp` event to whichever chat tab owns its acpSessionId.
@@ -618,12 +620,17 @@ export const useChatStore = createSelectors(
               applyDeltaToDraft(s, env);
             }
           }),
-        setAcpBinding: (tabId, agentId, acpSessionId) =>
+        setAcpBinding: (tabId, agentId, acpSessionId, cwd) =>
           set((s) => {
             const session = s.sessions[tabId];
             if (!session) return;
             session.acpAgentId = agentId;
             session.acpSessionId = acpSessionId;
+            // Stamp the session's project root the moment it's bound (the agent
+            // was created with this cwd). Without it `workingDirectory` stays ""
+            // and the chat never lands in the workspace "Chats" list / running
+            // counts. Callers pass the project path they used for the session.
+            if (cwd) session.workingDirectory = cwd;
           }),
         pushPermission: (req) => {
           set((s) => {

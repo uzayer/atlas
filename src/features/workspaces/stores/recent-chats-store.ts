@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { createSelectors } from "@/lib/create-selectors";
-import type { AgentStatus } from "@/types/agent";
+import type { AgentStatus, AgentType } from "@/types/agent";
 
 /**
  * Recently-invoked agent chats across ALL projects — the sidebar "Chats"
@@ -16,11 +16,15 @@ export interface RecentChat {
   projectName: string;
   title: string;
   status: AgentStatus;
+  /** Which agent drives this chat — for the brand icon in the row. */
+  agentType?: AgentType;
+  /** ACP session id — lets a closed chat be reopened/reloaded from disk. */
+  acpSessionId?: string;
   /** Unix ms of last activity. */
   updatedAt: number;
 }
 
-const CAP = 10;
+const CAP = 15;
 
 interface RecentChatsState {
   items: RecentChat[];

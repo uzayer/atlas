@@ -124,7 +124,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         }
         useChatStore
           .getState()
-          .actions.setAcpBinding(tabId, agent.agent_id, key.session_id);
+          .actions.setAcpBinding(tabId, agent.agent_id, key.session_id, cwd);
       } catch (err) {
         console.warn("Agent session creation failed:", err);
       } finally {

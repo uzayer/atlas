@@ -20,8 +20,6 @@ import {
   ChevronsUpDown,
   MoreHorizontal,
   Search,
-  MessageSquare,
-  Loader2,
   Trash2,
 } from "lucide-react";
 import {
@@ -30,7 +28,10 @@ import {
   type WorkspaceGroup,
 } from "../stores/workspace-store";
 import { pickAndAddWorkspace } from "../lib/pick-workspace";
-import { useRunningByPath } from "../lib/agent-activity";
+import { useRunningByPath, useRunningChatKeys } from "../lib/agent-activity";
+import { openAgentSession } from "@/features/chat/lib/open-agent-session";
+import { AtlasLoader } from "@/components/atlas-loader";
+import { AgentIcons } from "@/components/agent-icons";
 import { useRecentChatsStore, type RecentChat } from "../stores/recent-chats-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
@@ -44,8 +45,8 @@ const WS_H = 50;
 const WS_CARD = 44;
 const ROW_H = 27;
 const ROW_CARD = 26;
-const CHAT_H = 46;
-const CHAT_CARD = 40;
+const CHAT_H = 60;
+const CHAT_CARD = 54;
 const HEADER_H = 26;
 
 /** Git status dot: green = clean tree, yellow = dirty, gray = non-repo/unknown. */
@@ -285,16 +286,41 @@ function RecentProjectRow({ name, path, onOpen }: { name: string; path: string; 
   );
 }
 
-function ChatRow({ chat, onOpen }: { chat: RecentChat; onOpen: () => void }) {
-  const running = chat.status === "running" || chat.status === "waiting";
+/** Compact relative time: "now" / "5m" / "3h" / "2d". */
+function relTime(ms: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+function ChatRow({ chat, running, onOpen }: { chat: RecentChat; running: boolean; onOpen: () => void }) {
+  const AgentIcon = chat.agentType === "codex" ? AgentIcons.Codex : AgentIcons.Claude;
   return (
     <div onClick={onOpen} style={{ height: CHAT_CARD, paddingLeft: 6 }}
-      className="group flex items-center gap-2 pr-1.5 rounded-md cursor-pointer hover:bg-[var(--bg-hover)]" title={chat.projectPath}>
-      {running ? <Loader2 size={12} className="shrink-0 text-[var(--accent-primary)] animate-spin" /> : <MessageSquare size={12} className="shrink-0 text-[var(--text-tertiary)]" />}
-      <div className="flex-1 min-w-0">
-        <div className="truncate text-[12px] text-[var(--text-secondary)] leading-tight">{chat.title}</div>
-        <div className="truncate text-[10px] text-[var(--text-tertiary)] leading-tight font-mono">{chat.projectName}</div>
+      className="group relative flex items-start gap-2 pr-1.5 py-1.5 border-b border-[var(--border-subtle)] cursor-pointer hover:bg-[var(--bg-hover)] transform-gpu [backface-visibility:hidden]" title={chat.projectPath}>
+      {running ? (
+        <AtlasLoader size={11} className="mt-0.5 shrink-0 text-[var(--accent-primary)]" />
+      ) : (
+        <AgentIcon className="mt-0.5 size-3.5 shrink-0" />
+      )}
+      <div
+        className={cn(
+          "min-w-0 flex-1 text-[12px] leading-[1.3] line-clamp-2 break-words",
+          running ? "text-[var(--text-primary)]" : "text-[var(--text-secondary)]",
+        )}
+      >
+        {chat.title}
       </div>
+      {/* Timestamp — bottom-left, aligned with the title start (past the icon). */}
+      <span className="absolute bottom-1 left-7 text-[9px] font-mono text-[var(--text-tertiary)] tabular-nums">
+        {relTime(chat.updatedAt)}
+      </span>
+      {/* Project badge — bottom-right. */}
+      <span className="absolute bottom-1 right-1.5 max-w-[60%] truncate rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] px-1.5 py-px text-[9px] font-mono text-[var(--text-tertiary)]">
+        {chat.projectName}
+      </span>
     </div>
   );
 }
@@ -311,10 +337,18 @@ export function WorkspaceSidebar() {
   const groups = useWorkspaceStore.use.groups();
   const activeWorkspaceId = useWorkspaceStore.use.activeWorkspaceId();
   const { addWorkspace } = useWorkspaceStore.use.actions();
-  const { addTab, setActiveTab } = useLayoutStore.use.actions();
+  const { addTab } = useLayoutStore.use.actions();
   const recentProjects = useProjectStore.use.recentProjects();
   const { clearRecents } = useProjectStore.use.actions();
   const recentChats = useRecentChatsStore.use.items();
+  const { clear: clearChats } = useRecentChatsStore.use.actions();
+  const runningChatKeys = useRunningChatKeys();
+  const isChatRunning = useCallback(
+    (c: RecentChat) =>
+      runningChatKeys.has(c.tabId) ||
+      (!!c.acpSessionId && runningChatKeys.has(c.acpSessionId)),
+    [runningChatKeys],
+  );
   const runningByPath = useRunningByPath();
   const fullscreen = useFullscreen();
 
@@ -370,10 +404,16 @@ export function WorkspaceSidebar() {
     }
     if (recentChats.length) {
       out.push({ kind: "section", id: "sec:chats", label: "Chats", key: "s:chats" });
-      if (!collapsed["sec:chats"]) for (const c of recentChats) out.push({ kind: "chat", chat: c, key: `c:${c.tabId}` });
+      // Active (live-running) chats float to the top of the stack; the rest keep
+      // their most-recent-first order. Capacity (15) is enforced by the store.
+      const ordered = [
+        ...recentChats.filter(isChatRunning),
+        ...recentChats.filter((c) => !isChatRunning(c)),
+      ];
+      if (!collapsed["sec:chats"]) for (const c of ordered) out.push({ kind: "chat", chat: c, key: `c:${c.tabId}` });
     }
     return out;
-  }, [pinned, projects, sortedGroups, collapsed, recents, recentChats]);
+  }, [pinned, projects, sortedGroups, collapsed, recents, recentChats, isChatRunning]);
 
   // Collapse-all / expand-all: collapses every section + group, or expands all.
   const allCollapsibleIds = useMemo(
@@ -417,12 +457,19 @@ export function WorkspaceSidebar() {
   }, [visiblePaths, ensureSummary]);
 
   const openChat = useCallback(async (chat: RecentChat) => {
+    // 1. Focus the chat's project workspace (register it if new).
     const ws = useWorkspaceStore.getState().workspaces.find((w) => w.path === chat.projectPath);
     if (ws) await useWorkspaceStore.getState().actions.switchTo(ws.id);
     else await addWorkspace(chat.projectPath);
-    // Focus the chat tab if it exists in the now-active workspace's view.
-    setActiveTab(chat.tabId);
-  }, [addWorkspace, setActiveTab]);
+    // 2. Open THIS session (by acp session id — not the tab id, which is reused
+    //    across many sessions). openAgentSession focuses it if already open,
+    //    else loads it into the agent chat.
+    await openAgentSession({
+      acpSessionId: chat.acpSessionId,
+      title: chat.title,
+      cwd: chat.projectPath,
+    });
+  }, [addWorkspace]);
 
   const openTabSingleton = (type: "mission-control" | "log" | "settings", title: string) =>
     addTab({ id: type === "mission-control" ? "mission-control" : type, type, title, closable: true, dirty: false, data: {} });
@@ -476,7 +523,9 @@ export function WorkspaceSidebar() {
                       action={
                         row.id === "sec:recent"
                           ? { icon: <Trash2 size={11} />, title: "Clear recent projects", onClick: () => clearRecents() }
-                          : undefined
+                          : row.id === "sec:chats"
+                            ? { icon: <Trash2 size={11} />, title: "Clear chats", onClick: () => clearChats() }
+                            : undefined
                       }
                     />
                   ) : row.kind === "group" ? (
@@ -486,7 +535,7 @@ export function WorkspaceSidebar() {
                   ) : row.kind === "recent" ? (
                     <RecentProjectRow name={row.name} path={row.path} onOpen={() => void addWorkspace(row.path)} />
                   ) : (
-                    <ChatRow chat={row.chat} onOpen={() => void openChat(row.chat)} />
+                    <ChatRow chat={row.chat} running={isChatRunning(row.chat)} onOpen={() => void openChat(row.chat)} />
                   )}
                 </div>
               );
