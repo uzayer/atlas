@@ -229,11 +229,13 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   // row arrives mid-stream — it's always the live `session.title` for as
   // long as the session is in the chat-store.
   const items = useMemo<SidebarItem[]>(() => {
+    // Only sessions the user has actually messaged belong in history. A new
+    // chat that merely got an ACP session bound (no message yet) must NOT
+    // appear — that was the "empty chat I can't remove" bug. The first user
+    // message is what promotes a chat into the history list (and becomes its
+    // title below).
     const liveAgents = Object.values(tabSummaries).filter(
-      (s) =>
-        s.acpSessionId ||
-        s.status === "running" ||
-        s.userMessageCount > 0
+      (s) => s.userMessageCount > 0 || s.hasAnyMessage,
     );
     const liveById = new Map(
       liveAgents.map((s) => {
@@ -282,9 +284,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       };
     });
 
-    return agents.sort((a, b) =>
-      (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? "")
-    );
+    // Drop empty rows (disk JSONLs that exist but hold no messages, or any live
+    // session that slipped through) so history only ever shows messaged chats.
+    return agents
+      .filter((a) => a.messageCount > 0)
+      .sort((a, b) => (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? ""));
   }, [agentList, tabSummaries]);
 
   // Sessions currently running (used to show a spinner on the matching row).
