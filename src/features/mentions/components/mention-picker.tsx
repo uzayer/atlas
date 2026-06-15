@@ -253,7 +253,18 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         return out;
       }
       if (!query.trim()) {
-        const recents = recentFiles.slice(0, RECENT_LIMIT);
+        // The recents mirror is a single global store reflecting the ACTIVE
+        // workspace; right after a workspace switch there's an async window
+        // where it still holds the previous project's files. Filter to THIS
+        // picker's project so a recent from another project can never surface.
+        const recents = recentFiles
+          .filter(
+            (r) =>
+              !projectPath ||
+              r.absPath === projectPath ||
+              r.absPath.startsWith(projectPath + "/"),
+          )
+          .slice(0, RECENT_LIMIT);
         if (recents.length > 0) {
           out.push({ type: "header", label: "Recent files" });
           for (const r of recents) {
@@ -277,7 +288,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         out.push({ type: "mention", mention: m });
       }
       return out;
-    }, [scope, query, results, recentFiles]);
+    }, [scope, query, results, recentFiles, projectPath]);
 
     // Compute the navigable rows (skip headers). `active` is an index into
     // *navigable* rows, not the full list; the renderer maps it back.

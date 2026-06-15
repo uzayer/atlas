@@ -101,6 +101,9 @@ interface ChatActions {
     setTranscriptLoading: (sessionId: string, loading: boolean) => void;
     clearSession: (sessionId: string) => void;
     removeSession: (sessionId: string) => void;
+    /** Drop several sessions at once (used when a workspace is DISCARDED from
+     *  the hot set — frees its chat history from RAM; reloaded cold on revisit). */
+    removeSessions: (sessionIds: string[]) => void;
     /** Drop all chat sessions, queues, and pending permissions. Used when
      *  the user switches projects so dead acpSessionIds from the old
      *  project's `.atlas/` don't linger and cause ghost-bound tabs. */
@@ -523,6 +526,16 @@ export const useChatStore = createSelectors(
             if (s.activeSessionId === sessionId) {
               const keys = Object.keys(s.sessions);
               s.activeSessionId = keys.length > 0 ? keys[0] : null;
+            }
+          }),
+        removeSessions: (sessionIds) =>
+          set((s) => {
+            for (const id of sessionIds) {
+              delete s.sessions[id];
+              delete s.drafts[id];
+              delete s.queues[id];
+              delete s.pendingPermissions[id];
+              if (s.activeSessionId === id) s.activeSessionId = null;
             }
           }),
         resetSessions: () =>

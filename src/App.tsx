@@ -22,6 +22,11 @@ import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { HintOverlay } from "@/features/hint-nav/components/hint-overlay";
 import { BrowserOverlayWatcher } from "@/features/browser/components/browser-overlay-watcher";
 import { fileIndex, openFileIndex, markFileIndexClosed } from "@/features/file-picker/lib/file-picker-api";
+import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
+import { pickAndAddWorkspace } from "@/features/workspaces/lib/pick-workspace";
+import { flushAll } from "@/features/workspaces/lib/flush-registry";
+import { captureSnapshot } from "@/features/workspaces/lib/workspace-snapshot";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -30,6 +35,7 @@ import {
   ensureRecentFilesListener,
   type RecentFile,
 } from "@/features/chat/stores/recent-files-store";
+import { useRecentChatsStore } from "@/features/workspaces/stores/recent-chats-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import {
   isPermissionGranted,
@@ -475,8 +481,36 @@ export function App() {
     };
     const notify = () => useNotificationsStore.getState().actions;
 
+    // Record a chat into the sidebar "Chats" (recently-invoked) list whenever a
+    // session sees meaningful activity. Resolves project + title from the chat
+    // session that owns this acpSessionId.
+    const recordRecentChat = (acpSessionId: string) => {
+      const sessions = useChatStore.getState().sessions;
+      for (const [tabId, s] of Object.entries(sessions)) {
+        if (s.acpSessionId !== acpSessionId) continue;
+        const path = s.workingDirectory;
+        if (!path) return;
+        useRecentChatsStore.getState().actions.record({
+          tabId,
+          projectPath: path,
+          projectName: path.split("/").pop() || path,
+          title: s.title || "Chat",
+          status: s.status,
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+    };
+
     listenAgents((env) => {
       if (cancelled) return;
+      if (
+        env.kind === "status" ||
+        env.kind === "message_appended" ||
+        env.kind === "turn_finished"
+      ) {
+        recordRecentChat(env.session_id);
+      }
       const actions = useChatStore.getState().actions;
       switch (env.kind) {
         case "text_chunk":
@@ -634,9 +668,15 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    type Payload = { dirs: string[]; fullRefresh: boolean };
+    type Payload = { workspaceId?: string; dirs: string[]; fullRefresh: boolean };
     listen<Payload>("atlas:explorer:changed", (e) => {
       if (cancelled) return;
+      // Ignore changes from a backgrounded workspace's resident watcher —
+      // only the active workspace's explorer should reconcile.
+      const active = activeWorkspaceId();
+      if (e.payload.workspaceId && active && e.payload.workspaceId !== active) {
+        return;
+      }
       const actions = useExplorerStore.getState().actions;
       const { dirs, fullRefresh } = e.payload;
       if (fullRefresh) {
@@ -708,19 +748,27 @@ export function App() {
       return;
     }
     markFileIndexClosed();
+    const workspaceId = activeWorkspaceId();
     void openFileIndex(currentProject.path);
     // Git watcher: emits `atlas:git-changed` on commit / checkout /
     // branch ops. Replaces the 3-second polling that git-graph-panel
     // used to do via `refetchInterval` on `git_graph_signature`.
-    void invoke("git_watch_start", { projectPath: currentProject.path }).catch(
-      (e) => console.warn("git watch start failed:", e),
-    );
+    // Keyed by workspace so each open workspace keeps its own resident watcher.
+    void invoke("git_watch_start", {
+      projectPath: currentProject.path,
+      workspaceId,
+    }).catch((e) => console.warn("git watch start failed:", e));
+    // Clear the global recents mirror SYNCHRONOUSLY before the async reload so
+    // there's no window where it still shows the previous project's files
+    // (the picker also filters by project as a belt-and-suspenders guard).
+    useRecentFilesStore.getState().actions.hydrate([]);
     // Recent-files state: Rust loads `<project>/.atlas/recent-files.json`
     // and returns the list. We hydrate the JS mirror with it so the
     // mention picker's "Recent files" section is correct from the
     // first render of the new project.
     void invoke<RecentFile[]>("recent_files_open_project", {
       projectPath: currentProject.path,
+      workspaceId,
     })
       .then((items) => {
         useRecentFilesStore.getState().actions.hydrate(items);
@@ -742,25 +790,38 @@ export function App() {
     ensureRecentFilesListener();
   }, []);
 
+  // Quit durability: per-switch flushes are fire-and-forget, so on window
+  // close flush the ACTIVE workspace's pending writes (background workspaces
+  // were already flushed when we left them). beforeunload can't await, but it
+  // cancels the debounce and kicks the write immediately.
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      const wsId = useWorkspaceStore.getState().activeWorkspaceId;
+      const path = useProjectStore.getState().currentProject?.path ?? null;
+      // Capture first so the flush dedup compares against the CURRENT state
+      // (not a stale capture from the last switch-away).
+      if (wsId) captureSnapshot(wsId);
+      void flushAll({ workspaceId: wsId, path });
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
   useHotkeys([
     {
+      // ⌘⇧N — "new workspace": pick a folder and add it as a workspace in
+      // this window (Atlas is single-window now; this replaces the old
+      // "open a new native window" behaviour).
       combo: { key: "n", meta: true, shift: true },
       action: () => {
-        import("@tauri-apps/api/webviewWindow")
-          .then(({ WebviewWindow }) => {
-            new WebviewWindow(`atlas-${Date.now()}`, {
-              url: "/?new=1",
-              title: "Atlas",
-              width: 1200,
-              height: 800,
-              center: true,
-              decorations: true,
-              titleBarStyle: "overlay",
-              hiddenTitle: true,
-            });
-          })
-          .catch((err) => console.error("New window failed:", err));
+        void pickAndAddWorkspace();
       },
+    },
+    {
+      // ⌘⇧. — toggle the Arc-like workspace sidebar. (⌘. alone is the macOS
+      // system "Cancel" chord and gets swallowed before reaching the webview.)
+      combo: { key: ".", meta: true, shift: true },
+      action: () => useWorkspaceStore.getState().actions.toggleSidebar(),
     },
     {
       combo: { key: "k", meta: true },

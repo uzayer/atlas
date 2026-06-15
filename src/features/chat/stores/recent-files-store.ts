@@ -13,6 +13,7 @@ import { create } from "zustand";
 import { createSelectors } from "@/lib/create-selectors";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
 
 export interface RecentFile {
   absPath: string;
@@ -39,17 +40,22 @@ export const useRecentFilesStore = createSelectors(
     items: [],
     actions: {
       push: (entry) => {
+        const workspaceId = activeWorkspaceId();
+        if (!workspaceId) return;
         // Fire-and-forget — the Rust side emits the updated list
         // through the global listener wired in App.tsx.
         void invoke<RecentFile[]>("recent_files_push", {
           absPath: entry.absPath,
           rel: entry.rel,
+          workspaceId,
         })
           .then((items) => set({ items }))
           .catch((e) => console.warn("recent_files_push failed:", e));
       },
       clear: () => {
-        void invoke("recent_files_clear")
+        const workspaceId = activeWorkspaceId();
+        if (!workspaceId) return;
+        void invoke("recent_files_clear", { workspaceId })
           .then(() => set({ items: [] }))
           .catch((e) => console.warn("recent_files_clear failed:", e));
       },
@@ -64,9 +70,15 @@ let listenerInit = false;
 export function ensureRecentFilesListener(): void {
   if (listenerInit) return;
   listenerInit = true;
-  void listen<{ project: string; items: RecentFile[] }>(
+  void listen<{ workspaceId?: string; project: string; items: RecentFile[] }>(
     "atlas:recent-files-changed",
     (e) => {
+      // Only mirror events for the active workspace — a background
+      // workspace's push must not overwrite the visible picker.
+      const active = activeWorkspaceId();
+      if (e.payload.workspaceId && active && e.payload.workspaceId !== active) {
+        return;
+      }
       useRecentFilesStore.setState({ items: e.payload.items });
     }
   );

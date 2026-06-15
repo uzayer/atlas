@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
-import { ChevronDown, Folder, FolderOpen, X, PanelLeft, PanelRight, Search, Bell } from "lucide-react";
+import { PanelLeft, PanelRight, Bell, Layers } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
@@ -37,15 +37,12 @@ function useTauriWindow() {
 
 export function Titlebar() {
   const currentProject = useProjectStore.use.currentProject();
-  const recentProjects = useProjectStore.use.recentProjects();
-  const { openProject, removeRecent } = useProjectStore.use.actions();
   const { windowRef, isFullscreen } = useTauriWindow();
-  const [search, setSearch] = useState("");
-
-  const filtered = recentProjects.filter((p) =>
-    p.name.toLowerCase().includes(search.toLowerCase()) ||
-    p.path.toLowerCase().includes(search.toLowerCase())
-  );
+  // When the workspace sidebar is open it owns the top-left corner (its own
+  // traffic-light spacer), so the titlebar must NOT also reserve 72px for the
+  // window controls — that double-reservation is the empty gap before the
+  // workspace toggle. Fullscreen hides the controls entirely, same effect.
+  const sidebarOpen = useWorkspaceStore.use.sidebarOpen();
 
   const isTitlebarSurface = (target: EventTarget | null) => {
     const el = target as HTMLElement | null;
@@ -83,99 +80,23 @@ export function Titlebar() {
     void invoke("window_zoom").catch(() => {});
   };
 
-  const handleOpenFolder = async () => {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({ directory: true });
-      if (selected) openProject(selected as string);
-    } catch {}
-  };
-
   return (
     <div
       onMouseDown={handleDrag}
       onDoubleClick={handleDoubleClick}
-      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[#000] border-b border-border-default ${isFullscreen ? "pl-3" : "pl-[72px]"}`}
+      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[#000] border-b border-border-default ${isFullscreen || sidebarOpen ? "pl-3" : "pl-[72px]"}`}
     >
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
+        <WorkspaceToggle />
         {currentProject && <LeftPanelToggle />}
-        <DropdownMenu.Root onOpenChange={(open) => { if (!open) setSearch(""); }}>
-          <DropdownMenu.Trigger asChild>
-            <button
-              className="flex items-center gap-1 h-6 px-1.5 text-[12px] font-medium text-[#ccc] hover:text-[#fff] outline-none rounded hover:bg-[#ffffff08] max-w-[260px]"
-              title={currentProject?.path}
-            >
-              <span className="truncate">{currentProject ? currentProject.name : "Atlas"}</span>
-              <ChevronDown size={10} className="text-[#555] shrink-0" />
-            </button>
-          </DropdownMenu.Trigger>
-          <DropdownMenu.Portal>
-            <DropdownMenu.Content
-              align="start"
-              sideOffset={2}
-              className="w-[260px] rounded-md border border-[#1a1a1a] bg-[#0f0f0f] shadow-lg py-1"
-              style={{ zIndex: "var(--z-max)" as unknown as number }}
-            >
-              <DropdownMenu.Item
-                onClick={handleOpenFolder}
-                className="flex items-center gap-2 px-3 h-[30px] text-[12px] text-[#aaa] hover:bg-[#1a1a1a] hover:text-[#fff] cursor-default outline-none"
-              >
-                <FolderOpen size={13} />
-                Open Folder...
-              </DropdownMenu.Item>
-
-              {recentProjects.length > 0 && (
-                <>
-                  <DropdownMenu.Separator className="h-px bg-[#1a1a1a] my-1" />
-                  <div className="px-2 py-1">
-                    <div className="flex items-center gap-1.5 h-[26px] rounded border border-[#1a1a1a] bg-[#0a0a0a] px-2">
-                      <Search size={10} className="text-[#444] shrink-0" />
-                      <input
-                        value={search}
-                        onChange={(e) => setSearch(e.target.value)}
-                        placeholder="Search projects..."
-                        className="flex-1 bg-transparent outline-none text-[11px] text-[#ccc] placeholder:text-[#444]"
-                        onKeyDown={(e) => e.stopPropagation()}
-                        autoFocus
-                      />
-                    </div>
-                  </div>
-                  <div className="px-3 py-1">
-                    <span className="text-[10px] text-[#555] uppercase tracking-[0.05em] font-medium">
-                      Recent
-                    </span>
-                  </div>
-                  {filtered.length === 0 ? (
-                    <div className="px-3 py-2 text-[10px] text-[#444] text-center">
-                      No matching projects
-                    </div>
-                  ) : (
-                    filtered.map((p) => (
-                      <DropdownMenu.Item
-                        key={p.path}
-                        onClick={() => openProject(p.path)}
-                        className="group flex items-center gap-2 px-3 h-[28px] text-[11px] text-[#999] hover:bg-[#1a1a1a] hover:text-[#fff] cursor-default outline-none"
-                      >
-                        <Folder size={12} className="text-[#555] shrink-0" />
-                        <span className="truncate flex-1 font-mono">{p.name}</span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removeRecent(p.path);
-                          }}
-                          className="opacity-0 group-hover:opacity-100 p-0.5 text-[#555] hover:text-[#999]"
-                        >
-                          <X size={10} />
-                        </button>
-                      </DropdownMenu.Item>
-                    ))
-                  )}
-                </>
-              )}
-            </DropdownMenu.Content>
-          </DropdownMenu.Portal>
-        </DropdownMenu.Root>
-
+        {/* Static project label — the recent-projects picker moved to the
+         *  workspace sidebar's "+" menu. */}
+        <span
+          className="truncate text-[12px] font-medium text-[#ccc] max-w-[260px] px-1"
+          title={currentProject?.path}
+        >
+          {currentProject ? currentProject.name : "Atlas"}
+        </span>
       </div>
 
       {currentProject && (
@@ -185,6 +106,30 @@ export function Titlebar() {
         </div>
       )}
     </div>
+  );
+}
+
+function WorkspaceToggle() {
+  const sidebarOpen = useWorkspaceStore.use.sidebarOpen();
+  const { toggleSidebar } = useWorkspaceStore.use.actions();
+  const count = useWorkspaceStore.use.workspaces().length;
+
+  return (
+    <button
+      onClick={toggleSidebar}
+      className={cn(
+        "relative flex items-center justify-center w-6 h-6 rounded hover:bg-[#ffffff08] transition-all duration-150",
+        sidebarOpen ? "text-[#ccc]" : "text-[#555] hover:text-[#aaa]",
+      )}
+      title={sidebarOpen ? "Hide workspaces (⌘⇧.)" : "Show workspaces (⌘⇧.)"}
+    >
+      <Layers size={14} />
+      {count > 1 && (
+        <span className="absolute -bottom-0.5 -right-0.5 text-[7px] font-mono text-[var(--accent-primary)]">
+          {count}
+        </span>
+      )}
+    </button>
   );
 }
 

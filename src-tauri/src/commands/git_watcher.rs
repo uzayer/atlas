@@ -18,6 +18,7 @@
 //! `.git/objects/…` during `git add` / `git commit` — huge noise for
 //! zero signal. The above cover every state change the UI cares about.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,7 +43,9 @@ struct ActiveWatcher {
 
 #[derive(Default)]
 pub struct GitWatcherState {
-    current: RwLock<Option<ActiveWatcher>>,
+    /// One resident watcher per open workspace (keyed by workspace id) so a
+    /// backgrounded workspace's git +/- badge keeps updating live.
+    watchers: RwLock<HashMap<String, ActiveWatcher>>,
     /// Cached `GitRefs` for the active project. Populated lazily by
     /// `get_or_compute_refs` and invalidated by the watcher callback
     /// the instant any `.git/HEAD` / refs / packed-refs change lands.
@@ -109,15 +112,25 @@ struct GitChangedPayload {
 #[tauri::command]
 pub async fn git_watch_start(
     project_path: String,
+    workspace_id: Option<String>,
     app: AppHandle,
     state: State<'_, GitWatcherState>,
 ) -> Result<(), String> {
+    let key = workspace_id.unwrap_or_else(|| project_path.clone());
     let root = PathBuf::from(&project_path);
     let dot_git = root.join(".git");
     if !dot_git.is_dir() {
         // Not a git project — leave any existing watcher alone (caller
         // may switch projects in/out of a non-repo).
         return Ok(());
+    }
+
+    // Idempotent: if this workspace already watches the same root (e.g. on a
+    // switch back), don't drop + recreate the watcher.
+    if let Some(existing) = state.watchers.read().get(&key) {
+        if existing.root == root {
+            return Ok(());
+        }
     }
 
     // Cache invalidation runs FROM the watcher callback so the very
@@ -195,16 +208,25 @@ pub async fn git_watch_start(
     .await
     .map_err(|e| e.to_string())??;
 
-    *state.current.write() = Some(ActiveWatcher {
-        root,
-        _debouncer: debouncer,
-    });
+    state.watchers.write().insert(
+        key,
+        ActiveWatcher {
+            root,
+            _debouncer: debouncer,
+        },
+    );
     Ok(())
 }
 
 #[tauri::command]
-pub fn git_watch_stop(state: State<'_, GitWatcherState>) {
-    *state.current.write() = None;
+pub fn git_watch_stop(workspace_id: Option<String>, state: State<'_, GitWatcherState>) {
+    match workspace_id {
+        Some(id) => {
+            state.watchers.write().remove(&id);
+        }
+        // No id (legacy / app teardown): drop everything.
+        None => state.watchers.write().clear(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -214,8 +236,16 @@ pub struct GitWatcherStatus {
 }
 
 #[tauri::command]
-pub fn git_watch_status(state: State<'_, GitWatcherState>) -> GitWatcherStatus {
-    match state.current.read().as_ref() {
+pub fn git_watch_status(
+    workspace_id: Option<String>,
+    state: State<'_, GitWatcherState>,
+) -> GitWatcherStatus {
+    let guard = state.watchers.read();
+    let watcher = match workspace_id {
+        Some(id) => guard.get(&id),
+        None => guard.values().next(),
+    };
+    match watcher {
         Some(w) => GitWatcherStatus {
             watching: true,
             root: Some(w.root.to_string_lossy().into_owned()),

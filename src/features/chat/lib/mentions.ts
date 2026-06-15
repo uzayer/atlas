@@ -15,6 +15,7 @@ import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-met
 import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { listClaudeSessions, readClaudeSession } from "./claude-api";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
+import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -313,6 +314,7 @@ export async function searchMentions(
       query: stripCategoryAlias(query, scope ?? "file"),
       scope,
       projectPath: ctx.projectPath,
+      workspaceId: activeWorkspaceId(),
     });
     return results;
   } catch (e) {
@@ -339,9 +341,10 @@ export function publishKnowledgeToMentionCache(): Promise<void> {
       filePath: e.file_path,
     };
   });
-  return invoke<void>("mention_cache_set_knowledge", { items }).catch((err) =>
-    console.warn("mention_cache_set_knowledge failed:", err),
-  );
+  return invoke<void>("mention_cache_set_knowledge", {
+    items,
+    workspaceId: activeWorkspaceId(),
+  }).catch((err) => console.warn("mention_cache_set_knowledge failed:", err));
 }
 
 // Coalesce the knowledge self-heal: which project we've already ensured this
@@ -386,7 +389,10 @@ export function publishSymbolsToMentionCache(): void {
     line: s.line,
     signature: s.signature,
   }));
-  void invoke("mention_cache_set_symbols", { items }).catch((err) =>
+  void invoke("mention_cache_set_symbols", {
+    items,
+    workspaceId: activeWorkspaceId(),
+  }).catch((err) =>
     console.warn("mention_cache_set_symbols failed:", err),
   );
 }

@@ -86,6 +86,20 @@ export const useReviewStore = createSelectors(
     pendingSource: null,
     actions: {
       init: async (project) => {
+        // Reset per-project view state up front so switching projects never
+        // shows the previous project's records or the report we were viewing.
+        set({
+          records: [],
+          selectedRecord: null,
+          streaming: false,
+          streamError: null,
+          pendingFiles: [],
+          liveFiles: [],
+          synthesisText: "",
+          fileErrors: [],
+          activeId: null,
+        });
+
         if (!listenerReady) {
           listenerReady = true;
           await listenReview((e) => {

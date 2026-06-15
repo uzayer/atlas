@@ -81,13 +81,15 @@ impl MentionCacheState {
 #[tauri::command]
 pub fn mention_cache_set_knowledge(
     items: Vec<KnowledgeInput>,
+    workspace_id: Option<String>,
     webview: WebviewWindow,
     state: State<'_, MentionCacheState>,
 ) {
+    let key = workspace_id.unwrap_or_else(|| webview.label().to_string());
     state
         .per_window
         .write()
-        .entry(webview.label().to_string())
+        .entry(key)
         .or_default()
         .knowledge = items;
 }
@@ -95,20 +97,27 @@ pub fn mention_cache_set_knowledge(
 #[tauri::command]
 pub fn mention_cache_set_symbols(
     items: Vec<SymbolInput>,
+    workspace_id: Option<String>,
     webview: WebviewWindow,
     state: State<'_, MentionCacheState>,
 ) {
+    let key = workspace_id.unwrap_or_else(|| webview.label().to_string());
     state
         .per_window
         .write()
-        .entry(webview.label().to_string())
+        .entry(key)
         .or_default()
         .symbols = items;
 }
 
 #[tauri::command]
-pub fn mention_cache_clear(webview: WebviewWindow, state: State<'_, MentionCacheState>) {
-    state.per_window.write().remove(webview.label());
+pub fn mention_cache_clear(
+    workspace_id: Option<String>,
+    webview: WebviewWindow,
+    state: State<'_, MentionCacheState>,
+) {
+    let key = workspace_id.unwrap_or_else(|| webview.label().to_string());
+    state.per_window.write().remove(&key);
 }
 
 /// Frontend-supplied caches for kinds whose source-of-truth state
@@ -203,13 +212,14 @@ pub async fn mention_search(
     query: String,
     scope: Option<String>,
     project_path: Option<String>,
+    workspace_id: Option<String>,
     webview: WebviewWindow,
     fileindex: State<'_, FileIndexState>,
     papers: State<'_, SavedPapersIndex>,
     git_watcher: State<'_, GitWatcherState>,
     cache: State<'_, MentionCacheState>,
 ) -> Result<Vec<MentionResult>, String> {
-    let label = webview.label().to_string();
+    let label = workspace_id.unwrap_or_else(|| webview.label().to_string());
     let scope_ref = scope.as_deref();
     let trimmed = query.trim().to_string();
 

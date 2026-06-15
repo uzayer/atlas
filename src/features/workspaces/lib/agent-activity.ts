@@ -1,0 +1,49 @@
+import { useMemo } from "react";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/features/chat/stores/chat-store";
+
+/**
+ * Running-agent activity per workspace, derived from the chat store.
+ *
+ * Why derive instead of a dedicated store: every HOT workspace's chat sessions
+ * are resident in `chat-store` (keyed by unique tab id), and a workspace with a
+ * running agent is never discarded — so a running session is always present
+ * here with its `workingDirectory` (== the workspace path). Counting those by
+ * path gives an accurate per-workspace running count without a parallel store
+ * or threading `cwd` through the agent delta bus.
+ */
+
+const ACTIVE: ReadonlySet<string> = new Set(["running", "waiting"]);
+
+/** Non-reactive: running-session count for a workspace path. Used by the
+ *  residency manager to avoid discarding a workspace with live agents. */
+export function runningCountForPath(path: string): number {
+  const sessions = useChatStore.getState().sessions;
+  let n = 0;
+  for (const s of Object.values(sessions)) {
+    if (s.workingDirectory === path && ACTIVE.has(s.status)) n++;
+  }
+  return n;
+}
+
+export function isWorkspaceRunning(path: string): boolean {
+  return runningCountForPath(path) > 0;
+}
+
+/** Reactive: `{ [workspacePath]: runningCount }` for the sidebar. Re-renders
+ *  only when the set of (path,status) pairs actually changes. */
+export function useRunningByPath(): Record<string, number> {
+  const signature = useChatStore(
+    useShallow((s) =>
+      Object.values(s.sessions)
+        .filter((sess) => ACTIVE.has(sess.status))
+        .map((sess) => sess.workingDirectory)
+        .sort(),
+    ),
+  );
+  return useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const p of signature) map[p] = (map[p] ?? 0) + 1;
+    return map;
+  }, [signature]);
+}

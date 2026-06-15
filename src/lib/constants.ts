@@ -18,6 +18,7 @@ export const TAB_TYPES = [
   "pdf",
   "unsupported",
   "pomodoro",
+  "mission-control",
 ] as const;
 
 export type TabType = (typeof TAB_TYPES)[number];
