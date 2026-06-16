@@ -4,6 +4,7 @@ import { immer } from "zustand/middleware/immer";
 import { createSelectors } from "@/lib/create-selectors";
 import { invoke } from "@tauri-apps/api/core";
 import type { TabType } from "@/lib/constants";
+import type { LayoutTemplate } from "../templates";
 
 export interface Tab {
   id: string;
@@ -15,6 +16,18 @@ export interface Tab {
   /** Which split column this tab lives in. Absent = the default "main"
    *  column (so existing tab literals don't need to set it). */
   groupId?: string;
+}
+
+/** A workspace's saved tab/split view — everything needed to restore its
+ *  CenterPanel without touching disk. */
+export interface WorkspaceView {
+  tabs: Tab[];
+  activeTabId: string | null;
+  groupOrder: string[];
+  activeByGroup: Record<string, string | null>;
+  focusedGroupId: string;
+  tabHistory: string[];
+  tabHistoryIndex: number;
 }
 
 interface ZenSnapshot {
@@ -39,7 +52,7 @@ interface LayoutState {
   rightPanel: {
     visible: boolean;
     width: number;
-    activeSection: "changes" | "analysis" | "explore" | "github";
+    activeSection: "review-agents" | "changes" | "analysis" | "explore" | "github";
   };
   /** Per-app KB tab layout — survives tab switches (each KB tab gets the
    *  same panel layout, matching the global-left/right model). */
@@ -68,6 +81,15 @@ interface LayoutState {
     width: number;
   };
   tabs: Tab[];
+  /** Per-workspace saved view (tabs + split layout + history). The singular
+   *  fields below (`tabs`/`groupOrder`/`activeByGroup`/…) are a live MIRROR of
+   *  the ACTIVE workspace's view; `viewsByWs` holds every *other* open
+   *  workspace's last-committed view so CenterPanel can keep their tab subtrees
+   *  mounted (hidden) for instant switching. Committed on switch-away. Session
+   *  state — excluded from the persist `partialize`. */
+  viewsByWs: Record<string, WorkspaceView>;
+  /** Which workspace the singular mirror currently represents. */
+  currentViewWsId: string | null;
   /** Mirror of the FOCUSED column's active tab — kept in sync so the many
    *  existing readers (status bar, persistence, etc.) don't need to know about
    *  split columns. */
@@ -129,13 +151,22 @@ interface LayoutActions {
     /** Toggle Zen mode: a Knowledge │ Chat │ Browser 3-column split with the
      *  global side panels hidden; toggling again restores the prior layout. */
     toggleZenMode: () => void;
+    /** Apply a predefined layout template to the active workspace: set panels +
+     *  split columns + a tab of each template type per column (reusing existing
+     *  tabs; other open tabs are preserved in the first column). */
+    applyLayoutTemplate: (template: LayoutTemplate) => void;
     saveEditorState: (projectPath: string) => void;
+    /** Awaitable variant of `saveEditorState` used by the workspace flush
+     *  coordinator — resolves only once the editor-state write hits disk. */
+    flushEditorState: (projectPath: string) => Promise<void>;
     loadEditorState: (projectPath: string) => Promise<void>;
-    /** Wipe tabs/history back to the welcome-chat baseline. Called when
-     *  the user switches projects so the previous project's editor / chat
-     *  tabs don't leak into the new one. Panel layout (widths, sidebar
-     *  visibility) is intentionally preserved — those are user prefs. */
-    resetForProjectSwitch: () => void;
+    // ── Multi-workspace view (mounted-tabs fast switching) ──
+    /** Save the active mirror into `viewsByWs[wsId]` (on switch-away / quit). */
+    commitWorkspaceView: (wsId: string) => void;
+    /** Load `viewsByWs[wsId]` (or a fresh welcome view) into the mirror. */
+    loadWorkspaceView: (wsId: string) => void;
+    /** Drop a workspace's saved view (on close). */
+    removeWorkspaceView: (wsId: string) => void;
   };
 }
 
@@ -150,7 +181,7 @@ const initialState: LayoutState = {
   rightPanel: {
     visible: true,
     width: 280,
-    activeSection: "changes",
+    activeSection: "review-agents",
   },
   knowledgePanel: {
     showSidebar: true,
@@ -187,6 +218,8 @@ const initialState: LayoutState = {
       groupId: "main",
     },
   ],
+  viewsByWs: {},
+  currentViewWsId: null,
   activeTabId: "welcome-chat",
   groupOrder: ["main"],
   activeByGroup: { main: "welcome-chat" },
@@ -256,6 +289,50 @@ const WELCOME_TAB = (groupId: string): Tab => ({
   data: {},
   groupId,
 });
+
+/** Per-workspace welcome tab id — distinct so two workspaces' welcome chats
+ *  don't collide in `chat-store.sessions` (which keys by tab id). */
+const welcomeIdFor = (wsId: string): string => `welcome-chat-${wsId}`;
+
+/** A fresh single-welcome-tab view for a workspace never visited this session. */
+function welcomeView(wsId: string): WorkspaceView {
+  const id = welcomeIdFor(wsId);
+  return {
+    tabs: [
+      { id, type: "chat", title: "Agents", closable: false, dirty: false, data: {}, groupId: DEFAULT_GROUP },
+    ],
+    activeTabId: id,
+    groupOrder: [DEFAULT_GROUP],
+    activeByGroup: { [DEFAULT_GROUP]: id },
+    focusedGroupId: DEFAULT_GROUP,
+    tabHistory: [id],
+    tabHistoryIndex: 0,
+  };
+}
+
+/** Snapshot the singular mirror fields into a portable WorkspaceView. */
+function captureView(s: LayoutState): WorkspaceView {
+  return {
+    tabs: s.tabs.map((t) => ({ ...t })),
+    activeTabId: s.activeTabId,
+    groupOrder: [...s.groupOrder],
+    activeByGroup: { ...s.activeByGroup },
+    focusedGroupId: s.focusedGroupId,
+    tabHistory: [...s.tabHistory],
+    tabHistoryIndex: s.tabHistoryIndex,
+  };
+}
+
+/** Load a WorkspaceView into the singular mirror fields. */
+function applyView(s: LayoutState, v: WorkspaceView): void {
+  s.tabs = v.tabs.map((t) => ({ ...t }));
+  s.activeTabId = v.activeTabId;
+  s.groupOrder = [...v.groupOrder];
+  s.activeByGroup = { ...v.activeByGroup };
+  s.focusedGroupId = v.focusedGroupId;
+  s.tabHistory = [...v.tabHistory];
+  s.tabHistoryIndex = v.tabHistoryIndex;
+}
 
 export const useLayoutStore = createSelectors(
   create<LayoutState & LayoutActions>()(
@@ -568,6 +645,62 @@ export const useLayoutStore = createSelectors(
             s.zen = true;
             syncActiveMirror(s);
           }),
+        applyLayoutTemplate: (template) =>
+          set((s) => {
+            // Leaving zen if we were in it.
+            s.zen = false;
+            s.zenPrev = null;
+
+            // One column per template cell. Reuse an existing tab of the cell's
+            // type when present (preserve open work), else create one.
+            const order: string[] = [];
+            const active: Record<string, string | null> = {};
+            template.columns.forEach((col, i) => {
+              const gid = i === 0 ? DEFAULT_GROUP : `tpl-${i}`;
+              order.push(gid);
+              const existing = s.tabs.find((t) => t.type === col.type);
+              let id: string;
+              if (existing) {
+                existing.groupId = gid;
+                id = existing.id;
+              } else {
+                const ts = Date.now().toString(36);
+                id = `${col.type}-tpl-${i}-${ts}`;
+                // A fresh editor needs a buffer key or it renders blank; seed an
+                // untitled scratch buffer (same convention as ⌘N).
+                const data =
+                  col.type === "editor"
+                    ? { filePath: `untitled:tpl-${i}-${ts}` }
+                    : {};
+                s.tabs.push({
+                  id,
+                  type: col.type,
+                  title: col.title,
+                  closable: col.type !== "chat",
+                  dirty: false,
+                  data,
+                  groupId: gid,
+                });
+              }
+              active[gid] = id;
+            });
+
+            s.groupOrder = order;
+            s.activeByGroup = active;
+            s.focusedGroupId = order[Math.min(template.focus ?? order.length - 1, order.length - 1)];
+
+            // Park any OTHER open tabs in the first column (kept, not lost) and
+            // validate actives/focus.
+            reconcileGroups(s);
+
+            // Panels — left/right are explicitly controlled by templates;
+            // bottom (status bar) is only touched when a template opts in.
+            s.leftPanel.visible = !!template.panels.left;
+            s.rightPanel.visible = !!template.panels.right;
+            if (template.panels.bottom !== undefined) s.bottomPanel.visible = template.panels.bottom;
+            if (template.leftSection) s.leftPanel.activeSection = template.leftSection;
+            if (template.rightSection) s.rightPanel.activeSection = template.rightSection;
+          }),
         setTabDirty: (id, dirty) =>
           set((s) => {
             const tab = s.tabs.find((t) => t.id === id);
@@ -605,15 +738,45 @@ export const useLayoutStore = createSelectors(
             stateJson: JSON.stringify(data),
           }).catch(() => {});
         },
-        resetForProjectSwitch: () =>
+        flushEditorState: async (projectPath) => {
+          const state = useLayoutStore.getState();
+          if (state.zen) return;
+          const tabs = state.tabs
+            .filter((t) => t.closable)
+            .map((t) => ({
+              id: t.id,
+              type: t.type,
+              title: t.title,
+              data: t.data,
+              groupId: groupOf(t),
+            }));
+          const data = {
+            version: 2,
+            tabs,
+            groupOrder: state.groupOrder,
+            activeByGroup: state.activeByGroup,
+            focusedGroupId: state.focusedGroupId,
+            activeTabId: state.activeTabId,
+          };
+          await invoke("save_editor_state", {
+            projectPath,
+            stateJson: JSON.stringify(data),
+          }).catch(() => {});
+        },
+        commitWorkspaceView: (wsId) =>
           set((s) => {
-            s.tabs = [WELCOME_TAB(DEFAULT_GROUP)];
-            s.activeTabId = "welcome-chat";
-            s.groupOrder = [DEFAULT_GROUP];
-            s.activeByGroup = { [DEFAULT_GROUP]: "welcome-chat" };
-            s.focusedGroupId = DEFAULT_GROUP;
-            s.tabHistory = ["welcome-chat"];
-            s.tabHistoryIndex = 0;
+            s.viewsByWs[wsId] = captureView(s);
+            s.currentViewWsId = wsId;
+          }),
+        loadWorkspaceView: (wsId) =>
+          set((s) => {
+            const v = s.viewsByWs[wsId] ?? welcomeView(wsId);
+            applyView(s, v);
+            s.currentViewWsId = wsId;
+          }),
+        removeWorkspaceView: (wsId) =>
+          set((s) => {
+            delete s.viewsByWs[wsId];
           }),
         loadEditorState: async (projectPath) => {
           try {

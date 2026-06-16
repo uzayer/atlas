@@ -60,10 +60,31 @@ pub struct Policy {
     hint: String,
     /// The matched memory statement — editable; rewritten in place on save.
     value: String,
+    /// "strong" (hard rule — MUST/NEVER/ALWAYS) | "soft" (preference/guidance).
+    category: String,
+    /// "preference" (curated probe) | "codebase" (a feedback/behavior memory).
+    origin: String,
+    /// "semantic" (cosine-matched probe) | "keyword" (direct memory listing).
+    match_kind: String,
     source: String, // "claude" | "codex"
     file_path: String,
     doc_title: String,
     score: f32,
+}
+
+/// Classify a policy statement as a STRONG (hard) rule or a SOFT (preference).
+/// Strong = imperative absolutes the agent must obey; soft = guidance.
+fn classify(text: &str) -> &'static str {
+    let l = text.to_lowercase();
+    const STRONG: &[&str] = &[
+        "must", "never", "always", "do not", "don't", "required", "mandatory",
+        "forbidden", "shall", "only ever", "do NOT",
+    ];
+    if STRONG.iter().any(|m| l.contains(m)) {
+        "strong"
+    } else {
+        "soft"
+    }
 }
 
 // ── Statement-vector cache (per project) ────────────────────────────────────
@@ -210,10 +231,14 @@ fn compute_policies(
         if let Some((di, line, score)) = best {
             if score >= MATCH_THRESHOLD {
                 let d = &docs[di];
+                let category = classify(&line).to_string();
                 out.push(Policy {
                     id: probe.key.to_string(),
                     key: probe.key.to_string(),
                     hint: probe.hint.to_string(),
+                    category,
+                    origin: "preference".to_string(),
+                    match_kind: "semantic".to_string(),
                     value: line,
                     source: d.source.clone(),
                     file_path: d.file_path.clone().unwrap_or_default(),
@@ -227,6 +252,43 @@ fn compute_policies(
     if cache_dirty {
         save_cache(&project_path, &cache);
     }
+
+    // ── Behavioral policies ──────────────────────────────────────────────────
+    // Every `feedback` memory is a codebase behavior the agent should follow,
+    // but most aren't one of the curated preference probes (e.g. "use
+    // transform-gpu for hover jitter"). Surface each as a soft/strong policy row
+    // so they show up in the tab. No embedding needed — it's a direct listing.
+    // Skip docs already claimed by a probe match above to avoid duplicate rows.
+    let used: std::collections::HashSet<String> =
+        out.iter().map(|p| p.file_path.clone()).collect();
+    for d in &docs {
+        if d.kind != "feedback" {
+            continue;
+        }
+        let fp = d.file_path.clone().unwrap_or_default();
+        if used.contains(&fp) {
+            continue;
+        }
+        // Lead statement = the one-line rule (the memory's description/summary).
+        let Some(line) = split_statements(&d.text).into_iter().next() else {
+            continue;
+        };
+        let category = classify(&line).to_string();
+        out.push(Policy {
+            id: format!("fb:{}", d.id),
+            key: d.title.clone(),
+            hint: "Codebase behavior".to_string(),
+            category,
+            origin: "codebase".to_string(),
+            match_kind: "keyword".to_string(),
+            value: line,
+            source: d.source.clone(),
+            file_path: fp,
+            doc_title: d.title.clone(),
+            score: 1.0,
+        });
+    }
+
     Ok(out)
 }
 

@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, useLayoutEffect, Fragment } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "@/lib/utils";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
@@ -54,6 +54,7 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const {
     addTab,
     toggleLeftPanel,
@@ -193,6 +194,14 @@ export function CommandPalette({
     setQuery("");
   }, [open]);
 
+  // Keep the keyboard-selected row visible (the list is long once grouped).
+  useLayoutEffect(() => {
+    const el = listRef.current?.querySelector(
+      `[data-idx="${selectedIndex}"]`,
+    ) as HTMLElement | null;
+    el?.scrollIntoView({ block: "nearest" });
+  }, [selectedIndex]);
+
   function runCommand(cmd: Command) {
     cmd.action();
     onOpenChange(false);
@@ -216,6 +225,7 @@ export function CommandPalette({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/60 z-[var(--z-overlay)]" />
         <Dialog.Content
+          aria-describedby={undefined}
           className={cn(
             "fixed top-[20%] left-1/2 -translate-x-1/2 z-[var(--z-modal)]",
             "w-[520px] max-h-[400px] rounded-xl overflow-hidden",
@@ -228,7 +238,11 @@ export function CommandPalette({
             inputRef.current?.focus();
           }}
         >
-          <div className="flex items-center gap-2 px-4 h-[44px] border-b border-[var(--border-default)]">
+          <Dialog.Title className="sr-only">Run a command</Dialog.Title>
+          {/* `shrink-0`: without it the flex column compresses this fixed-height
+              search bar when the list overflows `max-h` (the command list is
+              long), making it render at half height. */}
+          <div className="flex items-center gap-2 px-4 h-[44px] shrink-0 border-b border-[var(--border-default)]">
             <Search size={14} className="text-[var(--text-tertiary)] shrink-0" />
             <input
               ref={inputRef}
@@ -240,7 +254,7 @@ export function CommandPalette({
             />
           </div>
 
-          <div className="overflow-y-auto flex-1 py-1">
+          <div ref={listRef} className="overflow-y-auto flex-1 py-1">
             {filtered.length === 0 && (
               <div className="px-4 py-6 text-center text-xs text-[var(--text-tertiary)]">
                 No commands found
@@ -248,22 +262,32 @@ export function CommandPalette({
             )}
             {filtered.map((cmd, i) => {
               const Icon = cmd.icon;
+              // Section header before the first item of each category — breaks
+              // the long flat list into scannable groups.
+              const showHeader = i === 0 || filtered[i - 1].category !== cmd.category;
               return (
-                <button
-                  key={cmd.id}
-                  onClick={() => runCommand(cmd)}
-                  onMouseEnter={() => setSelectedIndex(i)}
-                  className={cn(
-                    "w-full flex items-center gap-3 px-4 h-[36px] text-left text-sm transition-colors",
-                    i === selectedIndex
-                      ? "bg-[var(--bg-hover)] text-[var(--text-primary)]"
-                      : "text-[var(--text-secondary)]"
+                <Fragment key={cmd.id}>
+                  {showHeader && (
+                    <div className="px-4 pt-2.5 pb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--text-tertiary)] select-none">
+                      {cmd.category}
+                    </div>
                   )}
-                >
-                  <Icon size={14} className="shrink-0 text-[var(--text-tertiary)]" />
-                  <span className="flex-1 truncate">{cmd.label}</span>
-                  {cmd.shortcut && <KbdCombo combo={cmd.shortcut} />}
-                </button>
+                  <button
+                    data-idx={i}
+                    onClick={() => runCommand(cmd)}
+                    onMouseEnter={() => setSelectedIndex(i)}
+                    className={cn(
+                      "w-full flex items-center gap-3 px-4 h-[36px] text-left text-sm transition-colors",
+                      i === selectedIndex
+                        ? "bg-[var(--bg-hover)] text-[var(--text-primary)]"
+                        : "text-[var(--text-secondary)]"
+                    )}
+                  >
+                    <Icon size={14} className="shrink-0 text-[var(--text-tertiary)]" />
+                    <span className="flex-1 truncate">{cmd.label}</span>
+                    {cmd.shortcut && <KbdCombo combo={cmd.shortcut} />}
+                  </button>
+                </Fragment>
               );
             })}
           </div>

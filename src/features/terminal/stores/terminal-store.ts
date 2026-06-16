@@ -42,6 +42,9 @@ interface TerminalActions {
     setActiveTerminalInPane: (tabId: string, paneId: string, ptyId: string) => void;
     setActivePane: (tabId: string, paneId: string) => void;
     setTerminalBusy: (ptyId: string, busy: boolean) => void;
+    /** Drop several terminal tabs (used when a workspace is DISCARDED). PTYs
+     *  are already closed by the BlockTerminal unmount; this frees the trees. */
+    removeTabs: (tabIds: string[]) => void;
   };
 }
 
@@ -195,6 +198,11 @@ export const useTerminalStore = createSelectors(
             else delete s.busy[ptyId];
           });
         },
+
+        removeTabs: (tabIds) =>
+          set((s) => {
+            for (const id of tabIds) delete s.tabs[id];
+          }),
       },
     }))
   )

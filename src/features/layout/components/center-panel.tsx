@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense, Frag
 import { cn } from "@/lib/utils";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { useLayoutStore, type Tab } from "../stores/layout-store";
+import { useLayoutStore, type Tab, type WorkspaceView } from "../stores/layout-store";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 // Chat is the default landing surface — always loaded so the first paint
 // shows the agent UI without a Suspense flash.
 import { ChatPanel } from "@/features/chat/components/chat-panel";
@@ -27,6 +28,7 @@ const ResearchPanel = lazy(() => import("@/features/research/components/research
 const SettingsPanel = lazy(() => import("@/features/settings/components/settings-panel").then(m => ({ default: m.SettingsPanel })));
 const LogPanel = lazy(() => import("@/features/log/components/log-panel").then(m => ({ default: m.LogPanel })));
 const PomodoroPanel = lazy(() => import("@/features/pomodoro/components/pomodoro-panel").then(m => ({ default: m.PomodoroPanel })));
+const MissionControlPanel = lazy(() => import("@/features/mission-control/components/mission-control-panel").then(m => ({ default: m.MissionControlPanel })));
 const ModelChatPanel = lazy(() => import("@/features/model-chat/components/model-chat-panel").then(m => ({ default: m.ModelChatPanel })));
 const MemoryPanel = lazy(() => import("@/features/memory/components/memory-panel").then(m => ({ default: m.MemoryPanel })));
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -56,6 +58,7 @@ import {
   Timer,
   FileText,
   Columns2,
+  LayoutDashboard,
 } from "lucide-react";
 import type { TabType } from "@/lib/constants";
 
@@ -79,6 +82,7 @@ const tabIcons: Record<TabType, React.ElementType> = {
   pdf: FileText,
   unsupported: Code,
   pomodoro: Timer,
+  "mission-control": LayoutDashboard,
 };
 
 const GROUP_OF = (t: Tab) => t.groupId ?? "main";
@@ -104,7 +108,29 @@ const PERSISTENT_TYPES: ReadonlySet<TabType> = new Set([
  */
 export function CenterPanel() {
   const currentProject = useProjectStore.use.currentProject();
+  // Render ONLY the bounded HOT set, not the full project registry — keeps
+  // memory/DOM bounded at 100+ projects (Chrome tab-discard model). Resolve ids
+  // to workspaces, preserving registry order for stable React keys.
+  const workspacesAll = useWorkspaceStore.use.workspaces();
+  const mountedWorkspaceIds = useWorkspaceStore.use.mountedWorkspaceIds();
+  const workspaces = useMemo(() => {
+    const mounted = new Set(mountedWorkspaceIds);
+    return workspacesAll.filter((w) => mounted.has(w.id));
+  }, [workspacesAll, mountedWorkspaceIds]);
+  const activeWorkspaceId = useWorkspaceStore.use.activeWorkspaceId();
+  const viewsByWs = useLayoutStore.use.viewsByWs();
+
+  // Live mirror of the ACTIVE workspace's view.
+  const tabs = useLayoutStore.use.tabs();
   const groupOrder = useLayoutStore.use.groupOrder();
+  const activeByGroup = useLayoutStore.use.activeByGroup();
+  const focusedGroupId = useLayoutStore.use.focusedGroupId();
+  const tabHistory = useLayoutStore.use.tabHistory();
+  const tabHistoryIndex = useLayoutStore.use.tabHistoryIndex();
+  const mirrorView: WorkspaceView = useMemo(
+    () => ({ tabs, groupOrder, activeByGroup, focusedGroupId, tabHistory, tabHistoryIndex, activeTabId: activeByGroup[focusedGroupId] ?? null }),
+    [tabs, groupOrder, activeByGroup, focusedGroupId, tabHistory, tabHistoryIndex],
+  );
 
   // Running-tab ids (shallow-equal so streaming chunks don't churn it),
   // computed once here and shared to every column's tab strip.
@@ -120,24 +146,67 @@ export function CenterPanel() {
 
   if (!currentProject) return <WelcomeScreen />;
 
-  const solo = groupOrder.length === 1;
+  // Render EVERY open workspace's column-set in its own stable container
+  // (key=ws.id), only the active one visible. Background workspaces keep their
+  // editor/terminal/chat subtrees MOUNTED (display:none) so switching back is
+  // instant (no CodeMirror/xterm rebuild). A workspace with no view yet (never
+  // visited this session) renders nothing until its first cold load.
+  return (
+    <div className="h-full w-full bg-bg-surface relative">
+      {workspaces.map((ws) => {
+        const isActive = ws.id === activeWorkspaceId;
+        const view = isActive ? mirrorView : viewsByWs[ws.id];
+        if (!view) return null;
+        return (
+          <div
+            key={ws.id}
+            className="absolute inset-0"
+            style={{ display: isActive ? "block" : "none" }}
+          >
+            <WorkspaceColumns
+              workspaceId={ws.id}
+              view={view}
+              isActive={isActive}
+              runningTabIds={runningTabIds}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
-  // Always render through the same PanelGroup tree (even for one column) so
-  // adding/removing a split never remounts a sibling column's heavy modules
-  // (a terminal would lose its shell, a browser would reload).
+function WorkspaceColumns({
+  workspaceId,
+  view,
+  isActive,
+  runningTabIds,
+}: {
+  workspaceId: string;
+  view: WorkspaceView;
+  isActive: boolean;
+  runningTabIds: Set<string>;
+}) {
+  const solo = view.groupOrder.length === 1;
   return (
     <PanelGroup
       direction="horizontal"
-      autoSaveId="atlas-center-split"
+      autoSaveId={`atlas-center-split-${workspaceId}`}
       className="h-full bg-bg-surface"
     >
-      {groupOrder.map((gid, i) => (
+      {view.groupOrder.map((gid, i) => (
         <Fragment key={gid}>
           {i > 0 && (
             <PanelResizeHandle className="w-px bg-border-default hover:bg-accent data-[resize-handle-active]:bg-accent transition-colors cursor-col-resize" />
           )}
           <Panel id={gid} order={i + 1} minSize={20} className="min-w-0">
-            <TabColumn groupId={gid} runningTabIds={runningTabIds} soloColumn={solo} />
+            <TabColumn
+              groupId={gid}
+              view={view}
+              isActive={isActive}
+              runningTabIds={runningTabIds}
+              soloColumn={solo}
+            />
           </Panel>
         </Fragment>
       ))}
@@ -147,20 +216,18 @@ export function CenterPanel() {
 
 function TabColumn({
   groupId,
+  view,
+  isActive,
   runningTabIds,
   soloColumn,
 }: {
   groupId: string;
+  view: WorkspaceView;
+  isActive: boolean;
   runningTabIds: Set<string>;
   soloColumn?: boolean;
 }) {
-  const tabsAll = useLayoutStore.use.tabs();
-  const activeByGroup = useLayoutStore.use.activeByGroup();
-  const focusedGroupId = useLayoutStore.use.focusedGroupId();
-  const groupOrder = useLayoutStore.use.groupOrder();
   const tabBarVisible = useLayoutStore.use.tabBarVisible();
-  const tabHistory = useLayoutStore.use.tabHistory();
-  const tabHistoryIndex = useLayoutStore.use.tabHistoryIndex();
   const {
     setActiveTab,
     closeTab,
@@ -172,14 +239,17 @@ function TabColumn({
     closeGroup,
   } = useLayoutStore.use.actions();
 
+  const tabsAll = view.tabs;
+  const tabHistory = view.tabHistory;
+  const tabHistoryIndex = view.tabHistoryIndex;
   const tabs = useMemo(
     () => tabsAll.filter((t) => GROUP_OF(t) === groupId),
     [tabsAll, groupId]
   );
-  const activeId = activeByGroup[groupId] ?? null;
-  const isFocused = focusedGroupId === groupId;
-  const canSplit = groupOrder.length < 3;
-  const canCloseGroup = groupOrder.length > 1;
+  const activeId = view.activeByGroup[groupId] ?? null;
+  const isFocused = isActive && view.focusedGroupId === groupId;
+  const canSplit = view.groupOrder.length < 3;
+  const canCloseGroup = view.groupOrder.length > 1;
 
   // Back/forward operate on the (global) tab history.
   const canGoBack = useMemo(() => {
@@ -323,23 +393,30 @@ function TabColumn({
         </div>
       )}
 
-      <TabContentContainer groupId={groupId} />
+      <TabContentContainer groupId={groupId} view={view} isActive={isActive} />
     </div>
   );
 }
 
-function TabContentContainer({ groupId }: { groupId: string }) {
-  const tabsAll = useLayoutStore.use.tabs();
-  const activeByGroup = useLayoutStore.use.activeByGroup();
+function TabContentContainer({
+  groupId,
+  view,
+  isActive,
+}: {
+  groupId: string;
+  view: WorkspaceView;
+  isActive: boolean;
+}) {
   const { setActiveTab } = useLayoutStore.use.actions();
   const ref = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState(0);
 
+  const tabsAll = view.tabs;
   const tabs = useMemo(
     () => tabsAll.filter((t) => GROUP_OF(t) === groupId),
     [tabsAll, groupId]
   );
-  const activeTabId = activeByGroup[groupId] ?? null;
+  const activeTabId = view.activeByGroup[groupId] ?? null;
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   useEffect(() => {
@@ -357,9 +434,11 @@ function TabContentContainer({ groupId }: { groupId: string }) {
   }, []);
 
   // If this column's active id is stale (closed tab, etc.) snap to its first.
+  // Only for the ACTIVE workspace — `setActiveTab` mutates the live (active)
+  // store, so a background workspace must not fire it.
   useEffect(() => {
-    if (!activeTab && tabs.length > 0) setActiveTab(tabs[0].id);
-  }, [activeTab, tabs, setActiveTab]);
+    if (isActive && !activeTab && tabs.length > 0) setActiveTab(tabs[0].id);
+  }, [isActive, activeTab, tabs, setActiveTab]);
 
   // Empty split column — invite the user to open something.
   if (tabs.length === 0) {
@@ -449,6 +528,8 @@ function TabContent({ tab }: { tab: Tab }) {
       return <LogPanel />;
     case "pomodoro":
       return <PomodoroPanel />;
+    case "mission-control":
+      return <MissionControlPanel />;
     case "media":
       return <MediaViewer filePath={tab.data.filePath as string} />;
     case "svg":

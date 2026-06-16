@@ -11,9 +11,11 @@ import {
   Info,
   FlaskConical,
   KeyRound,
+  LayoutTemplate,
 } from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
+import { LayoutsSettings } from "./layouts-settings";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -26,6 +28,7 @@ import { isDev } from "@/lib/env";
 const SECTIONS = [
   { id: "general", label: "General", icon: Settings },
   { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "layouts", label: "Layouts", icon: LayoutTemplate },
   { id: "providers", label: "API Keys", icon: KeyRound },
   { id: "keybindings", label: "Keybindings", icon: Keyboard },
   ...(isDev
@@ -70,6 +73,7 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
           <div className="max-w-[500px]">
             {activeSection === "general" && <GeneralSettings />}
             {activeSection === "appearance" && <AppearanceSettings />}
+            {activeSection === "layouts" && <LayoutsSettings />}
             {activeSection === "keybindings" && <KeybindingsSettings />}
             {isDev && activeSection === "developer" && <DeveloperSettings />}
             {activeSection === "about" && <AboutSettings />}
@@ -232,6 +236,7 @@ function KeybindingsSettings() {
         { action: "Focus split right", keys: "⌥'" },
         { action: "Close split", keys: "⌥W" },
         { action: "New tab in focused split", keys: "⌘⌥N" },
+        { action: "Switch layout (templates)", keys: "⌘⌥L" },
         { action: "Zen mode (Knowledge │ Chat │ Browser)", keys: "⌥Z" },
       ],
     },
@@ -338,7 +343,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.11 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.14 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">

@@ -18,11 +18,39 @@
 //! job is just to spawn the spec the adapter hands it.
 
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as AsyncCommand;
+use tokio::time::timeout;
+
+/// Resolve a CLI's absolute path via the user's LOGIN+INTERACTIVE shell.
+///
+/// macOS GUI apps launched from Finder/the Dock inherit only a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), so a bare `claude` spawn fails even when
+/// the user has it on their interactive-shell PATH (`~/.local/bin`, nvm, a
+/// custom npm prefix, Homebrew, etc.). Asking their own `$SHELL -lic` resolves
+/// the binary the same way their terminal would. Falls back to the bare name
+/// (relying on the process-wide PATH enrichment in `atlas_acp::sanitize_host_env`)
+/// if the shell probe fails or times out.
+async fn resolve_cli(name: &str) -> String {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let probe = AsyncCommand::new(&shell)
+        .args(["-lic", &format!("command -v {name} 2>/dev/null")])
+        .output();
+    if let Ok(Ok(out)) = timeout(Duration::from_secs(5), probe).await {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            // Accept only a real absolute path (not a shell function/alias name).
+            if p.starts_with('/') && std::path::Path::new(&p).exists() {
+                return p;
+            }
+        }
+    }
+    name.to_string()
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // claude_status
@@ -41,8 +69,11 @@ pub struct ClaudeStatus {
 /// surfaces as `installed: false`).
 #[tauri::command]
 pub async fn claude_status() -> ClaudeStatus {
-    let version_fut = AsyncCommand::new("claude").arg("--version").output();
-    let auth_fut = AsyncCommand::new("claude").args(["auth", "status"]).output();
+    // Resolve via the user's login shell so we find `claude` wherever they
+    // installed it (GUI apps don't inherit the interactive-shell PATH).
+    let claude = resolve_cli("claude").await;
+    let version_fut = AsyncCommand::new(&claude).arg("--version").output();
+    let auth_fut = AsyncCommand::new(&claude).args(["auth", "status"]).output();
 
     let (version_res, auth_res) = tokio::join!(version_fut, auth_fut);
 

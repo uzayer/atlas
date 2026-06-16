@@ -100,6 +100,139 @@ function applySgr(state: SgrState, params: number[]): void {
 
 const ESC = 0x1b;
 
+/**
+ * Resolve in-place terminal updates (carriage return, backspace, cursor
+ * movement, erase-line) into the final visible lines, then style them.
+ *
+ * The plain `ansiToSegments` below drops `\r`/cursor sequences, which is correct
+ * for already-static output but WRONG for a spinner / progress bar / interactive
+ * prompt that redraws the same line(s) with `\r` + cursor control — those frames
+ * concatenate into one long wrapped line. This runs a tiny terminal emulator
+ * (cursor over a grid of styled cells) so a `\r⠙ Waiting…\r⠸ Waiting…` stream
+ * collapses to a single updating line, exactly as a real terminal shows it.
+ *
+ * Returns flattened segments with `\n` between resolved lines so the existing
+ * `white-space: pre-wrap` block renderer works unchanged.
+ */
+export function resolveTerminalOutput(input: string): AnsiSegment[] {
+  interface Cell {
+    ch: string;
+    style?: CSSProperties;
+  }
+  const lines: Cell[][] = [[]];
+  let row = 0;
+  let col = 0;
+  const state: SgrState = {};
+  let curStyle = styleOf(state);
+
+  const lineAt = (r: number): Cell[] => {
+    while (lines.length <= r) lines.push([]);
+    return lines[r];
+  };
+  const putChar = (ch: string) => {
+    const line = lineAt(row);
+    while (line.length < col) line.push({ ch: " " });
+    line[col] = { ch, style: curStyle };
+    col++;
+  };
+
+  const n = input.length;
+  let i = 0;
+  while (i < n) {
+    const ch = input.charCodeAt(i);
+    if (ch === ESC && input[i + 1] === "[") {
+      let j = i + 2;
+      while (j < n && !/[@-~]/.test(input[j])) j++;
+      const final = input[j];
+      const body = input.slice(i + 2, j);
+      const num = (def: number) => {
+        const v = parseInt(body, 10);
+        return Number.isNaN(v) ? def : v;
+      };
+      if (final === "m") {
+        const params = body.split(";").map((x) => (x === "" ? 0 : parseInt(x, 10)));
+        applySgr(state, params.length ? params : [0]);
+        curStyle = styleOf(state);
+      } else if (final === "A") row = Math.max(0, row - num(1));
+      else if (final === "B") row = row + num(1);
+      else if (final === "C") col = col + num(1);
+      else if (final === "D") col = Math.max(0, col - num(1));
+      else if (final === "G") col = Math.max(0, num(1) - 1);
+      else if (final === "H" || final === "f") {
+        // Cursor position row;col (1-based). Only used by some prompts.
+        const [r, c] = body.split(";").map((x) => parseInt(x, 10));
+        row = Math.max(0, (Number.isNaN(r) ? 1 : r) - 1);
+        col = Math.max(0, (Number.isNaN(c) ? 1 : c) - 1);
+      } else if (final === "K") {
+        const line = lineAt(row);
+        const mode = num(0);
+        if (mode === 0) line.length = Math.min(line.length, col);
+        else if (mode === 1) for (let k = 0; k < col && k < line.length; k++) line[k] = { ch: " " };
+        else if (mode === 2) line.length = 0;
+      }
+      // Other CSI (J erase-display, scroll, etc.) ignored — block output.
+      i = j + 1;
+      continue;
+    }
+    if (ch === ESC && (input[i + 1] === "]" || input[i + 1] === ")" || input[i + 1] === "(")) {
+      let j = i + 2;
+      while (
+        j < n &&
+        input.charCodeAt(j) !== 0x07 &&
+        !(input.charCodeAt(j) === ESC && input[j + 1] === "\\")
+      )
+        j++;
+      i = input.charCodeAt(j) === ESC ? j + 2 : j + 1;
+      continue;
+    }
+    if (ch === ESC) {
+      i += 2;
+      continue;
+    }
+    if (ch === 0x0d) {
+      col = 0; // carriage return — overwrite from column 0
+      i++;
+      continue;
+    }
+    if (ch === 0x0a) {
+      row++; // line feed — next row (CRLF already moved col to 0)
+      lineAt(row);
+      i++;
+      continue;
+    }
+    if (ch === 0x08) {
+      col = Math.max(0, col - 1); // backspace
+      i++;
+      continue;
+    }
+    if (ch === 0x07) {
+      i++; // bell
+      continue;
+    }
+    putChar(input[i]);
+    i++;
+  }
+
+  // Flatten the grid → segments, merging adjacent cells that share a style.
+  const out: AnsiSegment[] = [];
+  for (let r = 0; r < lines.length; r++) {
+    const line = lines[r];
+    let buf = "";
+    let style = line[0]?.style;
+    for (const cell of line) {
+      if (cell.style === style) buf += cell.ch;
+      else {
+        if (buf) out.push({ text: buf, style });
+        buf = cell.ch;
+        style = cell.style;
+      }
+    }
+    if (buf) out.push({ text: buf, style });
+    if (r < lines.length - 1) out.push({ text: "\n" });
+  }
+  return out;
+}
+
 /** Convert a string containing ANSI/SGR escapes into styled text runs. */
 export function ansiToSegments(input: string): AnsiSegment[] {
   const segments: AnsiSegment[] = [];

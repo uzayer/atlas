@@ -106,6 +106,8 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         "|" +
         (x.agentType ?? "claude-code") +
         "|" +
+        (x.workingDirectory ?? "") +
+        "|" +
         (x.messages.length > 0 ? 1 : 0) +
         "\n";
     }
@@ -127,6 +129,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         firstUserContent: string;
         userMessageCount: number;
         agentType: string;
+        workingDirectory: string;
         hasAnyMessage: boolean;
       }
     > = {};
@@ -141,6 +144,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         firstUserContent: sess.firstUserContent ?? "",
         userMessageCount: sess.userMessageCount ?? 0,
         agentType: sess.agentType ?? "claude-code",
+        workingDirectory: sess.workingDirectory ?? "",
         hasAnyMessage: sess.messages.length > 0,
       };
     }
@@ -229,11 +233,18 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   // row arrives mid-stream — it's always the live `session.title` for as
   // long as the session is in the chat-store.
   const items = useMemo<SidebarItem[]>(() => {
+    // Only sessions the user has actually messaged belong in history. A new
+    // chat that merely got an ACP session bound (no message yet) must NOT
+    // appear — that was the "empty chat I can't remove" bug. The first user
+    // message is what promotes a chat into the history list (and becomes its
+    // title below).
+    // Scope to THIS project: the chat-store is global (it holds every mounted
+    // workspace's sessions), so without the cwd filter a session from another
+    // open project leaks into this project's history list.
     const liveAgents = Object.values(tabSummaries).filter(
       (s) =>
-        s.acpSessionId ||
-        s.status === "running" ||
-        s.userMessageCount > 0
+        (s.userMessageCount > 0 || s.hasAnyMessage) &&
+        (s.workingDirectory === cwd || s.workingDirectory === ""),
     );
     const liveById = new Map(
       liveAgents.map((s) => {
@@ -282,9 +293,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       };
     });
 
-    return agents.sort((a, b) =>
-      (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? "")
-    );
+    // Drop empty rows (disk JSONLs that exist but hold no messages, or any live
+    // session that slipped through) so history only ever shows messaged chats.
+    return agents
+      .filter((a) => a.messageCount > 0)
+      .sort((a, b) => (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? ""));
   }, [agentList, tabSummaries]);
 
   // Sessions currently running (used to show a spinner on the matching row).
@@ -372,7 +385,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     setSessionTitle(targetTabId, item.title.slice(0, 40));
     const cachedAgent = getDefaultAgentSync();
     if (cachedAgent) {
-      setAcpBinding(targetTabId, cachedAgent.agent_id, item.id);
+      setAcpBinding(targetTabId, cachedAgent.agent_id, item.id, cwd);
     }
     // Always flag loading at this point — the chat panel renders a spinner
     // instead of the welcome state until the snapshot lands. On a Rust-cache
@@ -432,7 +445,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         try {
           const newKey = await agents.newSession(agent.agent_id, cwd);
           if (isStale()) return;
-          setAcpBinding(targetTabId, agent.agent_id, newKey.session_id);
+          setAcpBinding(targetTabId, agent.agent_id, newKey.session_id, cwd);
           setTranscriptLoading(targetTabId, false);
         } catch (newErr) {
           if (!isStale()) {
@@ -464,7 +477,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       if (isStale()) return;
 
       replaceMessages(targetTabId, snapshot.messages.map(snapshotMessageToWire));
-      setAcpBinding(targetTabId, agent.agent_id, item.id);
+      setAcpBinding(targetTabId, agent.agent_id, item.id, cwd);
       setTranscriptLoading(targetTabId, false);
     })();
   };

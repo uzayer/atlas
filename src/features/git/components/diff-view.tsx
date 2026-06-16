@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { parseDiff, buildRows, type DiffFile } from "../lib/diff";
+import { highlightDiffLine } from "../lib/diff-highlight";
 
 type SortMode = "default" | "most-changes";
 
@@ -239,9 +240,10 @@ export function DiffView({
                   <span className="w-[36px] shrink-0 text-right pr-2 text-[10px] text-text-tertiary select-none">
                     {line.newLine ?? ""}
                   </span>
-                  <span className="flex-1 min-w-0 whitespace-pre pr-3 text-text-secondary overflow-hidden">
-                    {line.content}
-                  </span>
+                  <DiffCode
+                    content={line.content}
+                    language={files[row.fileIndex]?.language ?? ""}
+                  />
                 </div>
               );
             })}
@@ -249,6 +251,29 @@ export function DiffView({
         </div>
       )}
     </div>
+  );
+}
+
+/** Renders a diff line's code text with cheap, synchronous syntax highlighting
+ *  (lowlight → `.diff-syntax` themed token spans). Falls back to plain text for
+ *  unsupported languages / empty lines so it can never break the row. */
+function DiffCode({ content, language }: { content: string; language: string }) {
+  const tokens = highlightDiffLine(language, content);
+  if (!tokens) {
+    return (
+      <span className="flex-1 min-w-0 whitespace-pre pr-3 text-text-secondary overflow-hidden">
+        {content}
+      </span>
+    );
+  }
+  return (
+    <span className="diff-syntax flex-1 min-w-0 whitespace-pre pr-3 text-text-secondary overflow-hidden">
+      {tokens.map((t, i) => (
+        <span key={i} className={t.cls ?? undefined}>
+          {t.text}
+        </span>
+      ))}
+    </span>
   );
 }
 

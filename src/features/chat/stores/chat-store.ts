@@ -101,6 +101,9 @@ interface ChatActions {
     setTranscriptLoading: (sessionId: string, loading: boolean) => void;
     clearSession: (sessionId: string) => void;
     removeSession: (sessionId: string) => void;
+    /** Drop several sessions at once (used when a workspace is DISCARDED from
+     *  the hot set — frees its chat history from RAM; reloaded cold on revisit). */
+    removeSessions: (sessionIds: string[]) => void;
     /** Drop all chat sessions, queues, and pending permissions. Used when
      *  the user switches projects so dead acpSessionIds from the old
      *  project's `.atlas/` don't linger and cause ghost-bound tabs. */
@@ -136,7 +139,9 @@ interface ChatActions {
     setAcpBinding: (
       tabId: string,
       agentId: string,
-      acpSessionId: string
+      acpSessionId: string,
+      /** Project root the session was created with — stamps `workingDirectory`. */
+      cwd?: string
     ) => void;
     /**
      * Apply one `atlas:acp` event to whichever chat tab owns its acpSessionId.
@@ -525,6 +530,16 @@ export const useChatStore = createSelectors(
               s.activeSessionId = keys.length > 0 ? keys[0] : null;
             }
           }),
+        removeSessions: (sessionIds) =>
+          set((s) => {
+            for (const id of sessionIds) {
+              delete s.sessions[id];
+              delete s.drafts[id];
+              delete s.queues[id];
+              delete s.pendingPermissions[id];
+              if (s.activeSessionId === id) s.activeSessionId = null;
+            }
+          }),
         resetSessions: () =>
           set((s) => {
             s.sessions = {};
@@ -605,12 +620,17 @@ export const useChatStore = createSelectors(
               applyDeltaToDraft(s, env);
             }
           }),
-        setAcpBinding: (tabId, agentId, acpSessionId) =>
+        setAcpBinding: (tabId, agentId, acpSessionId, cwd) =>
           set((s) => {
             const session = s.sessions[tabId];
             if (!session) return;
             session.acpAgentId = agentId;
             session.acpSessionId = acpSessionId;
+            // Stamp the session's project root the moment it's bound (the agent
+            // was created with this cwd). Without it `workingDirectory` stays ""
+            // and the chat never lands in the workspace "Chats" list / running
+            // counts. Callers pass the project path they used for the session.
+            if (cwd) session.workingDirectory = cwd;
           }),
         pushPermission: (req) => {
           set((s) => {

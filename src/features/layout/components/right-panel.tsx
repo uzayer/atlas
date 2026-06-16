@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 import { useLayoutStore } from "../stores/layout-store";
 import { ScrollArea } from "@/ui/scroll-area";
 import { PanelSkeleton } from "@/components/panel-skeleton";
-import { BarChart3, Sparkles, GitCompare, Github } from "lucide-react";
+import { BarChart3, Sparkles, GitCompare, Github, CheckCheck } from "lucide-react";
 
 // All four right-panel sub-panels are lazy so they don't run their first
 // invokes / vendor parses during the boot-cascade window. The user lands
@@ -32,8 +32,14 @@ const GithubPanel = lazy(() =>
     default: m.GithubPanel,
   }))
 );
+const ReviewAgentsPanel = lazy(() =>
+  import("@/features/review-agents/components/review-agents-panel").then((m) => ({
+    default: m.ReviewAgentsPanel,
+  }))
+);
 
 const sections = [
+  { id: "review-agents" as const, label: "Review", icon: CheckCheck },
   { id: "changes" as const, label: "Source Control", icon: GitCompare },
   { id: "analysis" as const, label: "Analysis", icon: BarChart3 },
   { id: "explore" as const, label: "Explore", icon: Sparkles },
@@ -80,6 +86,7 @@ export function RightPanel() {
             />
           }
         >
+          {activeSection === "review-agents" && <ReviewAgentsPanel />}
           {activeSection === "changes" && <GitManagerPanel />}
           {activeSection === "explore" && (
             <ScrollArea className="h-full p-2">

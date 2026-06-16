@@ -108,7 +108,8 @@ export function LogPanel() {
   const buffer = useLogStore.use.buffer();
   const pinned = useLogStore.use.pinned();
   const ready = useLogStore.use.ready();
-  const { loadPinned, pin, unpin, clearBuffer, clearPinned } = useLogStore.use.actions();
+  const { loadPinned, loadProject, pin, unpin, clearBuffer, clearPinned } =
+    useLogStore.use.actions();
 
   const currentProject = useProjectStore.use.currentProject();
 
@@ -116,7 +117,7 @@ export function LogPanel() {
   const [activeSources, setActiveSources] = useState<Set<LogSource>>(
     () => new Set(SOURCES)
   );
-  const [projectScope, setProjectScope] = useState<"all" | "current">("all");
+  const [projectScope, setProjectScope] = useState<"all" | "current">("current");
   const [showPinnedOnly, setShowPinnedOnly] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -124,6 +125,11 @@ export function LogPanel() {
   useEffect(() => {
     if (!ready) loadPinned();
   }, [ready, loadPinned]);
+
+  // Restore (and scope) the activity log for the current project from disk.
+  useEffect(() => {
+    if (currentProject?.path) void loadProject(currentProject.path);
+  }, [currentProject?.path, loadProject]);
 
   // Merge buffer + pinned (newest first, dedupe by id).
   const merged = useMemo<LogEntry[]>(() => {

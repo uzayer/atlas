@@ -13,7 +13,11 @@ use tauri::{AppHandle, Manager};
 /// Current schema version. Bump and migrate (or reset) when fields change
 /// shape. Older payloads with a smaller `version` are loadable as long as
 /// the missing fields default to sensible values.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 introduced the multi-workspace model (`workspaces`/`groups`/
+/// `active_workspace_id`); `current_project` is retained only as a
+/// migration source for v1 payloads.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,12 +35,52 @@ pub struct RecentProject {
     pub last_opened: String,
 }
 
+/// A single open workspace = one project plus its UI state identity. The
+/// `id` is the stable key that replaces `webview.label()` everywhere Rust
+/// state used to be keyed per-window (file index, git watcher, mention
+/// cache, recent files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workspace {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    /// ISO-8601 timestamp of the last time this workspace was the active
+    /// one; used to order the sidebar / pick a fallback on close.
+    #[serde(default)]
+    pub last_active_at: Option<String>,
+}
+
+/// A user-defined collapsible folder that groups workspaces in the sidebar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub order: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppState {
+    /// Legacy single-project field. Kept for migration from v1 `state.json`;
+    /// the frontend now derives "current project" from
+    /// `active_workspace_id`. New writes leave this `None`.
+    #[serde(default)]
     pub current_project: Option<Project>,
     #[serde(default)]
     pub recent_projects: Vec<RecentProject>,
+    #[serde(default)]
+    pub workspaces: Vec<Workspace>,
+    #[serde(default)]
+    pub groups: Vec<WorkspaceGroup>,
+    #[serde(default)]
+    pub active_workspace_id: Option<String>,
     #[serde(default)]
     pub settings: AppSettings,
     #[serde(default = "default_version")]
@@ -52,9 +96,37 @@ impl Default for AppState {
         Self {
             current_project: None,
             recent_projects: Vec::new(),
+            workspaces: Vec::new(),
+            groups: Vec::new(),
+            active_workspace_id: None,
             settings: AppSettings::default(),
             version: SCHEMA_VERSION,
         }
+    }
+}
+
+impl AppState {
+    /// Migrate a freshly-deserialized v1 payload in place: if no workspaces
+    /// exist yet but a legacy `current_project` is present, synthesize a
+    /// single workspace from it and make it active. Idempotent — once
+    /// `workspaces` is populated this is a no-op.
+    fn migrate(&mut self) {
+        if self.workspaces.is_empty() {
+            if let Some(project) = self.current_project.take() {
+                let id = uuid::Uuid::new_v4().to_string();
+                self.active_workspace_id = Some(id.clone());
+                self.workspaces.push(Workspace {
+                    id,
+                    name: project.name,
+                    path: project.path,
+                    group_id: None,
+                    color: None,
+                    last_active_at: None,
+                });
+            }
+        }
+        self.current_project = None;
+        self.version = SCHEMA_VERSION;
     }
 }
 
@@ -121,7 +193,9 @@ impl AppState {
         let Ok(raw) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        serde_json::from_str(&raw).unwrap_or_default()
+        let mut state: AppState = serde_json::from_str(&raw).unwrap_or_default();
+        state.migrate();
+        state
     }
 
     /// Atomic write — `state.json.tmp` then `rename` so a crash mid-write

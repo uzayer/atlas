@@ -1,6 +1,7 @@
 import { useMemo, useRef, useCallback, useState, useEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
+import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
 import { toast } from "sonner";
 import {
   useExplorerStore,
@@ -278,7 +279,7 @@ export function FileTree() {
       await reconcileDirectory(dirOfPath(oldPath));
       // Re-point recent-files entries so the mention picker shows the new name
       // (the file-index search already self-updates via the fs watcher).
-      void invoke("recent_files_rename", { oldPath, newPath }).catch(() => {});
+      void invoke("recent_files_rename", { oldPath, newPath, workspaceId: activeWorkspaceId() }).catch(() => {});
       // If the renamed file is open in ANY file-backed viewer (editor, media,
       // svg, pdf, unsupported), swap those tabs to the new path — otherwise the
       // viewer keeps loading the old (now-missing) path and 404s. Re-opening
@@ -332,7 +333,7 @@ export function FileTree() {
         if (clipboard.isCut) {
           await invoke("fs_rename", { from: src, to: destPath });
           await reconcileDirectory(dirOfPath(src));
-          void invoke("recent_files_rename", { oldPath: src, newPath: destPath }).catch(() => {});
+          void invoke("recent_files_rename", { oldPath: src, newPath: destPath, workspaceId: activeWorkspaceId() }).catch(() => {});
         } else {
           await invoke("fs_copy", { from: src, to: destPath });
         }

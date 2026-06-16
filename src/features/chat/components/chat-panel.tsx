@@ -124,7 +124,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         }
         useChatStore
           .getState()
-          .actions.setAcpBinding(tabId, agent.agent_id, key.session_id);
+          .actions.setAcpBinding(tabId, agent.agent_id, key.session_id, cwd);
       } catch (err) {
         console.warn("Agent session creation failed:", err);
       } finally {
@@ -561,19 +561,6 @@ function ChatComposer({
   };
 
   const disabled = (isClaude && phase !== "ready") || codexNeedsAuth;
-  const disabledReason = codexNeedsAuth
-    ? "Sign in to Codex to start chatting"
-    : !isClaude
-      ? undefined
-      : phase === "not-installed"
-        ? "Install Claude Code to start chatting"
-        : phase === "not-authed"
-          ? "Sign in to Claude Code to start chatting"
-          : phase === "installing"
-            ? "Installing Claude Code…"
-            : phase === "authing"
-              ? "Finishing sign-in…"
-              : undefined;
 
   const setupVisible = (isClaude && phase !== "ready") || codexNeedsAuth;
   const showRow = setupVisible || showJumpToBottom;
@@ -635,7 +622,7 @@ function ChatComposer({
           onStop={onStop}
           running={running}
           disabled={disabled}
-          disabledReason={disabledReason}
+          placeholder={isClaude ? "Ask Claude Code what to do…" : "Ask Codex what to do…"}
         />
       </div>
       {isClaude && <ClaudeLoginDialog />}

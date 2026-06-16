@@ -23,6 +23,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { listen } from "@tauri-apps/api/event";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   BookOpen,
@@ -52,6 +53,7 @@ import {
   useRecentFilesStore,
   type RecentFile,
 } from "@/features/chat/stores/recent-files-store";
+import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -138,6 +140,14 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
     const [pastSessions, setPastSessions] = useState<PastSessionRef[]>([]);
     const [results, setResults] = useState<MentionData[]>([]);
     const [active, setActive] = useState(0);
+    /** True until the backend FileIndex finishes its initial walk for the
+     *  active workspace. With multiple workspaces the first `@`/`~` in a
+     *  freshly-switched project can land before its index is built — without
+     *  this we'd flash a misleading "No matches" instead of a loading hint. */
+    const [indexing, setIndexing] = useState(false);
+    /** Bumped when the backend reports the index changed, to re-run the
+     *  in-flight search once the walk completes. */
+    const [indexNonce, setIndexNonce] = useState(0);
 
     // Reset transient state when the popover (re-)opens.
     // When `initialScope` is set, lock to that scope — the picker
@@ -215,7 +225,52 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       }
 
       return () => controller.abort();
-    }, [open, query, scope, pastSession, projectPath, excludeIds]);
+    }, [open, query, scope, pastSession, projectPath, excludeIds, indexNonce]);
+
+    // Detect whether the active workspace's file index is still building, for
+    // the file-dependent scopes (blended / file / folder). Drives the
+    // "Indexing files…" hint so the first `@` in a freshly-opened workspace
+    // shows a loading state instead of "No matches". `ensureFileIndex` returns
+    // null on the already-confirmed fast path (→ not indexing).
+    useEffect(() => {
+      if (!open || !projectPath) {
+        setIndexing(false);
+        return;
+      }
+      if (scope !== null && scope !== "file" && scope !== "folder") {
+        setIndexing(false);
+        return;
+      }
+      let cancelled = false;
+      void ensureFileIndex(projectPath).then((status) => {
+        if (cancelled) return;
+        setIndexing(status ? !status.indexed : false);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }, [open, projectPath, scope]);
+
+    // Flip the loading hint off and re-run the search the moment the backend
+    // reports the walk completed (fired by `fileindex_open_project` on initial
+    // walk and by the fs-watch debouncer thereafter).
+    useEffect(() => {
+      if (!open) return;
+      let cancelled = false;
+      let unlisten: (() => void) | null = null;
+      void listen("atlas:fileindex:updated", () => {
+        if (cancelled) return;
+        setIndexing(false);
+        setIndexNonce((n) => n + 1);
+      }).then((un) => {
+        if (cancelled) un();
+        else unlisten = un;
+      });
+      return () => {
+        cancelled = true;
+        unlisten?.();
+      };
+    }, [open]);
 
     // Build the renderable row list. Order:
     //   no scope + empty query → Recents (header) → files → Categories header → categories
@@ -253,7 +308,18 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         return out;
       }
       if (!query.trim()) {
-        const recents = recentFiles.slice(0, RECENT_LIMIT);
+        // The recents mirror is a single global store reflecting the ACTIVE
+        // workspace; right after a workspace switch there's an async window
+        // where it still holds the previous project's files. Filter to THIS
+        // picker's project so a recent from another project can never surface.
+        const recents = recentFiles
+          .filter(
+            (r) =>
+              !projectPath ||
+              r.absPath === projectPath ||
+              r.absPath.startsWith(projectPath + "/"),
+          )
+          .slice(0, RECENT_LIMIT);
         if (recents.length > 0) {
           out.push({ type: "header", label: "Recent files" });
           for (const r of recents) {
@@ -277,7 +343,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         out.push({ type: "mention", mention: m });
       }
       return out;
-    }, [scope, query, results, recentFiles]);
+    }, [scope, query, results, recentFiles, projectPath]);
 
     // Compute the navigable rows (skip headers). `active` is an index into
     // *navigable* rows, not the full list; the renderer maps it back.
@@ -426,12 +492,20 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
             {rows.length === 0 ||
             (rows.length === 1 && rows[0].type === "header") ? (
               <div className="flex-1 px-3 py-6 text-center text-[11px] text-[var(--text-tertiary)] leading-snug">
-                {emptyStateCopy({
-                  scope,
-                  pastSession: pastSession !== null,
-                  query: query.trim(),
-                  hasProject: projectPath !== null,
-                })}
+                {indexing &&
+                (scope === null || scope === "file" || scope === "folder") ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="size-1.5 rounded-full bg-[var(--text-tertiary)] animate-pulse" />
+                    Indexing files…
+                  </span>
+                ) : (
+                  emptyStateCopy({
+                    scope,
+                    pastSession: pastSession !== null,
+                    query: query.trim(),
+                    hasProject: projectPath !== null,
+                  })
+                )}
               </div>
             ) : (
               <VirtualizedRows

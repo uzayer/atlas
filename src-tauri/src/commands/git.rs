@@ -428,6 +428,80 @@ pub async fn git_graph_signature(path: String) -> Result<String, String> {
     .await
     .map_err(|e| e.to_string())?
 }
+/// Compact per-workspace git summary for the workspace sidebar: branch, latest
+/// commit subject, dirty flag (green/yellow dot), and working-tree +/- counts.
+/// One command (a few cheap git calls) so the sidebar doesn't fan out several
+/// IPC round-trips per workspace.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorkspaceSummary {
+    pub is_repo: bool,
+    pub branch: String,
+    pub head_subject: String,
+    pub dirty: bool,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[tauri::command]
+pub async fn git_workspace_summary(path: String) -> Result<GitWorkspaceSummary, String> {
+    tokio::task::spawn_blocking(move || {
+        let git = |args: &[&str]| -> Option<String> {
+            let out = Command::new("git").args(args).current_dir(&path).output().ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+
+        let is_repo = git(&["rev-parse", "--is-inside-work-tree"])
+            .map(|s| s == "true")
+            .unwrap_or(false);
+        if !is_repo {
+            return GitWorkspaceSummary {
+                is_repo: false,
+                branch: String::new(),
+                head_subject: String::new(),
+                dirty: false,
+                additions: 0,
+                deletions: 0,
+            };
+        }
+
+        let branch = git(&["branch", "--show-current"])
+            .filter(|s| !s.is_empty())
+            .or_else(|| git(&["rev-parse", "--short", "HEAD"]).map(|s| format!("@{s}")))
+            .unwrap_or_default();
+        let head_subject = git(&["log", "-1", "--pretty=%s"]).unwrap_or_default();
+        let dirty = git(&["status", "--porcelain"])
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        // additions/deletions from working tree vs HEAD (tracked changes).
+        let (mut additions, mut deletions) = (0u32, 0u32);
+        if let Some(numstat) = git(&["diff", "--numstat", "HEAD"]) {
+            for line in numstat.lines() {
+                let mut cols = line.split('\t');
+                let a = cols.next().and_then(|c| c.parse::<u32>().ok());
+                let d = cols.next().and_then(|c| c.parse::<u32>().ok());
+                additions += a.unwrap_or(0);
+                deletions += d.unwrap_or(0);
+            }
+        }
+
+        GitWorkspaceSummary {
+            is_repo: true,
+            branch,
+            head_subject,
+            dirty,
+            additions,
+            deletions,
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn git_diff_all(path: String) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {

@@ -5,6 +5,12 @@ export interface Policy {
   key: string;
   hint: string;
   value: string;
+  /** "strong" (hard rule — MUST/NEVER/ALWAYS) | "soft" (preference/guidance). */
+  category: "soft" | "strong";
+  /** "preference" (curated probe) | "codebase" (a feedback/behavior memory). */
+  origin: "preference" | "codebase";
+  /** "semantic" (cosine-matched probe) | "keyword" (direct memory listing). */
+  match_kind: "semantic" | "keyword";
   source: string; // "claude" | "codex"
   file_path: string;
   doc_title: string;

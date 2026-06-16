@@ -144,7 +144,7 @@ function ChatSurface({
   return (
     <div className="flex h-full bg-bg-base">
       <ModelChatSidebar onNew={() => newSession(configuredIds[0] ?? "", "")} />
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 min-h-0 flex-1 flex-col">
         {activeId && hasSession ? (
           <Conversation
             key={activeId}
@@ -243,7 +243,11 @@ function Conversation({
     window.dispatchEvent(new CustomEvent(JUMP_EVENT, { detail: { index } }));
 
   return (
-    <div className="relative flex min-w-0 flex-1 flex-col">
+    // `min-h-0` is REQUIRED on this flex-col (and its wrapper above): without it
+    // the column's default `min-height: auto` lets it grow to the virtualizer's
+    // full content height during a long streaming reply, which disables the
+    // messages scroll and pushes the `shrink-0` composer off-screen.
+    <div className="relative flex min-w-0 min-h-0 flex-1 flex-col">
       {/* Header bar — matches the agent chat (h-[32px]). */}
       <div className="flex items-center gap-2 px-3 h-[32px] shrink-0 border-b border-border-default">
         {!sidebar.visible && (

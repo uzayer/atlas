@@ -13,6 +13,15 @@ import { useGitStore, type GitFileStatus } from "../../stores/git-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { DiffView } from "../diff-view";
+import { classifyFile } from "@/lib/file-types";
+import { FileTreeConfirmDelete } from "@/features/explorer/components/file-tree-confirm-delete";
+
+/** An added/untracked file has no HEAD version, so "revert" = delete it (a plain
+ *  `git restore` errors). Mirrors the loose detection in `statusBadge`. */
+function isAddedStatus(status: string): boolean {
+  const s = status.toLowerCase();
+  return s.includes("add") || s.includes("new") || s.includes("untrack");
+}
 
 function statusBadge(status: string): { letter: string; cls: string } {
   const s = status.toLowerCase();
@@ -130,6 +139,32 @@ export function ChangesView() {
     }
   };
 
+  // Revert button. Tracked changes → `git restore` (back to HEAD). Added/
+  // untracked files have no HEAD to restore to, so reverting deletes them:
+  // text additions delete directly; binary additions (e.g. `.png`, no diff to
+  // review) ask for confirmation first since the bytes can't be recovered.
+  const [confirmDelete, setConfirmDelete] = useState<GitFileStatus | null>(null);
+  // Bulk revert of every unstaged change — discards tracked edits AND deletes
+  // added files, so it always confirms first (unlike "Stage all").
+  const [confirmRevertAll, setConfirmRevertAll] = useState(false);
+  const revertAll = () =>
+    run(async () => {
+      const tracked = unstaged.filter((f) => !isAddedStatus(f.status)).map((f) => f.path);
+      const added = unstaged.filter((f) => isAddedStatus(f.status)).map((f) => f.path);
+      if (tracked.length) await actions.discard(tracked);
+      if (added.length) await actions.discardAdded(added);
+    });
+  const handleRevert = (f: GitFileStatus) => {
+    if (!isAddedStatus(f.status)) {
+      void run(() => actions.discard([f.path]));
+      return;
+    }
+    const kind = classifyFile(f.path);
+    const isText = kind === "text" || kind === "svg";
+    if (isText) void run(() => actions.discardAdded([f.path]));
+    else setConfirmDelete(f);
+  };
+
   const doCommit = () =>
     run(async () => {
       if (!summary.trim()) return;
@@ -210,7 +245,7 @@ export function ChangesView() {
                 key={f.path}
                 file={f}
                 selected={selected === f.path}
-                onSelect={() => setSelected(f.path)}
+                onSelect={() => setSelected((cur) => (cur === f.path ? null : f.path))}
                 action="unstage"
                 onAction={() => run(() => actions.unstageFiles([f.path]))}
               />
@@ -225,12 +260,22 @@ export function ChangesView() {
               Changes ({unstaged.length})
             </span>
             {unstaged.length > 0 && (
-              <button
-                onClick={() => run(() => actions.stageFiles(unstaged.map((f) => f.path)))}
-                className="text-[10px] text-text-tertiary hover:text-text-primary"
-              >
-                Stage all
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => run(() => actions.stageFiles(unstaged.map((f) => f.path)))}
+                  className="text-[10px] text-text-tertiary hover:text-text-primary"
+                >
+                  Stage all
+                </button>
+                <span className="w-px h-3 bg-border-default" />
+                <button
+                  onClick={() => setConfirmRevertAll(true)}
+                  className="text-[10px] text-text-tertiary hover:text-[var(--status-error)]"
+                  title="Discard all unstaged changes"
+                >
+                  Revert all
+                </button>
+              </div>
             )}
           </div>
           {unstaged.map((f) => (
@@ -238,10 +283,10 @@ export function ChangesView() {
               key={f.path}
               file={f}
               selected={selected === f.path}
-              onSelect={() => setSelected(f.path)}
+              onSelect={() => setSelected((cur) => (cur === f.path ? null : f.path))}
               action="stage"
               onAction={() => run(() => actions.stageFiles([f.path]))}
-              onDiscard={() => run(() => actions.discard([f.path]))}
+              onDiscard={() => handleRevert(f)}
             />
           ))}
           {files.length === 0 && (
@@ -314,6 +359,43 @@ export function ChangesView() {
           </button>
         </div>
       </div>
+
+      <FileTreeConfirmDelete
+        open={confirmDelete !== null}
+        name={confirmDelete?.path.split("/").pop() ?? ""}
+        isDir={false}
+        onConfirm={() => {
+          if (confirmDelete) void run(() => actions.discardAdded([confirmDelete.path]));
+          setConfirmDelete(null);
+        }}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDelete(null);
+        }}
+      />
+
+      <FileTreeConfirmDelete
+        open={confirmRevertAll}
+        name=""
+        isDir={false}
+        title="Revert all changes?"
+        confirmLabel="Revert all"
+        body={
+          <>
+            All{" "}
+            <span className="font-mono text-text-primary">
+              {unstaged.length} unstaged change{unstaged.length === 1 ? "" : "s"}
+            </span>{" "}
+            will be discarded and any newly added files deleted. This can't be undone.
+          </>
+        }
+        onConfirm={() => {
+          void revertAll();
+          setConfirmRevertAll(false);
+        }}
+        onOpenChange={(open) => {
+          if (!open) setConfirmRevertAll(false);
+        }}
+      />
     </div>
   );
 }

@@ -91,6 +91,60 @@ struct ModelChatEnvelope {
     event: ModelChatEvent,
 }
 
+/// Best-effort per-1M ($input, $output) for a BYOK model. None when unknown —
+/// the dashboard then shows tokens but omits cost for that turn.
+fn byok_pricing(provider: &str, model: &str) -> Option<(f64, f64)> {
+    let m = model.to_lowercase();
+    if provider == "anthropic" || m.contains("claude") {
+        let (p_in, p_out, _, _) = super::claude::pricing_for(&m);
+        return Some((p_in, p_out));
+    }
+    if m.contains("gpt-4o-mini") || m.contains("4o-mini") {
+        Some((0.15, 0.60))
+    } else if m.contains("gpt-4o") || m.contains("4o") {
+        Some((2.50, 10.0))
+    } else if m.contains("o1") || m.contains("o3") {
+        Some((15.0, 60.0))
+    } else if m.contains("gpt-4") {
+        Some((30.0, 60.0))
+    } else if m.contains("gpt-3.5") {
+        Some((0.50, 1.50))
+    } else if m.contains("gemini") && m.contains("flash") {
+        Some((0.075, 0.30))
+    } else if m.contains("gemini") {
+        Some((1.25, 5.0))
+    } else {
+        None
+    }
+}
+
+/// Append one usage line to `<app_config_dir>/byok-usage.jsonl` (read back by
+/// `mission_control_usage`). Fire-and-forget; failures are swallowed.
+fn persist_byok_usage(app: &AppHandle, provider: &str, model: &str, input: u64, output: u64) {
+    let Some(path) = super::mission_control::byok_usage_path(app) else {
+        return;
+    };
+    let cost = byok_pricing(provider, model).map(|(p_in, p_out)| {
+        (input as f64 / 1_000_000.0) * p_in + (output as f64 / 1_000_000.0) * p_out
+    });
+    let entry = serde_json::json!({
+        "ts": chrono::Local::now().to_rfc3339(),
+        "provider": provider,
+        "model": model,
+        "inputTokens": input,
+        "outputTokens": output,
+        "costUsd": cost,
+    });
+    let line = format!("{}\n", entry);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 fn emit(app: &AppHandle, stream_id: &str, event: ModelChatEvent) {
     let _ = app.emit(
         "atlas:modelchat",
@@ -222,6 +276,9 @@ pub async fn modelchat_stream(
                     &stream_id,
                     ModelChatEvent::Usage { input_tokens, output_tokens },
                 );
+                // Persist for the Mission Control BYOK usage history (accrues
+                // going forward; old sessions have no token data).
+                persist_byok_usage(&app, &provider, &model, input_tokens, output_tokens);
             }
             emit(&app, &stream_id, ModelChatEvent::Done);
             Ok(())

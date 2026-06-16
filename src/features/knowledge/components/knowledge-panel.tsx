@@ -10,6 +10,7 @@ import {
 } from "../stores/knowledge-links-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import {
   TiptapEditor,
   type TiptapEditorHandle,
@@ -890,19 +891,10 @@ function RepoTopbar({
 }
 
 function RepoEmpty({ path }: { path: string }) {
+  // Open this repo as a workspace in the current window (Atlas is
+  // single-window now — was: spawn a new native window).
   const open = () => {
-    import("@tauri-apps/api/webviewWindow").then(({ WebviewWindow }) => {
-      new WebviewWindow(`atlas-${Date.now()}`, {
-        url: "/?new=1",
-        title: "Atlas",
-        width: 1200,
-        height: 800,
-        center: true,
-        decorations: true,
-        titleBarStyle: "overlay",
-        hiddenTitle: true,
-      });
-    }).catch(() => {});
+    void useWorkspaceStore.getState().actions.addWorkspace(path);
   };
   return (
     <div className="h-full flex flex-col items-center justify-center gap-3 text-text-tertiary">

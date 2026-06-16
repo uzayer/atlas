@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
 
 export interface FileMatch {
   path: string;
@@ -16,15 +17,35 @@ export interface FolderMatch {
   rel: string;
 }
 
+// Every call is scoped to the active workspace — multiple workspaces share
+// one webview, so the backend can no longer infer which index to hit from the
+// window label.
 export const fileIndex = {
   openProject: (path: string) =>
-    invoke<number>("fileindex_open_project", { path }),
-  closeProject: () => invoke<void>("fileindex_close_project"),
+    invoke<number>("fileindex_open_project", {
+      path,
+      workspaceId: activeWorkspaceId(),
+    }),
+  closeProject: () =>
+    invoke<void>("fileindex_close_project", {
+      workspaceId: activeWorkspaceId(),
+    }),
   search: (query: string, limit = 100) =>
-    invoke<FileMatch[]>("fileindex_search", { query, limit }),
+    invoke<FileMatch[]>("fileindex_search", {
+      query,
+      limit,
+      workspaceId: activeWorkspaceId(),
+    }),
   searchDirs: (query: string, limit = 30) =>
-    invoke<FolderMatch[]>("fileindex_search_dirs", { query, limit }),
-  status: () => invoke<FileIndexStatus>("fileindex_status"),
+    invoke<FolderMatch[]>("fileindex_search_dirs", {
+      query,
+      limit,
+      workspaceId: activeWorkspaceId(),
+    }),
+  status: () =>
+    invoke<FileIndexStatus>("fileindex_status", {
+      workspaceId: activeWorkspaceId(),
+    }),
 };
 
 const FAIL_STATUS: FileIndexStatus = { indexed: false, count: 0, root: null };

@@ -16,6 +16,7 @@
 //! `recent-files-store` is a thin cache that rehydrates from Rust on
 //! project change, never the source of truth.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,12 +46,22 @@ struct ProjectRecents {
 
 #[derive(Default)]
 pub struct RecentFilesState {
-    current: RwLock<Option<ProjectRecents>>,
+    /// One queue per open workspace (keyed by workspace id), so multiple
+    /// resident workspaces each keep their own recent-files list.
+    per_workspace: RwLock<HashMap<String, ProjectRecents>>,
 }
 
 impl RecentFilesState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Clone the (root, items) handle for a workspace, if open.
+    fn snapshot(&self, key: &str) -> Option<(PathBuf, Arc<RwLock<Vec<RecentFile>>>)> {
+        self.per_workspace
+            .read()
+            .get(key)
+            .map(|p| (p.root.clone(), p.items.clone()))
     }
 }
 
@@ -102,10 +113,11 @@ fn save_to_disk(project_root: &Path, items: &[RecentFile]) {
     }
 }
 
-fn emit_changed(app: &AppHandle, project_root: &Path, items: &[RecentFile]) {
+fn emit_changed(app: &AppHandle, workspace_id: &str, project_root: &Path, items: &[RecentFile]) {
     let _ = app.emit(
         "atlas:recent-files-changed",
         serde_json::json!({
+            "workspaceId": workspace_id,
             "project": project_root.to_string_lossy(),
             "items": items,
         }),
@@ -118,23 +130,40 @@ fn emit_changed(app: &AppHandle, project_root: &Path, items: &[RecentFile]) {
 #[tauri::command]
 pub async fn recent_files_open_project(
     project_path: String,
+    workspace_id: Option<String>,
     state: State<'_, RecentFilesState>,
 ) -> Result<Vec<RecentFile>, String> {
+    let key = workspace_id.unwrap_or_else(|| project_path.clone());
     let root = PathBuf::from(&project_path);
+    // Idempotent: a resident workspace's queue is already loaded — return it.
+    if let Some((_, items_lock)) = state.snapshot(&key) {
+        return Ok(items_lock.read().clone());
+    }
     let items = tokio::task::spawn_blocking(move || load_from_disk(&PathBuf::from(&project_path)))
         .await
         .map_err(|e| e.to_string())?;
     let items_arc = Arc::new(RwLock::new(items.clone()));
-    *state.current.write() = Some(ProjectRecents {
-        root,
-        items: items_arc,
-    });
+    state.per_workspace.write().insert(
+        key,
+        ProjectRecents {
+            root,
+            items: items_arc,
+        },
+    );
     Ok(items)
 }
 
 #[tauri::command]
-pub fn recent_files_close_project(state: State<'_, RecentFilesState>) {
-    *state.current.write() = None;
+pub fn recent_files_close_project(
+    workspace_id: Option<String>,
+    state: State<'_, RecentFilesState>,
+) {
+    match workspace_id {
+        Some(id) => {
+            state.per_workspace.write().remove(&id);
+        }
+        None => state.per_workspace.write().clear(),
+    }
 }
 
 /// Push a file onto the front of the queue. Dedupe by abs_path; cap
@@ -149,14 +178,11 @@ pub fn recent_files_close_project(state: State<'_, RecentFilesState>) {
 pub async fn recent_files_push(
     abs_path: String,
     rel: String,
+    workspace_id: String,
     state: State<'_, RecentFilesState>,
     app: AppHandle,
 ) -> Result<Vec<RecentFile>, String> {
-    let snapshot: Option<(PathBuf, Arc<RwLock<Vec<RecentFile>>>)> = {
-        let guard = state.current.read();
-        guard.as_ref().map(|p| (p.root.clone(), p.items.clone()))
-    };
-    let Some((root, items_lock)) = snapshot else {
+    let Some((root, items_lock)) = state.snapshot(&workspace_id) else {
         return Ok(Vec::new());
     };
 
@@ -188,7 +214,7 @@ pub async fn recent_files_push(
     let root_for_disk = root.clone();
     tokio::task::spawn_blocking(move || save_to_disk(&root_for_disk, &updated_for_disk));
 
-    emit_changed(&app, &root, &updated);
+    emit_changed(&app, &workspace_id, &root, &updated);
     Ok(updated)
 }
 
@@ -199,14 +225,11 @@ pub async fn recent_files_push(
 pub async fn recent_files_rename(
     old_path: String,
     new_path: String,
+    workspace_id: String,
     state: State<'_, RecentFilesState>,
     app: AppHandle,
 ) -> Result<Vec<RecentFile>, String> {
-    let snapshot: Option<(PathBuf, Arc<RwLock<Vec<RecentFile>>>)> = {
-        let guard = state.current.read();
-        guard.as_ref().map(|p| (p.root.clone(), p.items.clone()))
-    };
-    let Some((root, items_lock)) = snapshot else {
+    let Some((root, items_lock)) = state.snapshot(&workspace_id) else {
         return Ok(Vec::new());
     };
 
@@ -234,35 +257,35 @@ pub async fn recent_files_rename(
     let updated_for_disk = updated.clone();
     let root_for_disk = root.clone();
     tokio::task::spawn_blocking(move || save_to_disk(&root_for_disk, &updated_for_disk));
-    emit_changed(&app, &root, &updated);
+    emit_changed(&app, &workspace_id, &root, &updated);
     Ok(updated)
 }
 
 #[tauri::command]
-pub fn recent_files_list(state: State<'_, RecentFilesState>) -> Vec<RecentFile> {
+pub fn recent_files_list(
+    workspace_id: String,
+    state: State<'_, RecentFilesState>,
+) -> Vec<RecentFile> {
     state
-        .current
+        .per_workspace
         .read()
-        .as_ref()
+        .get(&workspace_id)
         .map(|p| p.items.read().clone())
         .unwrap_or_default()
 }
 
 #[tauri::command]
 pub async fn recent_files_clear(
+    workspace_id: String,
     state: State<'_, RecentFilesState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let snapshot: Option<(PathBuf, Arc<RwLock<Vec<RecentFile>>>)> = {
-        let guard = state.current.read();
-        guard.as_ref().map(|p| (p.root.clone(), p.items.clone()))
-    };
-    let Some((root, items_lock)) = snapshot else {
+    let Some((root, items_lock)) = state.snapshot(&workspace_id) else {
         return Ok(());
     };
     items_lock.write().clear();
     let root_for_disk = root.clone();
     tokio::task::spawn_blocking(move || save_to_disk(&root_for_disk, &[]));
-    emit_changed(&app, &root, &[]);
+    emit_changed(&app, &workspace_id, &root, &[]);
     Ok(())
 }

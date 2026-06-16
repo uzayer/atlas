@@ -8,8 +8,14 @@ import { useGitStore } from "@/features/git/stores/git-store";
 import { useSessionStore } from "./session-store";
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-meta-store";
-import { useChatStore } from "@/features/chat/stores/chat-store";
 import { logEvent } from "@/features/log/lib/log";
+import {
+  useWorkspaceStore,
+  type Workspace,
+  type WorkspaceGroup,
+} from "@/features/workspaces/stores/workspace-store";
+import { registerFlush } from "@/features/workspaces/lib/flush-registry";
+import { persistHashOf } from "@/features/workspaces/lib/workspace-snapshot";
 
 interface Project {
   name: string;
@@ -46,10 +52,17 @@ const DEFAULT_SETTINGS: AppSettings = {
 /**
  * Wire shape returned by the Rust `bootstrap_app_state` command. Mirrors
  * `src-tauri/src/state/app_state.rs:AppState` field-for-field.
+ *
+ * `currentProject` is a legacy v1 field — Rust migrates it into `workspaces`
+ * on load, so it arrives `null` here in practice. The multi-workspace fields
+ * are the source of truth.
  */
 export interface AppStateWire {
   currentProject: Project | null;
   recentProjects: RecentProject[];
+  workspaces?: Workspace[];
+  groups?: WorkspaceGroup[];
+  activeWorkspaceId?: string | null;
   settings?: AppSettings;
   version: number;
 }
@@ -62,9 +75,15 @@ interface ProjectState {
    *  the boot skeleton up rather than flashing an empty WelcomeScreen. */
   hydrated: boolean;
   actions: {
+    /** Public entry point used across the app (welcome screen, titlebar,
+     *  command palette, CLI). Adds-or-focuses a workspace for `path`. */
     openProject: (path: string) => Promise<void>;
-    closeProject: () => void;
+    /** Point the store at a workspace's project (or clear with `null`).
+     *  Called by the workspace switch coordinator — does NOT run the
+     *  downstream loaders (that's `loadProjectStores`). */
+    setActiveProject: (project: Project | null) => void;
     removeRecent: (path: string) => void;
+    clearRecents: () => void;
     updateSettings: (partial: Partial<AppSettings>) => void;
     /** One-shot hydration from Rust. Called once on app boot. */
     hydrate: (payload: AppStateWire) => void;
@@ -72,24 +91,82 @@ interface ProjectState {
 }
 
 // Debounced persistence: the Rust `save_app_state` command takes the full
-// `AppState` payload, so we just resend the whole thing whenever `currentProject`
-// or `recentProjects` changes. Coalesced to ~500ms to avoid burst writes
-// when the user clicks around recents.
+// `AppState` payload. Both `useProjectStore` (recents/settings) and
+// `useWorkspaceStore` (workspaces/groups/activeWorkspaceId) contribute to it,
+// so the save reads from both stores at flush time. Coalesced to ~500ms.
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-function scheduleSave(state: ProjectState) {
+export function scheduleAppStateSave(): void {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
+    const project = useProjectStore.getState();
+    const ws = useWorkspaceStore.getState();
     const payload: AppStateWire = {
-      currentProject: state.currentProject,
-      recentProjects: state.recentProjects,
-      settings: state.settings,
-      version: 1,
+      currentProject: null,
+      recentProjects: project.recentProjects,
+      workspaces: ws.workspaces,
+      groups: ws.groups,
+      activeWorkspaceId: ws.activeWorkspaceId,
+      settings: project.settings,
+      version: 2,
     };
     invoke("save_app_state", { payload }).catch((e) =>
-      console.warn("save_app_state failed:", e)
+      console.warn("save_app_state failed:", e),
     );
   }, 500);
 }
+
+/** Flush the pending app-state save immediately (used by the switch/quit
+ *  flush coordinator) so workspace list + active id are durable. */
+export async function flushAppStateSave(): Promise<void> {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const project = useProjectStore.getState();
+  const ws = useWorkspaceStore.getState();
+  const payload: AppStateWire = {
+    currentProject: null,
+    recentProjects: project.recentProjects,
+    workspaces: ws.workspaces,
+    groups: ws.groups,
+    activeWorkspaceId: ws.activeWorkspaceId,
+    settings: project.settings,
+    version: 2,
+  };
+  await invoke("save_app_state", { payload }).catch((e) =>
+    console.warn("flushAppStateSave failed:", e),
+  );
+}
+
+// The workspace list + active id must be durable before any workspace switch
+// or app quit, so register it with the flush coordinator. Always writes (the
+// active id / list changed) — it's a single cheap app-data-dir write.
+registerFlush("app-state", () => flushAppStateSave());
+
+// Dedup gate: the persist hash last written to disk per workspace. If the
+// workspace's snapshot hash is unchanged since the last write, we skip the
+// editor-state disk write entirely (the user's "don't re-write the cache when
+// the snapshot is identical").
+const lastPersistedHash = new Map<string, string>();
+
+// Editor tabs / split layout for a workspace. `ctx.path` is the OUTGOING
+// project path (passed explicitly so the write targets the right project even
+// after `currentProject` has swapped); falls back to the live current project
+// for non-switch flushes (e.g. app quit).
+registerFlush("editor-state", async (ctx) => {
+  const path = ctx.path ?? useProjectStore.getState().currentProject?.path;
+  if (!path) return;
+
+  // Skip the disk write when nothing the user cares about changed.
+  if (ctx.workspaceId) {
+    const hash = persistHashOf(ctx.workspaceId);
+    if (hash && lastPersistedHash.get(ctx.workspaceId) === hash) {
+      return; // identical snapshot — no write
+    }
+    if (hash) lastPersistedHash.set(ctx.workspaceId, hash);
+  }
+  await useLayoutStore.getState().actions.flushEditorState(path);
+});
 
 /**
  * Fire-and-forget: ensure the project's `.gitignore` contains `.atlas/`,
@@ -103,6 +180,32 @@ function maybeEnsureAtlasGitignore(path: string, settings: AppSettings): void {
   );
 }
 
+/**
+ * Load every downstream store for `path` in parallel. Shared by workspace
+ * switch + boot hydration. Each loader renders its own loading state, so this
+ * runs on Tauri's runtime without blocking the JS main thread.
+ *
+ * `loadLog` is intentionally NOT fired — the git-store's `log` field is unused
+ * (git-graph-panel has its own useQuery) and `git log --all` is the slowest
+ * of the bunch.
+ */
+export async function loadProjectStores(path: string): Promise<void> {
+  await Promise.all([
+    useExplorerStore.getState().actions.openFolder(path).catch((e) => console.error("Explorer failed:", e)),
+    useAnalysisStore.getState().actions.analyzeProject(path).catch((e) => console.error("Analysis failed:", e)),
+    useGitStore.getState().actions.loadStatus(path).catch((e) => console.error("Git failed:", e)),
+    useSessionStore.getState().actions.loadSession(path).catch((e) => console.error("Session load failed:", e)),
+    // Bind the KB meta store BEFORE loading entries so the entries published
+    // to the @-/~ mention cache already carry the page-header titles + emoji
+    // from `_meta.json`.
+    (async () => {
+      await useKnowledgeMetaStore.getState().actions.bind(path);
+      await useKnowledgeStore.getState().actions.loadEntries(path);
+    })().catch((e) => console.error("Knowledge load failed:", e)),
+    useLayoutStore.getState().actions.loadEditorState(path).catch((e) => console.error("Editor state load failed:", e)),
+  ]);
+}
+
 export const useProjectStore = createSelectors(
   create<ProjectState>()((set, get) => ({
     currentProject: null,
@@ -111,35 +214,31 @@ export const useProjectStore = createSelectors(
     hydrated: false,
     actions: {
       openProject: async (path: string) => {
-        const name = path.split("/").pop() ?? path;
+        // The workspace store is now the single entry point for "open a
+        // project": it dedupes by path (focus-existing) and drives the
+        // flush/restore switch. Everything that used to call openProject
+        // keeps working unchanged.
+        await useWorkspaceStore.getState().actions.addWorkspace(path);
+      },
 
-        // Wipe tabs + chat sessions from the previous project BEFORE the
-        // new project's loaders fire. Otherwise the layout-store's
-        // `loadEditorState` appends saved editor tabs on top of the old
-        // ones, and chat tabs (which aren't covered by editor-state
-        // persistence at all) survive every switch with dead acpSessionIds
-        // pointing at the old project's `.atlas/`.
-        const prevProjectPath = get().currentProject?.path;
-        if (prevProjectPath && prevProjectPath !== path) {
-          useLayoutStore.getState().actions.resetForProjectSwitch();
-          useChatStore.getState().actions.resetSessions();
+      setActiveProject: (project: Project | null) => {
+        if (!project) {
+          set({ currentProject: null });
+          return;
         }
-
+        const { name, path } = project;
         set((s) => ({
           currentProject: { name, path },
           recentProjects: [
             { name, path, lastOpened: new Date().toISOString() },
             ...s.recentProjects.filter((r) => r.path !== path),
-          ].slice(0, 5),
+          ].slice(0, 20),
         }));
-        scheduleSave(get());
 
-        // Idempotent + setting-gated. Safe to fire on every open.
+        // Idempotent + setting-gated. Safe to fire on every switch.
         maybeEnsureAtlasGitignore(path, get().settings);
-
         // Grant the asset protocol access to this project's tree so the media
-        // viewer can serve its images/video/audio. The static scope is narrow
-        // ($HOME); this covers projects on external volumes too. Fire-and-forget.
+        // viewer can serve its files. Scope only widens across workspaces.
         invoke("asset_allow_dir", { path }).catch(() => {});
 
         logEvent({
@@ -159,45 +258,21 @@ export const useProjectStore = createSelectors(
           projectName: name,
           payload: { path },
         });
+      },
 
-        // Trigger all downstream stores in parallel.
-        // `loadLog` is intentionally NOT fired here — the git-store's `log`
-        // field is unused (git-graph-panel has its own useQuery) and the
-        // underlying `git log --all` walk can take several seconds on a
-        // repo with many refs.
-        await Promise.all([
-          useExplorerStore.getState().actions.openFolder(path).catch((e) => console.error("Explorer failed:", e)),
-          useAnalysisStore.getState().actions.analyzeProject(path).catch((e) => console.error("Analysis failed:", e)),
-          useGitStore.getState().actions.loadStatus(path).catch((e) => console.error("Git failed:", e)),
-          useSessionStore.getState().actions.loadSession(path).catch((e) => console.error("Session load failed:", e)),
-          // Bind the KB meta store BEFORE loading entries so the entries
-          // publish to the @-/~ mention cache already carries the
-          // page-header titles + emoji from `_meta.json`. Previously meta
-          // only bound when the Knowledge panel first mounted, so the
-          // mention picker showed raw note-ids until the user opened KB.
-          (async () => {
-            await useKnowledgeMetaStore.getState().actions.bind(path);
-            await useKnowledgeStore.getState().actions.loadEntries(path);
-          })().catch((e) => console.error("Knowledge load failed:", e)),
-          useLayoutStore.getState().actions.loadEditorState(path).catch((e) => console.error("Editor state load failed:", e)),
-        ]);
-      },
-      closeProject: () => {
-        useLayoutStore.getState().actions.resetForProjectSwitch();
-        useChatStore.getState().actions.resetSessions();
-        useKnowledgeMetaStore.getState().actions.unbind();
-        set({ currentProject: null });
-        scheduleSave(get());
-      },
       removeRecent: (path: string) => {
         set((s) => ({
           recentProjects: s.recentProjects.filter((r) => r.path !== path),
         }));
-        scheduleSave(get());
+        scheduleAppStateSave();
+      },
+      clearRecents: () => {
+        set({ recentProjects: [] });
+        scheduleAppStateSave();
       },
       updateSettings: (partial: Partial<AppSettings>) => {
         set((s) => ({ settings: { ...s.settings, ...partial } }));
-        scheduleSave(get());
+        scheduleAppStateSave();
         // Toggling hidden-files visibility must re-apply the explorer's
         // dotfile filter immediately. `refresh()` reconciles the root and
         // every expanded subtree, so the user's expansion state survives.
@@ -206,48 +281,43 @@ export const useProjectStore = createSelectors(
         }
       },
       hydrate: (payload: AppStateWire) => {
-        // New windows always start fresh — same special case the previous
-        // `onRehydrateStorage` handled. `?new` query param signals this.
-        const isNewWindow =
-          typeof window !== "undefined" &&
-          new URLSearchParams(window.location.search).has("new");
-
-        const current = isNewWindow ? null : payload.currentProject;
-        // Merge with defaults so older state.json files (written before
-        // a new setting existed) get the modern default rather than
-        // `undefined` for newer fields.
+        // Merge with defaults so older state.json files (written before a new
+        // setting existed) get the modern default rather than `undefined`.
         const settings: AppSettings = {
           ...DEFAULT_SETTINGS,
           ...(payload.settings ?? {}),
         };
         set({
-          currentProject: current,
+          currentProject: null,
           recentProjects: payload.recentProjects ?? [],
           settings,
           hydrated: true,
         });
 
-        // Fire downstream loaders in parallel. They run on Tauri's tokio
-        // runtime (not the JS main thread); each panel renders its own
-        // loading state, so no need to gate this on idle. `loadLog` is
-        // intentionally NOT here — the git-store's `log` field is unused
-        // by any panel (git-graph fetches its own via useQuery) and
-        // `git log --all` is the slowest of the bunch.
-        if (current) {
-          const path = current.path;
-          maybeEnsureAtlasGitignore(path, settings);
-          useExplorerStore.getState().actions.openFolder(path).catch(() => {});
-          useLayoutStore.getState().actions.loadEditorState(path).catch(() => {});
-          useAnalysisStore.getState().actions.analyzeProject(path).catch(() => {});
-          useGitStore.getState().actions.loadStatus(path).catch(() => {});
-          useSessionStore.getState().actions.loadSession(path).catch(() => {});
-          void (async () => {
-            await useKnowledgeMetaStore.getState().actions.bind(path);
-            await useKnowledgeStore.getState().actions.loadEntries(path);
-          })().catch(() => {});
+        // Hand the multi-workspace fields to the workspace store. We hydrate
+        // with `activeWorkspaceId: null` and then `switchTo` the persisted id
+        // below, so the switch is a genuine null→id transition that actually
+        // runs the loaders (a same-id switch is a no-op by design).
+        const workspaces = payload.workspaces ?? [];
+        const groups = payload.groups ?? [];
+        const activeWorkspaceId = payload.activeWorkspaceId ?? null;
+        useWorkspaceStore.getState().actions.hydrate({
+          workspaces,
+          groups,
+          activeWorkspaceId: null,
+        });
+
+        // Restore the active workspace, if any. `switchTo` sets
+        // `currentProject` (which drives the App-level Rust lifecycle effects)
+        // and loads the downstream stores.
+        const active =
+          activeWorkspaceId &&
+          workspaces.find((w) => w.id === activeWorkspaceId);
+        if (active) {
+          maybeEnsureAtlasGitignore(active.path, settings);
+          void useWorkspaceStore.getState().actions.switchTo(active.id);
         }
       },
     },
-  }))
+  })),
 );
-

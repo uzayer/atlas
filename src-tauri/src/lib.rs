@@ -106,6 +106,7 @@ pub fn run() {
         .manage(commands::browser::BrowserState::new())
         .manage(TerminalState::new())
         .manage(commands::modelchat::ModelChatState::new())
+        .manage(commands::review::ReviewState::new())
         .manage(AgentRegistry::new())
         .manage(FileIndexState::new())
         .manage(GitWatcherState::new())
@@ -168,6 +169,10 @@ pub fn run() {
             commands::git::git_status_fresh,
             commands::git::git_log,
             commands::git::git_diff_all,
+            commands::git::git_workspace_summary,
+            commands::mission_control::mission_control_usage,
+            commands::mission_control::mission_control_export_markdown,
+            commands::mission_control::mission_control_write_file,
             commands::git::git_diff_file,
             commands::git::git_stage,
             commands::git::git_unstage,
@@ -193,10 +198,12 @@ pub fn run() {
             commands::git_ops::git_remote_remove,
             commands::git_ops::git_stash_list,
             commands::git_ops::git_stash_push,
+            commands::git_ops::git_stash_paths,
             commands::git_ops::git_stash_apply,
             commands::git_ops::git_stash_pop,
             commands::git_ops::git_stash_drop,
             commands::git_ops::git_discard,
+            commands::git_ops::git_delete_added,
             commands::git_ops::git_reset,
             commands::git_ops::git_revert,
             commands::git_ops::git_cherry_pick,
@@ -278,6 +285,9 @@ pub fn run() {
             commands::log::append_pinned_log,
             commands::log::clear_pinned_log,
             commands::log::rewrite_pinned_log,
+            commands::log::load_project_log,
+            commands::log::append_project_log,
+            commands::log::clear_project_log,
             commands::app_state::bootstrap_app_state,
             commands::app_state::save_app_state,
             commands::compose_prompt::compose_prompt,
@@ -309,6 +319,12 @@ pub fn run() {
             commands::modelchat::modelchat_models,
             commands::modelchat::modelchat_stream,
             commands::modelchat::modelchat_cancel,
+            commands::review::review_providers,
+            commands::review::review_base_branches,
+            commands::review::review_start,
+            commands::review::review_cancel,
+            commands::review::review_list,
+            commands::review::review_get,
             commands::modelchat_sessions::modelchat_sessions_list,
             commands::modelchat_sessions::modelchat_session_get,
             commands::modelchat_sessions::modelchat_session_save,

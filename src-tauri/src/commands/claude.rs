@@ -78,7 +78,7 @@ pub struct ChatMessageDump {
 
 // ───────────────────────── Session management ─────────────────────────
 
-fn projects_dir() -> Result<PathBuf, String> {
+pub(crate) fn projects_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "no home dir".to_string())?;
     Ok(home.join(".claude").join("projects"))
 }
@@ -309,7 +309,7 @@ pub async fn delete_claude_session(file_path: String) -> Result<(), String> {
 
 // Pricing per 1M tokens: (input, output, cache_write, cache_read)
 // Approximate Anthropic public pricing.
-fn pricing_for(model: &str) -> (f64, f64, f64, f64) {
+pub(crate) fn pricing_for(model: &str) -> (f64, f64, f64, f64) {
     let m = model.to_lowercase();
     if m.contains("opus") {
         (15.0, 75.0, 18.75, 1.50)
@@ -497,6 +497,136 @@ pub async fn project_usage_stats(cwd: String) -> Result<ProjectUsage, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+// ───────────────────────── Daily time-series (Mission Control) ─────────────
+
+/// Per-day Claude usage accumulator (one entry per local calendar day).
+#[derive(Default, Clone)]
+pub(crate) struct ClaudeDay {
+    pub input: u64,
+    pub output: u64,
+    pub cache_creation: u64,
+    pub cache_read: u64,
+    pub requests: u64,
+    pub cost: f64,
+}
+
+/// All-time Claude metrics for one project: lifetime totals + a per-day series
+/// + first/last activity (epoch ms). Cost is priced PER assistant turn using
+/// that turn's own model (more accurate than the session-level approximation in
+/// `compute_session_stats`). Used by the Mission Control dashboard aggregator.
+pub(crate) struct ClaudeAgg {
+    pub totals: UsageTotals,
+    pub days: std::collections::BTreeMap<String, ClaudeDay>,
+    pub first_ms: Option<i64>,
+    pub last_ms: Option<i64>,
+}
+
+/// Parse a top-level message `timestamp` (ISO-8601) into (local "YYYY-MM-DD",
+/// epoch ms). Returns None if absent/unparseable.
+fn day_and_ms(ts: &str) -> Option<(String, i64)> {
+    let dt = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
+    let local = dt.with_timezone(&chrono::Local);
+    Some((local.format("%Y-%m-%d").to_string(), dt.timestamp_millis()))
+}
+
+/// Walk every session JSONL under a project and fold per-day Claude usage.
+pub(crate) fn claude_project_agg(cwd: &str) -> ClaudeAgg {
+    let mut agg = ClaudeAgg {
+        totals: UsageTotals::default(),
+        days: std::collections::BTreeMap::new(),
+        first_ms: None,
+        last_ms: None,
+    };
+    let Ok(folder) = projects_dir().map(|d| d.join(encode_cwd(cwd))) else {
+        return agg;
+    };
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return agg;
+    };
+    let m = 1_000_000.0;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        // Fallback day if a line has no timestamp = the file's mtime day.
+        let mtime_ms = std::fs::metadata(&path)
+            .ok()
+            .and_then(|md| md.modified().ok())
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as i64);
+
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut session_had_turns = false;
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let v: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                continue;
+            }
+            if v.get("isSidechain").and_then(|x| x.as_bool()) == Some(true) {
+                continue;
+            }
+            let Some(msg) = v.get("message") else { continue };
+            let Some(usage) = msg.get("usage") else { continue };
+
+            let input = usage.get("input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let output = usage.get("output_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let cw = usage.get("cache_creation_input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let cr = usage.get("cache_read_input_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let model = msg.get("model").and_then(|m| m.as_str()).unwrap_or("");
+            let (p_in, p_out, p_cw, p_cr) = pricing_for(model);
+            let cost = (input as f64 / m) * p_in
+                + (output as f64 / m) * p_out
+                + (cw as f64 / m) * p_cw
+                + (cr as f64 / m) * p_cr;
+
+            let (day, ms) = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(day_and_ms)
+                .or_else(|| mtime_ms.map(|ms| (ms_to_local_day(ms), ms)))
+                .unwrap_or_else(|| ("unknown".to_string(), 0));
+
+            let d = agg.days.entry(day).or_default();
+            d.input += input;
+            d.output += output;
+            d.cache_creation += cw;
+            d.cache_read += cr;
+            d.requests += 1;
+            d.cost += cost;
+
+            agg.totals.input_tokens += input;
+            agg.totals.output_tokens += output;
+            agg.totals.cache_creation_tokens += cw;
+            agg.totals.cache_read_tokens += cr;
+            agg.totals.request_count += 1;
+            agg.totals.total_cost_usd += cost;
+
+            if ms > 0 {
+                agg.first_ms = Some(agg.first_ms.map_or(ms, |f| f.min(ms)));
+                agg.last_ms = Some(agg.last_ms.map_or(ms, |l| l.max(ms)));
+            }
+            session_had_turns = true;
+        }
+        if session_had_turns {
+            agg.totals.session_count += 1;
+        }
+    }
+    agg
+}
+
+fn ms_to_local_day(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 #[tauri::command]

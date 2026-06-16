@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import { openFile } from "@/lib/open-file";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { resolveTerminalFont } from "../utils/resolve-font";
-import { ansiToSegments, type AnsiSegment } from "../lib/ansi-to-segments";
+import { resolveTerminalOutput, type AnsiSegment } from "../lib/ansi-to-segments";
 import { splitPaths } from "../lib/linkify-paths";
 import { createTerminalKeymap } from "../lib/terminal-keymap";
 import { createPathLinkProvider } from "../lib/path-link-provider";
@@ -391,6 +391,13 @@ export function BlockTerminal({ isActive, onFocus, terminalKey }: BlockTerminalP
     if (id) void invoke("terminal_write", { id, data: [0x03] }).catch(() => {});
   }, []);
 
+  // Forward raw bytes to the PTY — used by the composer to feed nav keys to a
+  // running interactive prompt (arrows / Tab / Esc).
+  const writeRaw = useCallback((data: number[]) => {
+    const id = ptyRef.current;
+    if (id) void invoke("terminal_write", { id, data }).catch(() => {});
+  }, []);
+
   // Send a secret typed into a block's inline password field straight to the
   // PTY (never shown in the command input or stored in history).
   const writePassword = useCallback((pw: string) => {
@@ -506,6 +513,8 @@ export function BlockTerminal({ isActive, onFocus, terminalKey }: BlockTerminalP
             onSubmit={runCommand}
             onInterrupt={interrupt}
             cwd={cwd}
+            busy={busy}
+            writeRaw={writeRaw}
           />
           <StatusBadge cwd={cwd} git={git} />
         </div>
@@ -591,7 +600,10 @@ function BlockCard({
   const RENDER_CAP = 96 * 1024;
   const clipped = block.output.length > RENDER_CAP;
   const display = clipped ? block.output.slice(-RENDER_CAP) : block.output;
-  const segments = useMemo(() => ansiToSegments(display), [display]);
+  // `resolveTerminalOutput` applies CR / cursor / erase line discipline so a
+  // spinner or progress bar that redraws the same line (`\r…`) collapses to one
+  // updating line instead of concatenating every frame.
+  const segments = useMemo(() => resolveTerminalOutput(display), [display]);
   const cwdName = block.cwd ? block.cwd.split("/").filter(Boolean).pop() : "";
   const [collapsed, setCollapsed] = useState(false);
   const [copied, setCopied] = useState(false);
