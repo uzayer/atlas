@@ -26,8 +26,17 @@ export function AppLayout() {
 
   return (
     <div className="flex h-screen">
-      {/* Arc-like workspace rail, toggled by Cmd+. */}
-      {sidebarOpen && <WorkspaceSidebar />}
+      {/* Arc-like workspace rail, toggled by Cmd+. Always mounted so it can
+          slide open AND closed: an overflow-hidden wrapper animates its width
+          0↔244 with a smooth curve, clipping the fixed-width sidebar (whose
+          internals never reflow — only the outer width animates). */}
+      <div
+        className="h-screen shrink-0 overflow-hidden transition-[width] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none"
+        style={{ width: sidebarOpen ? 244 : 0 }}
+        aria-hidden={!sidebarOpen}
+      >
+        <WorkspaceSidebar />
+      </div>
 
       {/*
        * NOT keyed by workspace: keying forced a full unmount/remount of the
