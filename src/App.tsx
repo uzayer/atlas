@@ -70,41 +70,10 @@ export function App() {
     });
   }, []);
 
-  // If the user launched Atlas via `atlas <path>` from a terminal,
-  // open that path as the active project as soon as hydration
-  // finishes. `cli_take_initial_project_path` is single-shot — a
-  // window reload won't re-trigger it.
-  useEffect(() => {
-    let cancelled = false;
-    void invoke<string | null>("cli_take_initial_project_path")
-      .then((path) => {
-        if (cancelled || !path) return;
-        logEvent({
-          source: "atlas",
-          kind: "cli-launch-open-project",
-          summary: `Opening project from CLI argv: ${path}`,
-          status: "success",
-          payload: { path },
-        });
-        void useProjectStore.getState().actions.openProject(path);
-      })
-      .catch((e) => {
-        logEvent({
-          source: "atlas",
-          kind: "cli-launch-open-project-failed",
-          summary: `cli_take_initial_project_path failed: ${String(e)}`,
-          status: "failure",
-          payload: { error: String(e) },
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Warm-launch CLI: when `atlas <path>` runs while Atlas is already open,
-  // the Rust single-instance callback forwards the folder here. Open it in
-  // the existing window (the window is already focused by the Rust side).
+  // Warm-launch CLI: when `atlas <path>` runs while Atlas is already open, the
+  // Rust single-instance callback forwards the folder here. The app is already
+  // hydrated, so we just ADD it to the workspace list and switch to it (no race
+  // with hydration). `openProject` → `addWorkspace` dedupes by path.
   useEffect(() => {
     const unlisten = listen<string>("atlas:cli-open-project", (event) => {
       const path = event.payload;
@@ -112,7 +81,7 @@ export function App() {
       logEvent({
         source: "atlas",
         kind: "cli-launch-open-project",
-        summary: `Opening project from CLI (warm launch): ${path}`,
+        summary: `Adding workspace from CLI (warm launch): ${path}`,
         status: "success",
         payload: { path },
       });
@@ -167,25 +136,63 @@ export function App() {
     };
 
     (async () => {
+      // A terminal `atlas <path>` launch stashes the path in Rust (single-shot,
+      // so a window reload won't re-trigger). Consume it BEFORE hydrating: the
+      // CLI project must be ADDED to the workspace list and switched to, but
+      // hydrate replaces that list and fires its own `switchTo` — which would
+      // both clobber the CLI workspace and swallow the CLI switch (`switching`
+      // guard). So we suppress hydrate's auto-switch when a CLI path is present
+      // and perform the CLI open as the sole, final switch.
+      const cliPath = await invoke<string | null>("cli_take_initial_project_path").catch(
+        () => null,
+      );
       try {
         const payload = await invoke<AppStateWire>("bootstrap_app_state");
         if (cancelled) return;
         startTransition(() => {
-          useProjectStore.getState().actions.hydrate(payload);
+          useProjectStore
+            .getState()
+            .actions.hydrate(payload, { skipActiveSwitch: !!cliPath });
         });
       } catch (e) {
         console.warn("bootstrap_app_state failed; starting empty:", e);
         if (!cancelled) {
           startTransition(() => {
-            useProjectStore.getState().actions.hydrate({
-              currentProject: null,
-              recentProjects: [],
-              version: 1,
-            });
+            useProjectStore.getState().actions.hydrate(
+              {
+                currentProject: null,
+                recentProjects: [],
+                version: 1,
+              },
+              { skipActiveSwitch: !!cliPath },
+            );
           });
         }
       } finally {
-        if (!cancelled) signalReady();
+        if (!cancelled) {
+          if (cliPath) {
+            logEvent({
+              source: "atlas",
+              kind: "cli-launch-open-project",
+              summary: `Adding workspace from CLI argv: ${cliPath}`,
+              status: "success",
+              payload: { path: cliPath },
+            });
+            await useProjectStore
+              .getState()
+              .actions.openProject(cliPath)
+              .catch((err) => {
+                logEvent({
+                  source: "atlas",
+                  kind: "cli-launch-open-project-failed",
+                  summary: `openProject failed: ${String(err)}`,
+                  status: "failure",
+                  payload: { error: String(err) },
+                });
+              });
+          }
+          signalReady();
+        }
       }
     })();
     return () => {
