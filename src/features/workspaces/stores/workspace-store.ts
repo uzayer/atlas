@@ -64,6 +64,10 @@ interface WorkspaceState {
   maxMounted: number;
   /** Cmd+. sidebar visibility. */
   sidebarOpen: boolean;
+  /** Group whose header is currently in inline-rename mode (transient, not
+   *  persisted). Lives in the store so it survives the virtualized row
+   *  remounting and so a freshly-created group can open straight into rename. */
+  editingGroupId: string | null;
   /** Guards re-entrant switches while a flush/restore is in flight. */
   switching: boolean;
   actions: {
@@ -89,6 +93,10 @@ interface WorkspaceState {
     reorder: (orderedIds: string[]) => void;
     addGroup: (name: string) => string;
     renameGroup: (id: string, name: string) => void;
+    /** Enter inline-rename for a group header. */
+    beginRenameGroup: (id: string) => void;
+    /** Leave inline-rename (commit or cancel). */
+    endRenameGroup: () => void;
     removeGroup: (id: string) => void;
     pinGroup: (id: string) => void;
     unpinGroup: (id: string) => void;
@@ -144,6 +152,7 @@ export const useWorkspaceStore = createSelectors(
     maxMounted: DEFAULT_MAX_MOUNTED,
     sidebarOpen: false,
     switching: false,
+    editingGroupId: null,
     actions: {
       addWorkspace: async (path: string) => {
         const existing = get().workspaces.find((w) => w.path === path);
@@ -393,7 +402,8 @@ export const useWorkspaceStore = createSelectors(
           name,
           order: get().groups.length,
         };
-        set((s) => ({ groups: [...s.groups, group] }));
+        // Open the new group straight into inline-rename so the user can name it.
+        set((s) => ({ groups: [...s.groups, group], editingGroupId: group.id }));
         scheduleAppStateSave();
         return group.id;
       },
@@ -403,6 +413,8 @@ export const useWorkspaceStore = createSelectors(
         }));
         scheduleAppStateSave();
       },
+      beginRenameGroup: (id) => set({ editingGroupId: id }),
+      endRenameGroup: () => set({ editingGroupId: null }),
       removeGroup: (id) => {
         set((s) => ({
           groups: s.groups.filter((g) => g.id !== id),

@@ -21,6 +21,7 @@ import {
   MoreHorizontal,
   Search,
   Trash2,
+  Pencil,
 } from "lucide-react";
 import {
   useWorkspaceStore,
@@ -207,26 +208,35 @@ function WorkspaceRow({
   );
 }
 
-function GroupHeaderRow({ group, count, collapsed, onToggle }: { group: WorkspaceGroup; count: number; collapsed: boolean; onToggle: () => void }) {
-  const { pinGroup, unpinGroup, removeGroup, renameGroup } = useWorkspaceStore.use.actions();
-  const [editing, setEditing] = useState(false);
+function GroupHeaderRow({ group, collapsed, onToggle }: { group: WorkspaceGroup; collapsed: boolean; onToggle: () => void }) {
+  const { pinGroup, unpinGroup, removeGroup, renameGroup, beginRenameGroup, endRenameGroup } = useWorkspaceStore.use.actions();
+  // Editing lives in the store (not local state) so it survives the virtualized
+  // row remounting, and so a freshly-created group opens straight into rename.
+  const editing = useWorkspaceStore.use.editingGroupId() === group.id;
   const [name, setName] = useState(group.name);
-  const commit = () => { if (name.trim()) renameGroup(group.id, name.trim()); setEditing(false); };
+  // Seed the field each time we enter edit mode.
+  useEffect(() => { if (editing) setName(group.name); }, [editing, group.name]);
+  const commit = () => { const n = name.trim(); if (n) renameGroup(group.id, n); endRenameGroup(); };
   return (
-    <div data-hint style={{ height: HEADER_H }} className="group/h flex items-center gap-1 pl-1 pr-1.5 rounded-md cursor-pointer hover:bg-[var(--bg-hover)]" onClick={onToggle}>
+    <div data-hint style={{ height: HEADER_H }} className="group/h flex items-center gap-1 pl-1 pr-1.5 rounded-md cursor-pointer hover:bg-[var(--bg-hover)] transform-gpu [backface-visibility:hidden]" onClick={editing ? undefined : onToggle}>
       {collapsed ? <ChevronRight size={12} className="text-[var(--text-tertiary)]" /> : <ChevronDown size={12} className="text-[var(--text-tertiary)]" />}
       <Folder size={11} className="text-[var(--text-tertiary)] shrink-0" />
       {editing ? (
-        <input autoFocus value={name} onClick={(e) => e.stopPropagation()} onChange={(e) => setName(e.target.value)} onBlur={commit}
-          onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") setEditing(false); }}
+        <input autoFocus value={name} onClick={(e) => e.stopPropagation()} onFocus={(e) => e.target.select()} onChange={(e) => setName(e.target.value)} onBlur={commit}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") commit(); if (e.key === "Escape") endRenameGroup(); }}
           className="flex-1 min-w-0 bg-transparent outline-none text-[10px] font-semibold uppercase tracking-wide text-[var(--text-secondary)]" />
       ) : (
-        <span onDoubleClick={(e) => { e.stopPropagation(); setName(group.name); setEditing(true); }}
+        <span onDoubleClick={(e) => { e.stopPropagation(); beginRenameGroup(group.id); }}
           className="flex-1 min-w-0 truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--text-tertiary)]">
           {group.name}
         </span>
       )}
-      <span className="text-[9px] text-[var(--text-tertiary)] tabular-nums">{count}</span>
+      {!editing && (
+        <button onClick={(e) => { e.stopPropagation(); beginRenameGroup(group.id); }}
+          className="p-0.5 rounded hover:bg-[var(--bg-elevated)] text-[var(--text-tertiary)] opacity-0 group-hover/h:opacity-100 transition-opacity" title="Rename group">
+          <Pencil size={10} />
+        </button>
+      )}
       <button onClick={(e) => { e.stopPropagation(); if (group.pinned) unpinGroup(group.id); else pinGroup(group.id); }}
         className={cn("p-0.5 rounded hover:bg-[var(--bg-elevated)] transition-opacity", group.pinned ? "opacity-100 text-[var(--accent-primary)]" : "opacity-0 group-hover/h:opacity-100 text-[var(--text-tertiary)]")}
         title={group.pinned ? "Unpin group" : "Pin group"}>
@@ -531,7 +541,7 @@ export function WorkspaceSidebar() {
                       }
                     />
                   ) : row.kind === "group" ? (
-                    <GroupHeaderRow group={row.group} count={row.count} collapsed={!!collapsed[row.group.id]} onToggle={() => toggle(row.group.id)} />
+                    <GroupHeaderRow group={row.group} collapsed={!!collapsed[row.group.id]} onToggle={() => toggle(row.group.id)} />
                   ) : row.kind === "ws" ? (
                     <WorkspaceRow ws={row.ws} active={row.ws.id === activeWorkspaceId} agentCount={runningByPath[row.ws.path] ?? 0} summary={summaries[row.ws.path]} groups={groups} indented={row.indented} />
                   ) : row.kind === "recent" ? (

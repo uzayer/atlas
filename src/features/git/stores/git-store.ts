@@ -178,6 +178,8 @@ interface GitActions {
     stageFiles: (paths: string[]) => Promise<void>;
     unstageFiles: (paths: string[]) => Promise<void>;
     discard: (paths: string[]) => Promise<void>;
+    /** Revert ADDED files by deleting them (no HEAD to restore to). */
+    discardAdded: (paths: string[]) => Promise<void>;
     commit: (summary: string, description?: string, amend?: boolean) => Promise<void>;
     fetch: () => Promise<void>;
     pull: (rebase: boolean) => Promise<void>;
@@ -459,6 +461,13 @@ export const useGitStore = createSelectors(
             const p = repo();
             if (!p) return;
             await invoke("git_discard", { path: p, files: paths });
+            await get().actions.refreshStatusNow(p);
+            void get().actions.loadDiff();
+          },
+          discardAdded: async (paths) => {
+            const p = repo();
+            if (!p) return;
+            await invoke("git_delete_added", { path: p, files: paths });
             await get().actions.refreshStatusNow(p);
             void get().actions.loadDiff();
           },

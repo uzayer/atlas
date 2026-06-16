@@ -10,6 +10,12 @@ interface ConfirmDeleteProps {
   isDir: boolean;
   /** Number of items being deleted. >1 switches to the batch wording. */
   count?: number;
+  /** Override the default "Delete …?" title (e.g. "Revert all changes?"). */
+  title?: string;
+  /** Override the default body copy. */
+  body?: React.ReactNode;
+  /** Override the confirm button label (default "Delete"). */
+  confirmLabel?: string;
   onConfirm: () => void;
   onOpenChange: (open: boolean) => void;
 }
@@ -24,6 +30,9 @@ export function FileTreeConfirmDelete({
   name,
   isDir,
   count = 1,
+  title,
+  body,
+  confirmLabel = "Delete",
   onConfirm,
   onOpenChange,
 }: ConfirmDeleteProps) {
@@ -49,10 +58,10 @@ export function FileTreeConfirmDelete({
           }}
         >
           <Dialog.Title className="text-[13px] font-semibold text-text-primary">
-            {multi ? `Delete ${count} items?` : `Delete ${isDir ? "folder" : "file"}?`}
+            {title ?? (multi ? `Delete ${count} items?` : `Delete ${isDir ? "folder" : "file"}?`)}
           </Dialog.Title>
           <p className="text-[12px] text-text-secondary leading-relaxed">
-            {multi ? (
+            {body ?? (multi ? (
               <>
                 <span className="font-mono text-text-primary">{name}</span> and{" "}
                 {count - 1} other {count - 1 === 1 ? "item" : "items"} will be
@@ -64,7 +73,7 @@ export function FileTreeConfirmDelete({
                 permanently {isDir ? "removed along with everything inside it" : "deleted"}.
                 This can't be undone.
               </>
-            )}
+            ))}
           </p>
           <div className="flex items-center justify-end gap-2 mt-1">
             <button
@@ -86,7 +95,7 @@ export function FileTreeConfirmDelete({
                 "text-white bg-[var(--status-error)] hover:opacity-90",
               )}
             >
-              Delete
+              {confirmLabel}
             </button>
           </div>
         </Dialog.Content>

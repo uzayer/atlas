@@ -203,6 +203,7 @@ pub fn run() {
             commands::git_ops::git_stash_pop,
             commands::git_ops::git_stash_drop,
             commands::git_ops::git_discard,
+            commands::git_ops::git_delete_added,
             commands::git_ops::git_reset,
             commands::git_ops::git_revert,
             commands::git_ops::git_cherry_pick,
