@@ -1424,6 +1424,139 @@
   .lg-expand .lg-json-key { color: #8aaef2; }
   .lg-expand .lg-json-str { color: #6aa97a; }
 
+  /* ---- Multi-workspace switcher visual ---- */
+  .ws-pane {
+    padding: 14px 12px; min-height: 460px;
+    font-family: var(--font-ui);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .ws-sec {
+    font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-ghost); font-weight: 600;
+    padding: 0 6px; margin: 10px 0 5px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .ws-sec:first-child { margin-top: 0; }
+  .ws-sec::after { content: ''; flex: 1; height: 1px; background: var(--border-default); }
+  .ws-card {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; border-radius: 8px;
+    border: 1px solid transparent; cursor: pointer;
+  }
+  .ws-card:hover { background: var(--bg-hover); }
+  .ws-card.is-active { background: var(--bg-active); border-color: var(--border-default); }
+  /* Git status dot — the only colour, mirroring the app: green = clean tree,
+     yellow = dirty, grey = non-repo. */
+  .ws-gitdot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--text-ghost); }
+  .ws-gitdot.is-clean { background: #3fb950; }
+  .ws-gitdot.is-dirty { background: #cd9731; }
+  .ws-main { flex: 1; min-width: 0; }
+  .ws-name {
+    font-size: 12.5px; color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ws-card.is-active .ws-name { color: var(--text-primary); }
+  /* branch · last commit subject — monochromatic, like the real row. */
+  .ws-sub {
+    font-size: 10.5px; color: var(--text-ghost); font-family: var(--font-mono);
+    margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ws-stat {
+    display: flex; align-items: center; gap: 7px; flex-shrink: 0;
+    font-family: var(--font-mono); font-size: 9.5px;
+  }
+  .ws-add { color: #3fb950; } .ws-del { color: #f85149; }
+  .ws-run { display: inline-flex; align-items: center; gap: 3px; color: var(--text-secondary); }
+  .ws-spark { width: 9px; height: 9px; }
+  .ws-kbd {
+    font-family: var(--font-mono); font-size: 10px;
+    color: var(--text-ghost); border: 1px solid var(--border-default);
+    border-radius: 4px; padding: 1px 6px;
+  }
+
+  /* ---- Parallel agents visual ---- */
+  .par-pane {
+    padding: 14px; min-height: 460px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-content: start;
+  }
+  .par-card {
+    border: 1px solid var(--border-default); border-radius: 10px; background: #0a0a0a;
+    padding: 11px 12px; display: flex; flex-direction: column; gap: 9px;
+  }
+  .par-card.is-active { border-color: rgba(91,141,239,0.35); box-shadow: 0 0 0 1px rgba(91,141,239,0.12); }
+  .par-head { display: flex; align-items: center; gap: 8px; }
+  .par-badge {
+    width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center; flex-shrink: 0;
+    background: var(--bg-raised); border: 1px solid var(--border-default); color: var(--text-secondary);
+  }
+  .par-badge svg { width: 12px; height: 12px; }
+  .par-agent { font-size: 11.5px; color: var(--text-secondary); font-weight: 500; }
+  .par-status {
+    margin-left: auto; font-size: 9.5px; font-family: var(--font-mono);
+    padding: 2px 7px; border-radius: 20px; display: inline-flex; align-items: center; gap: 5px;
+  }
+  .par-status.is-run { color: #8aaef2; background: rgba(91,141,239,0.10); }
+  .par-status.is-done { color: #6aa97a; background: rgba(106,169,122,0.10); }
+  .par-status.is-wait { color: var(--text-tertiary); background: var(--bg-raised); }
+  .par-spin { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: parpulse 1.4s ease-in-out infinite; }
+  @keyframes parpulse { 0%,100% { opacity: 0.3 } 50% { opacity: 1 } }
+  .par-line { font-size: 11px; color: var(--text-tertiary); line-height: 1.55; }
+  .par-cursor { display: inline-block; width: 6px; height: 12px; background: #8aaef2; vertical-align: -2px; margin-left: 1px; animation: parblink 1.1s steps(1) infinite; }
+  @keyframes parblink { 50% { opacity: 0 } }
+  .par-tool {
+    font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary);
+    background: var(--bg-raised); border: 1px solid var(--border-default);
+    border-radius: 6px; padding: 6px 8px; display: flex; align-items: center; gap: 6px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .par-tool svg { width: 11px; height: 11px; color: var(--text-ghost); flex-shrink: 0; }
+  .par-prog { height: 3px; border-radius: 3px; background: var(--bg-raised); overflow: hidden; }
+  .par-prog > i { display: block; height: 100%; background: linear-gradient(90deg, #5b8def, #8aaef2); }
+  .par-meta { display: flex; gap: 12px; font-family: var(--font-mono); font-size: 9.5px; color: var(--text-ghost); }
+
+  /* ---- Memory inspector visual ---- */
+  .mem-split { display: grid; grid-template-columns: 206px 1fr; min-height: 460px; }
+  .mem-list { border-right: 1px solid var(--border-default); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+  .mem-cat { font-size: 9px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-ghost); font-weight: 600; padding: 9px 6px 4px; }
+  .mem-cat:first-child { padding-top: 2px; }
+  .mem-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; color: var(--text-tertiary); cursor: pointer; }
+  .mem-item:hover { background: var(--bg-hover); }
+  .mem-item.is-active { background: var(--bg-active); color: var(--text-primary); }
+  .mem-pill { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+  .mem-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; }
+  .mem-doc { padding: 20px 22px; }
+  .mem-doc h1 { font-size: 17px; color: var(--text-primary); margin: 0 0 4px; font-weight: 600; }
+  .mem-fm { border: 1px solid var(--border-default); border-radius: 8px; background: var(--bg-input); padding: 10px 12px; font-family: var(--font-mono); font-size: 11px; line-height: 1.75; margin: 14px 0 16px; }
+  .mem-fm-key { color: #8aaef2; } .mem-fm-val { color: var(--text-secondary); }
+  .mem-tag { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 20px; font-size: 10px; font-family: var(--font-mono); }
+  .mem-doc p { font-size: 12.5px; color: var(--text-tertiary); line-height: 1.65; margin: 11px 0; }
+  .mem-doc strong { color: var(--text-secondary); font-weight: 600; }
+  .mem-link { color: #8aaef2; border-bottom: 1px dashed rgba(138,174,242,0.4); }
+
+  /* ---- Memory graph + timeline visual ---- */
+  .mg-pane { display: flex; flex-direction: column; min-height: 460px; }
+  .mg-graph { position: relative; flex: 1; overflow: hidden; }
+  .mg-edges { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .mg-edges line { stroke: #1e1e1e; stroke-width: 0.4; }
+  .mg-edges line.is-hot { stroke: rgba(138,174,242,0.4); }
+  .mg-node { position: absolute; transform: translate(-50%, -50%); display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .mg-dot { width: 11px; height: 11px; border-radius: 50%; background: #0a0a0a; border: 1.5px solid #5b8def; box-shadow: 0 0 0 4px rgba(91,141,239,0.07); }
+  .mg-node.is-hot .mg-dot { width: 14px; height: 14px; background: #8aaef2; border-color: #8aaef2; box-shadow: 0 0 0 6px rgba(138,174,242,0.16); }
+  .mg-node.is-dim .mg-dot { border-color: var(--border-strong); box-shadow: none; }
+  .mg-label { font-family: var(--font-mono); font-size: 9.5px; color: var(--text-ghost); white-space: nowrap; }
+  .mg-node.is-hot .mg-label { color: var(--text-secondary); }
+  .mg-timeline { border-top: 1px solid var(--border-default); background: #0a0a0a; padding: 12px 16px 16px; }
+  .mg-tl-head { display: flex; align-items: center; justify-content: space-between; font-family: var(--font-mono); font-size: 10px; color: var(--text-ghost); margin-bottom: 14px; }
+  .mg-track { position: relative; height: 48px; }
+  .mg-lane { position: absolute; left: 0; right: 0; height: 1px; background: var(--border-default); }
+  .mg-tick { position: absolute; bottom: 0; width: 1px; height: 5px; background: var(--text-ghost); }
+  .mg-tlabel { position: absolute; bottom: -16px; transform: translateX(-50%); font-family: var(--font-mono); font-size: 8.5px; color: var(--text-ghost); }
+  .mg-commit { position: absolute; width: 7px; height: 7px; border-radius: 50%; transform: translate(-50%, -50%); background: #0a0a0a; border: 1.5px solid var(--lane-c, #5b8def); }
+  .mg-commit.is-filled { background: var(--lane-c, #5b8def); }
+  .mg-play { position: absolute; top: -8px; bottom: -8px; width: 2px; background: #8aaef2; }
+  .mg-play::before { content: ''; position: absolute; top: -3px; left: -4px; width: 10px; height: 10px; border-radius: 50%; background: #8aaef2; box-shadow: 0 0 0 4px rgba(138,174,242,0.16); }
+  .mg-play-lbl { position: absolute; top: -24px; left: 50%; transform: translateX(-50%); font-family: var(--font-mono); font-size: 9px; color: #8aaef2; background: rgba(138,174,242,0.10); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+
   /* ============================================================
      ROADMAP
      ============================================================ */
@@ -1846,7 +1979,7 @@
   <div class="wrap hero-inner">
     <div class="eyebrow">
       <span class="eyebrow-tag">Alpha</span>
-      <a href="#agents">Claude Code today · ACP-ready for the rest <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5l7 7-7 7"/></svg></a>
+      <a href="#agents">Claude Code &amp; Codex today · ACP-ready for the rest <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5l7 7-7 7"/></svg></a>
     </div>
     <h1 class="hero-title">A planning surface for coding agents.</h1>
     <p class="hero-sub">Atlas is a native macOS editor built for the work <em style="color:var(--text-secondary);font-style:normal">around</em> the code — research, planning, knowledge, and the agent threads that turn them into commits. Built so teams of humans and agents can move fast together.</p>
@@ -2988,7 +3121,7 @@
       <div>
         <span class="sec-eyebrow">Any agent · ACP-native</span>
         <h2 class="sec-title" style="max-width:18ch">One workspace.<br/>Every coding agent.</h2>
-        <p class="sec-sub" style="margin-bottom:32px">Atlas speaks the Agent Client Protocol (ACP). Today it ships with Claude Code; Codex, OpenCode, and Kilo Code follow on the same shell. Swap mid-thread. Bring your own keys. No lock-in.</p>
+        <p class="sec-sub" style="margin-bottom:32px">Atlas speaks the Agent Client Protocol (ACP). Today it ships with Claude Code and Codex, both via ACP; OpenCode and Kilo Code follow on the same shell. Swap mid-thread. Bring your own keys. No lock-in.</p>
         <a href="https://github.com/zed-industries/agent-client-protocol" target="_blank" rel="noopener" class="btn btn-secondary btn-lg">
           Read the ACP docs
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5l7 7-7 7"/></svg>
@@ -3010,11 +3143,11 @@
           <div class="agent-mark">CX</div>
           <div class="agent-info">
             <div class="agent-name">Codex</div>
-            <div class="agent-meta">via ACP · landing soon</div>
+            <div class="agent-meta">via ACP · shipping today</div>
           </div>
           <div class="agent-status">
-            <span class="atlas-dot atlas-dot-warning"></span>
-            Coming
+            <span class="atlas-dot atlas-dot-success"></span>
+            Available
           </div>
         </div>
         <div class="agent-row">
@@ -3052,25 +3185,317 @@
   </div>
 </section>
 
-<!-- ====================== METRICS ====================== -->
-<section class="metrics">
+<!-- ====================== SHOWCASE: MULTI-WORKSPACE ====================== -->
+<section class="showcase-row" id="workspaces">
   <div class="wrap">
-    <div class="metrics-grid">
-      <div>
-        <div class="metric-num">0</div>
-        <div class="metric-label">Telemetry. No account. No server. Your code never leaves your machine.</div>
+    <div class="showcase-grid is-reversed">
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+            workspaces
+          </span>
+          <span style="margin-left:auto">5 projects · 2 running</span>
+        </div>
+        <div class="ws-pane">
+          <div class="ws-sec">Pinned</div>
+          <div class="ws-card is-active">
+            <span class="ws-gitdot is-dirty"></span>
+            <span class="ws-main">
+              <span class="ws-name">atlas-core</span>
+              <span class="ws-sub">main · Wire ACP driver into chat panel</span>
+            </span>
+            <span class="ws-stat">
+              <span class="ws-run"><svg class="ws-spark" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/></svg>2</span>
+              <span class="ws-add">+128</span><span class="ws-del">−44</span>
+            </span>
+          </div>
+          <div class="ws-card">
+            <span class="ws-gitdot is-dirty"></span>
+            <span class="ws-main">
+              <span class="ws-name">web-app</span>
+              <span class="ws-sub">feat/checkout · Add Stripe payment intent</span>
+            </span>
+            <span class="ws-stat"><span class="ws-add">+12</span><span class="ws-del">−3</span></span>
+          </div>
+
+          <div class="ws-sec">payments · group</div>
+          <div class="ws-card">
+            <span class="ws-gitdot is-clean"></span>
+            <span class="ws-main">
+              <span class="ws-name">infra</span>
+              <span class="ws-sub">main · chore: bump terraform providers</span>
+            </span>
+            <span class="ws-stat"><span class="ws-run"><svg class="ws-spark" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/></svg>1</span></span>
+          </div>
+          <div class="ws-card">
+            <span class="ws-gitdot is-dirty"></span>
+            <span class="ws-main">
+              <span class="ws-name">billing-svc</span>
+              <span class="ws-sub">fix/webhooks · Retry on idempotency clash</span>
+            </span>
+            <span class="ws-stat"><span class="ws-del">−9</span></span>
+          </div>
+
+          <div class="ws-sec">Recent</div>
+          <div class="ws-card">
+            <span class="ws-gitdot is-clean"></span>
+            <span class="ws-main">
+              <span class="ws-name">docs-site</span>
+              <span class="ws-sub">main · Publish 0.1.14 release notes</span>
+            </span>
+          </div>
+        </div>
       </div>
-      <div>
-        <div class="metric-num metric-mono">.atlas/</div>
-        <div class="metric-label">All state is files. Knowledge, canvas, logs &mdash; markdown and JSON next to your code.</div>
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Workspaces</span>
+        <h2>Every project. One window.</h2>
+        <p>An Arc-style switcher holds all your projects in a single window. Hit <code style="font-family:var(--font-mono);font-size:13px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">⌘.</code> to flip between them &mdash; each carries its own editor tabs, terminals, git state, and agent threads, restored exactly as you left it.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Instant switch.</strong> State swaps from an in-RAM snapshot &mdash; no remount, no cold reload of the editor or terminal.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Group &amp; pin.</strong> Organise projects into custom groups, pin the ones you live in, and see live git <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">+/−</code> at a glance.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Running, everywhere.</strong> A badge marks workspaces with agents still working &mdash; even the ones you're not looking at.</span>
+          </li>
+        </ul>
       </div>
-      <div>
-        <div class="metric-num">3<span class="unit">+</span></div>
-        <div class="metric-label">Concurrent agent threads per project. Switch tabs &mdash; streams keep running.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: PARALLEL AGENTS ====================== -->
+<section class="showcase-row" id="parallel">
+  <div class="wrap">
+    <div class="showcase-grid">
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Parallel agents</span>
+        <h2>Run a team of agents at once.</h2>
+        <p>Every thread gets its own session worker, so you can fan work out across agents and projects simultaneously &mdash; one writing tests, one refactoring, one researching &mdash; and watch each one stream its tool calls live.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>True concurrency.</strong> Rust-owned session state means threads run independently &mdash; not a queue pretending to be parallel.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Mix your agents.</strong> Claude Code, Codex, and ACP agents side by side &mdash; each on the task it's best at.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Intervene anytime.</strong> Jump into any running thread, steer it, or approve a permission &mdash; the rest keep going.</span>
+          </li>
+        </ul>
       </div>
-      <div>
-        <div class="metric-num metric-mono">ACP</div>
-        <div class="metric-label">Standard protocol. Any compliant agent slots into the same shell.</div>
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+            3 agents running
+          </span>
+          <span style="margin-left:auto">across 2 workspaces</span>
+        </div>
+        <div class="par-pane">
+          <div class="par-card is-active">
+            <div class="par-head">
+              <span class="par-badge"><svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z"/></svg></span>
+              <span class="par-agent">Claude Code · tests</span>
+              <span class="par-status is-run"><span class="par-spin"></span>running</span>
+            </div>
+            <div class="par-tool">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              vitest run auth.test.ts
+            </div>
+            <div class="par-line">Added 6 cases for token refresh<span class="par-cursor"></span></div>
+            <div class="par-meta"><span>atlas-core</span><span>14.2k tok</span></div>
+          </div>
+          <div class="par-card">
+            <div class="par-head">
+              <span class="par-badge"><svg viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd" xmlns="http://www.w3.org/2000/svg"><path clip-rule="evenodd" d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"/></svg></span>
+              <span class="par-agent">Codex · refactor</span>
+              <span class="par-status is-run"><span class="par-spin"></span>running</span>
+            </div>
+            <div class="par-tool">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+              edit session-worker.rs
+            </div>
+            <div class="par-prog"><i style="width:62%"></i></div>
+            <div class="par-meta"><span>atlas-core</span><span>8.9k tok</span></div>
+          </div>
+          <div class="par-card">
+            <div class="par-head">
+              <span class="par-badge"><svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z"/></svg></span>
+              <span class="par-agent">Claude Code · research</span>
+              <span class="par-status is-run"><span class="par-spin"></span>running</span>
+            </div>
+            <div class="par-tool">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+              web.search "stripe webhooks"
+            </div>
+            <div class="par-line">Comparing idempotency strategies…</div>
+            <div class="par-meta"><span>billing-svc</span><span>21.7k tok</span></div>
+          </div>
+          <div class="par-card">
+            <div class="par-head">
+              <span class="par-badge"><svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z"/></svg></span>
+              <span class="par-agent">Claude Code · docs</span>
+              <span class="par-status is-done">done</span>
+            </div>
+            <div class="par-tool">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m5 12 5 5L20 7"/></svg>
+              committed 3 files
+            </div>
+            <div class="par-meta"><span>docs-site</span><span>5.1k tok</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: MEMORY INSPECTOR ====================== -->
+<section class="showcase-row" id="memory">
+  <div class="wrap">
+    <div class="showcase-grid is-reversed">
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5a3 3 0 0 1 3 3 3 3 0 0 1 0 6 3 3 0 0 1-6 0 3 3 0 0 1 0-6 3 3 0 0 1 3-3z"/><path d="M12 5V2M12 22v-3M5 9H2M22 12h-3"/></svg>
+            memory · rust-owns-business-logic
+          </span>
+          <span style="margin-left:auto">~/.claude/projects/…/memory</span>
+        </div>
+        <div class="mem-split">
+          <aside class="mem-list">
+            <div class="mem-cat">Feedback</div>
+            <div class="mem-item is-active"><span class="mem-pill" style="background:#d97e35"></span><span class="mem-name">rust-owns-logic</span></div>
+            <div class="mem-item"><span class="mem-pill" style="background:#d97e35"></span><span class="mem-name">permission-mode-sync</span></div>
+            <div class="mem-item"><span class="mem-pill" style="background:#d97e35"></span><span class="mem-name">git-refresh-immediacy</span></div>
+            <div class="mem-item"><span class="mem-pill" style="background:#d97e35"></span><span class="mem-name">flex-minh0-composer</span></div>
+            <div class="mem-cat">Project</div>
+            <div class="mem-item"><span class="mem-pill" style="background:#d96baf"></span><span class="mem-name">multi-workspace</span></div>
+            <div class="mem-item"><span class="mem-pill" style="background:#d96baf"></span><span class="mem-name">memory-graph</span></div>
+            <div class="mem-cat">User</div>
+            <div class="mem-item"><span class="mem-pill" style="background:#5b8def"></span><span class="mem-name">atlas-context</span></div>
+          </aside>
+          <div class="mem-doc">
+            <h1>Rust owns business logic</h1>
+            <div class="mem-fm">
+              <span class="mem-fm-key">name</span>: <span class="mem-fm-val">rust-owns-business-logic</span><br/>
+              <span class="mem-fm-key">type</span>: <span class="mem-fm-val">feedback</span><br/>
+              <span class="mem-fm-key">description</span>: <span class="mem-fm-val">all logic in Rust, React is view-only</span>
+            </div>
+            <div style="margin-bottom:14px">
+              <span class="mem-tag" style="color:#f0b87a;background:rgba(217,126,53,0.12)">feedback</span>
+            </div>
+            <p>Architectural rule: every piece of state and business logic lives in Rust. React is a <strong>view layer</strong> &mdash; it renders store snapshots and forwards intent over Tauri IPC, nothing more.</p>
+            <p><strong>Why:</strong> a single source of truth survives window reloads and keeps performance predictable.</p>
+            <p><strong>How to apply:</strong> new state goes in a Rust command + event, not a React hook. See <span class="mem-link">[[permission-mode-sync]]</span>.</p>
+          </div>
+        </div>
+      </div>
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Memory inspector</span>
+        <h2>See what your agents remember.</h2>
+        <p>Atlas surfaces the memory your agents accumulate &mdash; Claude Code's per-project markdown and Codex threads &mdash; as a browsable, read-only inspector. Every fact, with its frontmatter, in one place.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Typed &amp; categorised.</strong> User, feedback, project, reference &mdash; colour-coded so behavioural rules stand apart from facts.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Frontmatter, rendered.</strong> Read the exact <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">name / type / description</code> the agent keys recall on.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Wikilinked.</strong> Memories reference each other with <code style="font-family:var(--font-mono);font-size:12px;color:var(--text-primary);background:var(--bg-raised);padding:1px 5px;border-radius:4px">[[links]]</code> &mdash; follow the chain of reasoning.</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ====================== SHOWCASE: MEMORY GRAPH + TIMELINE ====================== -->
+<section class="showcase-row" id="memory-graph">
+  <div class="wrap">
+    <div class="showcase-grid">
+      <div class="showcase-copy">
+        <span class="sec-eyebrow">Graph &amp; timeline</span>
+        <h2>Memory in space and time.</h2>
+        <p>See the whole memory as a semantic graph &mdash; on-device embeddings cluster related facts and wikilinks draw the edges. Then scrub a timeline that lays commits, agent sessions, and memory on one axis to watch what your agents knew, and when.</p>
+        <ul class="showcase-points">
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>On-device semantics.</strong> A local MiniLM model embeds every note &mdash; nearest-neighbour links, no data leaves your machine.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Ask in plain English.</strong> Query the graph in natural language and watch the relevant cluster light up.</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 5 5L20 7"/></svg>
+            <span><strong>Scrub the history.</strong> Branch swimlanes tie every agent session to the commit it produced &mdash; drag to replay.</span>
+          </li>
+        </ul>
+      </div>
+      <div class="showcase-visual">
+        <div class="sv-header">
+          <span class="sv-tab-name">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7 7.5 10.5 16M16.5 7.5 13.5 16M7 6h10"/></svg>
+            memory · graph
+          </span>
+          <span style="margin-left:auto">42 notes · MiniLM-L6</span>
+        </div>
+        <div class="mg-pane">
+          <div class="mg-graph">
+            <svg class="mg-edges" viewBox="0 0 100 100" preserveAspectRatio="none">
+              <line class="is-hot" x1="50" y1="44" x2="26" y2="24"/>
+              <line class="is-hot" x1="50" y1="44" x2="74" y2="26"/>
+              <line class="is-hot" x1="50" y1="44" x2="24" y2="66"/>
+              <line class="is-hot" x1="50" y1="44" x2="78" y2="64"/>
+              <line x1="50" y1="44" x2="50" y2="18"/>
+              <line x1="26" y1="24" x2="50" y2="18"/>
+              <line x1="74" y1="26" x2="78" y2="64"/>
+              <line x1="24" y1="66" x2="50" y2="80"/>
+              <line x1="78" y1="64" x2="50" y2="80"/>
+            </svg>
+            <div class="mg-node is-hot" style="left:50%;top:44%"><span class="mg-dot"></span><span class="mg-label">rust-owns-logic</span></div>
+            <div class="mg-node" style="left:26%;top:24%"><span class="mg-dot"></span><span class="mg-label">permission-sync</span></div>
+            <div class="mg-node" style="left:74%;top:26%"><span class="mg-dot"></span><span class="mg-label">git-refresh</span></div>
+            <div class="mg-node" style="left:24%;top:66%"><span class="mg-dot"></span><span class="mg-label">flex-minh0</span></div>
+            <div class="mg-node" style="left:78%;top:64%"><span class="mg-dot"></span><span class="mg-label">cersei-result</span></div>
+            <div class="mg-node is-dim" style="left:50%;top:18%"><span class="mg-dot"></span><span class="mg-label">multi-window</span></div>
+            <div class="mg-node is-dim" style="left:50%;top:80%"><span class="mg-dot"></span><span class="mg-label">bash-toolcall</span></div>
+          </div>
+          <div class="mg-timeline">
+            <div class="mg-tl-head"><span>timeline · last 14 days</span><span>jun 16, 14:20</span></div>
+            <div class="mg-track">
+              <span class="mg-lane" style="top:10px"></span>
+              <span class="mg-lane" style="top:28px"></span>
+              <span class="mg-tick" style="left:6%"></span><span class="mg-tlabel" style="left:6%">jun 2</span>
+              <span class="mg-tick" style="left:34%"></span><span class="mg-tlabel" style="left:34%">jun 7</span>
+              <span class="mg-tick" style="left:62%"></span><span class="mg-tlabel" style="left:62%">jun 11</span>
+              <span class="mg-tick" style="left:92%"></span><span class="mg-tlabel" style="left:92%">jun 16</span>
+              <span class="mg-commit is-filled" style="left:10%;top:10px;--lane-c:#5b8def"></span>
+              <span class="mg-commit is-filled" style="left:24%;top:10px;--lane-c:#5b8def"></span>
+              <span class="mg-commit" style="left:30%;top:28px;--lane-c:#d97e35"></span>
+              <span class="mg-commit is-filled" style="left:44%;top:10px;--lane-c:#5b8def"></span>
+              <span class="mg-commit" style="left:52%;top:28px;--lane-c:#d96baf"></span>
+              <span class="mg-commit is-filled" style="left:62%;top:10px;--lane-c:#5b8def"></span>
+              <span class="mg-commit is-filled" style="left:78%;top:28px;--lane-c:#d97e35"></span>
+              <span class="mg-commit is-filled" style="left:90%;top:10px;--lane-c:#5b8def"></span>
+              <span class="mg-play" style="left:62%"><span class="mg-play-lbl">session · 1050e00</span></span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
