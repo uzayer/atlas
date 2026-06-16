@@ -107,6 +107,7 @@ function WorkspaceRow({
     : "no source control";
   return (
     <div
+      data-hint
       onClick={() => void switchTo(ws.id)}
       style={{ height: WS_CARD, paddingLeft: indented ? 16 : 6 }}
       className={cn(
@@ -212,7 +213,7 @@ function GroupHeaderRow({ group, count, collapsed, onToggle }: { group: Workspac
   const [name, setName] = useState(group.name);
   const commit = () => { if (name.trim()) renameGroup(group.id, name.trim()); setEditing(false); };
   return (
-    <div style={{ height: HEADER_H }} className="group/h flex items-center gap-1 pl-1 pr-1.5 rounded-md cursor-pointer hover:bg-[var(--bg-hover)]" onClick={onToggle}>
+    <div data-hint style={{ height: HEADER_H }} className="group/h flex items-center gap-1 pl-1 pr-1.5 rounded-md cursor-pointer hover:bg-[var(--bg-hover)]" onClick={onToggle}>
       {collapsed ? <ChevronRight size={12} className="text-[var(--text-tertiary)]" /> : <ChevronDown size={12} className="text-[var(--text-tertiary)]" />}
       <Folder size={11} className="text-[var(--text-tertiary)] shrink-0" />
       {editing ? (
@@ -253,6 +254,7 @@ function SectionHeaderRow({
 }) {
   return (
     <div
+      data-hint
       onClick={onToggle}
       style={{ height: HEADER_H }}
       className="group/s w-full flex items-center gap-1 px-1.5 rounded-md hover:bg-[var(--bg-hover)] outline-none cursor-pointer"
@@ -278,7 +280,7 @@ function SectionHeaderRow({
 
 function RecentProjectRow({ name, path, onOpen }: { name: string; path: string; onOpen: () => void }) {
   return (
-    <div onClick={onOpen} style={{ height: ROW_CARD, paddingLeft: 10 }}
+    <div data-hint onClick={onOpen} style={{ height: ROW_CARD, paddingLeft: 10 }}
       className="group flex items-center gap-2.5 pr-1.5 rounded-md cursor-pointer hover:bg-[var(--bg-hover)]" title={path}>
       <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--text-secondary)]" />
       <span className="flex-1 min-w-0 truncate text-[12px] text-[var(--text-secondary)]">{name}</span>
@@ -298,7 +300,7 @@ function relTime(ms: number): string {
 function ChatRow({ chat, running, onOpen }: { chat: RecentChat; running: boolean; onOpen: () => void }) {
   const AgentIcon = chat.agentType === "codex" ? AgentIcons.Codex : AgentIcons.Claude;
   return (
-    <div onClick={onOpen} style={{ height: CHAT_CARD, paddingLeft: 6 }}
+    <div data-hint onClick={onOpen} style={{ height: CHAT_CARD, paddingLeft: 6 }}
       className="group relative flex items-start gap-2 pr-1.5 py-1.5 border-b border-[var(--border-subtle)] cursor-pointer hover:bg-[var(--bg-hover)] transform-gpu [backface-visibility:hidden]" title={chat.projectPath}>
       {running ? (
         <AtlasLoader size={11} className="mt-0.5 shrink-0 text-[var(--accent-primary)]" />

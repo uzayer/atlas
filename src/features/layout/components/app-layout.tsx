@@ -56,21 +56,29 @@ export function AppLayout() {
           <PanelGroup direction="horizontal" autoSaveId="atlas-main-layout">
             {showLeft && (
               <>
-                <Panel defaultSize={16} minSize={14} maxSize={28} order={1}>
+                {/* Conditionally-rendered Panels MUST carry a stable `id` (not
+                    just `order`) — without it react-resizable-panels can't match
+                    panels across mount/unmount, so rapidly toggling left/right
+                    corrupts its internal layout state ("Invalid layout total
+                    size" + setState-on-unmounted), and an invariant throw with
+                    no error boundary tears down the whole React root (looks like
+                    a full app reload). Defaults sum to 100 for the 3-panel case;
+                    RRP normalizes the 1-/2-panel cases. */}
+                <Panel id="atlas-left" order={1} defaultSize={18} minSize={14} maxSize={28}>
                   <LeftPanel />
                 </Panel>
                 <PanelResizeHandle className="w-px bg-border-default hover:bg-accent data-[resize-handle-active]:bg-accent transition-colors cursor-col-resize" />
               </>
             )}
 
-            <Panel defaultSize={showLeft && showRight ? 60 : 75} minSize={30} order={2}>
+            <Panel id="atlas-center" order={2} defaultSize={64} minSize={30}>
               <CenterPanel />
             </Panel>
 
             {showRight && (
               <>
                 <PanelResizeHandle className="w-px bg-border-default hover:bg-accent data-[resize-handle-active]:bg-accent transition-colors cursor-col-resize" />
-                <Panel defaultSize={18} minSize={12} maxSize={30} order={3}>
+                <Panel id="atlas-right" order={3} defaultSize={18} minSize={12} maxSize={30}>
                   <RightPanel />
                 </Panel>
               </>
