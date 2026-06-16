@@ -7,6 +7,7 @@ import { useLayoutStore } from "../stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import { WorkspaceSidebar } from "@/features/workspaces/components/workspace-sidebar";
+import { useWorkspaceGitPrefetch } from "@/features/workspaces/lib/use-workspace-prefetch";
 import { Titlebar } from "@/components/titlebar";
 import { StatusBar } from "@/components/status-bar";
 import { LeftPanel } from "./left-panel";
@@ -19,6 +20,9 @@ export function AppLayout() {
   const bottomPanel = useLayoutStore.use.bottomPanel();
   const currentProject = useProjectStore.use.currentProject();
   const sidebarOpen = useWorkspaceStore.use.sidebarOpen();
+
+  // Warm the workspace-pane git data at startup so the first slide is smooth.
+  useWorkspaceGitPrefetch();
 
   const showLeft = leftPanel.visible && !!currentProject;
   const showRight = rightPanel.visible && !!currentProject;

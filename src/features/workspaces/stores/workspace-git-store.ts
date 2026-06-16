@@ -31,6 +31,21 @@ const fetched = new Set<string>();
 const inflight = new Set<string>();
 let listenerReady = false;
 
+// Coalesce bursty working-tree edits (every keystroke-save fires the fs
+// watcher) into one `git diff` per path. Cleared after the trailing refresh.
+const debounce = new Map<string, ReturnType<typeof setTimeout>>();
+function scheduleRefresh(path: string, refresh: (p: string) => void) {
+  const pending = debounce.get(path);
+  if (pending) clearTimeout(pending);
+  debounce.set(
+    path,
+    setTimeout(() => {
+      debounce.delete(path);
+      refresh(path);
+    }, 250),
+  );
+}
+
 export const useWorkspaceGitStore = createSelectors(
   create<State>((set, get) => {
     function ensureListener() {
@@ -40,10 +55,35 @@ export const useWorkspaceGitStore = createSelectors(
       // silently refreshes that project's cached summary in the background. The
       // UI updates only if the sidebar happens to be mounted; otherwise the
       // fresh value is simply ready for the next open.
+      //
+      // `atlas:git-changed` only fires on commit / checkout / branch / stage
+      // (the watcher watches .git/HEAD|refs|index, NOT the working tree), so a
+      // plain unstaged edit (+N/-M) would never reach us. We ALSO listen to the
+      // fs working-tree watcher (`atlas:explorer:changed`) so the live +/-
+      // counts track uncommitted edits, mirroring the source-control panel.
       void listen<{ project?: string }>("atlas:git-changed", (e) => {
         const p = e.payload?.project;
         if (p && fetched.has(p)) get().actions.refresh(p);
       });
+      void listen<{ dirs?: string[]; fullRefresh?: boolean }>(
+        "atlas:explorer:changed",
+        (e) => {
+          const refresh = get().actions.refresh;
+          // Opaque batch (rename, etc.): we can't pinpoint dirs — refresh every
+          // cached workspace.
+          if (e.payload?.fullRefresh || !e.payload?.dirs?.length) {
+            for (const p of fetched) scheduleRefresh(p, refresh);
+            return;
+          }
+          // Match each touched dir to the workspace whose root contains it.
+          for (const p of fetched) {
+            const hit = e.payload.dirs.some(
+              (d) => d === p || d.startsWith(p + "/"),
+            );
+            if (hit) scheduleRefresh(p, refresh);
+          }
+        },
+      );
     }
 
     async function load(path: string) {

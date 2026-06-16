@@ -11,7 +11,7 @@ import {
   X,
   ScrollText,
   Settings,
-  Bot,
+  Sparkles,
   Pin,
   PinOff,
   ChevronRight,
@@ -72,7 +72,7 @@ function NumStatPill({ summary, agentCount }: { summary?: GitSummary; agentCount
     <span className="flex items-center gap-1.5 rounded-full bg-[var(--bg-elevated)] px-1.5 py-[1px] font-mono text-[9px] shrink-0">
       {agentCount > 0 && (
         <span className="flex items-center gap-0.5 text-[var(--accent-primary)]">
-          <Bot size={9} />
+          <Sparkles size={9} />
           {agentCount}
         </span>
       )}

@@ -169,7 +169,23 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      // Only the frontend (`src/`, index.html, the config files) is part of
+      // Vite's module graph; everything else in the repo is Rust, scripts,
+      // docs or build output. Without ignoring them, editing ANY such file
+      // while dogfooding Atlas on its own repo (e.g. tweaking `bump.sh` to
+      // watch the workspace git +/- update) makes Vite bounce the whole page.
+      ignored: [
+        "**/src-tauri/**",
+        "**/crates/**",
+        "**/landing/**",
+        "**/scripts/**",
+        "**/dist/**",
+        "**/target/**",
+        "**/.atlas/**",
+        "**/.git/**",
+        "**/*.sh",
+        "**/*.md",
+      ],
     },
     // Pre-transform the boot critical-path the moment `tauri dev` starts the
     // Vite server. Without this, Vite transforms each user-source module on
