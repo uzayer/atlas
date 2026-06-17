@@ -30,24 +30,6 @@ export function isWorkspaceRunning(path: string): boolean {
   return runningCountForPath(path) > 0;
 }
 
-/** Reactive: `{ [workspacePath]: runningCount }` for the sidebar. Re-renders
- *  only when the set of (path,status) pairs actually changes. */
-export function useRunningByPath(): Record<string, number> {
-  const signature = useChatStore(
-    useShallow((s) =>
-      Object.values(s.sessions)
-        .filter((sess) => ACTIVE.has(sess.status))
-        .map((sess) => sess.workingDirectory)
-        .sort(),
-    ),
-  );
-  return useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const p of signature) map[p] = (map[p] ?? 0) + 1;
-    return map;
-  }, [signature]);
-}
-
 /** Reactive: set of LIVE running chat keys (each running session's tab id +
  *  acp session id). The workspace "Chats" section uses this to mark a recent
  *  chat as active from the live chat-store rather than a persisted (and

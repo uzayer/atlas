@@ -86,7 +86,7 @@ interface ProjectState {
     clearRecents: () => void;
     updateSettings: (partial: Partial<AppSettings>) => void;
     /** One-shot hydration from Rust. Called once on app boot. */
-    hydrate: (payload: AppStateWire) => void;
+    hydrate: (payload: AppStateWire, opts?: { skipActiveSwitch?: boolean }) => void;
   };
 }
 
@@ -280,7 +280,7 @@ export const useProjectStore = createSelectors(
           void useExplorerStore.getState().actions.refresh();
         }
       },
-      hydrate: (payload: AppStateWire) => {
+      hydrate: (payload: AppStateWire, opts?: { skipActiveSwitch?: boolean }) => {
         // Merge with defaults so older state.json files (written before a new
         // setting existed) get the modern default rather than `undefined`.
         const settings: AppSettings = {
@@ -310,10 +310,16 @@ export const useProjectStore = createSelectors(
         // Restore the active workspace, if any. `switchTo` sets
         // `currentProject` (which drives the App-level Rust lifecycle effects)
         // and loads the downstream stores.
+        //
+        // `skipActiveSwitch` is set when a `atlas <path>` CLI launch is about to
+        // open its own workspace: `switchTo` no-ops while another switch is in
+        // flight (the `switching` guard), so auto-switching here would swallow
+        // the CLI switch and strand the user on the persisted workspace. The
+        // caller switches to the CLI project instead.
         const active =
           activeWorkspaceId &&
           workspaces.find((w) => w.id === activeWorkspaceId);
-        if (active) {
+        if (active && !opts?.skipActiveSwitch) {
           maybeEnsureAtlasGitignore(active.path, settings);
           void useWorkspaceStore.getState().actions.switchTo(active.id);
         }

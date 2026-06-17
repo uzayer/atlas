@@ -157,7 +157,13 @@ export function TerminalPanel({ tabId }: TerminalPanelProps) {
       const isNav = e.key === ";" || e.key === "'";
       const isClose = e.key === "w" || e.key === "W";
       if (!isNav && !isClose) return;
-      if (rootRef.current?.offsetParent == null) return;
+      // Only act when the terminal is the FOCUSED surface, not merely visible.
+      // Gating on visibility alone let a terminal in the bottom panel (or a
+      // split) steal ⌘;/⌘' from the Knowledge Base's toggle shortcuts whenever
+      // it had 2+ tabs open — the source of the "KB toggle works only sometimes"
+      // flakiness. Requiring focus-within scopes these keys to the terminal.
+      const root = rootRef.current;
+      if (!root || root.offsetParent == null || !root.contains(document.activeElement)) return;
       const t = useTerminalStore.getState().tabs[tabId];
       if (!t) return;
       const panes = collectPanes(t.root);

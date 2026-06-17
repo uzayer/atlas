@@ -11,7 +11,6 @@ import {
   X,
   ScrollText,
   Settings,
-  Sparkles,
   Pin,
   PinOff,
   ChevronRight,
@@ -29,7 +28,7 @@ import {
   type WorkspaceGroup,
 } from "../stores/workspace-store";
 import { pickAndAddWorkspace } from "../lib/pick-workspace";
-import { useRunningByPath, useRunningChatKeys } from "../lib/agent-activity";
+import { useRunningChatKeys } from "../lib/agent-activity";
 import { openAgentSession } from "@/features/chat/lib/open-agent-session";
 import { AtlasLoader } from "@/components/atlas-loader";
 import { AgentIcons } from "@/components/agent-icons";
@@ -66,17 +65,11 @@ function GitDot({ summary }: { summary?: GitSummary }) {
   );
 }
 
-function NumStatPill({ summary, agentCount }: { summary?: GitSummary; agentCount: number }) {
+function NumStatPill({ summary }: { summary?: GitSummary }) {
   const hasStat = summary && (summary.additions > 0 || summary.deletions > 0);
-  if (!hasStat && agentCount === 0) return null;
+  if (!hasStat) return null;
   return (
     <span className="flex items-center gap-1.5 rounded-full bg-[var(--bg-elevated)] px-1.5 py-[1px] font-mono text-[9px] shrink-0">
-      {agentCount > 0 && (
-        <span className="flex items-center gap-0.5 text-[var(--accent-primary)]">
-          <Sparkles size={9} />
-          {agentCount}
-        </span>
-      )}
       {summary && summary.additions > 0 && (
         <span className="text-[var(--accent-positive,#3fb950)]">+{summary.additions}</span>
       )}
@@ -90,14 +83,12 @@ function NumStatPill({ summary, agentCount }: { summary?: GitSummary; agentCount
 function WorkspaceRow({
   ws,
   active,
-  agentCount,
   summary,
   groups,
   indented,
 }: {
   ws: Workspace;
   active: boolean;
-  agentCount: number;
   summary?: GitSummary;
   groups: WorkspaceGroup[];
   indented?: boolean;
@@ -137,9 +128,9 @@ function WorkspaceRow({
         </div>
       </div>
 
-      {/* +/- (and agent count) pill — absolute TOP-RIGHT. */}
+      {/* +/- git stat pill — absolute TOP-RIGHT. */}
       <div className="absolute top-1.5 right-2 pointer-events-none">
-        <NumStatPill summary={summary} agentCount={agentCount} />
+        <NumStatPill summary={summary} />
       </div>
 
       {/* Pin + more — absolute BOTTOM-RIGHT, on hover (pin stays if pinned). */}
@@ -361,7 +352,6 @@ export function WorkspaceSidebar() {
       (!!c.acpSessionId && runningChatKeys.has(c.acpSessionId)),
     [runningChatKeys],
   );
-  const runningByPath = useRunningByPath();
   const fullscreen = useFullscreen();
 
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -543,7 +533,7 @@ export function WorkspaceSidebar() {
                   ) : row.kind === "group" ? (
                     <GroupHeaderRow group={row.group} collapsed={!!collapsed[row.group.id]} onToggle={() => toggle(row.group.id)} />
                   ) : row.kind === "ws" ? (
-                    <WorkspaceRow ws={row.ws} active={row.ws.id === activeWorkspaceId} agentCount={runningByPath[row.ws.path] ?? 0} summary={summaries[row.ws.path]} groups={groups} indented={row.indented} />
+                    <WorkspaceRow ws={row.ws} active={row.ws.id === activeWorkspaceId} summary={summaries[row.ws.path]} groups={groups} indented={row.indented} />
                   ) : row.kind === "recent" ? (
                     <RecentProjectRow name={row.name} path={row.path} onOpen={() => void addWorkspace(row.path)} />
                   ) : (

@@ -129,6 +129,9 @@ interface LayoutActions {
     setPlansPanelWidth: (width: number) => void;
     setLeftSection: (section: LayoutState["leftPanel"]["activeSection"]) => void;
     setRightSection: (section: LayoutState["rightPanel"]["activeSection"]) => void;
+    /** Make the right panel visible AND switch it to `section` (e.g. open the
+     *  Source Control pane from the status bar). */
+    revealRightSection: (section: LayoutState["rightPanel"]["activeSection"]) => void;
     addTab: (tab: Tab, groupId?: string) => void;
     closeTab: (id: string) => void;
     setActiveTab: (id: string) => void;
@@ -398,6 +401,11 @@ export const useLayoutStore = createSelectors(
           }),
         setRightSection: (section) =>
           set((s) => {
+            s.rightPanel.activeSection = section;
+          }),
+        revealRightSection: (section) =>
+          set((s) => {
+            s.rightPanel.visible = true;
             s.rightPanel.activeSection = section;
           }),
         addTab: (tab, groupId) =>
