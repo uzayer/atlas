@@ -180,7 +180,6 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       if (!query.trim() && !scope) {
         setResults([]);
         setPastSessions([]);
-        setActive(0);
         return () => controller.abort();
       }
 
@@ -204,7 +203,6 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
             : sessions;
           setPastSessions(filtered.slice(0, 30));
           setResults([]);
-          setActive(0);
         });
       } else if (scope === "past_message" && pastSession) {
         void listMessagesInPastSession(pastSession, query, controller.signal).then(
@@ -212,7 +210,6 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
             if (controller.signal.aborted) return;
             setResults(applyExcludes(msgs));
             setPastSessions([]);
-            setActive(0);
           }
         );
       } else {
@@ -220,12 +217,19 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
           if (controller.signal.aborted) return;
           setResults(applyExcludes(r));
           setPastSessions([]);
-          setActive(0);
         });
       }
 
       return () => controller.abort();
     }, [open, query, scope, pastSession, projectPath, excludeIds, indexNonce]);
+
+    // Reset the keyboard cursor to the top ONLY when the user changes what
+    // they're looking at (query/scope/session) — NOT when results merely
+    // refresh in the background (e.g. the index-build `indexNonce` bump), which
+    // would otherwise snap the highlight back to the first item mid-navigation.
+    useEffect(() => {
+      setActive(0);
+    }, [query, scope, pastSession]);
 
     // Detect whether the active workspace's file index is still building, for
     // the file-dependent scopes (blended / file / folder). Drives the

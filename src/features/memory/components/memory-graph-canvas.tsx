@@ -23,6 +23,8 @@ import { GraphRuler, type Viewport } from "@/components/graph-ruler";
 export interface MemoryNode {
   id: string;
   title: string;
+  /** Natural-language one-liner for display (falls back to title). */
+  summary: string;
   kind: string;
   source: string; // "claude" | "codex"
   snippet: string;
@@ -416,7 +418,7 @@ function buildScene(
     });
     nodeLayer.addChild(graphics);
 
-    const label = new Text({ text: node.title, style: styleFor("#c4c4c4") });
+    const label = new Text({ text: node.summary || node.title, style: styleFor("#c4c4c4") });
     label.anchor.set(0.5, 0); // top-center: hangs below the disc
     labelLayer.addChild(label);
 
