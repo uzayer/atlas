@@ -50,6 +50,9 @@ fn git_mut(app: &AppHandle, path: &str, args: &[&str]) -> Result<String, String>
 pub struct BranchInfo {
     pub name: String,
     pub is_current: bool,
+    /// True for `refs/remotes/*` entries (e.g. `origin/main`). Local checkout
+    /// of one should use the short name so git creates a tracking branch.
+    pub is_remote: bool,
     pub upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
@@ -115,8 +118,10 @@ fn parse_track(track: &str) -> (u32, u32) {
 pub async fn git_branches_full(path: String) -> Result<Vec<BranchInfo>, String> {
     tokio::task::spawn_blocking(move || {
         let fmt = format!(
-            "%(refname:short){US}%(HEAD){US}%(upstream:short){US}%(upstream:track){US}%(contents:subject){US}%(committerdate:relative)"
+            "%(refname:short){US}%(HEAD){US}%(upstream:short){US}%(upstream:track){US}%(contents:subject){US}%(committerdate:relative){US}%(refname)"
         );
+        // Local heads AND remote-tracking branches, so the switcher can search
+        // and check out e.g. `origin/feature-x` (parity with the Review panel).
         let out = git_out(
             &path,
             &[
@@ -124,19 +129,29 @@ pub async fn git_branches_full(path: String) -> Result<Vec<BranchInfo>, String> 
                 "--sort=-committerdate",
                 &format!("--format={fmt}"),
                 "refs/heads",
+                "refs/remotes",
             ],
         )?;
         let branches = out
             .lines()
             .filter(|l| !l.is_empty())
-            .map(|line| {
+            .filter_map(|line| {
                 let p: Vec<&str> = line.split(US).collect();
+                let name = p.first().copied().unwrap_or("").to_string();
+                let full_ref = p.get(6).copied().unwrap_or("");
+                // Drop the symbolic `refs/remotes/origin/HEAD` pointer (its short
+                // name collapses to just `origin`, so filter on the full ref).
+                if name.is_empty() || full_ref.ends_with("/HEAD") {
+                    return None;
+                }
+                let is_remote = full_ref.starts_with("refs/remotes/");
                 let track = p.get(3).copied().unwrap_or("");
                 let (ahead, behind) = parse_track(track);
                 let upstream = p.get(2).copied().unwrap_or("");
-                BranchInfo {
-                    name: p.first().copied().unwrap_or("").to_string(),
+                Some(BranchInfo {
+                    name,
                     is_current: p.get(1).map_or(false, |h| h.trim() == "*"),
+                    is_remote,
                     upstream: if upstream.is_empty() {
                         None
                     } else {
@@ -146,7 +161,7 @@ pub async fn git_branches_full(path: String) -> Result<Vec<BranchInfo>, String> 
                     behind,
                     subject: p.get(4).copied().unwrap_or("").to_string(),
                     date: p.get(5).copied().unwrap_or("").to_string(),
-                }
+                })
             })
             .collect();
         Ok(branches)

@@ -70,18 +70,27 @@ export function BranchSwitcher() {
                 )}
                 onClick={() => {
                   if (b.isCurrent) return;
-                  void run(() => actions.checkout(b.name));
+                  // Remote-tracking refs (origin/foo) must be checked out by their
+                  // short name so git creates a local tracking branch instead of
+                  // landing in detached HEAD.
+                  const target = b.isRemote ? b.name.slice(b.name.indexOf("/") + 1) : b.name;
+                  void run(() => actions.checkout(target));
                   setOpen(false);
                 }}
               >
                 <Check size={12} className={cn("shrink-0", b.isCurrent ? "text-accent" : "opacity-0")} />
                 <span className="truncate flex-1 font-mono">{b.name}</span>
+                {b.isRemote && (
+                  <span className="shrink-0 text-[8px] font-mono uppercase tracking-wide text-text-tertiary border border-border-default rounded px-1">
+                    remote
+                  </span>
+                )}
                 {(b.ahead > 0 || b.behind > 0) && (
                   <span className="shrink-0 text-[9px] font-mono text-text-tertiary">
                     {b.ahead > 0 && `↑${b.ahead}`} {b.behind > 0 && `↓${b.behind}`}
                   </span>
                 )}
-                {!b.isCurrent && (
+                {!b.isCurrent && !b.isRemote && (
                   <div className="flex items-center opacity-0 group-hover:opacity-100">
                     <button
                       onClick={(e) => {

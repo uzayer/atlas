@@ -27,6 +27,8 @@ interface GitBranch {
 export interface BranchInfo {
   name: string;
   isCurrent: boolean;
+  /** True for remote-tracking branches (e.g. `origin/main`). */
+  isRemote: boolean;
   upstream: string | null;
   ahead: number;
   behind: number;
