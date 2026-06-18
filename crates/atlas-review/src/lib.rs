@@ -282,6 +282,22 @@ async fn run_agent(
     Ok(AgentRun { text, input_tokens: it, output_tokens: ot, cost_usd: cost })
 }
 
+/// One-shot, tool-free, single-turn completion via a BYOK provider — returns the
+/// assistant text. Reuses the same DenyAll / `max_turns(1)` agent the reviewer
+/// uses. Exposed for the Memory-Chat codebase indexer's file summaries.
+pub async fn complete(
+    provider: &str,
+    model: &str,
+    api_key: &str,
+    system: &str,
+    user: &str,
+    cancel: &CancellationToken,
+) -> Result<String, String> {
+    run_agent(provider, model, api_key, system, user, cancel, None)
+        .await
+        .map(|r| r.text)
+}
+
 /// Truncate a file's diff to a token budget (rough chars/4), with a marker.
 fn truncate_tokens(s: &str, budget_tokens: usize) -> String {
     if diff::estimate_tokens(s) <= budget_tokens {

@@ -12,6 +12,7 @@ pub mod compose_prompt;
 pub mod fileindex;
 pub mod canvas;
 pub mod claude;
+pub mod codebase_index;
 pub mod fs;
 pub mod git;
 pub mod git_graph;

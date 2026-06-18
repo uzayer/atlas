@@ -353,6 +353,7 @@ version = "0.1.15"
 dependencies = [
  "atlas-acp",
  "atlas-agents",
+ "atlas-codeindex",
  "atlas-embed",
  "atlas-review",
  "atlas-terminal",
@@ -418,6 +419,18 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "atlas-codeindex"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cersei",
+ "ignore",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -1,0 +1,21 @@
+[package]
+name = "atlas-codeindex"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic codebase scanner for Atlas: turns live source into structural, embeddable docs via Cersei's tree-sitter code intelligence."
+
+[lib]
+name = "atlas_codeindex"
+
+[dependencies]
+# Tree-sitter code intelligence (imports + symbols for Rust/TS/JS/Python/Go),
+# re-exported by the Cersei umbrella as `cersei::tools::tool_primitives::code_intel`.
+# Already compiled for the host via atlas-review, so no new grammar build.
+cersei = "0.1.9"
+# gitignore-respecting project walk (same crate the file index uses).
+ignore = "0.4"
+# Content fingerprints for incremental rebuilds.
+sha2 = "0.10"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -64,6 +64,24 @@ impl MemoryChatState {
             cancels: Mutex::new(HashMap::new()),
         }
     }
+
+    /// Shared handle to the cached local chat model, so the codebase indexer can
+    /// reuse it for Tier-2 file summaries instead of loading its own.
+    pub(crate) fn chat_model(&self) -> Arc<Mutex<Option<QuantizedChatModel>>> {
+        self.chat.clone()
+    }
+}
+
+/// Resolve the downloaded local model's gguf + tokenizer paths, erroring if the
+/// model isn't present. Shared with the codebase indexer.
+pub(crate) fn local_model_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    let dir = chat_model_dir(app)?;
+    let gguf = dir.join(GGUF_FILE);
+    let tok = dir.join(TOKENIZER_FILE);
+    if !gguf.exists() || !tok.exists() {
+        return Err("Local chat model is not downloaded.".into());
+    }
+    Ok((gguf, tok))
 }
 
 impl Default for MemoryChatState {

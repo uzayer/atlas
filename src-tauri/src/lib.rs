@@ -360,6 +360,8 @@ pub fn run() {
             commands::memory_chat::memory_chat_send,
             commands::memory_chat::memory_chat_cancel,
             commands::memory_chat::memory_chat_retrieve,
+            commands::codebase_index::codebase_index_status,
+            commands::codebase_index::codebase_index_build,
             commands::memory_chat_sessions::memory_chat_sessions_list,
             commands::memory_chat_sessions::memory_chat_session_get,
             commands::memory_chat_sessions::memory_chat_session_save,

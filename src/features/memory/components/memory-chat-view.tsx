@@ -13,6 +13,7 @@ import {
   Cpu,
   Cloud,
   KeyRound,
+  Boxes,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/time-ago";
@@ -255,6 +256,85 @@ function Conversation({
   );
 }
 
+// ── Codebase index status / action bar ─────────────────────────────────────────
+
+/** Codebase-index status banner — the top section *inside* the composer box
+ *  (one curved border around banner + input, divided by a line). */
+function CodebaseIndexBanner({
+  mode,
+  provider,
+  model,
+  localReady,
+}: {
+  mode: ChatMode;
+  provider: string;
+  model: string;
+  localReady: boolean;
+}) {
+  const projectPath = useProjectStore((s) => s.currentProject?.path ?? null);
+  const status = useMemoryChatStore.use.codebaseStatus();
+  const building = useMemoryChatStore.use.codebaseBuilding();
+  const progress = useMemoryChatStore.use.codebaseProgress();
+  const { loadCodebaseStatus, buildCodebaseIndex } = useMemoryChatStore.use.actions();
+
+  useEffect(() => {
+    if (projectPath) void loadCodebaseStatus(projectPath);
+  }, [projectPath, loadCodebaseStatus]);
+
+  if (!projectPath) return null;
+
+  const onIndex = () => {
+    // Reuse the chat's backend: provider summaries when a provider chat is set up,
+    // local summaries when the local model is ready, else structural-only.
+    const opts =
+      mode === "provider" && provider && model
+        ? ({ mode: "incremental", backend: "provider", provider, model } as const)
+        : localReady
+          ? ({ mode: "incremental", backend: "local" } as const)
+          : ({ mode: "incremental", backend: "structural" } as const);
+    void buildCodebaseIndex(projectPath, opts);
+  };
+
+  const lead = status?.indexed ? `Codebase: ${status.fileCount} files` : "Codebase not indexed";
+  const rest = status?.indexed
+    ? (status.summaryCount ? ` · ${status.summaryCount} summarized` : "") +
+      (status.builtAtMs ? ` · updated ${timeAgo(new Date(status.builtAtMs).toISOString(), { suffix: true })}` : "")
+    : " — answers may be outdated";
+
+  return (
+    <div className="relative z-0 mx-2 -mb-3.5 flex items-center justify-between gap-3 rounded-t-xl bg-[var(--bg-tertiary)] px-3.5 pt-1.5 pb-5 text-[11px]">
+      <span className="flex min-w-0 items-center gap-2 truncate">
+        <Boxes size={12} className="shrink-0 text-[var(--text-tertiary)]" />
+        <span className="truncate">
+          <span className="font-semibold text-[var(--text-primary)]">{lead}</span>
+          {rest && <span className="text-[var(--text-tertiary)]">{rest}</span>}
+        </span>
+      </span>
+      {building ? (
+        <span className="flex shrink-0 items-center gap-1.5 text-[var(--text-tertiary)]">
+          <Loader2 size={11} className="animate-spin" />
+          {progress ? phaseLabel(progress) : "Indexing…"}
+        </span>
+      ) : (
+        <button
+          onClick={onIndex}
+          title="Scan the current codebase so the chat is grounded in up-to-date source"
+          className="shrink-0 font-medium text-[var(--text-secondary)] underline underline-offset-2 hover:text-[var(--text-primary)] cursor-pointer"
+        >
+          {status?.indexed ? "Re-index" : "Index now"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function phaseLabel(p: { phase: string; current: number; total: number }): string {
+  if (p.phase === "scanning") return "Scanning…";
+  if (p.phase === "summarizing") return `Summarizing ${p.current}/${p.total}`;
+  if (p.phase === "embedding") return "Embedding…";
+  return "Indexing…";
+}
+
 function Sources({ sources }: { sources: SourceRef[] }) {
   return (
     <div className="mx-auto max-w-[760px] -mt-2 mb-4 flex flex-wrap gap-1.5 pl-11">
@@ -451,7 +531,11 @@ function Composer({
 
   return (
     <div className="shrink-0 p-3">
-      <div className="mx-auto w-full max-w-[760px] rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)] shadow-[0_8px_24px_rgba(0,0,0,0.35)] focus-within:border-[var(--border-focus)]">
+      <div className="mx-auto w-full max-w-[760px]">
+        {/* Tip peeks above the rounded input and tucks behind it (separate
+            rounded-top surface, contrasting shade, no border). */}
+        <CodebaseIndexBanner mode={mode} provider={provider} model={model} localReady={localReady} />
+        <div className="relative z-10 overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)] shadow-[0_8px_24px_rgba(0,0,0,0.35)] focus-within:border-[var(--border-focus)]">
         <ChatInput
           ref={inputRef}
           placeholder={disabled ? "Open a project to chat with its memory…" : "Ask about features, policies, changes…"}
@@ -496,6 +580,7 @@ function Composer({
               {running ? <Square size={11} strokeWidth={3} fill="currentColor" /> : <ArrowUp size={14} strokeWidth={2.5} />}
             </button>
           )}
+        </div>
         </div>
       </div>
     </div>

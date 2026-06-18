@@ -24,6 +24,13 @@ import {
   type DownloadProgress,
   type MemoryChatSessionWire,
 } from "../lib/memory-chat-api";
+import {
+  codebaseIndex,
+  listenCodebaseIndexProgress,
+  type CodebaseIndexStatus,
+  type CodebaseIndexProgress,
+  type CodebaseBuildOpts,
+} from "../lib/codebase-index-api";
 
 export type ChatMode = "local" | "provider";
 
@@ -60,6 +67,9 @@ interface MemoryChatState {
   streamToSession: Record<string, string>;
   /** assistant messageId → retrieved sources for that answer. */
   sourcesByMsg: Record<string, SourceRef[]>;
+  codebaseStatus: CodebaseIndexStatus | null;
+  codebaseBuilding: boolean;
+  codebaseProgress: CodebaseIndexProgress | null;
   actions: {
     init: () => Promise<void>;
     checkModel: () => Promise<void>;
@@ -74,6 +84,8 @@ interface MemoryChatState {
     setModel: (id: string, model: string) => void;
     send: (id: string, text: string, projectPath: string) => Promise<void>;
     stop: (id: string) => void;
+    loadCodebaseStatus: (projectPath: string, force?: boolean) => Promise<void>;
+    buildCodebaseIndex: (projectPath: string, opts: CodebaseBuildOpts) => Promise<void>;
   };
 }
 
@@ -124,6 +136,9 @@ const useMemoryChatStoreBase = create<MemoryChatState>()((set, get) => ({
   streaming: {},
   streamToSession: {},
   sourcesByMsg: {},
+  codebaseStatus: null,
+  codebaseBuilding: false,
+  codebaseProgress: null,
   actions: {
     init: async () => {
       if (!listenerInstalled) {
@@ -326,6 +341,31 @@ const useMemoryChatStoreBase = create<MemoryChatState>()((set, get) => ({
     stop: (id) => {
       const streamId = Object.entries(get().streamToSession).find(([, sid]) => sid === id)?.[0];
       if (streamId) void memoryChat.cancel(streamId);
+    },
+
+    loadCodebaseStatus: async (projectPath, force = false) => {
+      if (!force && get().codebaseStatus) return;
+      try {
+        const status = await codebaseIndex.status(projectPath);
+        set({ codebaseStatus: status });
+      } catch {
+        /* none yet */
+      }
+    },
+
+    buildCodebaseIndex: async (projectPath, opts) => {
+      if (get().codebaseBuilding) return;
+      set({ codebaseBuilding: true, codebaseProgress: null });
+      const un = await listenCodebaseIndexProgress((p) => set({ codebaseProgress: p }));
+      try {
+        const status = await codebaseIndex.build(projectPath, opts);
+        set({ codebaseStatus: status });
+      } catch {
+        /* keep prior status */
+      } finally {
+        un();
+        set({ codebaseBuilding: false, codebaseProgress: null });
+      }
     },
   },
 }));

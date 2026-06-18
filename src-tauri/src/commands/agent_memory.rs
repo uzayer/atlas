@@ -271,7 +271,42 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
         });
     }
 
+    // Fold in the codebase index (current source: per-file structure + optional
+    // LLM summaries) so the chat is grounded in how the code works *now*, not just
+    // stale agent memory. Cheap disk read — the expensive scan/summarize happens
+    // in the separate `codebase_index_build` command.
+    docs.extend(read_codebase_docs(&project_path));
+
     docs
+}
+
+/// Map the persisted codebase index (`.atlas/codebase-index/docs.json`) into
+/// embeddable `MemoryDoc`s for the unified corpus.
+fn read_codebase_docs(project_path: &str) -> Vec<MemoryDoc> {
+    atlas_codeindex::load_index(project_path)
+        .docs
+        .into_iter()
+        .map(|d| {
+            let summary = if d.summary.trim().is_empty() {
+                format!("{} · {} symbols", d.language, d.symbols.len())
+            } else {
+                d.summary.clone()
+            };
+            let aliases = atlas_codeindex::aliases(&d.rel, &d.symbols);
+            MemoryDoc {
+                id: format!("codebase:{}", d.rel),
+                title: d.rel,
+                summary,
+                kind: "file".into(),
+                source: "codebase".into(),
+                file_path: Some(d.abs_path),
+                timestamp_ms: d.mtime_ms,
+                text: d.text,
+                aliases,
+                links: vec![],
+            }
+        })
+        .collect()
 }
 
 /// A Codex session with its recorded git context — the strong agent→branch→
