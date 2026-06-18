@@ -113,6 +113,10 @@ pub struct MemoryDoc {
     /// Stable id, e.g. `claude:feedback_x.md`, `codex:<thread-id>`.
     pub id: String,
     pub title: String,
+    /// Natural-language one-liner for display (frontmatter `description`, the
+    /// thread's first message, or the first body sentence) — far more readable
+    /// than the slug `title` in the tree view. Falls back to `title` when empty.
+    pub summary: String,
     pub kind: String,
     pub source: String, // "claude" | "codex"
     /// Absolute path of the editable file this doc came from (memory `.md`,
@@ -154,6 +158,7 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
         docs.push(MemoryDoc {
             id: "claude:MEMORY.md".into(),
             title: "Memory Index".into(),
+            summary: "Index of every project memory".into(),
             kind: "index".into(),
             source: "claude".into(),
             file_path: Some(mem_dir.join("MEMORY.md").to_string_lossy().to_string()),
@@ -171,9 +176,15 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
         } else {
             format!("{}\n\n{}", e.description, e.body)
         };
+        let summary = if !e.description.trim().is_empty() {
+            short_title(e.description.trim())
+        } else {
+            first_sentence(&e.body)
+        };
         docs.push(MemoryDoc {
             id: format!("claude:{}", e.name),
             title,
+            summary,
             kind: if e.kind.is_empty() { "memory".into() } else { e.kind.clone() },
             source: "claude".into(),
             file_path: Some(mem_dir.join(&e.name).to_string_lossy().to_string()),
@@ -187,6 +198,7 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
         docs.push(MemoryDoc {
             id: "claude:CLAUDE.md".into(),
             title: "CLAUDE.md".into(),
+            summary: "Project instructions for agents".into(),
             kind: "instruction".into(),
             source: "claude".into(),
             file_path: Some(
@@ -205,6 +217,7 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
         docs.push(MemoryDoc {
             id: "claude:CLAUDE.md@global".into(),
             title: "CLAUDE.md (global)".into(),
+            summary: "Global agent instructions".into(),
             kind: "instruction".into(),
             source: "claude".into(),
             file_path: Some(home.join(".claude").join("CLAUDE.md").to_string_lossy().to_string()),
@@ -219,6 +232,7 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
         docs.push(MemoryDoc {
             id: "codex:AGENTS.md".into(),
             title: "AGENTS.md".into(),
+            summary: "Project instructions for Codex".into(),
             kind: "instruction".into(),
             source: "codex".into(),
             file_path: Some(
@@ -246,6 +260,7 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
         docs.push(MemoryDoc {
             id: format!("codex:{}", t.id),
             title: short_title(raw_title),
+            summary: short_title(raw_title),
             kind: "thread".into(),
             source: "codex".into(),
             file_path: None, // Codex threads live in SQLite, not an editable file.
@@ -256,7 +271,42 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
         });
     }
 
+    // Fold in the codebase index (current source: per-file structure + optional
+    // LLM summaries) so the chat is grounded in how the code works *now*, not just
+    // stale agent memory. Cheap disk read — the expensive scan/summarize happens
+    // in the separate `codebase_index_build` command.
+    docs.extend(read_codebase_docs(&project_path));
+
     docs
+}
+
+/// Map the persisted codebase index (`.atlas/codebase-index/docs.json`) into
+/// embeddable `MemoryDoc`s for the unified corpus.
+fn read_codebase_docs(project_path: &str) -> Vec<MemoryDoc> {
+    atlas_codeindex::load_index(project_path)
+        .docs
+        .into_iter()
+        .map(|d| {
+            let summary = if d.summary.trim().is_empty() {
+                format!("{} · {} symbols", d.language, d.symbols.len())
+            } else {
+                d.summary.clone()
+            };
+            let aliases = atlas_codeindex::aliases(&d.rel, &d.symbols);
+            MemoryDoc {
+                id: format!("codebase:{}", d.rel),
+                title: d.rel,
+                summary,
+                kind: "file".into(),
+                source: "codebase".into(),
+                file_path: Some(d.abs_path),
+                timestamp_ms: d.mtime_ms,
+                text: d.text,
+                aliases,
+                links: vec![],
+            }
+        })
+        .collect()
 }
 
 /// A Codex session with its recorded git context — the strong agent→branch→
@@ -307,6 +357,23 @@ fn file_mtime_ms(path: &std::path::Path) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// First meaningful line of a markdown body as a short NL summary (skips blank
+/// lines, strips heading/list/quote markers). Used when a memory has no
+/// frontmatter `description`.
+fn first_sentence(s: &str) -> String {
+    for line in s.lines() {
+        let t = line
+            .trim()
+            .trim_start_matches('#')
+            .trim_start_matches(['-', '*', '>', ' '])
+            .trim();
+        if !t.is_empty() {
+            return short_title(t);
+        }
+    }
+    String::new()
 }
 
 /// Strip the appended Atlas-context block, collapse whitespace, truncate.

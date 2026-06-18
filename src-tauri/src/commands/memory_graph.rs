@@ -235,6 +235,8 @@ fn embed_text(doc: &MemoryDoc) -> String {
 pub struct GraphNode {
     id: String,
     title: String,
+    /// Natural-language one-liner for display (falls back to title).
+    summary: String,
     kind: String,
     source: String,
     snippet: String,
@@ -398,6 +400,11 @@ fn build_graph_blocking(
         .map(|(i, d)| GraphNode {
             id: d.id.clone(),
             title: d.title.clone(),
+            summary: if d.summary.trim().is_empty() {
+                d.title.clone()
+            } else {
+                d.summary.clone()
+            },
             kind: d.kind.clone(),
             source: d.source.clone(),
             snippet: snippet(&d.text),

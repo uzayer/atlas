@@ -118,6 +118,7 @@ pub fn run() {
         .manage(SessionsWatchState::new())
         .manage(ClaudeSessionIndex::new())
         .manage(SavedPapersIndex::new())
+        .manage(commands::memory_chat::MemoryChatState::new())
         // Drop a window's per-window index + mention caches when it closes, so
         // its file watcher stops and memory is freed (these states are keyed by
         // webview label for multi-window project scoping).
@@ -353,6 +354,18 @@ pub fn run() {
             commands::memory_policy::memory_policy_update,
             commands::memory_timeline::memory_timeline,
             commands::memory_timeline::memory_timeline_cached,
+            commands::memory_chat::memory_chat_model_status,
+            commands::memory_chat::memory_chat_model_download,
+            commands::memory_chat::memory_chat_model_load,
+            commands::memory_chat::memory_chat_send,
+            commands::memory_chat::memory_chat_cancel,
+            commands::memory_chat::memory_chat_retrieve,
+            commands::codebase_index::codebase_index_status,
+            commands::codebase_index::codebase_index_build,
+            commands::memory_chat_sessions::memory_chat_sessions_list,
+            commands::memory_chat_sessions::memory_chat_session_get,
+            commands::memory_chat_sessions::memory_chat_session_save,
+            commands::memory_chat_sessions::memory_chat_session_delete,
             commands::pdf_annotations::pdf_annotations_load,
             commands::pdf_annotations::pdf_annotations_save,
         ])

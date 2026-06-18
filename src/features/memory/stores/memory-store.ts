@@ -71,7 +71,7 @@ interface MemoryStoreState {
 
 export const useMemoryStore = createSelectors(
   create<MemoryStoreState>()((set, get) => ({
-    subTab: "claude",
+    subTab: "chat",
     project: null,
     agentMemory: null,
     agentMemoryLoading: false,

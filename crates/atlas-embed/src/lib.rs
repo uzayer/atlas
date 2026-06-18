@@ -7,8 +7,13 @@
 //! `config.json`, `tokenizer.json`, `model.safetensors` — and produces
 //! L2-normalized mean-pooled sentence vectors. Because vectors are unit-length,
 //! cosine similarity is just a dot product.
+//!
+//! The crate also hosts a small generative counterpart in [`chat`]: a quantized
+//! Qwen2.5-Instruct decoder for local RAG answers, sharing the same candle stack.
 
 use std::path::Path;
+
+pub mod chat;
 
 use anyhow::{anyhow, Context, Result};
 use candle_core::{Device, Tensor};

@@ -1,6 +1,6 @@
 [package]
 name = "atlas"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2021"
 
 [lib]
@@ -54,6 +54,9 @@ atlas-acp = { path = "../crates/atlas-acp" }
 atlas-embed = { path = "../crates/atlas-embed" }
 # Native code-review engine (Cersei-backed). Drives `commands::review`.
 atlas-review = { path = "../crates/atlas-review" }
+# Deterministic codebase scanner (Cersei tree-sitter). Feeds the Memory-Chat RAG
+# with up-to-date source structure. Drives `commands::codebase_index`.
+atlas-codeindex = { path = "../crates/atlas-codeindex" }
 dirs = "6"
 sha2 = "0.10"
 # URL parsing for the embedded browser (`commands::browser`). Already in the
@@ -100,6 +103,9 @@ rig-core = "0.38.1"
 # performZoom:), which Tauri's cross-platform maximize API doesn't cover.
 # Already in the tree transitively; pinned here for the direct msg_send.
 objc2 = "0.6"
+# Turn on atlas-embed's Metal backend so the local memory-chat model runs on the
+# Apple-Silicon GPU. Feature is additive over the base path dep in `[dependencies]`.
+atlas-embed = { path = "../crates/atlas-embed", features = ["metal"] }
 
 # Release profile — Atlas previously shipped with Cargo defaults
 # (lto = false, codegen-units = 16, no strip), which means the bundled .app

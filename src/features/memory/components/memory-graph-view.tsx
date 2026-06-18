@@ -10,11 +10,19 @@ import {
   Play,
   Pause,
   Clock,
+  Network,
+  ListTree,
+  ArrowUpRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useMemoryGraphStore } from "../stores/memory-graph-store";
+import { useMemoryStore } from "../stores/memory-store";
 import { MemoryGraphCanvas } from "./memory-graph-canvas";
+import { MemoryTreeView } from "./memory-tree-view";
+
+type ViewMode = "graph" | "tree";
+const VIEW_KEY = "atlas-memory-graph-view-mode";
 
 const MODEL_LABEL = "all-MiniLM-L6-v2 · ~90 MB";
 
@@ -240,6 +248,41 @@ function GraphReady({
   const [playing, setPlaying] = useState(false);
   const rafRef = useRef<number | undefined>(undefined);
 
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    const v = typeof localStorage !== "undefined" ? localStorage.getItem(VIEW_KEY) : null;
+    // Tree is the default/initial view; only an explicit "graph" pref overrides.
+    return v === "graph" ? "graph" : "tree";
+  });
+  const setView = (m: ViewMode) => {
+    setViewMode(m);
+    try {
+      localStorage.setItem(VIEW_KEY, m);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const { navigateToMemory } = useMemoryStore.use.actions();
+
+  // Esc deselects the active node (unless typing in the search field).
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const el = document.activeElement;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+      onSelect(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedId, onSelect]);
+
+  // Jump from the detail card to the source memory: Claude file or Codex thread.
+  const openSource = () => {
+    if (!selected) return;
+    navigateToMemory(selected.source === "codex" ? "codex" : "claude", selected.id);
+  };
+
   // Animate the cutoff from oldest → newest, then reveal everything.
   useEffect(() => {
     if (!playing || !hasTime) return;
@@ -265,6 +308,34 @@ function GraphReady({
     <div className="h-full flex flex-col bg-[var(--bg-base)]">
       {/* Query bar */}
       <div className="flex items-center gap-2 px-3 h-[32px] shrink-0 border-b border-[var(--border-default)]">
+        {/* Tree / Graph toggle — top-left. Tree (the decision tree) is the
+            primary view, so it sits first. */}
+        <div className="flex items-center gap-0.5 h-6 rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)] p-0.5 shrink-0">
+          <button
+            onClick={() => setView("tree")}
+            title="Decision tree"
+            className={cn(
+              "flex items-center gap-1 px-1.5 h-5 rounded-[5px] text-[10px] font-medium transition-colors cursor-pointer",
+              viewMode === "tree"
+                ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
+                : "text-[var(--text-tertiary)] hover:text-[var(--text-primary)]",
+            )}
+          >
+            <ListTree size={11} /> Tree
+          </button>
+          <button
+            onClick={() => setView("graph")}
+            title="Force graph"
+            className={cn(
+              "flex items-center gap-1 px-1.5 h-5 rounded-[5px] text-[10px] font-medium transition-colors cursor-pointer",
+              viewMode === "graph"
+                ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
+                : "text-[var(--text-tertiary)] hover:text-[var(--text-primary)]",
+            )}
+          >
+            <Network size={11} /> Graph
+          </button>
+        </div>
         <div className="flex items-center gap-1.5 h-6 flex-1 max-w-[440px] rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 focus-within:border-[var(--border-strong)]">
           <Search size={12} className="text-[var(--text-tertiary)] shrink-0" />
           <input
@@ -304,15 +375,27 @@ function GraphReady({
       {/* Canvas + optional results rail */}
       <div className="flex-1 min-h-0 flex">
         <div className="relative flex-1 min-w-0">
-          <MemoryGraphCanvas
-            graph={graph}
-            projectPath={projectPath}
-            selectedId={selectedId}
-            matchedIds={matchedIds}
-            cutoffMs={cutoff}
-            onSelect={onSelect}
-            onActivate={onSelect}
-          />
+          {viewMode === "graph" ? (
+            <MemoryGraphCanvas
+              graph={graph}
+              projectPath={projectPath}
+              selectedId={selectedId}
+              matchedIds={matchedIds}
+              cutoffMs={cutoff}
+              onSelect={onSelect}
+              onActivate={onSelect}
+            />
+          ) : (
+            <MemoryTreeView
+              graph={graph}
+              projectPath={projectPath}
+              selectedId={selectedId}
+              matchedIds={matchedIds}
+              cutoffMs={cutoff}
+              onSelect={onSelect}
+              onActivate={onSelect}
+            />
+          )}
 
           {/* Time scrubber — watch memory accrue; drag to a moment in time. */}
           {hasTime && (
@@ -344,8 +427,8 @@ function GraphReady({
             </div>
           )}
 
-          {/* Impact-mode legend (only while a node is selected). */}
-          {selected && (
+          {/* Impact-mode legend (graph only, while a node is selected). */}
+          {selected && viewMode === "graph" && (
             <div className="absolute right-3 top-[26px] flex items-center gap-3 rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)]/90 backdrop-blur-sm px-2.5 h-7 text-[10px] text-[var(--text-tertiary)]">
               <span className="flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full" style={{ background: "#fafafa" }} /> impacted
@@ -355,14 +438,26 @@ function GraphReady({
               </span>
             </div>
           )}
-          {/* Selected node detail card */}
+          {/* Selected node detail card — click to open the source memory. */}
           {selected && (
-            <div className="absolute left-[26px] bottom-3 max-w-[340px] rounded-lg border border-[var(--border-default)] bg-[var(--bg-elevated)]/90 backdrop-blur-sm shadow-[var(--shadow-overlay)] p-3">
+            <button
+              onClick={openSource}
+              title={
+                selected.source === "codex"
+                  ? "Open this session in the Codex tab"
+                  : "Open this file in the Claude Code tab"
+              }
+              className="group absolute left-[26px] bottom-3 max-w-[340px] text-left rounded-lg border border-[var(--border-default)] hover:border-[var(--border-strong)] bg-[var(--bg-elevated)]/90 backdrop-blur-sm shadow-[var(--shadow-overlay)] p-3 transition-colors cursor-pointer"
+            >
               <div className="flex items-center gap-1.5 mb-1">
                 <SourceDot source={selected.source} />
                 <span className="text-[11px] font-medium text-[var(--text-primary)] truncate">
-                  {selected.title}
+                  {selected.summary || selected.title}
                 </span>
+                <ArrowUpRight
+                  size={12}
+                  className="ml-auto shrink-0 text-[var(--text-tertiary)] opacity-0 group-hover:opacity-100 transition-opacity"
+                />
               </div>
               <p className="text-[10px] text-[var(--text-tertiary)] line-clamp-4 leading-relaxed">
                 {selected.snippet || "—"}
@@ -371,7 +466,7 @@ function GraphReady({
                 {selected.source} · {selected.kind}
                 {selected.timestampMs > 0 && ` · ${fmtDate(selected.timestampMs)}`}
               </p>
-            </div>
+            </button>
           )}
         </div>
 
