@@ -14,10 +14,12 @@ import {
   Cpu,
   Share2,
   SlidersHorizontal,
+  Sparkles,
 } from "lucide-react";
 import { MemoryGraphView } from "./memory-graph-view";
 import { MemoryPolicyView } from "./memory-policy-view";
 import { MemoryTimelineView } from "./memory-timeline-view";
+import { MemoryChatView } from "./memory-chat-view";
 import { cn } from "@/lib/utils";
 import { PanelSkeleton } from "@/components/panel-skeleton";
 import { Markdown } from "@/lib/markdown";
@@ -57,48 +59,58 @@ export function MemoryPanel() {
 
   return (
     <div className="h-full flex flex-col bg-[var(--bg-base)]">
-      {/* Header: sub-tab segmented control + refresh */}
-      <div className="flex items-center justify-between h-[32px] shrink-0 border-b border-[var(--border-default)] px-2">
-        <div className="flex items-center gap-0.5">
-          <SubTabButton
-            active={sub === "claude"}
-            onClick={() => setSub("claude")}
-            icon={<ClaudeIcon className="size-3.5" />}
-            label="Claude Code"
-            count={claudeCount}
-          />
-          <SubTabButton
-            active={sub === "codex"}
-            onClick={() => setSub("codex")}
-            icon={<CodexIcon className="size-3.5" />}
-            label="Codex"
-            count={codexCount}
-          />
-          <SubTabButton
-            active={sub === "graph"}
-            onClick={() => setSub("graph")}
-            icon={<Share2 size={13} />}
-            label="Graph"
-            count={0}
-          />
-          <SubTabButton
-            active={sub === "policy"}
-            onClick={() => setSub("policy")}
-            icon={<SlidersHorizontal size={13} />}
-            label="Policy"
-            count={0}
-          />
-          <SubTabButton
-            active={sub === "timeline"}
-            onClick={() => setSub("timeline")}
-            icon={<GitBranch size={13} />}
-            label="Timeline"
-            count={0}
+      {/* Header: Chat (left) · combined nav (absolute center) · refresh (right) */}
+      <div className="relative flex items-center h-[32px] shrink-0 border-b border-[var(--border-default)] px-2">
+        <div className="flex items-center">
+          <PillSeg
+            active={sub === "chat"}
+            onClick={() => setSub("chat")}
+            icon={<Sparkles size={12} />}
+            label="Chat"
           />
         </div>
+
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+          <PillGroup>
+            <PillSeg
+              active={sub === "graph"}
+              onClick={() => setSub("graph")}
+              icon={<Share2 size={12} />}
+              label="Graph"
+            />
+            <PillSeg
+              active={sub === "policy"}
+              onClick={() => setSub("policy")}
+              icon={<SlidersHorizontal size={12} />}
+              label="Policy"
+            />
+            <PillSeg
+              active={sub === "timeline"}
+              onClick={() => setSub("timeline")}
+              icon={<GitBranch size={12} />}
+              label="Timeline"
+            />
+            <div className="mx-0.5 h-3.5 w-px bg-[var(--border-default)]" />
+            <PillSeg
+              active={sub === "claude"}
+              onClick={() => setSub("claude")}
+              icon={<ClaudeIcon className="size-3.5" />}
+              label="Claude Code"
+              count={claudeCount}
+            />
+            <PillSeg
+              active={sub === "codex"}
+              onClick={() => setSub("codex")}
+              icon={<CodexIcon className="size-3.5" />}
+              label="Codex"
+              count={codexCount}
+            />
+          </PillGroup>
+        </div>
+
         <button
           onClick={load}
-          className="flex items-center justify-center w-6 h-6 rounded text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+          className="ml-auto flex items-center justify-center h-6 w-6 rounded-full border border-[var(--border-default)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] outline-none transition-colors cursor-pointer"
           title="Refresh"
         >
           <RefreshCw size={12} className={cn(loading && "animate-spin")} />
@@ -106,7 +118,9 @@ export function MemoryPanel() {
       </div>
 
       <div className="flex-1 min-h-0">
-        {sub === "graph" ? (
+        {sub === "chat" ? (
+          <MemoryChatView />
+        ) : sub === "graph" ? (
           <MemoryGraphView />
         ) : sub === "policy" ? (
           <MemoryPolicyView />
@@ -130,7 +144,17 @@ export function MemoryPanel() {
   );
 }
 
-function SubTabButton({
+/** Rounded container that groups segmented pills (the center nav + agent group). */
+function PillGroup({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="inline-flex items-center gap-0.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated,var(--bg-secondary))] p-0.5">
+      {children}
+    </div>
+  );
+}
+
+/** One rounded segment; the active one renders as a filled pill. */
+function PillSeg({
   active,
   onClick,
   icon,
@@ -141,31 +165,22 @@ function SubTabButton({
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
-  count: number;
+  count?: number;
 }) {
   return (
     <button
       onClick={onClick}
       className={cn(
-        "flex items-center gap-1.5 px-2.5 h-[24px] rounded-md text-[11px] font-medium transition-colors cursor-pointer",
+        "flex items-center gap-1.5 h-[22px] px-2.5 rounded-full text-[11px] font-medium transition-colors cursor-pointer",
         active
-          ? "bg-[var(--bg-selected)] text-[var(--text-primary)]"
-          : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]",
+          ? "bg-[var(--bg-selected,var(--bg-hover))] text-[var(--text-primary)]"
+          : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]",
       )}
     >
       <span className={cn(active ? "opacity-100" : "opacity-60")}>{icon}</span>
       {label}
-      {count > 0 && (
-        <span
-          className={cn(
-            "ml-0.5 px-1 rounded-full text-[9px] tabular-nums",
-            active
-              ? "bg-[var(--bg-elevated-2)] text-[var(--text-secondary)]"
-              : "bg-[var(--bg-elevated)] text-[var(--text-tertiary)]",
-          )}
-        >
-          {count}
-        </span>
+      {count !== undefined && count > 0 && (
+        <span className="text-[9px] tabular-nums text-[var(--text-tertiary)]">{count}</span>
       )}
     </button>
   );

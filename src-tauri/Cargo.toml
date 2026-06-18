@@ -100,6 +100,9 @@ rig-core = "0.38.1"
 # performZoom:), which Tauri's cross-platform maximize API doesn't cover.
 # Already in the tree transitively; pinned here for the direct msg_send.
 objc2 = "0.6"
+# Turn on atlas-embed's Metal backend so the local memory-chat model runs on the
+# Apple-Silicon GPU. Feature is additive over the base path dep in `[dependencies]`.
+atlas-embed = { path = "../crates/atlas-embed", features = ["metal"] }
 
 # Release profile — Atlas previously shipped with Cargo defaults
 # (lto = false, codegen-units = 16, no strip), which means the bundled .app
