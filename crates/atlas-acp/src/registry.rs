@@ -172,7 +172,9 @@ impl AgentRegistry {
             .ok_or_else(|| AcpError::UnknownSpec(spec_id.to_string()))?;
 
         let agent_id = AgentId::new();
-        let runtime = driver::spawn_agent(agent_id, spec.command.clone(), sink).await?;
+        let runtime = driver::spawn_agent(agent_id, spec.command.clone(), sink)
+            .await
+            .map_err(|e| explain_spawn_failure(&spec, e))?;
 
         let info = AgentInfo {
             agent_id,
@@ -431,6 +433,43 @@ pub enum PermissionDecision {
     Cancelled,
 }
 
+/// Turn a raw spawn failure into an actionable message. The driver now
+/// surfaces the underlying error (instead of the old "driver task panicked
+/// before initialize" mask), but a bare "No such file or directory (os error
+/// 2)" still doesn't tell the user that the missing thing is the runtime the
+/// agent needs. The default agents launch via `npx`, so an ENOENT almost always
+/// means Node.js isn't installed (or isn't on the GUI app's PATH).
+fn explain_spawn_failure(spec: &AgentSpec, err: AcpError) -> AcpError {
+    let raw = err.to_string();
+    let looks_missing = raw.contains("os error 2")
+        || raw.contains("No such file or directory")
+        || raw.contains("ENOENT")
+        || raw.contains("not found");
+    if !looks_missing {
+        return err;
+    }
+
+    // First whitespace-separated token of the command is the executable.
+    let program = spec
+        .command
+        .split_whitespace()
+        .next()
+        .unwrap_or(&spec.command);
+
+    let hint = if program == "npx" || program == "node" {
+        "Node.js (which provides `npx`) was not found. Install Node.js \
+         (https://nodejs.org) and relaunch Atlas. If it is installed, make sure \
+         it is on your login shell's PATH."
+    } else {
+        "the agent's runtime executable was not found on PATH"
+    };
+
+    AcpError::other(format!(
+        "Could not start {}: `{}` is not available — {hint} (underlying error: {raw})",
+        spec.display_name, program
+    ))
+}
+
 /// Startup-time host environment fix-ups for the ACP agent process.
 ///
 /// Two concrete problems this addresses:
@@ -458,22 +497,69 @@ pub fn sanitize_host_env() {
 }
 
 fn enrich_path() {
-    // Split into two passes:
+    // Three passes, cheapest first:
     //
     // 1. The cheap, deterministic prepends (~$HOME/.local/bin, .bun, .cargo,
     //    /opt/homebrew/{bin,sbin}, /usr/local/{bin,sbin}, /usr/{bin,sbin})
     //    happen synchronously so the very first `acp_spawn_agent` call can
     //    already resolve `npx`/`node` from a Homebrew install.
     //
-    // 2. The `~/.nvm/versions/node/*` enumeration is moved to a background
-    //    thread. nvm doesn't symlink to a stable path so the directory walk
-    //    is unavoidable, and it can take ~100ms+ when many node versions are
-    //    installed. The walk runs while React paints the first frame; by the
-    //    time the user focuses the composer and the agent spawn kicks off
-    //    the additional PATH entries are in place. Homebrew/system node is
-    //    the fallback in the brief window before the walk lands.
+    // 2. The user's REAL interactive-shell PATH, queried synchronously via
+    //    `$SHELL -lic 'echo $PATH'` (bounded by a short timeout). This is the
+    //    authoritative fix: macOS GUI apps launched from Finder/the Dock only
+    //    inherit `/usr/bin:/bin:/usr/sbin:/sbin`, so `npx`/`node` installed via
+    //    nvm/fnm/volta/asdf or a custom npm prefix are invisible — the hardcoded
+    //    guesses in pass 1 can't cover every version manager. The login shell
+    //    resolves PATH exactly the way the user's terminal does (which is why
+    //    `tauri dev` from a terminal "just works" but the bundled app didn't).
+    //    Mirrors `commands::claude_setup::resolve_cli`, but applied process-wide
+    //    so the ACP agent spawn — not just `claude_status` — benefits.
+    //
+    // 3. The `~/.nvm/versions/node/*` enumeration on a background thread, kept
+    //    as a belt-and-suspenders fallback for the rare case where the login
+    //    shell probe fails or times out.
     apply_cheap_path_extras();
+    merge_login_shell_path();
     spawn_nvm_path_walk();
+}
+
+/// Query the user's login+interactive shell for its `PATH` and merge it into
+/// the process environment. Bounded by a 3s timeout so a slow shell rc (conda
+/// init, etc.) can't hang app startup — on timeout we fall back to the
+/// hardcoded extras already applied in `apply_cheap_path_extras`.
+fn merge_login_shell_path() {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+
+    // Run the probe on a worker thread and wait with a timeout. `-lic` loads
+    // the user's full login + interactive config (where nvm/fnm/etc. mutate
+    // PATH). `command -v node` is a harmless warm-up; we only consume $PATH.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(&shell)
+            .args(["-lic", "printf '%s' \"$PATH\""])
+            .output();
+        let _ = tx.send(out);
+    });
+
+    let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(3)) else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let entries: Vec<String> = raw
+        .trim()
+        .split(':')
+        .filter(|s| !s.is_empty() && s.starts_with('/'))
+        .map(String::from)
+        .collect();
+    if !entries.is_empty() {
+        // Prepend so the login-shell PATH wins over the hardcoded guesses,
+        // matching what the user's terminal would resolve first.
+        prepend_to_path(&entries);
+    }
 }
 
 fn apply_cheap_path_extras() {
