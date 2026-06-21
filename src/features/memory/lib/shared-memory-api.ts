@@ -59,6 +59,8 @@ export interface SharedState {
   decisions: DecisionView[];
   recentChanges: ChangeView[];
   facts: FactView[];
+  failures: FactView[];
+  architecture: FactView[];
   sessionAgents: Record<string, string>;
   updatedAt: number;
 }

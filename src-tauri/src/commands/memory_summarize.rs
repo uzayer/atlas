@@ -61,12 +61,23 @@ async fn run_summary(
     provider: &str,
     model: &str,
 ) -> Result<String, String> {
+    run_completion(app, format!("{SUMMARY_INSTRUCTION}{text}"), provider, model).await
+}
+
+/// One-shot BYOK completion: send `prompt_text` to `provider`/`model` and
+/// collect the full text. Shared by [`summarize`] and `super::memory_compile`.
+pub(crate) async fn run_completion(
+    app: &AppHandle,
+    prompt_text: String,
+    provider: &str,
+    model: &str,
+) -> Result<String, String> {
     let (api, base) =
         provider_endpoint(provider).ok_or_else(|| format!("{provider} does not support chat"))?;
     // Synchronous file read — done before any await, never held across one.
     let key = byok::byok_get(app.clone(), provider.to_string())?
         .ok_or_else(|| format!("No API key configured for {provider}"))?;
-    let prompt = RigMessage::user(format!("{SUMMARY_INSTRUCTION}{text}"));
+    let prompt = RigMessage::user(prompt_text);
 
     match api {
         ApiKind::OpenAi => {

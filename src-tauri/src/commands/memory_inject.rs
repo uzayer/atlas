@@ -71,6 +71,32 @@ pub fn compose_shared_block(state: &SharedState, since_seq: u64) -> Option<Strin
         sections.push(format!("[FILES CHANGED]\n{}", changes.join("\n")));
     }
 
+    // Failures / anti-patterns — high-value as deltas so a second agent never
+    // repeats a dead end the moment it's recorded.
+    let failures: Vec<String> = state
+        .failures
+        .iter()
+        .filter(|f| first || f.seq > since_seq)
+        .rev()
+        .take(MAX_ITEMS)
+        .map(|f| format!("- {} (by {})", f.text, f.agent))
+        .collect();
+    if !failures.is_empty() {
+        sections.push(format!("[FAILURES / AVOID]\n{}", failures.join("\n")));
+    }
+
+    let architecture: Vec<String> = state
+        .architecture
+        .iter()
+        .filter(|a| first || a.seq > since_seq)
+        .rev()
+        .take(MAX_ITEMS)
+        .map(|a| format!("- {} (by {})", a.text, a.agent))
+        .collect();
+    if !architecture.is_empty() {
+        sections.push(format!("[ARCHITECTURE]\n{}", architecture.join("\n")));
+    }
+
     // Facts are durable context — surface them only on first sync to avoid
     // re-injecting standing facts every turn.
     if first {

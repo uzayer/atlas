@@ -26,6 +26,9 @@ const TEXT_CAP: usize = 600;
 const DECISION_MARKERS: [&str; 5] =
     ["decided to", "decision:", "we will use", "let's use", "going with"];
 const FACT_MARKERS: [&str; 3] = ["note:", "remember:", "convention:"];
+const FAILURE_MARKERS: [&str; 5] =
+    ["failed:", "doesn't work", "does not work", "anti-pattern", "gotcha:"];
+const ARCH_MARKERS: [&str; 3] = ["architecture:", "structured as", "the system uses"];
 
 /// Entry point from `TauriDeltaSink::emit`. Best-effort: a missing session
 /// (delta before first send) or an append error is a silent no-op.
@@ -110,6 +113,10 @@ fn scan_assistant_text(content: &str, session_id: &str, agent: &str) -> Vec<RawE
         let lower = trimmed.to_lowercase();
         let (kind, marker) = if let Some(m) = DECISION_MARKERS.iter().find(|m| lower.contains(**m)) {
             (EventKind::Decision, *m)
+        } else if let Some(m) = FAILURE_MARKERS.iter().find(|m| lower.contains(**m)) {
+            (EventKind::Failure, *m)
+        } else if let Some(m) = ARCH_MARKERS.iter().find(|m| lower.contains(**m)) {
+            (EventKind::Architecture, *m)
         } else if let Some(m) = FACT_MARKERS.iter().find(|m| lower.contains(**m)) {
             (EventKind::Fact, *m)
         } else {

@@ -18,6 +18,8 @@ const EMPTY_STATE: SharedState = {
   decisions: [],
   recentChanges: [],
   facts: [],
+  failures: [],
+  architecture: [],
   sessionAgents: {},
   updatedAt: 0,
 };

@@ -35,6 +35,8 @@ use tauri::State;
 const MAX_DECISIONS: usize = 50;
 const MAX_CHANGES: usize = 50;
 const MAX_FACTS: usize = 50;
+const MAX_FAILURES: usize = 30;
+const MAX_ARCH: usize = 30;
 
 // ── Event model ──────────────────────────────────────────────────────────────
 
@@ -47,6 +49,11 @@ pub enum EventKind {
     Decision,
     FileChanged,
     Fact,
+    /// Something that was tried and failed / an anti-pattern to avoid — so a
+    /// second agent doesn't repeat a dead end.
+    Failure,
+    /// A durable architecture/structure note about the system.
+    Architecture,
     SessionStart,
     SessionEnd,
     TodoAdded,
@@ -135,6 +142,10 @@ pub struct SharedState {
     pub recent_changes: Vec<ChangeView>,
     #[serde(default)]
     pub facts: Vec<FactView>,
+    #[serde(default)]
+    pub failures: Vec<FactView>,
+    #[serde(default)]
+    pub architecture: Vec<FactView>,
     #[serde(default)]
     pub session_agents: HashMap<String, String>,
     #[serde(default)]
@@ -226,6 +237,34 @@ impl SharedState {
                     text,
                 });
                 trim_front(&mut self.facts, MAX_FACTS);
+            }
+            EventKind::Failure => {
+                let text = payload_text(ev);
+                if text.is_empty() {
+                    return;
+                }
+                self.failures
+                    .retain(|f| !dedup_match(&f.text, &f.text, &ev.key, &text));
+                self.failures.push(FactView {
+                    seq: ev.seq,
+                    agent: ev.agent.clone(),
+                    text,
+                });
+                trim_front(&mut self.failures, MAX_FAILURES);
+            }
+            EventKind::Architecture => {
+                let text = payload_text(ev);
+                if text.is_empty() {
+                    return;
+                }
+                self.architecture
+                    .retain(|a| !dedup_match(&a.text, &a.text, &ev.key, &text));
+                self.architecture.push(FactView {
+                    seq: ev.seq,
+                    agent: ev.agent.clone(),
+                    text,
+                });
+                trim_front(&mut self.architecture, MAX_ARCH);
             }
             EventKind::SessionStart => {
                 self.session_agents

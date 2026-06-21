@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use atlas_agents::{
     AgentId, AgentInfo, AgentManager, AuthMethodWire, DeltaSink, PermissionDecision, PluginSpec,
-    SessionDeltaEnvelope, SessionId, SessionKey, SessionSnapshot,
+    SessionDelta, SessionDeltaEnvelope, SessionId, SessionKey, SessionSnapshot,
 };
 
 use super::memory_inject;
@@ -51,6 +51,18 @@ impl DeltaSink for TauriDeltaSink {
         // before its first `agents_send`) is a silent no-op.
         let store = self.app.state::<SharedMemoryStore>();
         super::memory_delta::ingest(&envelope, store.inner());
+
+        // On turn completion, distill the reply's prose into typed
+        // decision/fact/failure/architecture events (off the hot path; no-op
+        // unless the project's summarizer is set to a BYOK provider).
+        if matches!(envelope.delta, SessionDelta::TurnFinished { .. }) {
+            let app = self.app.clone();
+            let agent_id = envelope.agent_id.clone();
+            let session_id = envelope.session_id.clone();
+            tauri::async_runtime::spawn(async move {
+                super::memory_compile::compile_finished_turn(&app, agent_id, session_id).await;
+            });
+        }
     }
 }
 
