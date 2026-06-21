@@ -25,3 +25,8 @@ src-tauri/target/
 
 .claude/
 .atlas/
+
+# Markdown docs (working notes, PRDs, comparison docs) — except README
+*.md
+!README.md
+graphify-out/

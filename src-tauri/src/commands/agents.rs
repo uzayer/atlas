@@ -12,11 +12,18 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use atlas_agents::{
     AgentId, AgentInfo, AgentManager, AuthMethodWire, DeltaSink, PermissionDecision, PluginSpec,
     SessionDeltaEnvelope, SessionId, SessionKey, SessionSnapshot,
 };
+
+use super::memory_inject;
+use super::memory_pack;
+use super::memory_sharing::{MemorySharingState, SummarizerPref};
+use super::memory_summarize;
+use super::shared_memory::SharedMemoryStore;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -39,6 +46,11 @@ impl DeltaSink for TauriDeltaSink {
         if let Err(e) = self.app.emit("atlas:agents", &envelope) {
             tracing::error!(target: "atlas_agents::emit", "failed to emit atlas:agents event: {e}");
         }
+        // Shared Cross-Agent Memory (v2): capture this delta into the shared
+        // event log. Best-effort; a delta for an unregistered session (i.e.
+        // before its first `agents_send`) is a silent no-op.
+        let store = self.app.state::<SharedMemoryStore>();
+        super::memory_delta::ingest(&envelope, store.inner());
     }
 }
 
@@ -132,13 +144,129 @@ pub fn agents_snapshot(
     manager.snapshot(&key).map_err(|e| e.to_string())
 }
 
+/// Hard cap on the whole memory-injection path (pack + handoff + summarize) so a
+/// slow disk or provider can never stall the user's first message.
+const INJECT_BUDGET_SECS: u64 = 8;
+
+/// Send a user message to an agent session.
+///
+/// On the **first send** of a session — when Shared Cross-Agent Memory is
+/// enabled for the project — Atlas prepends a curated memory pack + recent
+/// Claude-session handoff so a freshly-switched agent inherits prior context.
+/// The injection is best-effort and time-bounded ([`INJECT_BUDGET_SECS`]); on
+/// any timeout/error the original `text` is sent unchanged. Turns 2..N skip the
+/// build entirely (see [`MemorySharingState::already_sent`]).
 #[tauri::command]
-pub fn agents_send(
+pub async fn agents_send(
     key: SessionKey,
     text: String,
     manager: State<'_, AgentManager>,
+    sharing: State<'_, MemorySharingState>,
+    app: AppHandle,
 ) -> Result<(), String> {
-    manager.send(&key, text).map_err(|e| e.to_string())
+    // Resolve the project cwd. Unknown session → just send as-is (don't fail
+    // the turn on a snapshot miss).
+    let Ok(snapshot) = manager.snapshot(&key) else {
+        return manager.send(&key, text).map_err(|e| e.to_string());
+    };
+    let cwd = snapshot.cwd;
+
+    // No cwd or sharing disabled → bare send (no capture, no injection).
+    if cwd.is_empty() || !sharing.is_enabled(&cwd) {
+        return manager.send(&key, text).map_err(|e| e.to_string());
+    }
+
+    // Register this session so the capture path (`TauriDeltaSink::emit`) can
+    // route its deltas into the shared event log for the project.
+    let store = app.state::<SharedMemoryStore>();
+    store.register_session(&key.session_id, &cwd, &snapshot.plugin_id);
+
+    // v2 push: per-turn shared-memory block, gated by this session's sync clock
+    // (0 ⇒ first sync = full current state; >0 ⇒ delta since last turn). Cheap
+    // in-memory read, so no timeout needed here.
+    let clock = sharing.clock_for(&key);
+    let shared_block = memory_inject::build_shared_block(store.inner(), &cwd, clock);
+    sharing.advance_clock(&key, store.last_seq(&cwd));
+
+    // v1 bootstrap: on the very first send only, also prepend the curated pack +
+    // recent-session handoff (retained as the clock-0 onboarding layer, bounded
+    // by INJECT_BUDGET_SECS inside `build_injection`).
+    let base = if !sharing.already_sent(&key) {
+        let pref = sharing.summarizer_pref(&cwd);
+        let built = build_injection(&app, &cwd, &key.session_id, &pref, &text).await;
+        sharing.mark_sent(&key);
+        built
+    } else {
+        text
+    };
+
+    let prefixed = match shared_block {
+        Some(block) => format!("{block}\n\n{base}"),
+        None => base,
+    };
+    manager.send(&key, prefixed).map_err(|e| e.to_string())
+}
+
+/// Assemble the memory-prefixed message. Everything runs inside a single
+/// [`INJECT_BUDGET_SECS`] timeout; on elapse it falls back to the bare text.
+async fn build_injection(
+    app: &AppHandle,
+    cwd: &str,
+    session_id: &str,
+    pref: &SummarizerPref,
+    user_text: &str,
+) -> String {
+    let cwd = cwd.to_string();
+    let session_id = session_id.to_string();
+
+    let built = tokio::time::timeout(Duration::from_secs(INJECT_BUDGET_SECS), async {
+        // Curated pack (collect_corpus is async + does its own spawn_blocking).
+        let pack = memory_pack::build_memory_pack(&cwd).await;
+
+        // Recent-session handoff: pure disk I/O on a blocking thread.
+        let handoff_raw = {
+            let cwd = cwd.clone();
+            let sid = session_id.clone();
+            tokio::task::spawn_blocking(move || memory_pack::build_session_handoff(&cwd, &sid))
+                .await
+                .ok()
+                .flatten()
+        };
+
+        let handoff_block = if let Some((raw_body, turns)) = handoff_raw {
+            let (body, attribution) = if pref.mode == "provider"
+                && !pref.provider.is_empty()
+                && !pref.model.is_empty()
+            {
+                let summary =
+                    memory_summarize::summarize(app, &raw_body, &pref.provider, &pref.model).await;
+                if summary == raw_body {
+                    (raw_body, "raw".to_string())
+                } else {
+                    (summary, format!("summarized by {}/{}", pref.provider, pref.model))
+                }
+            } else {
+                (raw_body, "raw".to_string())
+            };
+            Some(memory_pack::wrap_handoff(&body, turns, &attribution))
+        } else {
+            None
+        };
+
+        memory_pack::compose_injection(pack.as_deref(), handoff_block.as_deref(), user_text)
+    })
+    .await;
+
+    match built {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(
+                target: "atlas::memory_sharing",
+                "memory injection exceeded {INJECT_BUDGET_SECS}s budget; sending bare text"
+            );
+            user_text.to_string()
+        }
+    }
 }
 
 #[tauri::command]

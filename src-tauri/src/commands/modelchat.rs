@@ -32,15 +32,16 @@ use super::byok;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 #[derive(Clone, Copy, PartialEq)]
-enum ApiKind {
+pub(super) enum ApiKind {
     OpenAi,
     Anthropic,
     Google,
 }
 
 /// `(api kind, base url)` for each chat-capable provider. The base url is only
-/// used by the OpenAI-compatible arm.
-fn provider_endpoint(provider: &str) -> Option<(ApiKind, &'static str)> {
+/// used by the OpenAI-compatible arm. Shared with `memory_summarize` (sibling
+/// module) for the one-shot handoff summarizer.
+pub(super) fn provider_endpoint(provider: &str) -> Option<(ApiKind, &'static str)> {
     Some(match provider {
         "openai" => (ApiKind::OpenAi, "https://api.openai.com/v1"),
         "anthropic" => (ApiKind::Anthropic, ""),

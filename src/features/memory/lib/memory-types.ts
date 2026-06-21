@@ -44,4 +44,5 @@ export type MemorySubTab =
   | "graph"
   | "policy"
   | "timeline"
+  | "shared"
   | "chat";
