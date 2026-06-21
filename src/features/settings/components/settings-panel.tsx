@@ -12,7 +12,16 @@ import {
   FlaskConical,
   KeyRound,
   LayoutTemplate,
+  Plus,
+  Minus,
 } from "lucide-react";
+import {
+  clampScale,
+  SCALE_STEP,
+  MIN_SCALE,
+  MAX_SCALE,
+  DEFAULT_SCALE,
+} from "../lib/ui-scale";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
@@ -186,18 +195,55 @@ function GeneralSettings() {
 }
 
 function AppearanceSettings() {
+  const settings = useProjectStore.use.settings();
+  const { updateSettings } = useProjectStore.use.actions();
+
+  const scalePct = Math.round(settings.uiScale * 100);
+  const setScale = (next: number) => updateSettings({ uiScale: clampScale(next) });
+
   return (
     <div className="space-y-6">
       <SectionTitle title="Appearance" subtitle="Visual preferences" />
-      <SettingRow label="Font size" description="Editor and UI font size">
-        <select
-          defaultValue="14"
-          className="h-7 rounded px-2 text-[11px] outline-none"
-        >
-          {[11, 12, 13, 14, 15, 16].map((s) => (
-            <option key={s} value={s}>{s}px</option>
-          ))}
-        </select>
+      <SettingRow
+        label="Interface zoom"
+        description="Scale the entire interface — text and layout — like browser zoom. Shortcuts: ⌘+ and ⌘- to adjust, ⌘0 to reset."
+      >
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            aria-label="Zoom out"
+            onClick={() => setScale(settings.uiScale - SCALE_STEP)}
+            disabled={settings.uiScale <= MIN_SCALE}
+            className={cn(
+              "h-7 w-7 flex items-center justify-center rounded-md border border-border-default bg-bg-elevated",
+              "text-text-primary hover:bg-bg-hover transition-colors",
+              "disabled:opacity-40 disabled:cursor-not-allowed",
+            )}
+          >
+            <Minus size={13} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setScale(DEFAULT_SCALE)}
+            title="Reset to 100%"
+            className="h-7 min-w-[52px] px-2 rounded-md text-[11px] tabular-nums font-medium text-text-primary hover:bg-bg-hover transition-colors"
+          >
+            {scalePct}%
+          </button>
+          <button
+            type="button"
+            aria-label="Zoom in"
+            onClick={() => setScale(settings.uiScale + SCALE_STEP)}
+            disabled={settings.uiScale >= MAX_SCALE}
+            className={cn(
+              "h-7 w-7 flex items-center justify-center rounded-md border border-border-default bg-bg-elevated",
+              "text-text-primary hover:bg-bg-hover transition-colors",
+              "disabled:opacity-40 disabled:cursor-not-allowed",
+            )}
+          >
+            <Plus size={13} />
+          </button>
+        </div>
       </SettingRow>
     </div>
   );
@@ -215,6 +261,9 @@ function KeybindingsSettings() {
         { action: "Global Search", keys: "⌘⇧F" },
         { action: "Settings", keys: "⌘," },
         { action: "New Window", keys: "⌘⇧N" },
+        { action: "Zoom in", keys: "⌘+" },
+        { action: "Zoom out", keys: "⌘-" },
+        { action: "Reset zoom", keys: "⌘0" },
       ],
     },
     {
@@ -343,7 +392,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.15 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.16 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">

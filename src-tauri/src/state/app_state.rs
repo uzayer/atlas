@@ -155,10 +155,18 @@ pub struct AppSettings {
     /// users who want a cleaner tree can turn it off.
     #[serde(default = "default_true")]
     pub show_hidden_files: bool,
+    /// Global interface zoom (1.0 == 100%). Applied via the native WebView zoom
+    /// on the frontend (⌘+/⌘-/⌘0); persisted so it survives relaunch.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_ui_scale() -> f32 {
+    1.0
 }
 
 impl Default for AppSettings {
@@ -167,6 +175,7 @@ impl Default for AppSettings {
             auto_add_atlas_gitignore: true,
             enable_atlas_logs: true,
             show_hidden_files: true,
+            ui_scale: default_ui_scale(),
         }
     }
 }

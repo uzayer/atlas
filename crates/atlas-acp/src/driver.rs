@@ -211,7 +211,7 @@ pub async fn spawn_agent(
     let sink_for_task = sink.clone();
     let command_for_task = command.clone();
 
-    tokio::spawn(async move {
+    let driver_handle = tokio::spawn(async move {
         let result = run_driver(
             agent_id,
             command_for_task,
@@ -223,16 +223,40 @@ pub async fn spawn_agent(
         )
         .await;
 
-        let reason = match result {
+        let reason = match &result {
             Ok(()) => "driver exited cleanly".to_string(),
             Err(e) => format!("driver error: {e}"),
         };
         sink_for_task.emit(agent_id, AcpEvent::AgentDisconnected { reason });
+        result
     });
 
-    let initialized = ready_rx
-        .await
-        .map_err(|_| AcpError::other("driver task panicked before initialize"))??;
+    let initialized = match ready_rx.await {
+        // The driver answered: either a successful handshake or an explicit
+        // initialize error. Propagate as-is.
+        Ok(res) => res?,
+        // `ready_tx` was dropped without sending — the driver task returned
+        // (or panicked) BEFORE the `initialize` handshake completed, most
+        // commonly because the agent subprocess failed to spawn (e.g. `npx`
+        // / `node` not on PATH → ENOENT). The generic "task panicked"
+        // message hid that real cause; recover it from the join handle so
+        // the user sees the actual failure instead of a useless panic string.
+        Err(_) => {
+            return Err(match driver_handle.await {
+                // Returned Ok(()) but never sent ready — shouldn't happen,
+                // but don't claim a panic if it does.
+                Ok(Ok(())) => {
+                    AcpError::other("agent process exited before completing initialize")
+                }
+                // The real, actionable error (ENOENT, spawn failure, …).
+                Ok(Err(e)) => e,
+                // Genuine panic in the driver task.
+                Err(join_err) => {
+                    AcpError::other(format!("driver task panicked before initialize: {join_err}"))
+                }
+            });
+        }
+    };
 
     Ok(AgentRuntime {
         connection: initialized.connection,

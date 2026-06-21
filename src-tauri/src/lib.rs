@@ -299,6 +299,8 @@ pub fn run() {
             commands::cli::cli_take_initial_project_path,
             commands::claude_setup::claude_status,
             commands::claude_setup::claude_install,
+            commands::node_setup::node_check,
+            commands::node_setup::node_install,
             commands::agents::agents_list_plugins,
             commands::agents::agents_list_running,
             commands::agents::agents_spawn,

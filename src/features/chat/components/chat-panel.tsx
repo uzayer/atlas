@@ -8,6 +8,8 @@ import { MessageInput } from "./message-input";
 import { SessionSidebar } from "./session-sidebar";
 import { PermissionModal } from "./permission-modal";
 import { ClaudeSetupBanner } from "@/features/claude-setup/components/claude-setup-banner";
+import { NodeSetupBanner } from "@/features/node-setup/components/node-setup-banner";
+import { useNodeSetupStore } from "@/features/node-setup/stores/node-setup-store";
 import { ClaudeLoginDialog } from "@/features/claude-setup/components/claude-login-dialog";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 
@@ -563,7 +565,12 @@ function ChatComposer({
   const disabled = (isClaude && phase !== "ready") || codexNeedsAuth;
 
   const setupVisible = (isClaude && phase !== "ready") || codexNeedsAuth;
-  const showRow = setupVisible || showJumpToBottom;
+  // Node install pill (bundled-nvm). Non-blocking — informs only, doesn't
+  // disable the composer. Shown for both agents since `npx` powers both.
+  const nodePhase = useNodeSetupStore.use.phase();
+  const nodeBusy =
+    nodePhase === "installing" || nodePhase === "installed" || nodePhase === "failed";
+  const showRow = setupVisible || nodeBusy || showJumpToBottom;
 
   return (
     <>
@@ -575,6 +582,11 @@ function ChatComposer({
         {showRow && (
           <div className="pointer-events-none absolute bottom-full inset-x-0 mb-2 z-20 flex justify-center">
             <div className="pointer-events-auto flex items-center gap-2">
+              {nodeBusy && (
+                <span key={`node-${nodePhase}`} className="atlas-pill-in">
+                  <NodeSetupBanner />
+                </span>
+              )}
               {setupVisible && isClaude && (
                 <span key={`setup-${phase}`} className="atlas-pill-in">
                   <ClaudeSetupBanner />
