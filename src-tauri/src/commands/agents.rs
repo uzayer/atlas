@@ -19,8 +19,10 @@ use atlas_agents::{
     SessionDelta, SessionDeltaEnvelope, SessionId, SessionKey, SessionSnapshot,
 };
 
+use super::memory_chat::MemoryChatState;
 use super::memory_inject;
 use super::memory_pack;
+use super::memory_retrieve;
 use super::memory_sharing::{MemorySharingState, SummarizerPref};
 use super::memory_summarize;
 use super::shared_memory::SharedMemoryStore;
@@ -200,6 +202,18 @@ pub async fn agents_send(
     let shared_block = memory_inject::build_shared_block(store.inner(), &cwd, clock);
     sharing.advance_clock(&key, store.last_seq(&cwd));
 
+    // v3 Tier 2 — retrieval-augmented push: RAG the project's memory index by
+    // the user's message, keep only docs not already injected this session, and
+    // compose a budgeted `--- RELEVANT PROJECT MEMORY ---` block. `retrieve` is
+    // best-effort + time-bounded; a missing embedding model / unbuilt index
+    // yields nothing, so this is a no-op until the index exists.
+    const INDEX_TOP_K: usize = 3;
+    let chat_state = app.state::<MemoryChatState>();
+    let mut index_docs =
+        memory_retrieve::retrieve(&app, chat_state.inner(), &cwd, &text, INDEX_TOP_K).await;
+    index_docs.retain(|d| sharing.note_index_doc(&key, &d.id));
+    let index_block = memory_retrieve::compose_index_block(&index_docs);
+
     // v1 bootstrap: on the very first send only, also prepend the curated pack +
     // recent-session handoff (retained as the clock-0 onboarding layer, bounded
     // by INJECT_BUDGET_SECS inside `build_injection`).
@@ -212,9 +226,18 @@ pub async fn agents_send(
         text
     };
 
-    let prefixed = match shared_block {
-        Some(block) => format!("{block}\n\n{base}"),
-        None => base,
+    // Compose: [working memory] + [relevant index] + (bootstrap +) user text.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(b) = shared_block {
+        parts.push(b);
+    }
+    if let Some(b) = index_block {
+        parts.push(b);
+    }
+    let prefixed = if parts.is_empty() {
+        base
+    } else {
+        format!("{}\n\n{}", parts.join("\n\n"), base)
     };
     manager.send(&key, prefixed).map_err(|e| e.to_string())
 }

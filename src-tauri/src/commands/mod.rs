@@ -37,6 +37,7 @@ pub mod shared_memory;
 pub mod memory_delta;
 pub mod memory_inject;
 pub mod memory_compile;
+pub mod memory_retrieve;
 pub mod mention_search;
 pub mod mission_control;
 pub mod papers;

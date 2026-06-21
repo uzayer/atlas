@@ -276,8 +276,75 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
     // stale agent memory. Cheap disk read — the expensive scan/summarize happens
     // in the separate `codebase_index_build` command.
     docs.extend(read_codebase_docs(&project_path));
+    docs.extend(read_shared_memory_docs(&project_path));
 
     docs
+}
+
+/// v3 Write half — surface the project's Shared Cross-Agent Memory (working
+/// memory) into the index corpus, so settled decisions/failures/architecture/
+/// facts become embeddable + retrievable (Tier 2 read path), not just
+/// live-injected. Only durable kinds are promoted; the live plan + churn are
+/// skipped. Reads the folded shared state from `.atlas/shared-memory/`; an
+/// absent/empty store is a no-op. Stable ids (`shared:<kind>:<seq>`) namespace
+/// these apart from the claude/codex docs, so re-runs don't duplicate.
+fn read_shared_memory_docs(project_path: &str) -> Vec<MemoryDoc> {
+    let state = super::shared_memory::rebuild_state(project_path);
+    let ts = state.updated_at;
+    let mut docs = Vec::new();
+    for d in &state.decisions {
+        docs.extend(shared_doc(d.seq, &d.agent, "decision", &d.text, ts));
+    }
+    for f in &state.failures {
+        docs.extend(shared_doc(f.seq, &f.agent, "failure", &f.text, ts));
+    }
+    for a in &state.architecture {
+        docs.extend(shared_doc(a.seq, &a.agent, "architecture", &a.text, ts));
+    }
+    for f in &state.facts {
+        docs.extend(shared_doc(f.seq, &f.agent, "fact", &f.text, ts));
+    }
+    docs
+}
+
+/// Build one promoted shared-memory [`MemoryDoc`]. `None` for empty text.
+fn shared_doc(seq: u64, agent: &str, kind: &str, text: &str, ts: i64) -> Option<MemoryDoc> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    Some(MemoryDoc {
+        id: format!("shared:{kind}:{seq}"),
+        title: short_title(t),
+        summary: short_title(t),
+        kind: kind.to_string(),
+        source: "shared".into(),
+        file_path: None,
+        timestamp_ms: ts,
+        text: format!("[{agent}] {t}"),
+        aliases: Vec::new(),
+        links: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod shared_promo_tests {
+    use super::shared_doc;
+
+    #[test]
+    fn maps_kind_source_and_id() {
+        let d = shared_doc(7, "codex", "decision", "Use RS256 for JWT", 100).unwrap();
+        assert_eq!(d.id, "shared:decision:7");
+        assert_eq!(d.kind, "decision");
+        assert_eq!(d.source, "shared");
+        assert!(d.text.contains("[codex]"));
+        assert!(d.text.contains("RS256"));
+    }
+
+    #[test]
+    fn empty_text_is_none() {
+        assert!(shared_doc(1, "a", "fact", "   ", 0).is_none());
+    }
 }
 
 /// Map the persisted codebase index (`.atlas/codebase-index/docs.json`) into

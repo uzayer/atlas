@@ -123,6 +123,9 @@ pub struct MemorySharingState {
     /// session has already had injected. 0 (or absent) ⇒ never synced, so the
     /// next send gets the full current shared state. See `super::memory_inject`.
     sync_clocks: Mutex<HashMap<SessionKey, u64>>,
+    /// v3 Tier 2: index doc ids already injected into a session, so the same
+    /// retrieved doc isn't re-pushed turn after turn.
+    injected_docs: Mutex<HashMap<SessionKey, HashSet<String>>>,
 }
 
 impl MemorySharingState {
@@ -170,6 +173,17 @@ impl MemorySharingState {
         if seq > *entry {
             *entry = seq;
         }
+    }
+
+    /// Record that index doc `doc_id` was injected into `key`'s session; returns
+    /// true the first time (caller should inject it), false on repeats. Dedup
+    /// for the v3 Tier 2 retrieval-augmented push.
+    pub fn note_index_doc(&self, key: &SessionKey, doc_id: &str) -> bool {
+        self.injected_docs
+            .lock()
+            .entry(key.clone())
+            .or_default()
+            .insert(doc_id.to_string())
     }
 
     /// Update the toggle cache after a settings write so the next send sees it.
