@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use agent_client_protocol::schema::{
     AuthenticateRequest, CancelNotification, ContentBlock, LoadSessionRequest, NewSessionRequest,
@@ -172,7 +172,20 @@ impl AgentRegistry {
             .ok_or_else(|| AcpError::UnknownSpec(spec_id.to_string()))?;
 
         let agent_id = AgentId::new();
-        let runtime = driver::spawn_agent(agent_id, spec.command.clone(), sink)
+        // Resolve the agent's program (e.g. `npx`) to an ABSOLUTE path via the
+        // user's login shell, so the spawn never depends on the GUI process
+        // PATH being correctly enriched. This is the belt to `enrich_path`'s
+        // suspenders: the bundled/Finder-launched app inherits a minimal PATH,
+        // and if the boot-time PATH merge times out or can't run, a bare `npx`
+        // ENOENTs ("driver panicked"). Resolving here mirrors what the user's
+        // terminal would find. Falls back to the bare command on failure.
+        let command = {
+            let c = spec.command.clone();
+            tokio::task::spawn_blocking(move || resolve_command(&c))
+                .await
+                .unwrap_or_else(|_| spec.command.clone())
+        };
+        let runtime = driver::spawn_agent(agent_id, command, sink)
             .await
             .map_err(|e| explain_spawn_failure(&spec, e))?;
 
@@ -439,6 +452,93 @@ pub enum PermissionDecision {
 /// 2)" still doesn't tell the user that the missing thing is the runtime the
 /// agent needs. The default agents launch via `npx`, so an ENOENT almost always
 /// means Node.js isn't installed (or isn't on the GUI app's PATH).
+/// Resolve a bare program name (e.g. `npx`) to an absolute path the way the
+/// user's login+interactive shell would — covering nvm / fnm / volta / asdf /
+/// Homebrew / custom npm prefixes. macOS GUI apps inherit only a minimal PATH,
+/// so this is what makes a Finder-launched app find the same binaries the
+/// terminal does. Bounded by a timeout so a slow/hanging shell rc can't block
+/// the agent spawn. Returns `None` (caller keeps the bare name) if the probe
+/// fails, times out, or the program isn't found.
+/// A Node toolchain Atlas installed itself (via the bundled nvm) when the
+/// machine had no usable Node. Set by `register_managed_node_bin` after a
+/// successful install. When present it WINS over whatever the login shell would
+/// resolve — that's what makes the "incompatible system Node" case work: we
+/// prefer our known-good version instead of the user's old one.
+static MANAGED_NODE_BIN: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Register the bin dir of an Atlas-managed Node install (e.g.
+/// `<NVM_DIR>/versions/node/vXX/bin`). Prepends it to the process PATH (so even
+/// code paths that don't go through `resolve_program_abs` find it) and records
+/// it as the preferred toolchain for agent spawns.
+pub fn register_managed_node_bin(bin_dir: PathBuf) {
+    prepend_to_path(&[bin_dir.to_string_lossy().into_owned()]);
+    if let Ok(mut guard) = MANAGED_NODE_BIN.write() {
+        *guard = Some(bin_dir);
+    }
+}
+
+/// The currently-registered managed Node bin dir, if any.
+pub fn managed_node_bin() -> Option<PathBuf> {
+    MANAGED_NODE_BIN.read().ok().and_then(|g| g.clone())
+}
+
+fn resolve_program_abs(program: &str) -> Option<String> {
+    // Already absolute → use as-is.
+    if program.starts_with('/') {
+        return Some(program.to_string());
+    }
+    // Prefer the Atlas-managed Node toolchain (bundled-nvm install) when set —
+    // it's a known-good version and must beat an incompatible system Node.
+    if let Some(bin) = managed_node_bin() {
+        let candidate = bin.join(program);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let prog = program.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(&shell)
+            .args(["-lic", &format!("command -v {prog} 2>/dev/null")])
+            .output();
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Accept only a real absolute path (not a shell function/alias name).
+    if p.starts_with('/') && std::path::Path::new(&p).exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Rewrite a `shell-words`-style command so its program (first token) is an
+/// absolute path resolved via the login shell. No-op for JSON specs (`{…}`) and
+/// when resolution fails (keeps the bare command → process-PATH resolution).
+fn resolve_command(command: &str) -> String {
+    let trimmed = command.trim_start();
+    if trimmed.starts_with('{') {
+        return command.to_string(); // JSON stdio spec — leave untouched.
+    }
+    let (program, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((p, r)) => (p, r),
+        None => (trimmed, ""),
+    };
+    match resolve_program_abs(program) {
+        Some(abs) if rest.is_empty() => abs,
+        Some(abs) => format!("{abs} {rest}"),
+        None => command.to_string(),
+    }
+}
+
 fn explain_spawn_failure(spec: &AgentSpec, err: AcpError) -> AcpError {
     let raw = err.to_string();
     let looks_missing = raw.contains("os error 2")

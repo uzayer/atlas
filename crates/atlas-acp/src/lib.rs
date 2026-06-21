@@ -17,7 +17,7 @@ pub use error::{AcpError, Result};
 pub use events::{AcpEvent, EventSink};
 pub use registry::{
     AgentId, AgentInfo, AgentRegistry, AgentSpec, NewSessionInfo, PermissionDecision,
-    sanitize_host_env,
+    managed_node_bin, register_managed_node_bin, sanitize_host_env,
 };
 
 // Re-export schema types the host needs (so it doesn't have to take a direct
