@@ -21,7 +21,13 @@ import {
   listClaudeSessions,
   deleteClaudeSession,
 } from "../lib/claude-api";
-import { agents, ensureDefaultAgent, getDefaultAgentSync } from "../lib/agents-api";
+import {
+  agents,
+  ensureAgent,
+  getAgentSync,
+  CODEX_PLUGIN_ID,
+  DEFAULT_PLUGIN_ID,
+} from "../lib/agents-api";
 import type { SessionMessage } from "@/types/agents";
 
 // Module-level click-token table per target tab id. Each call to
@@ -203,20 +209,28 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   }, [cwd]);
 
   useEffect(() => {
+    // Rebuild the key from `cwd` INSIDE the effect. Depending on the
+    // `queryKey` array (a fresh literal every render) made this effect
+    // re-subscribe on every render; because `listen()` is async, each render
+    // opened a teardown→reattach gap where an `atlas:sessions-changed` event
+    // could land with no listener attached → the refresh was silently dropped
+    // and the history list went stale until something else forced a refetch.
+    // Now it attaches once per `cwd` and stays attached.
+    const key = ["claude-sessions", cwd] as const;
+    const invalidate = () => queryClient.invalidateQueries({ queryKey: key });
     const unlistenPromise = listen<{ cwd: string }>(
       "atlas:sessions-changed",
       (e) => {
         if (e.payload.cwd !== cwd) return;
-        queryClient.invalidateQueries({ queryKey });
+        invalidate();
       }
     );
-    const onFocus = () => queryClient.invalidateQueries({ queryKey });
-    window.addEventListener("focus", onFocus);
+    window.addEventListener("focus", invalidate);
     return () => {
       unlistenPromise.then((u) => u());
-      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("focus", invalidate);
     };
-  }, [queryClient, queryKey, cwd]);
+  }, [queryClient, cwd]);
 
   // Build the unified item list. Two sources, merged by session id:
   //   1. disk JSONL rows (agentList, from list_claude_sessions polling)
@@ -327,9 +341,15 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       !!current &&
       ((current.userMessageCount ?? 0) > 0 || current.messages.length > 0);
 
-    // If the current tab is empty there's nothing to lose — reuse it.
+    // If the current tab is empty there's nothing to lose — reuse it. Reset it
+    // to pristine and focus the composer so the click visibly does something;
+    // previously this branch just cleared an already-empty session and bailed,
+    // which read as "I click + and nothing happens".
     if (!hasConversation) {
       clearSession(tabId);
+      window.dispatchEvent(
+        new CustomEvent("atlas:chat-focus", { detail: { tabId } }),
+      );
       return;
     }
 
@@ -356,7 +376,19 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   };
 
   const handleOpenAgent = (item: SidebarItem) => {
-    if (!item.filePath) return;
+    // Resumable when we have a disk-backed JSONL OR a real (bound) ACP session
+    // id. Codex sessions never live in Claude's `~/.claude/projects` JSONL dir,
+    // so they only ever arrive as live rows with no `filePath` — gating on
+    // `filePath` alone made every Codex history row a dead click. Synthetic
+    // `live-<tabId>` ids aren't resumable (that's the current empty tab itself),
+    // so those still bail.
+    const isSynthetic = item.id.startsWith("live-");
+    if (!item.filePath && isSynthetic) return;
+
+    // Pick the agent that actually ran this session. This was hardcoded to the
+    // default (Claude), so clicking a Codex row tried to resume it through the
+    // Claude process → `loadSession` failed → it fell back to a blank session.
+    const pluginId = item.agent === "codex" ? CODEX_PLUGIN_ID : DEFAULT_PLUGIN_ID;
 
     const storeSnapshot = useChatStore.getState().sessions;
 
@@ -402,14 +434,17 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     }
 
     const project = useProjectStore.getState().currentProject;
-    const cwd = project?.path ?? "/";
+    // Empty-string fallback (not "/") to stay consistent with the component
+    // default and the sidebar filter (`workingDirectory === cwd || === ""`);
+    // a session stamped "/" would match neither arm and vanish from history.
+    const cwd = project?.path ?? "";
 
     // OPTIMISTIC SYNCHRONOUS UI: clear + retitle + bind the historical
     // session id IMMEDIATELY when the default agent is already cached
     // (App.tsx pre-spawns it at startup, so it almost always is).
     clearSession(targetTabId);
     setSessionTitle(targetTabId, item.title.slice(0, 40));
-    const cachedAgent = getDefaultAgentSync();
+    const cachedAgent = getAgentSync(pluginId);
     if (cachedAgent) {
       setAcpBinding(targetTabId, cachedAgent.agent_id, item.id, cwd);
     }
@@ -436,7 +471,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
 
       let agent;
       try {
-        agent = await ensureDefaultAgent();
+        agent = await ensureAgent(pluginId);
       } catch (err) {
         if (!isStale()) {
           setTranscriptLoading(targetTabId, false);
@@ -514,9 +549,16 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     try {
       await deleteClaudeSession(item.filePath);
       if (activeAcpId === item.id) clearSession(tabId);
-      queryClient.invalidateQueries({ queryKey });
     } catch (err) {
       console.error("Failed to delete session:", err);
+      toast.error(
+        `Couldn't delete session: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      // Always refetch so the list reflects on-disk truth — whether the delete
+      // succeeded (row gone) or failed (row stays). Was inside `try`, so a
+      // failed delete never re-synced.
+      queryClient.invalidateQueries({ queryKey });
     }
   };
 
@@ -528,6 +570,10 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   const onResizeStart = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
+      // Guard against a second drag starting before the first's mouseup
+      // cleanup runs (e.g. rapid double-mousedown) — that would stack two
+      // `mousemove` listeners and move the handle double-distance per pixel.
+      if (resizeStartXRef.current !== null) return;
       resizeStartXRef.current = e.clientX;
       resizeStartWidthRef.current = chatSidebar.width;
       const onMove = (ev: MouseEvent) => {
@@ -569,6 +615,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
+          aria-label="Search sessions"
           placeholder="Search…"
           className="flex-1 bg-transparent outline-none text-[11px] text-text-primary placeholder:text-text-tertiary min-w-0"
         />
@@ -640,6 +687,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
               {item.kind === "agent" && (
                 <button
                   onClick={(e) => handleDeleteAgent(e, item)}
+                  aria-label="Delete session"
                   className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 flex items-center justify-center w-4 h-4 rounded text-[var(--text-tertiary)] hover:text-[var(--status-error)] hover:bg-[var(--bg-elevated)] transition-opacity"
                   title="Delete session"
                 >

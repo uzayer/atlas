@@ -378,6 +378,20 @@ export function MessageInput({
     return () => window.removeEventListener("atlas:chat-prefill", handler);
   }, []);
 
+  // Focus the composer on demand. The sidebar "+ new chat" button fires this
+  // when it reuses an already-empty tab: no remount happens in that case, so
+  // the mount auto-focus above doesn't re-run. Tab-scoped so only the active
+  // composer grabs focus (the event fans out to every mounted chat tab).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ tabId?: string }>).detail;
+      if (detail?.tabId && detail.tabId !== tabId) return;
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
+    window.addEventListener("atlas:chat-focus", handler);
+    return () => window.removeEventListener("atlas:chat-focus", handler);
+  }, [tabId]);
+
   // Append text to the composer (e.g. the KB bubble menu's "Send selection to
   // chat"). Unlike "prefill" this is NON-destructive (keeps any draft) and only
   // the ACTIVE session reacts, so it doesn't fan out to every mounted chat tab.
