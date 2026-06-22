@@ -16,6 +16,7 @@ import {
 } from "@/features/workspaces/stores/workspace-store";
 import { registerFlush } from "@/features/workspaces/lib/flush-registry";
 import { persistHashOf } from "@/features/workspaces/lib/workspace-snapshot";
+import { applyUiScale, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
 
 interface Project {
   name: string;
@@ -41,12 +42,16 @@ export interface AppSettings {
   enableAtlasLogs: boolean;
   /** Show dotfiles / dot-directories in the explorer file tree. */
   showHiddenFiles: boolean;
+  /** Global interface zoom (1 == 100%). Driven by the ⌘+/⌘-/⌘0 hotkeys;
+   *  applied via the native WebView zoom. */
+  uiScale: number;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   autoAddAtlasGitignore: true,
   enableAtlasLogs: true,
   showHiddenFiles: true,
+  uiScale: DEFAULT_SCALE,
 };
 
 /**
@@ -279,6 +284,7 @@ export const useProjectStore = createSelectors(
         if (partial.showHiddenFiles !== undefined) {
           void useExplorerStore.getState().actions.refresh();
         }
+        if (partial.uiScale !== undefined) applyUiScale(partial.uiScale);
       },
       hydrate: (payload: AppStateWire, opts?: { skipActiveSwitch?: boolean }) => {
         // Merge with defaults so older state.json files (written before a new
@@ -293,6 +299,10 @@ export const useProjectStore = createSelectors(
           settings,
           hydrated: true,
         });
+
+        // Re-apply the persisted interface zoom (needs the Tauri WebView API,
+        // so it can only run here, not in the pre-mount boot path).
+        applyUiScale(settings.uiScale);
 
         // Hand the multi-workspace fields to the workspace store. We hydrate
         // with `activeWorkspaceId: null` and then `switchTo` the persisted id

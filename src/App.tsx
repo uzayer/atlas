@@ -38,6 +38,7 @@ import {
 } from "@/features/chat/stores/recent-files-store";
 import { useRecentChatsStore } from "@/features/workspaces/stores/recent-chats-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
+import { useNodeSetupStore } from "@/features/node-setup/stores/node-setup-store";
 import {
   isPermissionGranted,
   requestPermission,
@@ -48,6 +49,18 @@ import { warmMarkdownWorker } from "@/lib/markdown-cache";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
 import { NotificationPanel } from "@/features/notifications/components/notification-panel";
 import { Toaster } from "sonner";
+import { clampScale, SCALE_STEP, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
+
+// Interface-zoom helpers (⌘+/⌘-/⌘0). They read + write the persisted
+// `uiScale` setting; `updateSettings` applies it to the native WebView zoom.
+function stepZoom(delta: number) {
+  const { settings, actions } = useProjectStore.getState();
+  actions.updateSettings({ uiScale: clampScale(settings.uiScale + delta) });
+}
+const zoomIn = () => stepZoom(SCALE_STEP);
+const zoomOut = () => stepZoom(-SCALE_STEP);
+const zoomReset = () =>
+  useProjectStore.getState().actions.updateSettings({ uiScale: DEFAULT_SCALE });
 
 export function App() {
   // Probe Claude Code (installed? authed?) on mount. Drives the banner
@@ -55,6 +68,10 @@ export function App() {
   // when the CLI isn't ready. Fast — two parallel subprocesses, totals
   // <100ms on a warm machine.
   useEffect(() => {
+    // Probe the Node runtime first (the ACP agents launch via `npx`). If it's
+    // missing or too old, the store auto-installs the latest LTS via the
+    // bundled nvm in the background and re-runs ACP discovery when ready.
+    void useNodeSetupStore.getState().actions.check();
     void useClaudeSetupStore.getState().actions.refreshStatus();
   }, []);
 
@@ -1032,6 +1049,13 @@ export function App() {
           data: {},
         }),
     },
+    // ── Interface zoom (⌘+ / ⌘- / ⌘0) ──
+    // `⌘+` on a US layout arrives as Shift+`=` (e.key === "+"); `⌘=` works too.
+    // Both step the global UI scale up; `⌘-` down; `⌘0` resets to 100%.
+    { combo: { key: "=", meta: true }, action: zoomIn },
+    { combo: { key: "+", meta: true, shift: true }, action: zoomIn },
+    { combo: { key: "-", meta: true }, action: zoomOut },
+    { combo: { key: "0", meta: true }, action: zoomReset },
   ]);
 
   return (

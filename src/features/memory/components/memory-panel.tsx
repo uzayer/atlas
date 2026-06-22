@@ -20,6 +20,8 @@ import { MemoryGraphView } from "./memory-graph-view";
 import { MemoryPolicyView } from "./memory-policy-view";
 import { MemoryTimelineView } from "./memory-timeline-view";
 import { MemoryChatView } from "./memory-chat-view";
+import { MemorySharingControls } from "./memory-sharing-controls";
+import { SharedMemoryView } from "./shared-memory-view";
 import { cn } from "@/lib/utils";
 import { PanelSkeleton } from "@/components/panel-skeleton";
 import { Markdown } from "@/lib/markdown";
@@ -90,6 +92,12 @@ export function MemoryPanel() {
               icon={<GitBranch size={12} />}
               label="Timeline"
             />
+            <PillSeg
+              active={sub === "shared"}
+              onClick={() => setSub("shared")}
+              icon={<Share2 size={12} />}
+              label="Shared"
+            />
             <div className="mx-0.5 h-3.5 w-px bg-[var(--border-default)]" />
             <PillSeg
               active={sub === "claude"}
@@ -108,13 +116,16 @@ export function MemoryPanel() {
           </PillGroup>
         </div>
 
-        <button
-          onClick={load}
-          className="ml-auto flex items-center justify-center h-6 w-6 rounded-full border border-[var(--border-default)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] outline-none transition-colors cursor-pointer"
-          title="Refresh"
-        >
-          <RefreshCw size={12} className={cn(loading && "animate-spin")} />
-        </button>
+        <div className="ml-auto flex items-center gap-1">
+          <MemorySharingControls projectPath={projectPath} />
+          <button
+            onClick={load}
+            className="flex items-center justify-center h-6 w-6 rounded-full border border-[var(--border-default)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] outline-none transition-colors cursor-pointer"
+            title="Refresh"
+          >
+            <RefreshCw size={12} className={cn(loading && "animate-spin")} />
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 min-h-0">
@@ -126,6 +137,14 @@ export function MemoryPanel() {
           <MemoryPolicyView />
         ) : sub === "timeline" ? (
           <MemoryTimelineView />
+        ) : sub === "shared" ? (
+          <div className="h-full overflow-y-auto p-4">
+            {projectPath ? (
+              <SharedMemoryView projectPath={projectPath} />
+            ) : (
+              <div className="text-xs text-white/40">Open a project to view shared memory.</div>
+            )}
+          </div>
         ) : loading && !data ? (
           <PanelSkeleton rows={8} />
         ) : !projectPath ? (

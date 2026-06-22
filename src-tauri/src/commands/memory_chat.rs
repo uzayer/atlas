@@ -70,6 +70,12 @@ impl MemoryChatState {
     pub(crate) fn chat_model(&self) -> Arc<Mutex<Option<QuantizedChatModel>>> {
         self.chat.clone()
     }
+
+    /// Shared handle to the cached embedder, so the v3 retrieval-augmented push
+    /// (`super::memory_retrieve`) reuses the loaded MiniLM instead of its own.
+    pub(crate) fn embedder(&self) -> Arc<Mutex<Option<Embedder>>> {
+        self.embedder.clone()
+    }
 }
 
 /// Resolve the downloaded local model's gguf + tokenizer paths, erroring if the

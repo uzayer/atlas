@@ -322,11 +322,37 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   }, [items, search]);
 
   const handleNewChat = () => {
-    // ACP sessions are owned by the agent process; clearing the tab just
-    // resets local state. The underlying ACP session stays addressable via
-    // its session_id and will surface as a disk-backed row once its JSONL
-    // is written.
-    clearSession(tabId);
+    const current = useChatStore.getState().sessions[tabId];
+    const hasConversation =
+      !!current &&
+      ((current.userMessageCount ?? 0) > 0 || current.messages.length > 0);
+
+    // If the current tab is empty there's nothing to lose — reuse it.
+    if (!hasConversation) {
+      clearSession(tabId);
+      return;
+    }
+
+    // Otherwise PRESERVE the current conversation by opening a brand-new chat
+    // tab/session instead of wiping this one in place. Wiping was the
+    // "New Chat deletes my last session" bug: `clearSession` resets the live
+    // row to empty, so it dropped out of the history list immediately — and in
+    // a fresh workspace its JSONL hadn't been written yet, so there was no
+    // disk-backed row to fall back to and the conversation vanished. Keeping
+    // the old tab open leaves it as a live (and clickable) history row.
+    const newId = `chat-${Date.now().toString(36)}-${Math.random()
+      .toString(36)
+      .slice(2, 6)}`;
+    addTab({
+      id: newId,
+      type: "chat",
+      title: "New Chat",
+      closable: true,
+      dirty: false,
+      data: {},
+    });
+    createSession(newId, current.agentType === "codex" ? "codex" : "claude-code");
+    setActiveTab(newId);
   };
 
   const handleOpenAgent = (item: SidebarItem) => {

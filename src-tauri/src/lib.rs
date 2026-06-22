@@ -119,6 +119,8 @@ pub fn run() {
         .manage(ClaudeSessionIndex::new())
         .manage(SavedPapersIndex::new())
         .manage(commands::memory_chat::MemoryChatState::new())
+        .manage(commands::memory_sharing::MemorySharingState::new())
+        .manage(commands::shared_memory::SharedMemoryStore::new())
         // Drop a window's per-window index + mention caches when it closes, so
         // its file watcher stops and memory is freed (these states are keyed by
         // webview label for multi-window project scoping).
@@ -297,6 +299,8 @@ pub fn run() {
             commands::cli::cli_take_initial_project_path,
             commands::claude_setup::claude_status,
             commands::claude_setup::claude_install,
+            commands::node_setup::node_check,
+            commands::node_setup::node_install,
             commands::agents::agents_list_plugins,
             commands::agents::agents_list_running,
             commands::agents::agents_spawn,
@@ -352,6 +356,14 @@ pub fn run() {
             commands::memory_graph::memory_graph_layout_save,
             commands::memory_policy::memory_policies,
             commands::memory_policy::memory_policy_update,
+            commands::memory_sharing::memory_sharing_get,
+            commands::memory_sharing::memory_sharing_set,
+            commands::memory_sharing::memory_summarizer_get,
+            commands::memory_sharing::memory_summarizer_set,
+            commands::shared_memory::memory_get_state,
+            commands::shared_memory::memory_query,
+            commands::shared_memory::memory_clear_project,
+            commands::shared_memory::memory_append_event,
             commands::memory_timeline::memory_timeline,
             commands::memory_timeline::memory_timeline_cached,
             commands::memory_chat::memory_chat_model_status,
