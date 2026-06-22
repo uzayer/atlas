@@ -41,7 +41,6 @@ pub struct RetrievedDoc {
     pub title: String,
     pub source: String,
     pub text: String,
-    pub score: f32,
 }
 
 struct DocText {
@@ -154,7 +153,6 @@ async fn retrieve_inner(
                     title: d.title.clone(),
                     source: d.source.clone(),
                     text: d.text.clone(),
-                    score: *score,
                 });
             }
         }
@@ -209,13 +207,12 @@ fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn doc(id: &str, title: &str, text: &str, score: f32) -> RetrievedDoc {
+    fn doc(id: &str, title: &str, text: &str) -> RetrievedDoc {
         RetrievedDoc {
             id: id.into(),
             title: title.into(),
             source: "claude".into(),
             text: text.into(),
-            score,
         }
     }
 
@@ -226,7 +223,7 @@ mod tests {
 
     #[test]
     fn composes_block_with_delimiters() {
-        let docs = vec![doc("a", "Auth", "Uses Better Auth with DB sessions", 0.8)];
+        let docs = vec![doc("a", "Auth", "Uses Better Auth with DB sessions")];
         let block = compose_index_block(&docs).unwrap();
         assert!(block.starts_with("--- RELEVANT PROJECT MEMORY ---"));
         assert!(block.contains("Auth (claude): Uses Better Auth"));
@@ -235,7 +232,7 @@ mod tests {
 
     #[test]
     fn redacts_secrets_in_snippets() {
-        let docs = vec![doc("a", "Env", "key is sk-ABCDEF0123456789ABCDEF here", 0.7)];
+        let docs = vec![doc("a", "Env", "key is sk-ABCDEF0123456789ABCDEF here")];
         let block = compose_index_block(&docs).unwrap();
         assert!(block.contains("[REDACTED]"));
         assert!(!block.contains("sk-ABCDEF0123456789"));
@@ -245,9 +242,9 @@ mod tests {
     fn budget_bounds_body() {
         let big = "x".repeat(2000);
         let docs = vec![
-            doc("a", "A", &big, 0.9),
-            doc("b", "B", &big, 0.8),
-            doc("c", "C", &big, 0.7),
+            doc("a", "A", &big),
+            doc("b", "B", &big),
+            doc("c", "C", &big),
         ];
         let block = compose_index_block(&docs).unwrap();
         assert!(block.len() <= BLOCK_MAX_CHARS + 200);

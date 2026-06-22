@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "atlas"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "atlas-acp",
  "atlas-agents",
