@@ -97,6 +97,45 @@ pub async fn read_file_base64(path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Heuristic: does this file look like UTF-8/ASCII text rather than binary?
+/// Reads only a capped prefix (8 KB) and applies the classic "a NUL byte means
+/// binary" rule that `git` uses, plus a UTF-8 validity check on the prefix.
+///
+/// Used as a fallback when a file's name/extension isn't in the known-text
+/// allowlist (e.g. `.env.local`, `.env.production`, or any odd text file) so it
+/// still opens in the editor instead of the unsupported-file view, without
+/// risking dumping real binary into CodeMirror.
+#[tauri::command]
+pub async fn is_text_file(path: String) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut f =
+            fs::File::open(&path).map_err(|e| format!("Failed to open {}: {}", path, e))?;
+        let mut buf = [0u8; 8192];
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+        let slice = &buf[..n];
+        // Empty file → treat as text (an empty editor is fine).
+        if slice.is_empty() {
+            return Ok(true);
+        }
+        // A NUL byte in the prefix is the standard binary signal.
+        if slice.contains(&0) {
+            return Ok(false);
+        }
+        // Otherwise require the prefix to be valid UTF-8 — but tolerate an
+        // incomplete final multibyte char caused by the 8 KB cut (that's
+        // `error_len() == None`, i.e. "unexpected end", not an invalid byte).
+        match std::str::from_utf8(slice) {
+            Ok(_) => Ok(true),
+            Err(e) => Ok(e.error_len().is_none() && e.valid_up_to() > 0),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Grant the asset protocol read access to a project directory (recursive), so
 /// the media viewer can serve images/video/audio from it via `convertFileSrc`.
 /// The static scope (tauri.conf.json) is intentionally narrow ($HOME) rather

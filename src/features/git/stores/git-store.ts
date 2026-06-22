@@ -36,6 +36,16 @@ export interface BranchInfo {
   date: string;
 }
 
+/** Dry-run result of merging a branch into the current one (pre-merge preview). */
+export interface MergePreview {
+  /** "clean" | "conflicts" | "uptodate" | "invalid" | "unsupported" */
+  kind: "clean" | "conflicts" | "uptodate" | "invalid" | "unsupported";
+  /** Commits the merge would bring in (on the source branch, not on current). */
+  commitCount: number;
+  /** Files that would conflict (only meaningful when kind === "conflicts"). */
+  conflictedFiles: number;
+}
+
 export interface StashEntry {
   index: number;
   message: string;
@@ -177,6 +187,8 @@ interface GitActions {
     renameBranch: (oldName: string, newName: string) => Promise<void>;
     deleteBranch: (name: string, force?: boolean) => Promise<void>;
     mergeBranch: (branch: string) => Promise<void>;
+    /** Read-only dry run: what merging `branch` into current would do. */
+    mergePreview: (branch: string) => Promise<MergePreview>;
     stageFiles: (paths: string[]) => Promise<void>;
     unstageFiles: (paths: string[]) => Promise<void>;
     discard: (paths: string[]) => Promise<void>;
@@ -442,6 +454,13 @@ export const useGitStore = createSelectors(
             const p = repo();
             if (!p) return;
             await invoke("git_merge_branch", { path: p, branch });
+          },
+          mergePreview: async (branch) => {
+            const p = repo();
+            if (!p) {
+              return { kind: "invalid", commitCount: 0, conflictedFiles: 0 };
+            }
+            return invoke<MergePreview>("git_merge_preview", { path: p, branch });
           },
           stageFiles: async (paths) => {
             const p = repo();

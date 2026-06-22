@@ -208,6 +208,101 @@ pub async fn git_merge_branch(path: String, branch: String, app: AppHandle) -> R
         .map_err(|e| e.to_string())?
 }
 
+/// Dry-run preview of merging `branch` into the current branch — what GitHub
+/// Desktop shows under the branch picker before you confirm. Read-only: runs
+/// no mutating git, so it takes no `AppHandle` and emits no change event.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergePreview {
+    /// "clean" | "conflicts" | "uptodate" | "invalid" | "unsupported"
+    ///   - clean:       merges with no conflicts
+    ///   - conflicts:   would produce `conflicted_files` conflicts
+    ///   - uptodate:    nothing to merge (0 commits)
+    ///   - invalid:     unrelated histories (no merge base)
+    ///   - unsupported: git too old for `merge-tree --write-tree` preview;
+    ///                  the merge can still be attempted, we just can't
+    ///                  predict conflicts ahead of time
+    pub kind: String,
+    /// Commits on `branch` not yet on the current branch (what merging brings in).
+    pub commit_count: u32,
+    /// Number of files that would conflict (only meaningful when kind == "conflicts").
+    pub conflicted_files: u32,
+}
+
+fn merge_preview(path: &str, branch: &str) -> Result<MergePreview, String> {
+    let head = git_out(path, &["rev-parse", "HEAD"])?.trim().to_string();
+    let theirs = git_out(path, &["rev-parse", "--verify", &format!("{branch}^{{commit}}")])
+        .map_err(|_| format!("branch '{branch}' not found"))?
+        .trim()
+        .to_string();
+
+    // Unrelated histories → no common ancestor → merge would refuse.
+    let base = Command::new("git")
+        .args(["merge-base", &head, &theirs])
+        .current_dir(path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !base.status.success() {
+        return Ok(MergePreview { kind: "invalid".into(), commit_count: 0, conflicted_files: 0 });
+    }
+
+    // Commits that merging would bring in: on `branch` but not on HEAD.
+    let commit_count = git_out(path, &["rev-list", "--count", &format!("{head}..{theirs}")])?
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
+    if commit_count == 0 {
+        return Ok(MergePreview { kind: "uptodate".into(), commit_count: 0, conflicted_files: 0 });
+    }
+
+    // Conflict detection via `git merge-tree --write-tree` (git 2.38+, with
+    // `--name-only` in 2.40+). It returns a NON-ZERO exit on conflicts, so we
+    // can't use `git_out` (which treats non-zero as an error) — capture the
+    // raw status/stdout/stderr instead.
+    let mt = Command::new("git")
+        .args([
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "-z",
+            &head,
+            &theirs,
+        ])
+        .current_dir(path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if mt.status.success() {
+        return Ok(MergePreview { kind: "clean".into(), commit_count, conflicted_files: 0 });
+    }
+
+    // Non-zero: conflicts (exit 1) OR the flags are unsupported on an older git
+    // (usage error / exit 129). Degrade gracefully so the merge stays available.
+    let stderr = String::from_utf8_lossy(&mt.stderr);
+    if stderr.contains("usage:") || stderr.contains("unknown option") || stderr.contains("not a valid option") {
+        return Ok(MergePreview { kind: "unsupported".into(), commit_count, conflicted_files: 0 });
+    }
+
+    // Conflict output (`-z`, `--name-only`): `<tree-oid>\0` then each conflicted
+    // path `\0`-separated. Drop empties (section separators); first field is the
+    // oid, the rest are the conflicted files.
+    let stdout = String::from_utf8_lossy(&mt.stdout);
+    let mut fields = stdout.split('\0').filter(|s| !s.is_empty());
+    let _oid = fields.next();
+    let conflicted_files = fields.count() as u32;
+    Ok(MergePreview { kind: "conflicts".into(), commit_count, conflicted_files })
+}
+
+#[tauri::command]
+pub async fn git_merge_preview(path: String, branch: String) -> Result<MergePreview, String> {
+    tokio::task::spawn_blocking(move || merge_preview(&path, &branch))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ── Remote sync ──────────────────────────────────────────────────────────
 
 #[tauri::command]

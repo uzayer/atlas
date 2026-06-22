@@ -6,10 +6,12 @@ import {
   ArrowUp,
   UploadCloud,
   Loader2,
+  GitMerge,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useGitStore } from "../../stores/git-store";
 import { BranchSwitcher } from "./branch-switcher";
+import { MergeBranchDialog } from "./merge-branch-dialog";
 import { ChangesView } from "./changes-view";
 import { HistoryView } from "./history-view";
 import { StashesView } from "./stashes-view";
@@ -33,6 +35,7 @@ export function GitManagerPanel() {
 
   const [view, setView] = useState<View>("changes");
   const [busy, setBusy] = useState<string | null>(null);
+  const [mergeOpen, setMergeOpen] = useState(false);
 
   useEffect(() => {
     if (repoPath) void actions.refreshAll(repoPath).catch(() => {});
@@ -66,6 +69,13 @@ export function GitManagerPanel() {
       {/* Toolbar: branch + sync */}
       <div className="shrink-0 flex items-center gap-1 px-1.5 h-[29px] border-b border-border-default">
         <BranchSwitcher />
+        <button
+          onClick={() => setMergeOpen(true)}
+          className="flex items-center justify-center w-6 h-6 rounded text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer shrink-0"
+          title={`Merge a branch into ${current?.name ?? "the current branch"}`}
+        >
+          <GitMerge size={12} />
+        </button>
         <div className="ml-auto flex items-center gap-0.5">
           <ToolbarBtn
             onClick={() => run("fetch", () => actions.fetch())}
@@ -120,6 +130,8 @@ export function GitManagerPanel() {
         {view === "history" && <HistoryView />}
         {view === "stashes" && <StashesView />}
       </div>
+
+      <MergeBranchDialog open={mergeOpen} onOpenChange={setMergeOpen} />
     </div>
   );
 }
