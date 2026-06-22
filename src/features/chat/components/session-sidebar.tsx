@@ -356,23 +356,31 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   };
 
   const handleOpenAgent = (item: SidebarItem) => {
-    if (!item.filePath) return;
-
     const storeSnapshot = useChatStore.getState().sessions;
 
-    // De-dup #1: if THIS tab is already pointing at the same session id,
-    // it's a no-op (covers re-clicks + clicks-while-loading).
-    if (storeSnapshot[tabId]?.acpSessionId === item.id) return;
-
-    // De-dup #2: if ANOTHER open tab is already bound to this session id,
-    // just focus that tab instead of opening a new one. Keeps tabs from
-    // multiplying when the user re-clicks a row they already have open.
+    // Live-focus / de-dup: if an open tab already represents THIS session,
+    // just focus it. A tab matches by its bound `acpSessionId` OR by the
+    // synthetic `live-<tabId>` id used before binding — the exact same id
+    // formula `items` uses to key live rows. Covers re-clicks, clicks while
+    // loading, and clicks on a row already open in another tab.
+    //
+    // Crucially this runs BEFORE the `filePath` guard below: it's the ONLY
+    // way to (re)open a live-only session such as a running Codex chat, which
+    // has no Claude JSONL on disk and therefore no `filePath` to reload from.
+    // (Previously this lived after the guard, so live-only rows were silently
+    // unclickable — two same-looking agents, only one selectable.)
     for (const [tid, s] of Object.entries(storeSnapshot)) {
-      if (s.acpSessionId === item.id) {
+      const liveId = s.acpSessionId ?? `live-${tid}`;
+      if (liveId === item.id) {
         setActiveTab(tid);
         return;
       }
     }
+
+    // Past this point we reload the session from its JSONL transcript, which
+    // requires a disk file. Live-only sessions never reach here — they were
+    // focused above.
+    if (!item.filePath) return;
 
     // Decide target tab. If the current tab's session is mid-flight
     // (status === "running"), we MUST NOT overwrite it — the agent is
@@ -551,7 +559,14 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   }
 
   const isActiveItem = (item: SidebarItem) => {
-    if (item.kind === "agent") return item.id === activeAcpId;
+    if (item.kind === "agent") {
+      // Match the active tab by the SAME id formula `items` uses for live
+      // rows: bound acpSessionId, else the synthetic `live-<tabId>`. Without
+      // the fallback a focused live-only session (e.g. Codex, or any chat
+      // before it binds) never highlights.
+      const activeId = activeAcpId ?? `live-${tabId}`;
+      return item.id === activeId;
+    }
     return item.id === tabId;
   };
 
