@@ -699,7 +699,7 @@ function ChatComposer({
           onStop={onStop}
           running={running}
           disabled={disabled}
-          placeholder={isClaude ? "Ask Claude Code what to do…" : "Ask Codex what to do…"}
+          placeholder="Ask Atlas what to do…"
         />
       </div>
       {isClaude && <ClaudeLoginDialog />}
