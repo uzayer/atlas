@@ -84,8 +84,13 @@ export interface ChatSession {
    *  the picker in a loading state, optimistically pre-filled from the persisted
    *  per-agent modes cache so switching feels instant. Cleared by `setAcpModes`. */
   acpModesPending?: boolean;
-  /** Currently selected ACP model id (default / sonnet / haiku / …). */
+  /** Currently selected ACP model id (default / sonnet / haiku / …). For the
+   *  native Cersei agent this is the bare model id; the provider lives in
+   *  `cerseiProvider` and the two are pushed to the backend as `provider/model`. */
   acpCurrentModel?: string;
+  /** BYOK provider id backing the native Cersei agent's model selection
+   *  (e.g. "anthropic", "openai"). Unused by the ACP agents. */
+  cerseiProvider?: string;
   /** Available slash commands as reported by the agent for this session. */
   availableCommands?: unknown[];
   /**

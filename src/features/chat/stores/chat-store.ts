@@ -51,6 +51,23 @@ function pushAcpModeToAgent(state: ChatState, sessionId: string): void {
   }).catch((err) => console.warn("agents_set_mode failed:", err));
 }
 
+/** Push the native Cersei agent's `provider/model` selection to its bound
+ *  agent via `agents_set_model`. The backend's `set_model` parses the
+ *  `provider/model` form (see `atlas_cersei::CerseiRuntime::set_model`).
+ *  No-op until the session is bound and both provider + model are chosen. */
+function pushCerseiModelToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId) return;
+  if (session.agentType !== "cersei") return;
+  const provider = session.cerseiProvider;
+  const model = session.acpCurrentModel;
+  if (!provider || !model) return;
+  void invoke("agents_set_model", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    modelId: `${provider}/${model}`,
+  }).catch((err) => console.warn("agents_set_model failed:", err));
+}
+
 /** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
 function toChatToolCall(tc: AgentToolCall): ChatMessage["toolCalls"][number] {
   return {
@@ -145,6 +162,12 @@ interface ChatActions {
      *  session boot resolves (modes confirmed, or bind failed) so the composer's
      *  picker never hangs on its loading spinner. */
     setAcpModesPending: (sessionId: string, pending: boolean) => void;
+    /** Native Cersei agent: pick the BYOK provider. Clears the model so the
+     *  composer re-selects a default for the new provider before pushing. */
+    setCerseiProvider: (sessionId: string, provider: string) => void;
+    /** Native Cersei agent: pick the model and push `provider/model` to the
+     *  bound agent via `agents_set_model`. No-op until the session is bound. */
+    setCerseiModel: (sessionId: string, model: string) => void;
     replaceMessages: (
       sessionId: string,
       messages: Array<{
@@ -405,6 +428,9 @@ export const useChatStore = createSelectors(
             sess.acpSessionId = undefined;
             sess.acpCurrentMode = undefined;
             sess.acpCurrentModel = undefined;
+            // The provider only applies to the native agent; clear it so the
+            // composer re-defaults from BYOK keys if cersei is chosen.
+            sess.cerseiProvider = undefined;
             if (agentType === "claude-code") {
               // Claude has no ACP modes — clear the old agent's so no stale pill.
               sess.acpAvailableModes = [];
@@ -564,6 +590,22 @@ export const useChatStore = createSelectors(
             if (session) session.acpCurrentMode = modeId;
           });
           pushAcpModeToAgent(get(), sessionId);
+        },
+        setCerseiProvider: (sessionId, provider) =>
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (!session || session.cerseiProvider === provider) return;
+            session.cerseiProvider = provider;
+            // New provider → the prior model id is meaningless; let the composer
+            // pick this provider's default before anything is pushed.
+            session.acpCurrentModel = undefined;
+          }),
+        setCerseiModel: (sessionId, model) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.acpCurrentModel = model;
+          });
+          pushCerseiModelToAgent(get(), sessionId);
         },
         replaceMessages: (sessionId, messages) =>
           set((s) => {

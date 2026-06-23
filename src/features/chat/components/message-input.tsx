@@ -13,6 +13,7 @@ import { useChatStore } from "../stores/chat-store";
 import { agents } from "../lib/agents-api";
 import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL } from "@/types/agent";
 import { AgentMark } from "@/components/agent-mark";
+import { ProviderModelPills } from "./provider-model-pills";
 // `ChatInput` pulls in CodeMirror (~870 KB) via `cm-mention-extension`.
 // We import it dynamically so the chunk is not in the initial preload set.
 // The import is kicked off at module-evaluation time (below, outside the
@@ -207,6 +208,8 @@ export function MessageInput({
     removeQueueItem,
     setAcpModes,
     setAcpModesPending,
+    setCerseiProvider,
+    setCerseiModel,
   } = useChatStore.use.actions();
   // Codex/other ACP agents advertise their own permission modes; show the
   // picker only when this session actually has modes (Claude uses its own pill).
@@ -272,6 +275,34 @@ export function MessageInput({
   const agentType = useChatStore(
     (s) => s.sessions[tabId]?.agentType ?? "claude-code"
   );
+  // Native Cersei agent only: BYOK provider + model selection for the composer.
+  const cerseiProvider = useChatStore((s) => s.sessions[tabId]?.cerseiProvider ?? "");
+  const cerseiModel = useChatStore((s) => s.sessions[tabId]?.acpCurrentModel ?? "");
+  const onCerseiProvider = useCallback(
+    (id: string) => setCerseiProvider(tabId, id),
+    [tabId, setCerseiProvider]
+  );
+  const onCerseiModel = useCallback(
+    (id: string) => setCerseiModel(tabId, id),
+    [tabId, setCerseiModel]
+  );
+  // The composer may settle on a provider/model before the session is bound
+  // (the `agents_set_model` push no-ops until then). Re-push once the binding
+  // lands and a full selection exists — idempotent, mirrors the ACP mode
+  // self-heal above. Without this the agent silently falls back to the server's
+  // default model whenever the user's pick raced ahead of the bind.
+  const cerseiBinding = useChatStore((s) => {
+    const sess = s.sessions[tabId];
+    if (sess?.agentType !== "cersei") return null;
+    if (!sess.acpAgentId || !sess.acpSessionId) return null;
+    if (!sess.cerseiProvider || !sess.acpCurrentModel) return null;
+    return `${sess.acpAgentId}::${sess.acpSessionId}::${sess.acpCurrentModel}`;
+  });
+  useEffect(() => {
+    if (!cerseiBinding) return;
+    const model = cerseiBinding.split("::")[2];
+    setCerseiModel(tabId, model);
+  }, [tabId, cerseiBinding, setCerseiModel]);
   // ACP-reported slash commands for this session (Codex). Claude keeps its
   // curated catalogue (the picker's default).
   const availableCommands = useChatStore((s) => s.sessions[tabId]?.availableCommands);
@@ -753,6 +784,14 @@ export function MessageInput({
               )}
               {agentType !== "claude-code" && (hasAcpModes || acpModesPending) && (
                 <AcpModePicker tabId={tabId} />
+              )}
+              {agentType === "cersei" && (
+                <ProviderModelPills
+                  provider={cerseiProvider}
+                  model={cerseiModel}
+                  onProvider={onCerseiProvider}
+                  onModel={onCerseiModel}
+                />
               )}
               <button
                 onClick={() => {
