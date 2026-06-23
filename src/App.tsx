@@ -315,8 +315,15 @@ export function App() {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
 
-    const pendingText = new Map<string, string>(); // session_id → buffered narration
-    const pendingThought = new Map<string, string>(); // session_id → buffered thinking
+    // All deltas — text/thinking chunks INCLUDED — buffer here in strict wire
+    // order. Consecutive same-session text (or thinking) chunks coalesce into
+    // the trailing entry, but a `message_appended`/tool delta between two text
+    // runs breaks the run so ordering is preserved. (Previously text was
+    // bucketed separately and applied BEFORE other deltas, which reordered the
+    // anchoring `message_appended` after its text — invisible for ACP agents
+    // whose IPC latency spread deltas across frames, but the in-process Cersei
+    // agent emits a whole turn in one frame and the text shattered into
+    // mis-ordered fragments.)
     const pendingDeltas: AgentDelta[] = [];
     const toolDeltaPos = new Map<string, number>(); // dedup key → index in pendingDeltas
     let rafId: number | null = null;
@@ -455,21 +462,30 @@ export function App() {
 
     const flush = () => {
       rafId = null;
-      if (
-        pendingText.size === 0 &&
-        pendingThought.size === 0 &&
-        pendingDeltas.length === 0
-      ) {
-        return;
-      }
-      const texts = Array.from(pendingText, ([sessionId, text]) => ({ sessionId, text }));
-      const thoughts = Array.from(pendingThought, ([sessionId, text]) => ({ sessionId, text }));
+      if (pendingDeltas.length === 0) return;
       const deltas = pendingDeltas.slice();
-      pendingText.clear();
-      pendingThought.clear();
       pendingDeltas.length = 0;
       toolDeltaPos.clear();
-      useChatStore.getState().actions.applyAgentBatch({ texts, thoughts, deltas });
+      useChatStore.getState().actions.applyAgentBatch({ texts: [], thoughts: [], deltas });
+    };
+    // Coalesce a streaming text/thinking chunk into the trailing pendingDeltas
+    // entry when it's the same kind + session; otherwise append in order. Keeps
+    // the per-frame coalescing win without divorcing text from its wire order.
+    const bufferChunk = (env: AgentDelta) => {
+      const last = pendingDeltas[pendingDeltas.length - 1];
+      if (
+        last &&
+        (last.kind === "text_chunk" || last.kind === "thinking_chunk") &&
+        last.kind === env.kind &&
+        last.session_id === env.session_id
+      ) {
+        pendingDeltas[pendingDeltas.length - 1] = {
+          ...last,
+          delta: last.delta + (env as typeof last).delta,
+        };
+      } else {
+        pendingDeltas.push(env);
+      }
     };
     const schedule = () => {
       if (rafId !== null) return;
@@ -539,17 +555,11 @@ export function App() {
       const actions = useChatStore.getState().actions;
       switch (env.kind) {
         case "text_chunk":
-          pendingText.set(
-            env.session_id,
-            (pendingText.get(env.session_id) ?? "") + env.delta
-          );
+          bufferChunk(env);
           schedule();
           return;
         case "thinking_chunk":
-          pendingThought.set(
-            env.session_id,
-            (pendingThought.get(env.session_id) ?? "") + env.delta
-          );
+          bufferChunk(env);
           schedule();
           return;
         case "permission_request": {

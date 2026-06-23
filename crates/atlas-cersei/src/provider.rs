@@ -30,11 +30,15 @@ pub fn openai_base_url(provider: &str) -> Option<&'static str> {
 }
 
 /// Build a boxed Cersei provider for `(provider, model)` using `api_key`.
+///
+/// Returns a `Send + Sync` box (the `Provider` trait already requires both) so
+/// the same builder satisfies `provider_boxed(Box<dyn Provider>)` *and* the
+/// delegate tool's `ProviderFactory` (which needs `Box<dyn Provider + Send + Sync>`).
 pub fn build_provider(
     provider: &str,
     api_key: &str,
     model: &str,
-) -> Result<Box<dyn Provider>, String> {
+) -> Result<Box<dyn Provider + Send + Sync>, String> {
     if provider == "anthropic" {
         let p = Anthropic::builder()
             .api_key(api_key)
@@ -76,6 +80,43 @@ pub fn default_model_for(provider: &str) -> Option<&'static str> {
         "cohere" => "command-a-03-2025",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_url_known_and_unknown() {
+        assert_eq!(openai_base_url("openai"), Some("https://api.openai.com/v1"));
+        assert_eq!(openai_base_url("groq"), Some("https://api.groq.com/openai/v1"));
+        // Anthropic is handled natively, not via the OpenAI-compat path.
+        assert_eq!(openai_base_url("anthropic"), None);
+        assert_eq!(openai_base_url("nonsense"), None);
+    }
+
+    #[test]
+    fn default_models_cover_priority_list() {
+        // Every prioritized provider must have a known default model, or the
+        // runtime can't auto-select one for it.
+        for p in PROVIDER_PRIORITY {
+            assert!(default_model_for(p).is_some(), "no default model for {p}");
+        }
+        assert_eq!(default_model_for("anthropic"), Some("claude-opus-4-8"));
+        assert_eq!(default_model_for("nonsense"), None);
+    }
+
+    #[test]
+    fn priority_leads_with_anthropic() {
+        assert_eq!(PROVIDER_PRIORITY.first(), Some(&"anthropic"));
+    }
+
+    #[test]
+    fn build_provider_known_ok_unknown_err() {
+        assert!(build_provider("anthropic", "sk-test", "claude-opus-4-8").is_ok());
+        assert!(build_provider("openai", "sk-test", "gpt-5.1").is_ok());
+        assert!(build_provider("nonsense", "k", "m").is_err());
+    }
 }
 
 /// Priority order used to pick a default provider from the configured BYOK keys

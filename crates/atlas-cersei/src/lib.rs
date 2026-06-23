@@ -25,6 +25,8 @@ use atlas_acp::{AcpError, AcpEvent, AgentId, AgentInfo, EventSink, NewSessionInf
 use cersei::prelude::{PermissionDecision as CerseiDecision, PermissionPolicy, PermissionRequest};
 use cersei::tools::PermissionLevel;
 use cersei::types::Message;
+use cersei_agent::delegate::{ProviderFactory, ToolsetFactory};
+use cersei_agent::delegate_tool::DelegateTool;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -40,9 +42,35 @@ pub const CERSEI_PLUGIN_ID: &str = "cersei";
 /// Display name shown in the agent picker / marks.
 pub const CERSEI_DISPLAY_NAME: &str = "Atlas";
 
-const SYSTEM_PROMPT: &str = "You are Atlas, a native coding agent embedded in the Atlas IDE. \
-You help the user read, write, and reason about their codebase using the provided tools. \
-Be concise and precise. Prefer making edits with the file tools over printing large blocks of code.";
+const SYSTEM_PROMPT: &str = r#"You are Atlas, a coding agent embedded natively in the Atlas IDE. You run in-process — your tool calls are local and near-instant, so reach for them freely. You help the user read, write, and reason about their codebase.
+
+# Exploration — understand before you act
+- Read the codebase first; resist easy assumptions. Let the shape of the existing system teach you how to move. Never guess a file's location, an API's signature, or a pattern — verify it with a tool.
+- Search to discover, read to confirm. Use glob/code_search to find candidates, grep to inspect them, then read the files that matter.
+- Filter early: combine a grep pattern with a path/type filter rather than searching everything and sifting noise.
+- Issue independent tool calls in parallel in a single step (e.g. several reads, or a grep plus a glob). Only serialize when a later call genuinely depends on an earlier result. Parallel calls are cheap here — use them.
+- For a substantial change, trace the full call path and the existing conventions before editing.
+
+# Planning & todos
+- For any multi-step or non-trivial task (roughly 3+ steps, or work that spans several files), use the TodoWrite tool to lay out a short, concrete plan and keep the user oriented. Skip it for simple one- or two-step tasks — a todo list there is just noise.
+- Write atomic todos: one clear action each. Mark exactly one item in_progress at a time, and flip it to completed the moment it's done — never batch-complete at the end. Don't leave the turn with todos unfinished.
+- In plan mode you may only read and search — no edits, no commands, nothing that mutates files. Explore non-destructively, then present a concrete plan and exit plan mode when the user approves. A request to "do it" while in plan mode means plan the doing, not perform it.
+
+# Parallel sub-agents (delegate)
+- You can spawn parallel sub-agents with the `delegate` tool. Each child runs in its own fresh context with the coding tools and reports a summary back; children cannot delegate further. Use the `tasks` array to fan several out at once — they run concurrently.
+- Delegate when the work splits into independent, well-bounded pieces that can run in parallel without stepping on each other: e.g. researching several subsystems at once, or implementing disjoint slices of a change with non-overlapping file scopes. Each task prompt must be fully self-contained — the child can't see this conversation.
+- Keep the critical-path step yourself; delegate the sidecar work. Don't delegate a tightly-coupled next step you're blocked on, and don't delegate trivial one-shot tasks you can just do. After children return, integrate their results — don't redo their work.
+
+# Doing, not explaining
+- Assume the user wants you to make the change and run the work needed to solve the problem — unless they explicitly ask for a plan, ask a question, or are brainstorming. Don't stop at a proposal; carry the task to a finished, verified state within the turn when feasible.
+- Match the surrounding code: its naming, idiom, and comment density. Do NOT add comments that merely narrate what the code does — comments explain non-obvious intent, trade-offs, or constraints, nothing more.
+- Prefer editing files with the file tools over printing large code blocks. The user is on the same machine — never tell them to copy or save a file you can write yourself.
+
+# Communicating
+- Be concise. For simple work, a sentence or two — don't pad with bullets unless structure genuinely helps.
+- While exploring, drop brief one- or two-sentence notes on what you're learning, not just what you're doing. Before a non-trivial edit, say what you're about to change and why.
+- Don't write "Let me read the file." before a tool call — just make the call; the UI shows it. No colons trailing into a tool call.
+- Report outcomes faithfully: if something failed, say so with the evidence; if you skipped a step, note it; when it's done and verified, state it plainly without hedging."#;
 
 /// One historical conversation item, in a UI-neutral shape so `atlas-agents`
 /// can rebuild its own `Message` type on resume without depending on Cersei.
@@ -304,9 +332,39 @@ impl CerseiRuntime {
         let token = CancellationToken::new();
         *entry.cancel.lock() = Some(token.clone());
 
+        // Coding tools + planning (EnterPlanMode / ExitPlanMode / TodoWrite) so
+        // the agent can lay out and track a plan; TodoWrite calls are surfaced
+        // as a live plan card (see the adapter below), not a raw tool card.
+        //
+        // Plus the `delegate` tool — parallel in-process sub-agents (like Claude
+        // Code's Task / Codex's spawn_agent). Each child gets a fresh
+        // conversation + the coding toolset, runs on the SAME provider/model via
+        // the factory below, and cannot delegate further (depth-capped). The
+        // batch runs children concurrently (default 3 in flight).
+        let provider_factory: ProviderFactory = {
+            let pid = provider_id.clone();
+            let key = api_key.clone();
+            let m = model.clone();
+            Arc::new(move || {
+                // Safe to unwrap: the parent provider built successfully above
+                // from the same (provider, key, model), so a rebuild won't fail.
+                provider::build_provider(&pid, &key, &m).expect("delegate provider rebuild")
+            })
+        };
+        let toolset_factory: ToolsetFactory = Arc::new(|| cersei::tools::coding());
+
+        let tools = {
+            let mut t = cersei::tools::coding();
+            t.extend(cersei::tools::planning());
+            t.push(Box::new(
+                DelegateTool::new(provider_factory, toolset_factory).with_model(model.clone()),
+            ));
+            t
+        };
+
         let built = cersei::Agent::builder()
             .provider_boxed(provider)
-            .tools(cersei::tools::coding())
+            .tools(tools)
             .working_dir(PathBuf::from(&entry.cwd))
             .with_messages(history)
             .permission_policy(policy)
@@ -321,30 +379,18 @@ impl CerseiRuntime {
 
         let mut stream = built.run_stream(&text);
         let mut stop = "endturn".to_string();
+        // TodoWrite tool-call ids — surfaced as plan cards, so their tool
+        // start/end are suppressed from the raw tool-card stream.
+        let mut todo_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         while let Some(ev) = stream.next().await {
-            use cersei::events::AgentEvent as E;
-            match ev {
-                E::TextDelta(s) => emit_chunk(&sink, agent_id, &session_id, "agent_message_chunk", &s),
-                E::ThinkingDelta(s) => {
-                    emit_chunk(&sink, agent_id, &session_id, "agent_thought_chunk", &s)
-                }
-                E::ToolStart { name, id, input } => {
-                    emit_tool_call(&sink, agent_id, &session_id, &id, &name, input)
-                }
-                E::ToolEnd {
-                    id,
-                    result,
-                    is_error,
-                    ..
-                } => emit_tool_update(&sink, agent_id, &session_id, &id, &result, is_error),
-                E::TurnComplete { stop_reason, .. } => {
-                    stop = map_stop(stop_reason).to_string();
-                }
-                E::Complete(out) => {
-                    stop = map_stop(out.stop_reason).to_string();
+            match translate_event(ev, &sink, agent_id, &session_id, &mut todo_ids) {
+                TurnStep::Continue => {}
+                TurnStep::SetStop(s) => stop = s,
+                TurnStep::Done(s) => {
+                    stop = s;
                     break;
                 }
-                E::Error(e) => {
+                TurnStep::Failed(e) => {
                     if entry.cancelled.load(Ordering::SeqCst) {
                         stop = "cancelled".to_string();
                         break;
@@ -352,7 +398,6 @@ impl CerseiRuntime {
                     *entry.cancel.lock() = None;
                     return Err(AcpError::other(e));
                 }
-                _ => {}
             }
         }
 
@@ -510,6 +555,68 @@ fn map_decision(d: atlas_acp::PermissionDecision) -> CerseiDecision {
     }
 }
 
+// ─── Turn-stream event translation ──────────────────────────────────────────
+
+/// Outcome of translating one Cersei `AgentEvent` in the turn loop.
+enum TurnStep {
+    /// Keep streaming.
+    Continue,
+    /// Update the running stop reason but keep streaming (multi-turn runs).
+    SetStop(String),
+    /// Final event — set the stop reason and end the turn.
+    Done(String),
+    /// The run errored; the caller decides cancel-vs-propagate.
+    Failed(String),
+}
+
+/// Translate one Cersei `AgentEvent` into the emitted `AcpEvent`(s) and the loop
+/// control signal. Pulled out of `send_prompt` so the whole adapter — text,
+/// thinking, tool cards, the TodoWrite→plan mapping, and stop-reason handling —
+/// is unit-testable with scripted events + a capturing sink, without a provider.
+fn translate_event(
+    ev: cersei::events::AgentEvent,
+    sink: &Arc<dyn EventSink>,
+    agent_id: AgentId,
+    session_id: &SessionId,
+    todo_ids: &mut std::collections::HashSet<String>,
+) -> TurnStep {
+    use cersei::events::AgentEvent as E;
+    match ev {
+        E::TextDelta(s) => {
+            emit_chunk(sink, agent_id, session_id, "agent_message_chunk", &s);
+            TurnStep::Continue
+        }
+        E::ThinkingDelta(s) => {
+            emit_chunk(sink, agent_id, session_id, "agent_thought_chunk", &s);
+            TurnStep::Continue
+        }
+        E::ToolStart { name, id, input } => {
+            if name == "TodoWrite" {
+                // Surface the todo list as a live plan card, not a tool card.
+                todo_ids.insert(id.clone());
+                emit_plan(sink, agent_id, session_id, &input);
+            } else {
+                emit_tool_call(sink, agent_id, session_id, &id, &name, input);
+            }
+            TurnStep::Continue
+        }
+        E::ToolEnd {
+            id, result, is_error, ..
+        } => {
+            // TodoWrite already rendered as a plan card on ToolStart; drop its
+            // completion so no phantom tool card appears.
+            if !todo_ids.contains(&id) {
+                emit_tool_update(sink, agent_id, session_id, &id, &result, is_error);
+            }
+            TurnStep::Continue
+        }
+        E::TurnComplete { stop_reason, .. } => TurnStep::SetStop(map_stop(stop_reason).to_string()),
+        E::Complete(out) => TurnStep::Done(map_stop(out.stop_reason).to_string()),
+        E::Error(e) => TurnStep::Failed(e),
+        _ => TurnStep::Continue,
+    }
+}
+
 // ─── AgentEvent → AcpEvent adapters ─────────────────────────────────────────
 
 fn emit_chunk(sink: &Arc<dyn EventSink>, agent_id: AgentId, session_id: &SessionId, kind: &str, text: &str) {
@@ -517,6 +624,29 @@ fn emit_chunk(sink: &Arc<dyn EventSink>, agent_id: AgentId, session_id: &Session
         "sessionUpdate": kind,
         "content": { "type": "text", "text": text },
     });
+    emit_session_update(sink, agent_id, session_id, v);
+}
+
+/// Map a `TodoWrite` tool input (`{ todos: [{ content, status, activeForm }] }`)
+/// into an ACP `plan` session update so it renders as a live plan/todo card
+/// (the same surface Claude Code's TodoWrite drives) instead of a tool card.
+fn emit_plan(sink: &Arc<dyn EventSink>, agent_id: AgentId, session_id: &SessionId, input: &serde_json::Value) {
+    let entries: Vec<serde_json::Value> = input
+        .get("todos")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "content": t.get("content").and_then(|c| c.as_str()).unwrap_or(""),
+                        "priority": "medium",
+                        "status": t.get("status").and_then(|s| s.as_str()).unwrap_or("pending"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let v = serde_json::json!({ "sessionUpdate": "plan", "entries": entries });
     emit_session_update(sink, agent_id, session_id, v);
 }
 
@@ -701,5 +831,368 @@ fn tool_result_text(content: &cersei::types::ToolResultContent) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+    }
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+//
+// These pin the AgentEvent→AcpEvent adapter (where bugs live) without needing a
+// provider or network: scripted Cersei events are fed through `translate_event`
+// into a capturing sink and the emitted ACP session updates are asserted.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cersei::events::AgentEvent as E;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// EventSink that records every emitted AcpEvent for assertions.
+    #[derive(Default)]
+    struct CollectingSink {
+        events: Mutex<Vec<AcpEvent>>,
+    }
+    impl EventSink for CollectingSink {
+        fn emit(&self, _agent_id: AgentId, event: AcpEvent) {
+            self.events.lock().push(event);
+        }
+    }
+
+    fn sink() -> (Arc<dyn EventSink>, Arc<CollectingSink>) {
+        let c = Arc::new(CollectingSink::default());
+        (c.clone() as Arc<dyn EventSink>, c)
+    }
+
+    /// The session-update JSON of the i-th recorded event (re-serialized).
+    fn update_json(c: &CollectingSink, i: usize) -> serde_json::Value {
+        match &c.events.lock()[i] {
+            AcpEvent::SessionUpdate { update, .. } => serde_json::to_value(update).unwrap(),
+            other => panic!("event {i} is not a SessionUpdate: {other:?}"),
+        }
+    }
+
+    fn run(ev: E) -> (Arc<CollectingSink>, TurnStep) {
+        let (s, c) = sink();
+        let sid = SessionId::new("sess-1".to_string());
+        let mut todo = std::collections::HashSet::new();
+        let step = translate_event(ev, &s, AgentId::new(), &sid, &mut todo);
+        (c, step)
+    }
+
+    #[test]
+    fn text_delta_emits_message_chunk() {
+        let (c, step) = run(E::TextDelta("hello world".into()));
+        assert!(matches!(step, TurnStep::Continue));
+        assert_eq!(c.events.lock().len(), 1);
+        let v = update_json(&c, 0);
+        assert_eq!(v["sessionUpdate"], "agent_message_chunk");
+        assert_eq!(v["content"]["text"], "hello world");
+    }
+
+    #[test]
+    fn thinking_delta_emits_thought_chunk() {
+        let (c, _) = run(E::ThinkingDelta("pondering".into()));
+        assert_eq!(update_json(&c, 0)["sessionUpdate"], "agent_thought_chunk");
+    }
+
+    #[test]
+    fn tool_start_emits_tool_call_with_kind() {
+        let (c, _) = run(E::ToolStart {
+            name: "Read".into(),
+            id: "t1".into(),
+            input: serde_json::json!({ "path": "x.rs" }),
+        });
+        let v = update_json(&c, 0);
+        assert_eq!(v["sessionUpdate"], "tool_call");
+        assert_eq!(v["toolCallId"], "t1");
+        assert_eq!(v["kind"], "read");
+    }
+
+    #[test]
+    fn todowrite_emits_plan_not_tool_card() {
+        let (s, c) = sink();
+        let sid = SessionId::new("sess-1".to_string());
+        let mut todo = std::collections::HashSet::new();
+        translate_event(
+            E::ToolStart {
+                name: "TodoWrite".into(),
+                id: "td1".into(),
+                input: serde_json::json!({
+                    "todos": [
+                        { "content": "Build feature", "status": "in_progress", "activeForm": "Building" },
+                        { "content": "Write tests", "status": "pending", "activeForm": "Writing" }
+                    ]
+                }),
+            },
+            &s,
+            AgentId::new(),
+            &sid,
+            &mut todo,
+        );
+        // Rendered as a plan card, and the id is tracked for ToolEnd suppression.
+        assert!(todo.contains("td1"));
+        let v = update_json(&c, 0);
+        assert_eq!(v["sessionUpdate"], "plan");
+        let entries = v["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["content"], "Build feature");
+        assert_eq!(entries[0]["status"], "in_progress");
+        assert_eq!(entries[1]["status"], "pending");
+    }
+
+    #[test]
+    fn tool_end_suppressed_for_todo_id() {
+        let (s, c) = sink();
+        let sid = SessionId::new("sess-1".to_string());
+        let mut todo = std::collections::HashSet::new();
+        todo.insert("td1".to_string());
+        let step = translate_event(
+            E::ToolEnd {
+                name: "TodoWrite".into(),
+                id: "td1".into(),
+                result: "2 items".into(),
+                is_error: false,
+                duration: Duration::from_secs(0),
+            },
+            &s,
+            AgentId::new(),
+            &sid,
+            &mut todo,
+        );
+        assert!(matches!(step, TurnStep::Continue));
+        assert_eq!(c.events.lock().len(), 0, "TodoWrite ToolEnd must not emit a tool card");
+    }
+
+    #[test]
+    fn tool_end_emits_update_for_normal_tool() {
+        let (c, _) = run(E::ToolEnd {
+            name: "Read".into(),
+            id: "t1".into(),
+            result: "file contents".into(),
+            is_error: false,
+            duration: Duration::from_secs(0),
+        });
+        let v = update_json(&c, 0);
+        assert_eq!(v["sessionUpdate"], "tool_call_update");
+        assert_eq!(v["toolCallId"], "t1");
+        assert_eq!(v["status"], "completed");
+    }
+
+    #[test]
+    fn tool_end_error_maps_to_failed() {
+        let (c, _) = run(E::ToolEnd {
+            name: "Bash".into(),
+            id: "t9".into(),
+            result: "boom".into(),
+            is_error: true,
+            duration: Duration::from_secs(0),
+        });
+        assert_eq!(update_json(&c, 0)["status"], "failed");
+    }
+
+    #[test]
+    fn turn_complete_sets_stop_without_emitting() {
+        let (c, step) = run(E::TurnComplete {
+            turn: 1,
+            stop_reason: cersei::types::StopReason::EndTurn,
+            usage: cersei::types::Usage::default(),
+        });
+        assert!(matches!(step, TurnStep::SetStop(ref s) if s == "endturn"));
+        assert_eq!(c.events.lock().len(), 0);
+    }
+
+    #[test]
+    fn error_event_signals_failure() {
+        let (_c, step) = run(E::Error("provider exploded".into()));
+        assert!(matches!(step, TurnStep::Failed(ref e) if e == "provider exploded"));
+    }
+
+    #[test]
+    fn tool_kind_classification() {
+        assert_eq!(tool_kind("Read"), "read");
+        assert_eq!(tool_kind("Grep"), "read");
+        assert_eq!(tool_kind("Edit"), "edit");
+        assert_eq!(tool_kind("Write"), "edit");
+        assert_eq!(tool_kind("Bash"), "execute");
+        assert_eq!(tool_kind("WebFetch"), "fetch");
+        assert_eq!(tool_kind("delegate"), "other");
+    }
+
+    #[test]
+    fn stop_reason_mapping() {
+        use cersei::types::StopReason as S;
+        assert_eq!(map_stop(S::EndTurn), "endturn");
+        assert_eq!(map_stop(S::MaxTokens), "maxtokens");
+        assert_eq!(map_stop(S::ToolUse), "endturn");
+        assert_eq!(map_stop(S::ContentFilter), "refusal");
+    }
+
+    #[test]
+    fn modes_blob_advertises_four_modes() {
+        let v = modes_blob("plan");
+        assert_eq!(v["currentModeId"], "plan");
+        let ids: Vec<&str> = v["availableModes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["default", "acceptEdits", "plan", "bypass"]);
+    }
+
+    #[test]
+    fn full_turn_emits_events_in_wire_order() {
+        // A realistic turn: narrate → call a tool → tool finishes → narrate →
+        // end. The emitted ACP updates must stay in that exact order (this is
+        // the ordering the streaming pipeline depends on).
+        let (s, c) = sink();
+        let sid = SessionId::new("sess-1".to_string());
+        let aid = AgentId::new();
+        let mut todo = std::collections::HashSet::new();
+        let seq = vec![
+            E::TextDelta("Reading it.".into()),
+            E::ToolStart {
+                name: "Read".into(),
+                id: "r1".into(),
+                input: serde_json::json!({}),
+            },
+            E::ToolEnd {
+                name: "Read".into(),
+                id: "r1".into(),
+                result: "body".into(),
+                is_error: false,
+                duration: Duration::from_secs(0),
+            },
+            E::TextDelta("Done.".into()),
+            E::TurnComplete {
+                turn: 1,
+                stop_reason: cersei::types::StopReason::EndTurn,
+                usage: cersei::types::Usage::default(),
+            },
+        ];
+        let mut last = TurnStep::Continue;
+        for ev in seq {
+            last = translate_event(ev, &s, aid, &sid, &mut todo);
+        }
+        // Bind the count first: holding the lock across `.map()` (which re-locks
+        // inside `update_json`) would deadlock parking_lot's non-reentrant Mutex.
+        let n = c.events.lock().len();
+        let kinds: Vec<String> = (0..n)
+            .map(|i| update_json(&c, i)["sessionUpdate"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"],
+            "TurnComplete emits nothing; the rest stay in wire order"
+        );
+        assert!(matches!(last, TurnStep::SetStop(ref s) if s == "endturn"));
+    }
+
+    // ── Permission policy (the synthesized modes that mirror Claude Code) ──────
+
+    fn policy(mode: &str) -> UiPolicy {
+        let (s, _c) = sink();
+        let entry = Arc::new(SessionEntry {
+            session_id: "s".into(),
+            cwd: "/tmp".into(),
+            history: Mutex::new(Vec::new()),
+            provider: Mutex::new("anthropic".into()),
+            model: Mutex::new("claude-opus-4-8".into()),
+            mode: Mutex::new(mode.into()),
+            cancel: Mutex::new(None),
+            pending: DashMap::new(),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+        });
+        UiPolicy {
+            sink: s,
+            agent_id: AgentId::new(),
+            session_id: SessionId::new("s".to_string()),
+            pending: entry,
+            mode: mode.into(),
+        }
+    }
+
+    fn req(level: PermissionLevel) -> PermissionRequest {
+        PermissionRequest {
+            tool_name: "SomeTool".into(),
+            tool_input: serde_json::json!({}),
+            permission_level: level,
+            description: String::new(),
+            id: "1".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn bypass_mode_allows_everything() {
+        let p = policy("bypass");
+        assert!(matches!(
+            p.check(&req(PermissionLevel::Dangerous)).await,
+            CerseiDecision::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_is_read_only() {
+        let p = policy("plan");
+        assert!(matches!(
+            p.check(&req(PermissionLevel::ReadOnly)).await,
+            CerseiDecision::Allow
+        ));
+        assert!(matches!(
+            p.check(&req(PermissionLevel::Write)).await,
+            CerseiDecision::Deny(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn accept_edits_auto_allows_writes() {
+        let p = policy("acceptEdits");
+        assert!(matches!(
+            p.check(&req(PermissionLevel::Write)).await,
+            CerseiDecision::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn forbidden_is_always_denied() {
+        // Denied before any UI prompt, so awaiting check() doesn't block.
+        let p = policy("default");
+        assert!(matches!(
+            p.check(&req(PermissionLevel::Forbidden)).await,
+            CerseiDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn replay_pairs_tool_results_with_calls() {
+        use cersei::types::{ContentBlock, Message, ToolResultContent};
+        let msgs = vec![
+            Message::user("hello"),
+            Message::assistant_blocks(vec![
+                ContentBlock::Text { text: "on it".into() },
+                ContentBlock::ToolUse {
+                    id: "x".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({}),
+                },
+            ]),
+            Message::user_blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "x".into(),
+                content: ToolResultContent::Text("file body".into()),
+                is_error: None,
+            }]),
+        ];
+        let items = messages_to_replay(&msgs);
+        assert!(matches!(&items[0], ReplayItem::User { text } if text == "hello"));
+        assert!(matches!(&items[1], ReplayItem::Assistant { text } if text == "on it"));
+        match &items[2] {
+            ReplayItem::Tool { id, name, result, is_error, .. } => {
+                assert_eq!(id, "x");
+                assert_eq!(name, "Read");
+                assert_eq!(result.as_deref(), Some("file body"));
+                assert!(!is_error);
+            }
+            other => panic!("expected Tool replay item, got {other:?}"),
+        }
     }
 }

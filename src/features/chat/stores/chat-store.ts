@@ -18,6 +18,7 @@ import type {
 } from "@/types/agents";
 import { splitAtlasContext } from "../lib/atlas-context";
 import { loadCachedAcpModes, saveCachedAcpModes } from "../lib/acp-modes-cache";
+import { saveCerseiModelPref } from "../lib/cersei-model-pref";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
 
@@ -605,6 +606,11 @@ export const useChatStore = createSelectors(
             const session = s.sessions[sessionId];
             if (session) session.acpCurrentModel = model;
           });
+          // Remember the full selection so the next new chat seeds from it.
+          const sess = get().sessions[sessionId];
+          if (sess?.cerseiProvider && model) {
+            saveCerseiModelPref({ provider: sess.cerseiProvider, model });
+          }
           pushCerseiModelToAgent(get(), sessionId);
         },
         replaceMessages: (sessionId, messages) =>
@@ -946,30 +952,15 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       return;
     }
     case "text_chunk": {
-      // Rust pre-decides "new message vs append" — every text_chunk
-      // refers to the trailing text-mode assistant message. We just
-      // append; MessageAppended events handle the "new message" case
-      // ahead of this.
-      const last = session.messages[session.messages.length - 1];
-      if (
-        last &&
-        last.role === "assistant" &&
-        (last.mode === "text" || last.mode === undefined) &&
-        last.toolCalls.length === 0
-      ) {
-        last.content += env.delta;
-      } else {
-        session.messages.push(makeAssistantTextMessage(env.delta));
-      }
+      // Delegate to the shared helper so text chunks routed through the
+      // delta stream get the SAME "find last renderable message" logic the
+      // narration bucket used — skipping empty placeholder/thinking markers
+      // so one continuous narration never splits into broken fragments.
+      appendTextToDraft(s, env.session_id, env.delta);
       return;
     }
     case "thinking_chunk": {
-      const last = session.messages[session.messages.length - 1];
-      if (last && last.role === "assistant" && last.mode === "thinking") {
-        last.thinking = (last.thinking ?? "") + env.delta;
-      } else {
-        session.messages.push(makeAssistantThinkingMessage(env.delta));
-      }
+      appendThoughtToDraft(s, env.session_id, env.delta);
       return;
     }
     case "message_appended": {
@@ -1066,7 +1057,12 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       return;
     }
     case "model_changed": {
-      session.acpCurrentModel = env.model_id;
+      // The native Cersei agent's model is UI-driven and stored as a BARE id
+      // (its provider lives in `cerseiProvider`). The worker echoes back the
+      // full "provider/model" we pushed, so applying it here would re-prefix
+      // the value every cycle ("google/google/google/…") via the composer's
+      // re-push. Ignore the echo for cersei — the UI is the source of truth.
+      if (session.agentType !== "cersei") session.acpCurrentModel = env.model_id;
       return;
     }
     default:

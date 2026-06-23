@@ -431,6 +431,7 @@ dependencies = [
  "async-trait",
  "atlas-acp",
  "cersei",
+ "cersei-agent",
  "chrono",
  "dashmap",
  "parking_lot",

@@ -148,6 +148,74 @@ pub fn list(config_dir: &Path, cwd: &str) -> Vec<SessionMeta> {
     metas
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cersei::types::Message;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Unique temp config dir per test (no external tempfile dep).
+    fn temp_dir() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let id = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("atlas-cersei-test-{}-{id}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn save_load_roundtrip() {
+        let dir = temp_dir();
+        let cwd = "/proj/a";
+        let msgs = vec![Message::user("hello"), Message::assistant("hi there")];
+        save(&dir, cwd, "s1", "anthropic", "claude-opus-4-8", &msgs, "2026-06-23T00:00:00Z");
+
+        let loaded = load(&dir, cwd, "s1").expect("session should load");
+        assert_eq!(loaded.session_id, "s1");
+        assert_eq!(loaded.provider, "anthropic");
+        assert_eq!(loaded.model, "claude-opus-4-8");
+        assert_eq!(loaded.messages.len(), 2);
+        // Different cwd → isolated namespace, nothing there.
+        assert!(load(&dir, "/proj/b", "s1").is_none());
+    }
+
+    #[test]
+    fn list_is_newest_first_with_preview() {
+        let dir = temp_dir();
+        let cwd = "/proj/list";
+        save(&dir, cwd, "old", "openai", "gpt-5.1", &[Message::user("first task")], "2026-06-23T00:00:00Z");
+        save(&dir, cwd, "new", "openai", "gpt-5.1", &[Message::user("second task")], "2026-06-23T12:00:00Z");
+
+        let metas = list(&dir, cwd);
+        assert_eq!(metas.len(), 2);
+        assert_eq!(metas[0].id, "new", "newest session must sort first");
+        assert_eq!(metas[0].preview, "second task");
+        assert_eq!(metas[0].message_count, 1);
+    }
+
+    #[test]
+    fn byok_reads_shared_keys_file() {
+        let dir = temp_dir();
+        fs::write(
+            dir.join("byok-keys.json"),
+            r#"{ "anthropic": { "key": "sk-ant" }, "openai": { "key": "sk-oai" } }"#,
+        )
+        .unwrap();
+        assert_eq!(byok_get(&dir, "anthropic").as_deref(), Some("sk-ant"));
+        assert_eq!(byok_get(&dir, "missing"), None);
+        let mut providers = byok_providers(&dir);
+        providers.sort();
+        assert_eq!(providers, vec!["anthropic".to_string(), "openai".to_string()]);
+    }
+
+    #[test]
+    fn byok_missing_file_is_empty() {
+        let dir = temp_dir();
+        assert_eq!(byok_get(&dir, "anthropic"), None);
+        assert!(byok_providers(&dir).is_empty());
+    }
+}
+
 /// First user message's text, truncated — used as the session title.
 fn first_user_text(messages: &[Message]) -> Option<String> {
     use cersei::types::{ContentBlock, MessageContent, Role};
