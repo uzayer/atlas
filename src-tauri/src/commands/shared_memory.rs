@@ -490,6 +490,13 @@ impl SharedMemoryStore {
         events
     }
 
+    /// Full event log, newest-first — backs the Memory panel's events table.
+    pub fn list_events(&self, project_path: &str) -> Vec<MemoryEvent> {
+        let mut events = read_events(project_path);
+        events.reverse(); // newest-first
+        events
+    }
+
     /// Wipe a project's shared memory (log, view, cached state).
     pub fn clear(&self, project_path: &str) -> Result<(), String> {
         let guard = self.lock_for(project_path);
@@ -592,6 +599,14 @@ pub fn memory_query(
     store: State<'_, SharedMemoryStore>,
 ) -> Result<Vec<MemoryEvent>, String> {
     Ok(store.query(&project_path, &query, limit.unwrap_or(20)))
+}
+
+#[tauri::command]
+pub fn memory_list_events(
+    project_path: String,
+    store: State<'_, SharedMemoryStore>,
+) -> Result<Vec<MemoryEvent>, String> {
+    Ok(store.list_events(&project_path))
 }
 
 #[tauri::command]

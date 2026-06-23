@@ -88,6 +88,57 @@ pub struct AgentMemory {
     codex: CodexMemory,
 }
 
+/// History-list row for a Codex session, shaped to match `ClaudeSessionMeta`
+/// so the chat sidebar can merge both agents' sessions uniformly. `id` is the
+/// Codex thread id — the exact identifier the codex-acp adapter resolves to a
+/// rollout file in `session/load`, so it doubles as the resume key. There's no
+/// single editable transcript file to expose, so `file_path` is empty.
+#[derive(Debug, Clone, Serialize)]
+pub struct CodexSessionMeta {
+    pub id: String,
+    pub file_path: String,
+    pub started_at: Option<String>,
+    pub last_modified: Option<String>,
+    pub message_count: usize,
+    pub preview: String,
+}
+
+/// Unix-ms → RFC3339 string, matching the `last_modified` format the Claude
+/// listing uses so the sidebar's lexical date sort orders both agents together.
+fn ms_to_rfc3339(ms: i64) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms).map(|dt| dt.to_rfc3339())
+}
+
+/// List the current project's Codex sessions for the chat history sidebar.
+/// Sourced from the same `~/.codex` SQLite `threads` table as the memory tab
+/// (via `collect_codex_sessions`), filtered to this `cwd`.
+#[tauri::command]
+pub async fn list_codex_sessions(cwd: String) -> Result<Vec<CodexSessionMeta>, String> {
+    let cwd = cwd.trim_end_matches('/').to_string();
+    let sessions = collect_codex_sessions(&cwd).await;
+    Ok(sessions
+        .into_iter()
+        .map(|s| {
+            // The threads table has no message count; treat any session with a
+            // title/preview or recorded token use as non-empty so it survives
+            // the sidebar's `message_count > 0` visibility filter.
+            let message_count = if !s.title.trim().is_empty() || s.tokens > 0 {
+                1
+            } else {
+                0
+            };
+            CodexSessionMeta {
+                id: s.id,
+                file_path: String::new(),
+                started_at: ms_to_rfc3339(s.created_at_ms),
+                last_modified: ms_to_rfc3339(s.updated_at_ms),
+                message_count,
+                preview: s.title,
+            }
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn agent_memory_read(project_path: String) -> Result<AgentMemory, String> {
     let project_path = project_path.trim_end_matches('/').to_string();

@@ -70,6 +70,8 @@ export const sharedMemory = {
     invoke<SharedState>("memory_get_state", { projectPath }),
   query: (projectPath: string, query: string, limit = 20) =>
     invoke<MemoryEvent[]>("memory_query", { projectPath, query, limit }),
+  listEvents: (projectPath: string) =>
+    invoke<MemoryEvent[]>("memory_list_events", { projectPath }),
   clear: (projectPath: string) =>
     invoke<void>("memory_clear_project", { projectPath }),
   appendEvent: (

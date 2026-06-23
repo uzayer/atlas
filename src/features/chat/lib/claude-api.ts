@@ -33,6 +33,16 @@ export function listClaudeSessions(cwd: string): Promise<ClaudeSessionMeta[]> {
   return invoke<ClaudeSessionMeta[]>("list_claude_sessions", { cwd });
 }
 
+/**
+ * Codex sessions for `cwd`, shaped like {@link ClaudeSessionMeta} so the
+ * sidebar can merge both agents. `id` is the Codex thread id (the resume key
+ * the codex-acp adapter accepts in `session/load`); `file_path` is always
+ * empty since Codex has no single editable transcript file.
+ */
+export function listCodexSessions(cwd: string): Promise<ClaudeSessionMeta[]> {
+  return invoke<ClaudeSessionMeta[]>("list_codex_sessions", { cwd });
+}
+
 export function readClaudeSession(filePath: string): Promise<ChatMessageDump[]> {
   return invoke<ChatMessageDump[]>("read_claude_session", { filePath });
 }

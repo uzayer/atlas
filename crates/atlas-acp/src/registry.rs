@@ -232,14 +232,18 @@ impl AgentRegistry {
         agent_id: AgentId,
         session_id: SessionId,
         cwd: PathBuf,
-    ) -> Result<()> {
+    ) -> Result<Option<serde_json::Value>> {
         let connection = self.connection(agent_id)?;
-        connection
+        let resp = connection
             .send_request(LoadSessionRequest::new(session_id.clone(), cwd))
             .block_task()
             .await?;
         self.register_session(agent_id, session_id)?;
-        Ok(())
+        // Project the (non_exhaustive, unstable-gated) `modes` blob to JSON the
+        // same way `new_session` does, so the manager can seed the available
+        // session-mode list for the resumed session.
+        let modes = resp.modes.as_ref().and_then(|m| serde_json::to_value(m).ok());
+        Ok(modes)
     }
 
     /// Run the agent's ACP `authenticate` flow for `method_id`. For Codex's
@@ -533,10 +537,24 @@ fn resolve_command(command: &str) -> String {
         None => (trimmed, ""),
     };
     match resolve_program_abs(program) {
-        Some(abs) if rest.is_empty() => abs,
-        Some(abs) => format!("{abs} {rest}"),
+        Some(abs) if rest.is_empty() => shell_quote(&abs),
+        Some(abs) => format!("{} {rest}", shell_quote(&abs)),
         None => command.to_string(),
     }
+}
+
+/// POSIX single-quote a token so the downstream `shell_words::split` in
+/// `AcpAgent::from_str` reassembles it as ONE argument even when it contains
+/// spaces. The Atlas-managed Node toolchain lives under
+/// `~/Library/Application Support/dev.atlas.ide/...` — a path WITH A SPACE — so
+/// resolving `npx` to its absolute managed path and then splicing it back into a
+/// space-joined command string made `shell_words` split the path in two
+/// (`…/Library/Application` + `Support/…`). The spawn then failed with
+/// `ENOENT` / "No such file or directory" even though `npx` was perfectly
+/// available. Single-quoting the program path keeps it intact through the split.
+fn shell_quote(s: &str) -> String {
+    // Wrap in single quotes; escape any embedded single quote the POSIX way.
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 fn explain_spawn_failure(spec: &AgentSpec, err: AcpError) -> AcpError {

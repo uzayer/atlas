@@ -65,6 +65,12 @@ export function classifyFile(path: string): FileKind {
   const dot = last.lastIndexOf(".");
   const ext = (dot >= 0 ? last.slice(dot + 1) : "").toLowerCase();
   const base = (dot >= 0 ? last.slice(0, dot) : last).toLowerCase();
+  const lower = last.toLowerCase();
+
+  // `.env` and its variants (`.env.local`, `.env.production`, `.env.*`). The
+  // dot-split above treats the trailing segment (`local`, `production`) as the
+  // "extension", so these never match TEXT_EXTS — match the whole name here.
+  if (lower === ".env" || lower.startsWith(".env.")) return "text";
 
   if (ext) {
     if (SVG_EXTS.has(ext)) return "svg";

@@ -507,7 +507,7 @@ export function WorkspaceSidebar() {
       </div>
 
       {/* Virtualized list. */}
-      <div ref={parentRef} className="flex-1 min-h-0 overflow-y-auto px-1.5 pb-2">
+      <div ref={parentRef} className="flex-1 min-h-0 overflow-y-auto hide-scrollbar px-1.5 pb-2">
         {rows.length === 0 ? (
           <div className="px-2 py-3 text-[11px] text-[var(--text-tertiary)]">No projects yet.</div>
         ) : (

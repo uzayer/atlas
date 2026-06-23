@@ -91,6 +91,15 @@ pub struct Usage {
     pub cache_read_tokens: u64,
 }
 
+/// One ACP-advertised session mode (e.g. Codex's read-only / auto / full-access).
+/// Sourced from the `modes` blob in `session/new` and `session/load` responses.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionModeInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionSnapshot {
     pub agent_id: AgentId,
@@ -100,6 +109,9 @@ pub struct SessionSnapshot {
     pub status: SessionStatus,
     pub current_mode: Option<String>,
     pub current_model: Option<String>,
+    /// The full set of modes the agent advertised for this session. Empty for
+    /// agents that don't expose modes; drives the composer's mode picker.
+    pub available_modes: Vec<SessionModeInfo>,
     pub available_commands: Vec<serde_json::Value>,
     pub plan: Vec<PlanEntry>,
     pub messages: Vec<Message>,
@@ -117,6 +129,7 @@ pub struct SessionState {
     pub status: SessionStatus,
     pub current_mode: Option<String>,
     pub current_model: Option<String>,
+    pub available_modes: Vec<SessionModeInfo>,
     pub available_commands: Vec<serde_json::Value>,
     pub plan: Vec<PlanEntry>,
     pub messages: Vec<Message>,
@@ -136,6 +149,7 @@ impl SessionState {
             status: SessionStatus::Idle,
             current_mode: None,
             current_model: None,
+            available_modes: Vec::new(),
             available_commands: Vec::new(),
             plan: Vec::new(),
             messages: Vec::new(),
@@ -154,6 +168,7 @@ impl SessionState {
             status: self.status,
             current_mode: self.current_mode.clone(),
             current_model: self.current_model.clone(),
+            available_modes: self.available_modes.clone(),
             available_commands: self.available_commands.clone(),
             plan: self.plan.clone(),
             messages: self.messages.clone(),

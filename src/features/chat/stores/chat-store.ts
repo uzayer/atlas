@@ -10,8 +10,13 @@ import type {
 } from "@/types/agent";
 import { CLAUDE_PERMISSION_MODES } from "@/types/agent";
 import type { PendingPermission } from "@/types/acp";
-import type { AgentDelta, ToolCall as AgentToolCall } from "@/types/agents";
+import type {
+  AgentDelta,
+  ToolCall as AgentToolCall,
+  SessionModeInfo,
+} from "@/types/agents";
 import { splitAtlasContext } from "../lib/atlas-context";
+import { loadCachedAcpModes, saveCachedAcpModes } from "../lib/acp-modes-cache";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
 
@@ -30,6 +35,18 @@ function pushPermissionModeToAgent(state: ChatState, sessionId: string): void {
   void invoke("agents_set_mode", {
     key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
     modeId: session.claudePermissionMode ?? "default",
+  }).catch((err) => console.warn("agents_set_mode failed:", err));
+}
+
+/** Push a generic ACP session mode (Codex's read-only / auto / full-access)
+ *  to its bound agent. Agent-agnostic sibling of `pushPermissionModeToAgent`.
+ *  No-op until the session is bound. */
+function pushAcpModeToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId || !session.acpCurrentMode) return;
+  void invoke("agents_set_mode", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    modeId: session.acpCurrentMode,
   }).catch((err) => console.warn("agents_set_mode failed:", err));
 }
 
@@ -113,6 +130,20 @@ interface ChatActions {
       sessionId: string,
       mode: ClaudePermissionMode
     ) => void;
+    /** Seed the generic ACP mode state (current + available list) from a
+     *  session snapshot. Used for non-Claude agents (e.g. Codex). */
+    setAcpModes: (
+      sessionId: string,
+      currentMode: string | null,
+      availableModes: SessionModeInfo[]
+    ) => void;
+    /** Pick a generic ACP session mode and push it to the bound agent.
+     *  The Codex equivalent of `setClaudePermissionMode`. */
+    setAcpMode: (sessionId: string, modeId: string) => void;
+    /** Toggle the non-Claude mode-picker loading state. Set false once the
+     *  session boot resolves (modes confirmed, or bind failed) so the composer's
+     *  picker never hangs on its loading spinner. */
+    setAcpModesPending: (sessionId: string, pending: boolean) => void;
     replaceMessages: (
       sessionId: string,
       messages: Array<{
@@ -344,6 +375,19 @@ export const useChatStore = createSelectors(
               // Permission mode is a Claude Code feature; Codex drives its
               // modes generically via ACP (acpCurrentMode).
               claudePermissionMode: agentType === "claude-code" ? "default" : undefined,
+              // Optimistically pre-fill a non-Claude agent's mode picker from the
+              // persisted cache so switching feels instant; mark pending until the
+              // real session confirms (the picker shows a loading state).
+              ...(agentType !== "claude-code"
+                ? (() => {
+                    const cached = loadCachedAcpModes(agentType);
+                    return {
+                      acpAvailableModes: cached?.availableModes ?? [],
+                      acpCurrentMode: cached?.currentMode ?? undefined,
+                      acpModesPending: true,
+                    };
+                  })()
+                : {}),
             };
             s.activeSessionId = tabId;
           }),
@@ -360,6 +404,19 @@ export const useChatStore = createSelectors(
             sess.acpSessionId = undefined;
             sess.acpCurrentMode = undefined;
             sess.acpCurrentModel = undefined;
+            if (agentType === "claude-code") {
+              // Claude has no ACP modes — clear the old agent's so no stale pill.
+              sess.acpAvailableModes = [];
+              sess.acpModesPending = false;
+            } else {
+              // Optimistically seed from cache so the pill appears instantly with
+              // the right modes; keep pending until the new binding confirms. A
+              // cache miss (first-ever use) shows a pure loading state.
+              const cached = loadCachedAcpModes(agentType);
+              sess.acpAvailableModes = cached?.availableModes ?? [];
+              sess.acpCurrentMode = cached?.currentMode ?? undefined;
+              sess.acpModesPending = true;
+            }
           }),
         setActiveSession: (id) =>
           set((s) => {
@@ -475,6 +532,37 @@ export const useChatStore = createSelectors(
             if (session) session.claudePermissionMode = mode;
           });
           pushPermissionModeToAgent(get(), sessionId);
+        },
+        setAcpModes: (sessionId, currentMode, availableModes) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (!session) return;
+            session.acpAvailableModes = availableModes;
+            // Don't clobber a user-driven mode the store already reflects when
+            // the snapshot carries no current (null) — only seed when present.
+            if (currentMode) session.acpCurrentMode = currentMode;
+            // The real session has now confirmed its modes — drop the loading
+            // state regardless of whether they matched the optimistic cache.
+            if (availableModes.length > 0) session.acpModesPending = false;
+          });
+          // Persist the confirmed modes so the next switch to this agent is
+          // instant. Done outside the immer pass (side effect, not state).
+          const at = get().sessions[sessionId]?.agentType;
+          if (availableModes.length > 0 && at && at !== "claude-code") {
+            saveCachedAcpModes(at, { currentMode: currentMode ?? null, availableModes });
+          }
+        },
+        setAcpModesPending: (sessionId, pending) =>
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.acpModesPending = pending;
+          }),
+        setAcpMode: (sessionId, modeId) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.acpCurrentMode = modeId;
+          });
+          pushAcpModeToAgent(get(), sessionId);
         },
         replaceMessages: (sessionId, messages) =>
           set((s) => {

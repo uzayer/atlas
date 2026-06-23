@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
 import { agents, ensureAgent, CODEX_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
+import { loadCachedAcpModes } from "../lib/acp-modes-cache";
 import type { SessionKey } from "@/types/agents";
 import { composePrompt, type MentionData } from "../lib/mentions";
 import { usePaneFind } from "../lib/use-pane-find";
@@ -45,6 +46,9 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 interface ChatPanelProps {
   tabId: string;
 }
+
+// Once-per-app-session guard for the background Codex pre-warm (below).
+let codexPrewarmStarted = false;
 
 export function ChatPanel({ tabId }: ChatPanelProps) {
   // Subscribe to ONLY this tab's session. Streaming chunks on other tabs
@@ -127,8 +131,33 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         useChatStore
           .getState()
           .actions.setAcpBinding(tabId, agent.agent_id, key.session_id, cwd);
+        // Seed the composer mode picker from the freshly-created session's
+        // advertised modes (Codex: read-only / auto / full-access). The modes
+        // are seeded into the Rust SessionState by `new_session`, so the
+        // snapshot here already carries them. Claude ignores these in favour
+        // of its own permission pill.
+        try {
+          const snap = await agents.snapshot(key);
+          if (!cancelled) {
+            // Only seed when the agent actually advertised modes, so we never
+            // clobber the optimistic cached modes with an empty set.
+            if (snap.available_modes.length > 0) {
+              useChatStore
+                .getState()
+                .actions.setAcpModes(tabId, snap.current_mode, snap.available_modes);
+            }
+            // Boot finished (with or without modes) — drop the loading state.
+            useChatStore.getState().actions.setAcpModesPending(tabId, false);
+          }
+        } catch (err) {
+          console.warn("snapshot for modes failed:", err);
+          if (!cancelled) useChatStore.getState().actions.setAcpModesPending(tabId, false);
+        }
       } catch (err) {
         console.warn("Agent session creation failed:", err);
+        // Bind failed (agent not installed / spawn error) — clear the spinner so
+        // the picker doesn't hang in a loading state forever.
+        if (!cancelled) useChatStore.getState().actions.setAcpModesPending(tabId, false);
       } finally {
         pending = false;
       }
@@ -172,11 +201,47 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       e.stopPropagation();
       // The store action both cycles the mode AND propagates it to the bound
       // agent (so e.g. bypassPermissions actually stops permission prompts).
-      useChatStore.getState().actions.cycleClaudePermissionMode(tabId);
+      // For non-Claude agents (Codex) cycle the agent-advertised ACP modes.
+      const sess = useChatStore.getState().sessions[tabId];
+      const actions = useChatStore.getState().actions;
+      if (sess?.agentType !== "claude-code") {
+        const modes = sess?.acpAvailableModes ?? [];
+        if (modes.length === 0) return;
+        const i = modes.findIndex((m) => m.id === sess?.acpCurrentMode);
+        const next = modes[(i + 1) % modes.length];
+        actions.setAcpMode(tabId, next.id);
+        return;
+      }
+      actions.cycleClaudePermissionMode(tabId);
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
   }, [tabId]);
+  // NOTE: seeding the composer's ACP mode picker for resumed/restored sessions
+  // is handled consumer-side in MessageInput (self-heal), so it can't be missed
+  // by an effect that didn't re-run. The create-effect above still seeds the
+  // fast path for freshly-created sessions.
+
+  // Pre-warm the Codex agent in the background. The ~3-4s a fresh switch to
+  // Codex pays is dominated by spawning `npx @zed-industries/codex-acp` + the
+  // ACP initialize handshake; `ensureAgent` does exactly that (deduped/cached,
+  // no session, no auth), so paying it ahead of time makes the actual switch
+  // fast. Gated on the user having used Codex before (a persisted modes cache
+  // exists) so we never spawn it for people who only use Claude. Runs once per
+  // app session, deferred so it never competes with the primary (Claude) bind.
+  useEffect(() => {
+    if (codexPrewarmStarted) return;
+    if (!loadCachedAcpModes("codex")) return; // never used Codex → skip
+    codexPrewarmStarted = true;
+    const t = setTimeout(() => {
+      void ensureAgent(CODEX_PLUGIN_ID).catch(() => {
+        // Not installed / not ready — the real switch surfaces a proper error;
+        // allow a later retry by clearing the once-flag.
+        codexPrewarmStarted = false;
+      });
+    }, 1500);
+    return () => clearTimeout(t);
+  }, []);
 
   // Drain the per-tab queue when the agent transitions back to idle OR
   // when the ACP session id first becomes available. The latter covers the

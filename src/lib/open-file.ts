@@ -6,11 +6,24 @@
  * one place.
  */
 
+import { invoke } from "@tauri-apps/api/core";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { classifyFile, type FileKind } from "@/lib/file-types";
 
-export function openFile(path: string): void {
-  const kind = classifyFile(path);
+export async function openFile(path: string): Promise<void> {
+  let kind = classifyFile(path);
+  // Extension-based classification is an allowlist, so files with unrecognized
+  // names fall through to "unsupported". Before giving up, sniff the bytes: if
+  // they're UTF-8/ASCII text, open in the editor anyway. This is the only async
+  // branch — known kinds resolve synchronously above, so the tab still opens in
+  // the same tick for them.
+  if (kind === "unsupported") {
+    try {
+      if (await invoke<boolean>("is_text_file", { path })) kind = "text";
+    } catch {
+      /* keep "unsupported" if the sniff fails */
+    }
+  }
   const tabType = tabTypeFor(kind);
   const title = path.split("/").pop() ?? path;
   // `id` is stable per path + tabType so reopening the same file restores
