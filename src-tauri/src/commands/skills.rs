@@ -13,7 +13,7 @@
 //! ```
 //!
 //! `<root>` is the home dir (global scope) or the project path (project scope).
-//! The agent registry is a static table for v1 (Claude Code + Cursor); detection
+//! The agent registry is a static table for v1 (Claude Code + Codex); detection
 //! is "does the agent's config dir exist under `<root>`?".
 //!
 //! Discovery also surfaces **external** skills: real directories that live
@@ -107,8 +107,8 @@ struct ToolDef {
     env_override: Option<&'static str>,
 }
 
-// v1 in-scope tools: claude-code + codex. `cursor` kept as a non-v1 extra row
-// (both dirs given so it expresses correctly through the generalized engine).
+// v1 in-scope tools: Claude Code + Codex. The registry is trivially extensible —
+// a future ACP agent is one more ToolDef row.
 const TOOL_REGISTRY: &[ToolDef] = &[
     ToolDef {
         id: "claude-code",
@@ -130,16 +130,6 @@ const TOOL_REGISTRY: &[ToolDef] = &[
         supports_symlink: true,
         delivery: "native-dir",
         env_override: Some("CODEX_HOME"),
-    },
-    ToolDef {
-        id: "cursor",
-        display_name: "Cursor",
-        global_skills_dir: ".cursor/skills",
-        project_skills_dir: ".cursor/skills",
-        config_dir: ".cursor",
-        supports_symlink: true,
-        delivery: "native-dir",
-        env_override: None,
     },
 ];
 
@@ -1525,9 +1515,9 @@ mod tests {
         );
         p.push(uniq);
         fs::create_dir_all(&p).unwrap();
-        // Make both agents "detected".
+        // Make both v1 tools "detected".
         fs::create_dir_all(p.join(".claude")).unwrap();
-        fs::create_dir_all(p.join(".cursor")).unwrap();
+        fs::create_dir_all(p.join(".codex")).unwrap();
         p
     }
 
@@ -1590,7 +1580,7 @@ mod tests {
         assert!(root.join(".atlas/skills/pdf-extract/SKILL.md").is_file());
         assert!(root.join(".claude/skills/pdf-extract").symlink_metadata().is_ok());
         assert!(root
-            .join(".cursor/skills/pdf-extract")
+            .join(".agents/skills/pdf-extract")
             .symlink_metadata()
             .is_err());
 
@@ -1618,13 +1608,13 @@ mod tests {
     fn set_enabled_toggles_symlink() {
         let root = tmp_root();
         create_skill(&root, "project", "demo", "d", "b", &[]).unwrap();
-        let link = root.join(".cursor/skills/demo");
+        let link = root.join(".agents/skills/demo");
         assert!(link.symlink_metadata().is_err());
 
-        set_enabled(&root, "project", "demo", "cursor", true).unwrap();
+        set_enabled(&root, "project", "demo", "codex", true).unwrap();
         assert!(link.symlink_metadata().is_ok());
 
-        set_enabled(&root, "project", "demo", "cursor", false).unwrap();
+        set_enabled(&root, "project", "demo", "codex", false).unwrap();
         assert!(link.symlink_metadata().is_err());
 
         // Toggling for an unknown agent errors.
@@ -1641,17 +1631,17 @@ mod tests {
             "demo",
             "d",
             "b",
-            &["claude-code".to_string(), "cursor".to_string()],
+            &["claude-code".to_string(), "codex".to_string()],
         )
         .unwrap();
         assert!(root.join(".atlas/skills/demo").is_dir());
         assert!(root.join(".claude/skills/demo").symlink_metadata().is_ok());
-        assert!(root.join(".cursor/skills/demo").symlink_metadata().is_ok());
+        assert!(root.join(".agents/skills/demo").symlink_metadata().is_ok());
 
         delete_skill(&root, "project", "demo").unwrap();
         assert!(!root.join(".atlas/skills/demo").exists());
         assert!(root.join(".claude/skills/demo").symlink_metadata().is_err());
-        assert!(root.join(".cursor/skills/demo").symlink_metadata().is_err());
+        assert!(root.join(".agents/skills/demo").symlink_metadata().is_err());
 
         // Listing is now empty.
         assert!(list_skills(&root, "project").unwrap().is_empty());
@@ -1661,19 +1651,18 @@ mod tests {
     #[test]
     fn list_targets_reports_detection() {
         let root = tmp_root();
-        // Registry is claude-code + codex + cursor. tmp_root creates .claude and
-        // .cursor (so those are detected) but not .codex (not detected).
+        // Registry is claude-code + codex. tmp_root creates .claude and .codex,
+        // so both are detected.
         let targets = list_targets(&root, "global");
-        assert_eq!(targets.len(), 3);
+        assert_eq!(targets.len(), 2);
         assert!(targets.iter().any(|t| t.id == "claude-code" && t.detected));
-        assert!(targets.iter().any(|t| t.id == "cursor" && t.detected));
-        assert!(targets.iter().any(|t| t.id == "codex" && !t.detected));
+        assert!(targets.iter().any(|t| t.id == "codex" && t.detected));
 
-        // Remove cursor's config dir → not detected.
-        fs::remove_dir_all(root.join(".cursor")).unwrap();
+        // Remove codex's config dir → not detected.
+        fs::remove_dir_all(root.join(".codex")).unwrap();
         let targets = list_targets(&root, "global");
-        let cursor = targets.iter().find(|t| t.id == "cursor").unwrap();
-        assert!(!cursor.detected);
+        let codex = targets.iter().find(|t| t.id == "codex").unwrap();
+        assert!(!codex.detected);
         fs::remove_dir_all(&root).ok();
     }
 
@@ -1711,14 +1700,14 @@ mod tests {
     #[test]
     fn reconcile_reports_synced_external_and_absent() {
         let root = tmp_root();
-        // Canonical skill projected into claude-code → synced; cursor → absent.
+        // Canonical skill projected into claude-code → synced; codex → absent.
         create_skill(&root, "project", "owned", "d", "b", &[]).unwrap();
         project(&root, tool_def("claude-code").unwrap(), "project", "owned", false).unwrap();
-        // A hand-authored skill living only in cursor's dir → external.
-        plant_external(&root, ".cursor/skills", "wild", "External wild");
+        // A hand-authored skill living only in codex's project dir → external.
+        plant_external(&root, ".agents/skills", "wild", "External wild");
 
         let view = reconcile(&root, "project", &root).unwrap();
-        assert_eq!(view.tools.len(), 3);
+        assert_eq!(view.tools.len(), 2);
 
         let owned = view.skills.iter().find(|s| s.name == "owned").unwrap();
         assert!(owned.managed);
@@ -1727,14 +1716,14 @@ mod tests {
             "synced"
         );
         assert_eq!(
-            owned.cells.iter().find(|c| c.tool == "cursor").unwrap().status,
+            owned.cells.iter().find(|c| c.tool == "codex").unwrap().status,
             "absent"
         );
 
         let wild = view.skills.iter().find(|s| s.name == "wild").unwrap();
         assert!(!wild.managed);
         assert_eq!(
-            wild.cells.iter().find(|c| c.tool == "cursor").unwrap().status,
+            wild.cells.iter().find(|c| c.tool == "codex").unwrap().status,
             "external"
         );
         fs::remove_dir_all(&root).ok();
@@ -1833,7 +1822,7 @@ mod tests {
 
     #[test]
     fn adopt_external_skill_makes_it_managed_for_all_agents() {
-        let root = tmp_root(); // both .claude and .cursor detected
+        let root = tmp_root(); // both .claude and .codex detected
         plant_external(&root, ".claude/skills", "foo", "External foo");
         // Sanity: pre-adopt it's unmanaged and claude-only.
         let pre = list_skills(&root, "global").unwrap();
@@ -1845,7 +1834,7 @@ mod tests {
         assert_eq!(meta.description, "External foo");
         assert_eq!(
             meta.enabled_agents,
-            vec!["claude-code".to_string(), "cursor".to_string()]
+            vec!["claude-code".to_string(), "codex".to_string()]
         );
 
         // Canonical copy now exists.
@@ -1853,9 +1842,9 @@ mod tests {
         // The original real dir was replaced by a symlink into canonical.
         let claude_link = root.join(".claude/skills/foo");
         assert!(claude_link.symlink_metadata().unwrap().file_type().is_symlink());
-        // And the other detected agent got a symlink too.
-        let cursor_link = root.join(".cursor/skills/foo");
-        assert!(cursor_link.symlink_metadata().unwrap().file_type().is_symlink());
+        // And the other detected tool (codex, global dir) got a symlink too.
+        let codex_link = root.join(".codex/skills/foo");
+        assert!(codex_link.symlink_metadata().unwrap().file_type().is_symlink());
         // Both resolve to the canonical SKILL.md.
         let expected = fs::canonicalize(root.join(".atlas/skills/foo/SKILL.md")).unwrap();
         assert_eq!(
@@ -1863,7 +1852,7 @@ mod tests {
             expected
         );
         assert_eq!(
-            fs::canonicalize(cursor_link.join("SKILL.md")).unwrap(),
+            fs::canonicalize(codex_link.join("SKILL.md")).unwrap(),
             expected
         );
 
@@ -1873,7 +1862,7 @@ mod tests {
         assert!(post[0].managed);
         assert_eq!(
             post[0].enabled_agents,
-            vec!["claude-code".to_string(), "cursor".to_string()]
+            vec!["claude-code".to_string(), "codex".to_string()]
         );
         fs::remove_dir_all(&root).ok();
     }
