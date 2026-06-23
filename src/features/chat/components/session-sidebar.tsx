@@ -19,7 +19,9 @@ import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "../stores/chat-store";
 import {
   listClaudeSessions,
+  listCodexSessions,
   deleteClaudeSession,
+  type ClaudeSessionMeta,
 } from "../lib/claude-api";
 import {
   agents,
@@ -163,6 +165,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   const {
     replaceMessages,
     setAcpBinding,
+    setAcpModes,
     clearSession,
     setSessionTitle,
     setTranscriptLoading,
@@ -193,6 +196,19 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     refetchInterval: false,
   });
 
+  // Codex sessions live in `~/.codex` (SQLite), NOT Claude's JSONL dir, so they
+  // need their own listing — without it past Codex chats vanish from history
+  // after a restart. No file watcher exists for the SQLite db, so this refetches
+  // on the same focus / `atlas:sessions-changed` triggers as the Claude list.
+  const codexQueryKey = ["codex-sessions", cwd] as const;
+  const { data: codexList = [] } = useQuery({
+    queryKey: codexQueryKey,
+    queryFn: () => listCodexSessions(cwd),
+    enabled: cwd.length > 0,
+    staleTime: 30_000,
+    refetchInterval: false,
+  });
+
   // Start (or replace) the Rust file watcher for this cwd. The single
   // `atlas:sessions-changed` listener below dispatches against `queryKey`
   // closed over the current cwd, so the listener doesn't have to be
@@ -217,7 +233,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     // and the history list went stale until something else forced a refetch.
     // Now it attaches once per `cwd` and stays attached.
     const key = ["claude-sessions", cwd] as const;
-    const invalidate = () => queryClient.invalidateQueries({ queryKey: key });
+    const codexKey = ["codex-sessions", cwd] as const;
+    const invalidate = () => {
+      queryClient.invalidateQueries({ queryKey: key });
+      queryClient.invalidateQueries({ queryKey: codexKey });
+    };
     const unlistenPromise = listen<{ cwd: string }>(
       "atlas:sessions-changed",
       (e) => {
@@ -266,7 +286,16 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         return [id, s] as const;
       })
     );
-    const diskById = new Map(agentList.map((d) => [d.id, d] as const));
+    // Merge both agents' disk listings into one map, tagging each row with the
+    // agent that produced it so the row icon + resume routing are correct even
+    // when there's no live session to infer the agent from. Claude is inserted
+    // first; a Codex id never collides with a Claude JSONL id.
+    const diskById = new Map<
+      string,
+      { meta: ClaudeSessionMeta; agent: "claude" | "codex" }
+    >();
+    for (const d of agentList) diskById.set(d.id, { meta: d, agent: "claude" });
+    for (const d of codexList) diskById.set(d.id, { meta: d, agent: "codex" });
 
     const allIds = new Set<string>([
       ...liveById.keys(),
@@ -275,7 +304,8 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
 
     const agents: SidebarItem[] = Array.from(allIds, (id) => {
       const live = liveById.get(id);
-      const disk = diskById.get(id);
+      const diskEntry = diskById.get(id);
+      const disk = diskEntry?.meta;
       const firstUser = live?.firstUserContent ?? "";
       const diskPreview =
         disk?.preview && disk.preview !== "(no user message)"
@@ -300,9 +330,14 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         messageCount: live
           ? live.userMessageCount
           : (disk?.message_count ?? 0),
-        // Agent metadata comes from the live session (Codex only persists
-        // in-session for now); disk-backed Claude sessions default to claude.
-        agent: live?.agentType === "codex" ? "codex" : "claude",
+        // Agent identity: prefer the live session's, else the agent that
+        // produced the disk row (Claude JSONL vs Codex rollout). Drives the
+        // row icon AND which agent process handleOpenAgent resumes through.
+        agent: live
+          ? live.agentType === "codex"
+            ? "codex"
+            : "claude"
+          : (diskEntry?.agent ?? "claude"),
         filePath: disk?.file_path,
       };
     });
@@ -312,7 +347,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     return agents
       .filter((a) => a.messageCount > 0)
       .sort((a, b) => (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? ""));
-  }, [agentList, tabSummaries]);
+  }, [agentList, codexList, tabSummaries]);
 
   // Sessions currently running (used to show a spinner on the matching row).
   // Keys MUST match the `id`s used when constructing `items` above, otherwise
@@ -376,12 +411,28 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   };
 
   const handleOpenAgent = (item: SidebarItem) => {
-    // Resumable when we have a disk-backed JSONL OR a real (bound) ACP session
-    // id. Codex sessions never live in Claude's `~/.claude/projects` JSONL dir,
-    // so they only ever arrive as live rows with no `filePath` — gating on
-    // `filePath` alone made every Codex history row a dead click. Synthetic
-    // `live-<tabId>` ids aren't resumable (that's the current empty tab itself),
-    // so those still bail.
+    const storeSnapshot = useChatStore.getState().sessions;
+
+    // Live-focus / de-dup: if an open tab already represents THIS session,
+    // just focus it. A tab matches by its bound `acpSessionId` OR by the
+    // synthetic `live-<tabId>` id used before binding — the exact same id
+    // formula `items` uses to key live rows. Covers re-clicks, clicks while
+    // loading, and clicks on a row already open in another tab (incl. a
+    // live-only Codex chat that has no disk JSONL to reload from).
+    for (const [tid, s] of Object.entries(storeSnapshot)) {
+      const liveId = s.acpSessionId ?? `live-${tid}`;
+      if (liveId === item.id) {
+        setActiveTab(tid);
+        return;
+      }
+    }
+
+    // Past here we reload from disk/ACP, which needs either a JSONL file OR a
+    // real (bound) ACP session id. Codex sessions never live in Claude's
+    // `~/.claude/projects` JSONL dir, so they only ever arrive as live rows
+    // with no `filePath` — gating on `filePath` alone made every Codex history
+    // row a dead click. A synthetic `live-<tabId>` with no file is the current
+    // empty tab itself (handled above when open), so those still bail here.
     const isSynthetic = item.id.startsWith("live-");
     if (!item.filePath && isSynthetic) return;
 
@@ -389,22 +440,6 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     // default (Claude), so clicking a Codex row tried to resume it through the
     // Claude process → `loadSession` failed → it fell back to a blank session.
     const pluginId = item.agent === "codex" ? CODEX_PLUGIN_ID : DEFAULT_PLUGIN_ID;
-
-    const storeSnapshot = useChatStore.getState().sessions;
-
-    // De-dup #1: if THIS tab is already pointing at the same session id,
-    // it's a no-op (covers re-clicks + clicks-while-loading).
-    if (storeSnapshot[tabId]?.acpSessionId === item.id) return;
-
-    // De-dup #2: if ANOTHER open tab is already bound to this session id,
-    // just focus that tab instead of opening a new one. Keeps tabs from
-    // multiplying when the user re-clicks a row they already have open.
-    for (const [tid, s] of Object.entries(storeSnapshot)) {
-      if (s.acpSessionId === item.id) {
-        setActiveTab(tid);
-        return;
-      }
-    }
 
     // Decide target tab. If the current tab's session is mid-flight
     // (status === "running"), we MUST NOT overwrite it — the agent is
@@ -539,6 +574,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
 
       replaceMessages(targetTabId, snapshot.messages.map(snapshotMessageToWire));
       setAcpBinding(targetTabId, agent.agent_id, item.id, cwd);
+      // Seed the composer mode picker from the resumed session's advertised
+      // modes (Codex). Claude ignores these in favour of its own pill.
+      setAcpModes(targetTabId, snapshot.current_mode, snapshot.available_modes);
       setTranscriptLoading(targetTabId, false);
     })();
   };
@@ -597,7 +635,14 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   }
 
   const isActiveItem = (item: SidebarItem) => {
-    if (item.kind === "agent") return item.id === activeAcpId;
+    if (item.kind === "agent") {
+      // Match the active tab by the SAME id formula `items` uses for live
+      // rows: bound acpSessionId, else the synthetic `live-<tabId>`. Without
+      // the fallback a focused live-only session (e.g. Codex, or any chat
+      // before it binds) never highlights.
+      const activeId = activeAcpId ?? `live-${tabId}`;
+      return item.id === activeId;
+    }
     return item.id === tabId;
   };
 
@@ -684,7 +729,10 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
                 </span>
               </div>
 
-              {item.kind === "agent" && (
+              {/* Delete is Claude-only for now: it removes the JSONL file, but
+                  Codex sessions live in `~/.codex` SQLite + rollout bundles
+                  with no single file to delete, so hide the control there. */}
+              {item.kind === "agent" && !!item.filePath && (
                 <button
                   onClick={(e) => handleDeleteAgent(e, item)}
                   aria-label="Delete session"

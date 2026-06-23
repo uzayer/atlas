@@ -15,6 +15,7 @@ import {
   Share2,
   SlidersHorizontal,
   Sparkles,
+  Check,
 } from "lucide-react";
 import { MemoryGraphView } from "./memory-graph-view";
 import { MemoryPolicyView } from "./memory-policy-view";
@@ -72,7 +73,10 @@ export function MemoryPanel() {
           />
         </div>
 
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+        {/* The -translate centering creates a stacking context that would trap
+            the agent dropdown below the tables' sticky headers — lift it so the
+            dropdown (and its own z-max) paint above the panel body. */}
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[var(--z-max)]">
           <PillGroup>
             <PillSeg
               active={sub === "graph"}
@@ -99,19 +103,11 @@ export function MemoryPanel() {
               label="Shared"
             />
             <div className="mx-0.5 h-3.5 w-px bg-[var(--border-default)]" />
-            <PillSeg
-              active={sub === "claude"}
-              onClick={() => setSub("claude")}
-              icon={<ClaudeIcon className="size-3.5" />}
-              label="Claude Code"
-              count={claudeCount}
-            />
-            <PillSeg
-              active={sub === "codex"}
-              onClick={() => setSub("codex")}
-              icon={<CodexIcon className="size-3.5" />}
-              label="Codex"
-              count={codexCount}
+            <CodingAgentMenu
+              sub={sub}
+              setSub={setSub}
+              claudeCount={claudeCount}
+              codexCount={codexCount}
             />
           </PillGroup>
         </div>
@@ -138,13 +134,15 @@ export function MemoryPanel() {
         ) : sub === "timeline" ? (
           <MemoryTimelineView />
         ) : sub === "shared" ? (
-          <div className="h-full overflow-y-auto p-4">
-            {projectPath ? (
-              <SharedMemoryView projectPath={projectPath} />
-            ) : (
-              <div className="text-xs text-white/40">Open a project to view shared memory.</div>
-            )}
-          </div>
+          projectPath ? (
+            <SharedMemoryView projectPath={projectPath} />
+          ) : (
+            <Centered>
+              <p className="text-[12px] text-[var(--text-tertiary)]">
+                Open a project to view shared memory.
+              </p>
+            </Centered>
+          )
         ) : loading && !data ? (
           <PanelSkeleton rows={8} />
         ) : !projectPath ? (
@@ -207,6 +205,155 @@ function PillSeg({
 
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="h-full flex items-center justify-center">{children}</div>;
+}
+
+// ── Coding-agent combobox ────────────────────────────────────────────────────
+
+type AgentSub = "claude" | "codex";
+
+interface CodingAgentOption {
+  sub: AgentSub;
+  label: string;
+  icon: React.ReactNode;
+  count: number;
+}
+
+/** Searchable combobox that collapses the per-agent memory tabs (Claude Code,
+ *  Codex, and future agents) into ONE pill, keeping the center nav compact as
+ *  more agents are supported. The pill shows the active (or last-selected)
+ *  agent; the dropdown filters by name and switches the memory sub-tab. */
+function CodingAgentMenu({
+  sub,
+  setSub,
+  claudeCount,
+  codexCount,
+}: {
+  sub: string;
+  setSub: (s: AgentSub) => void;
+  claudeCount: number;
+  codexCount: number;
+}) {
+  const options = useMemo<CodingAgentOption[]>(
+    () => [
+      { sub: "claude", label: "Claude Code", icon: <ClaudeIcon className="size-3.5" />, count: claudeCount },
+      { sub: "codex", label: "Codex", icon: <CodexIcon className="size-3.5" />, count: codexCount },
+    ],
+    [claudeCount, codexCount],
+  );
+
+  const isAgentActive = sub === "claude" || sub === "codex";
+  // Remember the last agent so the pill keeps its identity while the user is on
+  // a non-agent tab (Graph/Policy/…).
+  const [lastAgent, setLastAgent] = useState<AgentSub>(
+    isAgentActive ? (sub as AgentSub) : "claude",
+  );
+  useEffect(() => {
+    if (isAgentActive) setLastAgent(sub as AgentSub);
+  }, [sub, isAgentActive]);
+
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  useEffect(() => {
+    if (open) {
+      setQuery("");
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [open]);
+
+  const selected = options.find((o) => o.sub === lastAgent) ?? options[0];
+  const q = query.trim().toLowerCase();
+  const filtered = q ? options.filter((o) => o.label.toLowerCase().includes(q)) : options;
+
+  const choose = (s: AgentSub) => {
+    setSub(s);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          "flex items-center gap-1.5 h-[22px] px-2.5 rounded-full text-[11px] font-medium transition-colors cursor-pointer",
+          isAgentActive
+            ? "bg-[var(--bg-selected,var(--bg-hover))] text-[var(--text-primary)]"
+            : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]",
+        )}
+        title="Coding agents"
+      >
+        <span className={cn(isAgentActive ? "opacity-100" : "opacity-60")}>{selected.icon}</span>
+        {selected.label}
+        {selected.count > 0 && (
+          <span className="text-[9px] tabular-nums text-[var(--text-tertiary)]">{selected.count}</span>
+        )}
+        <ChevronDown
+          size={11}
+          className={cn("opacity-50 transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 z-[var(--z-max)] min-w-[210px] rounded-lg border border-[var(--border-default)] bg-[var(--bg-elevated,var(--bg-secondary))] p-1 shadow-lg">
+          <div className="flex items-center gap-1.5 px-1.5 py-1">
+            <Search size={11} className="shrink-0 text-[var(--text-tertiary)]" />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search agents…"
+              className="w-full bg-transparent text-[11px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)] outline-none"
+            />
+          </div>
+          <div className="mb-1 h-px bg-[var(--border-default)]" />
+          {filtered.length === 0 ? (
+            <div className="px-2 py-1.5 text-[10px] text-[var(--text-tertiary)]">No agents found</div>
+          ) : (
+            filtered.map((o) => {
+              const active = sub === o.sub;
+              return (
+                <button
+                  key={o.sub}
+                  onClick={() => choose(o.sub)}
+                  className={cn(
+                    "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] transition-colors",
+                    active
+                      ? "bg-[var(--bg-selected,var(--bg-hover))] text-[var(--text-primary)]"
+                      : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]",
+                  )}
+                >
+                  <span className="shrink-0">{o.icon}</span>
+                  <span className="flex-1 min-w-0 truncate">{o.label}</span>
+                  {o.count > 0 && (
+                    <span className="text-[9px] tabular-nums text-[var(--text-tertiary)]">
+                      {o.count}
+                    </span>
+                  )}
+                  {active && <Check size={11} className="shrink-0 text-[var(--accent-primary)]" />}
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── Claude: markdown master-detail ──────────────────────────────────────────

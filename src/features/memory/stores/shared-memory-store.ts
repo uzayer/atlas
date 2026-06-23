@@ -27,6 +27,7 @@ const EMPTY_STATE: SharedState = {
 interface SharedMemoryStore {
   projectPath: string | null;
   state: SharedState;
+  events: MemoryEvent[];
   loaded: boolean;
   queryText: string;
   queryResults: MemoryEvent[];
@@ -42,6 +43,7 @@ export const useSharedMemoryStore = createSelectors(
   create<SharedMemoryStore>((set, get) => ({
     projectPath: null,
     state: EMPTY_STATE,
+    events: [],
     loaded: false,
     queryText: "",
     queryResults: [],
@@ -49,22 +51,29 @@ export const useSharedMemoryStore = createSelectors(
       load: async (projectPath) => {
         set({ projectPath, loaded: false });
         try {
-          const state = await sharedMemory.getState(projectPath);
+          // Derived view + the raw event log (newest-first) in parallel.
+          const [state, events] = await Promise.all([
+            sharedMemory.getState(projectPath),
+            sharedMemory.listEvents(projectPath),
+          ]);
           // Ignore a stale response if the project changed mid-flight.
           if (get().projectPath !== projectPath) return;
-          set({ state, loaded: true });
+          set({ state, events, loaded: true });
         } catch {
           if (get().projectPath !== projectPath) return;
-          set({ state: EMPTY_STATE, loaded: true });
+          set({ state: EMPTY_STATE, events: [], loaded: true });
         }
       },
       refresh: async () => {
         const { projectPath } = get();
         if (!projectPath) return;
         try {
-          const state = await sharedMemory.getState(projectPath);
+          const [state, events] = await Promise.all([
+            sharedMemory.getState(projectPath),
+            sharedMemory.listEvents(projectPath),
+          ]);
           if (get().projectPath !== projectPath) return;
-          set({ state });
+          set({ state, events });
         } catch {
           /* keep last good state */
         }
@@ -89,7 +98,7 @@ export const useSharedMemoryStore = createSelectors(
         if (!projectPath) return;
         await sharedMemory.clear(projectPath);
         if (get().projectPath !== projectPath) return;
-        set({ state: EMPTY_STATE, queryResults: [], queryText: "" });
+        set({ state: EMPTY_STATE, events: [], queryResults: [], queryText: "" });
       },
     },
   })),

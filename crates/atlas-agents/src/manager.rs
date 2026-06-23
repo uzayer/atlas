@@ -23,11 +23,11 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
-use crate::plugin::{PluginSpec, builtin_plugins, find_plugin};
+use crate::plugin::{PluginSpec, TranscriptKind, builtin_plugins, find_plugin};
 use crate::session::{
-    Message, MessageMode, PlanEntry, SessionSnapshot, SessionState, SessionStatus, ToolCall,
-    ToolCallStatus, extract_text_block, format_tool_content, map_tool_status, new_assistant_text,
-    new_assistant_thinking, new_assistant_tool, normalise_tool_input,
+    Message, MessageMode, PlanEntry, SessionModeInfo, SessionSnapshot, SessionState, SessionStatus,
+    ToolCall, ToolCallStatus, extract_text_block, format_tool_content, map_tool_status,
+    new_assistant_text, new_assistant_thinking, new_assistant_tool, normalise_tool_input,
 };
 use crate::transcript;
 use crate::worker::{SessionCommand, SessionHandle, SessionWorker};
@@ -129,7 +129,14 @@ impl AgentManager {
             agent_id,
             session_id: session_id_str.clone(),
         };
-        self.install_session(key.clone(), resp.session_id, cwd_str, plugin_id, Vec::new());
+        self.install_session(
+            key.clone(),
+            resp.session_id,
+            cwd_str,
+            plugin_id,
+            Vec::new(),
+            resp.modes,
+        );
         Ok(key)
     }
 
@@ -167,20 +174,67 @@ impl AgentManager {
         let plugin_id = self.plugin_id_for(agent_id)?;
         let plugin = find_plugin(&plugin_id).ok_or_else(|| Error::UnknownPlugin(plugin_id.clone()))?;
 
-        let seeds = transcript::replay(plugin.transcript, &cwd_str, &session_id_str).await?;
+        if plugin.transcript == TranscriptKind::None {
+            // Transcript-less plugins (Codex) have no on-disk format Atlas can
+            // parse. Instead the agent REPLAYS the conversation to us via
+            // `session/update` notifications DURING `acp.load_session` — and
+            // those are dropped unless a `SessionState` already exists to route
+            // them to (`dispatch` → `find_session_by_acp_id`). So install the
+            // session FIRST (empty), then load: the replay lands in the state.
+            self.install_session(
+                key.clone(),
+                session_id.clone(),
+                cwd_str,
+                plugin_id,
+                Vec::new(),
+                None,
+            );
+            match self.inner.acp.load_session(agent_id, session_id, cwd).await {
+                Ok(modes) => {
+                    self.seed_modes(&key, modes);
+                    Ok(key)
+                }
+                Err(e) => {
+                    // Roll back the phantom session so a failed resume doesn't
+                    // leave a dead, message-less tab bound to nothing.
+                    self.inner.sessions.remove(&key);
+                    Err(e.into())
+                }
+            }
+        } else {
+            // Disk-backed (Claude): replay the JSONL synchronously into seed
+            // messages, THEN install. ACP load happens after replay so the
+            // worker is ready for a follow-up `send_prompt`; the resumed
+            // session's advertised modes come back here.
+            let seeds = transcript::replay(plugin.transcript, &cwd_str, &session_id_str).await?;
+            let modes = self.inner.acp.load_session(agent_id, session_id.clone(), cwd).await?;
 
-        // ACP load happens after replay so the worker is ready to receive
-        // notifications immediately on a follow-up `send_prompt`.
-        self.inner.acp.load_session(agent_id, session_id.clone(), cwd).await?;
+            // Re-check after the awaits — another concurrent caller may have
+            // installed the same session while we were doing I/O.
+            if self.inner.sessions.contains_key(&key) {
+                return Ok(key);
+            }
 
-        // Re-check after the awaits — another concurrent caller may have
-        // installed the same session while we were doing I/O.
-        if self.inner.sessions.contains_key(&key) {
-            return Ok(key);
+            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes);
+            Ok(key)
         }
+    }
 
-        self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds);
-        Ok(key)
+    /// Apply a `session/load` | `session/new` `modes` blob onto an
+    /// already-installed session's state (used by the transcript-less resume
+    /// path, where the session is installed before the modes are known).
+    fn seed_modes(&self, key: &SessionKey, modes: Option<serde_json::Value>) {
+        let (Some(modes), Ok(handle)) = (modes, self.handle_for(key)) else {
+            return;
+        };
+        let (current, available) = parse_session_modes(&modes);
+        let mut st = handle.state.lock();
+        if let Some(c) = current {
+            st.current_mode = Some(c);
+        }
+        if !available.is_empty() {
+            st.available_modes = available;
+        }
     }
 
     pub fn snapshot(&self, key: &SessionKey) -> Result<SessionSnapshot> {
@@ -290,6 +344,7 @@ impl AgentManager {
         cwd: String,
         plugin_id: String,
         seed_messages: Vec<Message>,
+        modes: Option<serde_json::Value>,
     ) {
         let mut state = SessionState::new(
             key.agent_id,
@@ -298,6 +353,18 @@ impl AgentManager {
             plugin_id.clone(),
         );
         state.messages = seed_messages;
+        // Seed the advertised modes (Codex: read-only / auto / full-access) and
+        // the initial current mode from the `session/new` | `session/load`
+        // `modes` blob.
+        if let Some(modes) = &modes {
+            let (current, available) = parse_session_modes(modes);
+            if let Some(c) = current {
+                state.current_mode = Some(c);
+            }
+            if !available.is_empty() {
+                state.available_modes = available;
+            }
+        }
         let state = Arc::new(Mutex::new(state));
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
@@ -713,4 +780,40 @@ impl EventSink for AgentManager {
     fn emit(&self, agent_id: AgentId, event: AcpEvent) {
         self.dispatch(agent_id, event);
     }
+}
+
+/// Parse the ACP `SessionModeState` blob (from `session/new` | `session/load`)
+/// into `(current_mode_id, available_modes)`. The schema serialises camelCase
+/// (`currentModeId`, `availableModes`), each mode as `{id, name, description}`.
+fn parse_session_modes(modes: &serde_json::Value) -> (Option<String>, Vec<SessionModeInfo>) {
+    let current = modes
+        .get("currentModeId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let available = modes
+        .get("availableModes")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|m| {
+                    let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+                    let name = m
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&id)
+                        .to_string();
+                    let description = m
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    Some(SessionModeInfo {
+                        id,
+                        name,
+                        description,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (current, available)
 }

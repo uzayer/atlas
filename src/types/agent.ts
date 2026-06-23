@@ -1,3 +1,5 @@
+import type { SessionModeInfo } from "./agents";
+
 export type AgentType = "claude-code" | "codex" | "custom";
 
 /** Map a high-level agent type to the spawnable ACP plugin id (registry.rs). */
@@ -67,6 +69,14 @@ export interface ChatSession {
   acpSessionId?: string;
   /** Currently selected ACP session mode (default / acceptEdits / plan / …). */
   acpCurrentMode?: string;
+  /** Modes the agent advertised for this session — drives the composer's mode
+   *  picker for non-Claude agents (e.g. Codex). Seeded from the snapshot. */
+  acpAvailableModes?: SessionModeInfo[];
+  /** True while a non-Claude session is still booting (agent spawn + new_session)
+   *  and its real modes haven't been confirmed yet. When true the composer shows
+   *  the picker in a loading state, optimistically pre-filled from the persisted
+   *  per-agent modes cache so switching feels instant. Cleared by `setAcpModes`. */
+  acpModesPending?: boolean;
   /** Currently selected ACP model id (default / sonnet / haiku / …). */
   acpCurrentModel?: string;
   /** Available slash commands as reported by the agent for this session. */

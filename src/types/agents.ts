@@ -60,6 +60,13 @@ export interface Usage {
   cache_read_tokens: number;
 }
 
+/** One ACP-advertised session mode (e.g. Codex's read-only / auto / full-access). */
+export interface SessionModeInfo {
+  id: string;
+  name: string;
+  description?: string | null;
+}
+
 export interface SessionSnapshot {
   agent_id: AgentId;
   session_id: AcpSessionId;
@@ -68,6 +75,7 @@ export interface SessionSnapshot {
   status: SessionStatus;
   current_mode: string | null;
   current_model: string | null;
+  available_modes: SessionModeInfo[];
   available_commands: unknown[];
   plan: PlanEntry[];
   messages: SessionMessage[];

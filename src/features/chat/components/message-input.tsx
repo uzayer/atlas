@@ -6,8 +6,11 @@ import {
   Square,
   Pencil,
   X,
+  Check,
+  Loader2,
 } from "lucide-react";
 import { useChatStore } from "../stores/chat-store";
+import { agents } from "../lib/agents-api";
 import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL } from "@/types/agent";
 import { AgentMark } from "@/components/agent-mark";
 // `ChatInput` pulls in CodeMirror (~870 KB) via `cm-mention-extension`.
@@ -73,6 +76,123 @@ interface MessageInputProps {
   placeholder?: string;
 }
 
+/**
+ * Per-mode dot color for the generic ACP permission picker, mirroring Claude's
+ * semantic scale: restrictive = blue, auto-edit = green, unrestricted = red.
+ * Keyed off the agent-advertised mode id (Codex: read-only / auto / full-access)
+ * with broad fallbacks so other agents' modes still get a sensible tint.
+ */
+function acpModeColor(modeId: string | undefined): string {
+  const id = (modeId ?? "").toLowerCase();
+  if (/full|bypass|\ball\b|danger|yolo|unrestricted/.test(id)) return "var(--status-error)";
+  if (/read.?only|\bplan\b|ask|suggest/.test(id)) return "var(--accent-primary)";
+  if (/auto|default|edit|accept|agent|workspace/.test(id)) return "var(--status-success)";
+  return "var(--text-tertiary)";
+}
+
+/**
+ * Composer permission-mode picker for non-Claude ACP agents (Codex). Unlike
+ * Claude's fixed 4-mode cycling pill, the modes here are agent-advertised
+ * (id + name + description), so this renders a dropup popover listing them.
+ * Self-contained: own narrow store selectors + click-outside, so it doesn't
+ * widen MessageInput's render surface.
+ */
+function AcpModePicker({ tabId }: { tabId: string }) {
+  const currentMode = useChatStore((s) => s.sessions[tabId]?.acpCurrentMode);
+  const availableModes = useChatStore((s) => s.sessions[tabId]?.acpAvailableModes);
+  const pending = useChatStore((s) => s.sessions[tabId]?.acpModesPending ?? false);
+  const { setAcpMode } = useChatStore.use.actions();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const hasModes = !!availableModes && availableModes.length > 0;
+
+  // Still booting the session with nothing cached to show — a pure loading
+  // pill so the user sees the agent coming up instead of an empty composer.
+  if (!hasModes) {
+    if (!pending) return null;
+    return (
+      <span
+        className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-tertiary)] select-none"
+        title="Starting agent…"
+      >
+        <Loader2 size={11} className="shrink-0 animate-spin" />
+        Loading modes…
+      </span>
+    );
+  }
+
+  const current = availableModes!.find((m) => m.id === currentMode);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+        title="Permission mode"
+      >
+        {/* We already have (cached) modes — render the pill as settled for an
+            instant, Claude-like feel. The live session reconciles silently in
+            the background; no spinner, since the cached modes are usable now. */}
+        <span
+          className="w-1.5 h-1.5 rounded-full shrink-0"
+          style={{ background: acpModeColor(currentMode) }}
+        />
+        {current?.name ?? "Mode"}
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 mb-1.5 z-50 min-w-[200px] max-w-[280px] rounded-lg border border-[var(--border-default)] bg-[var(--bg-elevated)] p-1 shadow-lg">
+          {availableModes.map((m) => {
+            const active = m.id === currentMode;
+            return (
+              <button
+                key={m.id}
+                onClick={() => {
+                  setAcpMode(tabId, m.id);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-start gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors",
+                  active
+                    ? "bg-[var(--bg-selected)]"
+                    : "hover:bg-[var(--bg-hover)]"
+                )}
+              >
+                <span
+                  className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full"
+                  style={{ background: acpModeColor(m.id) }}
+                />
+                <span className="flex-1 min-w-0">
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-primary)]">
+                    {m.name}
+                    {active && (
+                      <Check size={11} className="text-[var(--accent-primary)]" />
+                    )}
+                  </span>
+                  {m.description && (
+                    <span className="mt-0.5 block text-[9px] leading-snug text-[var(--text-tertiary)]">
+                      {m.description}
+                    </span>
+                  )}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function MessageInput({
   tabId,
   onSend,
@@ -85,7 +205,64 @@ export function MessageInput({
     cycleClaudePermissionMode,
     enqueueMessage,
     removeQueueItem,
+    setAcpModes,
+    setAcpModesPending,
   } = useChatStore.use.actions();
+  // Codex/other ACP agents advertise their own permission modes; show the
+  // picker only when this session actually has modes (Claude uses its own pill).
+  const hasAcpModes = useChatStore(
+    (s) => (s.sessions[tabId]?.acpAvailableModes?.length ?? 0) > 0
+  );
+  // Show the picker as soon as the agent is non-Claude — even before its modes
+  // load — so the composer can render a loading pill instead of nothing during
+  // the agent spawn + new_session boot.
+  const acpModesPending = useChatStore(
+    (s) => s.sessions[tabId]?.acpModesPending ?? false
+  );
+  // Self-heal the mode picker. chat-panel seeds the modes when a session is
+  // first bound, but that path can be missed (resumed/restored sessions, an
+  // effect that didn't re-run, etc.) — leaving a bound Codex session with the
+  // modes sitting in Rust state but never pushed to the store, so no pill.
+  // Since THIS component is what renders the pill, seed from here too: whenever
+  // we're a bound non-Claude session with no modes loaded, pull the snapshot
+  // and seed. Idempotent (bails once modes exist) and mirrors the codebase's
+  // consumer-side self-heal pattern (file index / knowledge mentions).
+  const seedBinding = useChatStore((s) => {
+    const sess = s.sessions[tabId];
+    if (!sess || sess.agentType === "claude-code") return null;
+    if (!sess.acpAgentId || !sess.acpSessionId) return null;
+    if ((sess.acpAvailableModes?.length ?? 0) > 0) return null;
+    return `${sess.acpAgentId}::${sess.acpSessionId}`;
+  });
+  useEffect(() => {
+    if (!seedBinding) return;
+    const [agent_id, session_id] = seedBinding.split("::");
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snap = await agents.snapshot({ agent_id, session_id });
+        if (!cancelled && snap.available_modes.length > 0) {
+          setAcpModes(tabId, snap.current_mode, snap.available_modes);
+        }
+      } catch (err) {
+        console.warn("seed ACP modes (composer self-heal) failed:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tabId, seedBinding, setAcpModes]);
+  // Safety net: an agent whose boot hangs (e.g. Codex's models-refresh times out
+  // waiting on a child process) never resolves `new_session`, so the create
+  // effect's `setAcpModesPending(false)` never runs and the picker spins
+  // forever. Time the loading state out so the pill settles regardless — if the
+  // binding lands later, the self-heal above still seeds the real modes; any
+  // optimistic cached modes simply stay shown without the spinner.
+  useEffect(() => {
+    if (!acpModesPending) return;
+    const t = setTimeout(() => setAcpModesPending(tabId, false), 12000);
+    return () => clearTimeout(t);
+  }, [tabId, acpModesPending, setAcpModesPending]);
   // Narrow per-tab selectors — primitives only, no message-array refs. This
   // component otherwise would re-render on every streaming chunk because it
   // sits inside the active chat panel.
@@ -567,6 +744,9 @@ export function MessageInput({
                 />
                 {CLAUDE_PERMISSION_MODE_LABEL[permissionMode]}
               </button>
+              )}
+              {agentType !== "claude-code" && (hasAcpModes || acpModesPending) && (
+                <AcpModePicker tabId={tabId} />
               )}
               <button
                 onClick={() => {
