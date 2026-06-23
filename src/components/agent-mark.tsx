@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils";
 import type { AgentType } from "@/types/agent";
 import { AgentIcons } from "@/components/agent-icons";
+import { AtlasIcon } from "@/components/atlas-icon";
 
 /**
  * Small per-agent identity badge. Reuses the `.amark` + `.agent-*` token
@@ -10,6 +11,7 @@ import { AgentIcons } from "@/components/agent-icons";
 const AGENT_CLASS: Record<AgentType, string> = {
   "claude-code": "agent-claude",
   codex: "agent-codex",
+  cersei: "agent-cersei",
   custom: "",
 };
 
@@ -17,6 +19,8 @@ function AgentGlyph({ agentType, size }: { agentType: AgentType; size: "sm" | "l
   const cls = size === "lg" ? "size-[18px]" : "size-3.5";
   if (agentType === "claude-code") return <AgentIcons.Claude className={cls} />;
   if (agentType === "codex") return <AgentIcons.Codex className={cls} />;
+  // Atlas's native agent — its own brand mark.
+  if (agentType === "cersei") return <AtlasIcon size={size === "lg" ? 18 : 14} />;
   return <span className="font-mono">?</span>;
 }
 

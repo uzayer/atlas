@@ -43,6 +43,16 @@ export function listCodexSessions(cwd: string): Promise<ClaudeSessionMeta[]> {
   return invoke<ClaudeSessionMeta[]>("list_codex_sessions", { cwd });
 }
 
+/**
+ * Native Atlas (Cersei) agent sessions for `cwd`, shaped like
+ * {@link ClaudeSessionMeta} (Rust `atlas_cersei::SessionMeta`) so the sidebar
+ * merges all three agents. `id` is the resume key; `file_path` points at the
+ * persisted JSON transcript under the app config dir.
+ */
+export function listCerseiSessions(cwd: string): Promise<ClaudeSessionMeta[]> {
+  return invoke<ClaudeSessionMeta[]>("cersei_list_sessions", { projectPath: cwd });
+}
+
 export function readClaudeSession(filePath: string): Promise<ChatMessageDump[]> {
   return invoke<ChatMessageDump[]>("read_claude_session", { filePath });
 }

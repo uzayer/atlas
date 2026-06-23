@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
-import { agents, ensureAgent, CODEX_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
+import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
 import { loadCachedAcpModes } from "../lib/acp-modes-cache";
 import type { SessionKey } from "@/types/agents";
 import { composePrompt, type MentionData } from "../lib/mentions";
@@ -105,7 +105,11 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         // not a single global default — so per-tab agents run in parallel.
         const at = useChatStore.getState().sessions[tabId]?.agentType;
         const pluginId =
-          at === "codex" ? CODEX_PLUGIN_ID : DEFAULT_PLUGIN_ID;
+          at === "codex"
+            ? CODEX_PLUGIN_ID
+            : at === "cersei"
+              ? CERSEI_PLUGIN_ID
+              : DEFAULT_PLUGIN_ID;
         const agent = await ensureAgent(pluginId);
         if (cancelled) return;
         const project = useProjectStore.getState().currentProject;

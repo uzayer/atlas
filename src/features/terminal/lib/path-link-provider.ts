@@ -1,19 +1,16 @@
 import type { Terminal, ILink, ILinkProvider } from "@xterm/xterm";
 import { invoke } from "@tauri-apps/api/core";
-import { openFile } from "@/lib/open-file";
+import { openFileOrReveal } from "@/lib/open-file";
+import { splitLinks, normalizeUrl } from "./linkify-paths";
 
 /**
- * xterm link provider that makes file paths in terminal output ⌘-clickable
- * (VS Code behavior): ⌘-hover underlines, ⌘-click opens the file. Path
- * resolution (strip `:line:col`, expand `~`, join the shell's live cwd for
- * relative paths, verify existence) happens in Rust (`terminal_resolve_path`),
- * so this only detects candidate tokens and routes activations.
+ * xterm link provider that makes URLs and file paths in terminal output
+ * ⌘-clickable (VS Code behavior): ⌘-hover underlines, ⌘-click opens. URLs open
+ * in the default browser; file paths resolve via Rust (`terminal_resolve_path`:
+ * strip `:line:col`, expand `~`, join the shell's live cwd, verify existence)
+ * then open in Atlas if supported, else reveal in Finder. Detection is shared
+ * with the static-block renderer via `splitLinks`.
  */
-
-// Path-ish run containing at least one `/`, made of safe path chars, with an
-// optional `:line[:col]` suffix. Colons are excluded from the body so URLs
-// (`http://…`) don't match as paths (guarded again by the `:` look-behind).
-const PATH_RE = /[A-Za-z0-9._~@+\-/]*\/[A-Za-z0-9._~@+\-/]*(?::\d+(?::\d+)?)?/g;
 
 // ⌘/Ctrl-held state, shared across all terminals; drives the hover underline.
 let metaHeld = false;
@@ -60,14 +57,14 @@ export function createPathLinkProvider(term: Terminal, terminalId: string): ILin
       }
       const text = line.translateToString(true);
       const links: ILink[] = [];
-      PATH_RE.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = PATH_RE.exec(text)) !== null) {
-        const raw = m[0];
-        // Skip empties / URL tails (`http://host` → the `//host` part follows a `:`).
-        if (raw.length < 2 || text[m.index - 1] === ":") continue;
-        const startX = m.index;
-        const endX = m.index + raw.length;
+      let offset = 0;
+      for (const run of splitLinks(text)) {
+        const startX = offset;
+        const endX = offset + run.text.length;
+        offset = endX;
+        if (run.kind === "text") continue;
+        const raw = run.text;
+        const isUrl = run.kind === "url";
         links.push({
           text: raw,
           range: {
@@ -78,12 +75,18 @@ export function createPathLinkProvider(term: Terminal, terminalId: string): ILin
           activate: (event) => {
             // Require ⌘ (mac) / Ctrl (win/linux) so normal clicks/selection work.
             if (!(event.metaKey || event.ctrlKey)) return;
+            if (isUrl) {
+              void import("@tauri-apps/plugin-opener")
+                .then(({ openUrl }) => openUrl(normalizeUrl(raw)))
+                .catch(() => {});
+              return;
+            }
             void invoke<string | null>("terminal_resolve_path", {
               id: terminalId,
               raw,
             })
               .then((abs) => {
-                if (abs) openFile(abs);
+                if (abs) void openFileOrReveal(abs);
               })
               .catch(() => {});
           },

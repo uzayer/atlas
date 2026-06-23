@@ -5,10 +5,11 @@
 use std::sync::Arc;
 
 use agent_client_protocol::schema::SessionId;
-use atlas_acp::{AgentId, AgentRegistry};
+use atlas_acp::AgentId;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
+use crate::backend::AgentBackend;
 use crate::error::{Error, Result};
 use crate::events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
 use crate::session::{SessionState, SessionStatus, new_user_message};
@@ -36,7 +37,7 @@ pub struct SessionWorker {
     pub state: Arc<Mutex<SessionState>>,
     pub agent_id: AgentId,
     pub acp_session_id: SessionId,
-    pub registry: AgentRegistry,
+    pub backend: Arc<dyn AgentBackend>,
     pub sink: Arc<dyn DeltaSink>,
     pub rx: mpsc::UnboundedReceiver<SessionCommand>,
 }
@@ -54,7 +55,7 @@ impl SessionWorker {
                 }
                 SessionCommand::SetMode(mode_id) => {
                     if let Err(e) = self
-                        .registry
+                        .backend
                         .set_session_mode(self.agent_id, self.acp_session_id.clone(), mode_id)
                         .await
                     {
@@ -62,10 +63,16 @@ impl SessionWorker {
                     }
                 }
                 SessionCommand::SetModel(model_id) => {
-                    // The protocol doesn't have a generic set_model call we can
-                    // hit through atlas-acp yet — surface the desired value to
-                    // state so the UI keeps the selection. Model changes from
-                    // the agent come back via `current_model_update`.
+                    // ACP agents have no generic set_model call (model changes
+                    // come back via `current_model_update`); the native backend
+                    // applies it to the session. Either way we mirror the
+                    // selection into state so the UI keeps it.
+                    if let Err(e) =
+                        self.backend
+                            .set_model(self.agent_id, &self.acp_session_id, model_id.clone())
+                    {
+                        tracing::warn!(target: "atlas_agents::worker", "set_model failed: {e}");
+                    }
                     let mut st = self.state.lock();
                     st.current_model = Some(model_id.clone());
                     st.touch();
@@ -102,7 +109,7 @@ impl SessionWorker {
         // new turn flow through. Cheap (an `AtomicBool` store + an
         // `AtomicU64` increment).
         if let Err(e) = self
-            .registry
+            .backend
             .mark_turn_started(self.agent_id, &self.acp_session_id)
         {
             tracing::warn!(target: "atlas_agents::worker", "mark_turn_started failed: {e}");
@@ -110,9 +117,10 @@ impl SessionWorker {
 
         // 3. Drive the prompt. Notifications during the turn arrive via the
         // manager's EventSink, mutate state, and emit their own deltas — we
-        // don't see them here.
+        // don't see them here. The backend returns the lowercased stop-reason
+        // token directly.
         let result = self
-            .registry
+            .backend
             .send_prompt(self.agent_id, self.acp_session_id.clone(), text)
             .await;
 
@@ -120,9 +128,7 @@ impl SessionWorker {
         let (status, delta) = match result {
             Ok(stop_reason) => (
                 SessionStatus::Idle,
-                SessionDelta::TurnFinished {
-                    stop_reason: format!("{stop_reason:?}").to_ascii_lowercase(),
-                },
+                SessionDelta::TurnFinished { stop_reason },
             ),
             Err(e) => (SessionStatus::Error, SessionDelta::TurnFailed { error: e.to_string() }),
         };

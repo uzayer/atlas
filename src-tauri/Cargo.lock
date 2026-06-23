@@ -408,7 +408,9 @@ name = "atlas-agents"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "async-trait",
  "atlas-acp",
+ "atlas-cersei",
  "chrono",
  "dashmap",
  "dirs 6.0.0",
@@ -417,6 +419,25 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "atlas-cersei"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "async-trait",
+ "atlas-acp",
+ "cersei",
+ "chrono",
+ "dashmap",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

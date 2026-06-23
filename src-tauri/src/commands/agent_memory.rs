@@ -716,5 +716,12 @@ async fn query_codex_threads(db: &Path, project_path: &str) -> Vec<CodexThread> 
         // sqlite3 emits nothing for an empty result set.
         return Vec::new();
     }
-    serde_json::from_str::<Vec<CodexThread>>(stdout).unwrap_or_default()
+    let mut threads = serde_json::from_str::<Vec<CodexThread>>(stdout).unwrap_or_default();
+    // Strip Atlas-injected context blocks the agent recorded in the prompt, so
+    // they never surface as a session preview/title (mirrors the Claude reader).
+    for t in &mut threads {
+        t.first_user_message =
+            atlas_agents::transcript::strip_injected_context(&t.first_user_message);
+    }
+    threads
 }

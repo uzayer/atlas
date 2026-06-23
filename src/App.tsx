@@ -19,6 +19,7 @@ import {
 } from "@/features/chat/lib/agents-api";
 import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta } from "@/types/agents";
+import { SWITCHABLE_AGENTS } from "@/types/agent";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { HintOverlay } from "@/features/hint-nav/components/hint-overlay";
 import { BrowserOverlayWatcher } from "@/features/browser/components/browser-overlay-watcher";
@@ -37,6 +38,7 @@ import {
   type RecentFile,
 } from "@/features/chat/stores/recent-files-store";
 import { useRecentChatsStore } from "@/features/workspaces/stores/recent-chats-store";
+import { stripInjectedContext } from "@/features/chat/lib/atlas-context";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useNodeSetupStore } from "@/features/node-setup/stores/node-setup-store";
 import {
@@ -513,7 +515,9 @@ export function App() {
           tabId,
           projectPath: path,
           projectName: path.split("/").pop() || path,
-          title: s.title || "Chat",
+          // Strip any Atlas-injected memory scaffolding the title may carry
+          // (resumed sessions); a dirty fragment cleans to "" → fall back.
+          title: stripInjectedContext(s.title) || "Chat",
           status: s.status,
           agentType: s.agentType,
           acpSessionId: s.acpSessionId,
@@ -962,9 +966,9 @@ export function App() {
       },
     },
     {
-      // ⌥/ — switch coding agent (Claude Code ⇄ Codex). A session is paired to
-      // one agent: an empty chat flips in place; a started chat opens a NEW
-      // chat bound to the other agent (per the agent-pairing rule).
+      // ⌥/ — cycle the coding agent (Claude Code → Codex → Atlas → …). A
+      // session is paired to one agent: an empty chat flips in place; a started
+      // chat opens a NEW chat bound to the next agent (per the pairing rule).
       combo: { key: "/", alt: true },
       action: () => {
         const layout = useLayoutStore.getState();
@@ -972,8 +976,10 @@ export function App() {
         if (!tab || tab.type !== "chat") return;
         const chat = useChatStore.getState();
         const sess = chat.sessions[tab.id];
-        const cur = sess?.agentType === "codex" ? "codex" : "claude-code";
-        const next: "claude-code" | "codex" = cur === "codex" ? "claude-code" : "codex";
+        const curIdx = SWITCHABLE_AGENTS.indexOf(
+          (sess?.agentType ?? "claude-code") as (typeof SWITCHABLE_AGENTS)[number]
+        );
+        const next = SWITCHABLE_AGENTS[(Math.max(curIdx, 0) + 1) % SWITCHABLE_AGENTS.length];
         if ((sess?.messages.length ?? 0) === 0) {
           chat.actions.switchChatAgent(tab.id, next);
         } else {

@@ -86,7 +86,7 @@ pub(crate) fn projects_dir() -> Result<PathBuf, String> {
 // `encode_cwd` (Claude's cwd→folder encoding) and `is_injected_user_text` live
 // in the canonical transcript module in `atlas-agents` — reused here so the
 // history reader and the live transcript parser agree.
-use atlas_agents::transcript::{encode_cwd, is_injected_user_text};
+use atlas_agents::transcript::{encode_cwd, is_injected_user_text, strip_injected_context};
 
 fn extract_first_user_text(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
@@ -111,7 +111,8 @@ fn extract_first_user_text(line: &str) -> Option<String> {
     if is_injected_user_text(&text) {
         return None;
     }
-    Some(text.trim().to_string())
+    let cleaned = strip_injected_context(&text);
+    if cleaned.is_empty() { None } else { Some(cleaned) }
 }
 
 fn extract_timestamp(line: &str) -> Option<String> {
@@ -694,7 +695,8 @@ fn extract_user_message_text(v: &serde_json::Value) -> Option<String> {
         if is_injected_user_text(s) {
             return None;
         }
-        return Some(s.trim().to_string());
+        let cleaned = strip_injected_context(s);
+        return if cleaned.is_empty() { None } else { Some(cleaned) };
     }
     if let Some(arr) = content.as_array() {
         // Skip blocks that are tool_result (they're tool replies, not real user input)
@@ -716,7 +718,8 @@ fn extract_user_message_text(v: &serde_json::Value) -> Option<String> {
         if is_injected_user_text(&text) {
             return None;
         }
-        return Some(text.trim().to_string());
+        let cleaned = strip_injected_context(&text);
+        return if cleaned.is_empty() { None } else { Some(cleaned) };
     }
     None
 }

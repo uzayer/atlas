@@ -72,7 +72,14 @@ impl DeltaSink for TauriDeltaSink {
 /// real `AppHandle` to emit through. Called from `setup`.
 pub fn install_manager(app: &AppHandle) {
     let sink: Arc<dyn DeltaSink> = Arc::new(TauriDeltaSink::new(app.clone()));
-    let manager = AgentManager::new(sink);
+    // App config dir holds `byok-keys.json` (BYOK keys the native agent reads)
+    // and `cersei-sessions/` (its persisted transcripts). Best-effort: fall
+    // back to a temp dir if the platform path is unavailable.
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let manager = AgentManager::new(sink, config_dir);
     app.manage(manager);
 }
 

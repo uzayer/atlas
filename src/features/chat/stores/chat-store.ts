@@ -7,6 +7,7 @@ import type {
   AgentStatus,
   MessageRole,
   ClaudePermissionMode,
+  SwitchableAgent,
 } from "@/types/agent";
 import { CLAUDE_PERMISSION_MODES } from "@/types/agent";
 import type { PendingPermission } from "@/types/acp";
@@ -97,10 +98,10 @@ interface ChatState {
 
 interface ChatActions {
   actions: {
-    createSession: (tabId: string, agentType?: "claude-code" | "codex") => void;
+    createSession: (tabId: string, agentType?: SwitchableAgent) => void;
     /** Re-bind a fresh (message-less) chat to a different agent. Clears the ACP
      *  binding so the chat panel re-creates a session with the new agent. */
-    switchChatAgent: (tabId: string, agentType: "claude-code" | "codex") => void;
+    switchChatAgent: (tabId: string, agentType: SwitchableAgent) => void;
     setActiveSession: (id: string | null) => void;
     addMessage: (
       sessionId: string,

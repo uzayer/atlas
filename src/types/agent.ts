@@ -1,24 +1,31 @@
 import type { SessionModeInfo } from "./agents";
 
-export type AgentType = "claude-code" | "codex" | "custom";
+export type AgentType = "claude-code" | "codex" | "cersei" | "custom";
 
-/** Map a high-level agent type to the spawnable ACP plugin id (registry.rs). */
-export const AGENT_PLUGIN_ID: Record<"claude-code" | "codex", string> = {
+/** Switchable (Atlas-shipped) agents — excludes the catch-all "custom". */
+export type SwitchableAgent = "claude-code" | "codex" | "cersei";
+
+/** Map a high-level agent type to the spawnable plugin id (registry.rs /
+ *  atlas-cersei). "cersei" is Atlas's native in-process agent. */
+export const AGENT_PLUGIN_ID: Record<SwitchableAgent, string> = {
   "claude-code": "claude-code-ts",
   codex: "codex",
+  cersei: "cersei",
 };
 
-/** The two coding agents Atlas ships, in switch order (for option+/). */
-export const SWITCHABLE_AGENTS: ("claude-code" | "codex")[] = ["claude-code", "codex"];
+/** The coding agents Atlas ships, in switch order (for option+/). */
+export const SWITCHABLE_AGENTS: SwitchableAgent[] = ["claude-code", "codex", "cersei"];
 
-export const AGENT_LABEL: Record<"claude-code" | "codex", string> = {
+export const AGENT_LABEL: Record<SwitchableAgent, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
+  cersei: "Atlas",
 };
 
 /** Derive the display agent type from a spawnable plugin id. */
 export function agentTypeFromPluginId(pluginId: string): AgentType {
   if (pluginId === "codex") return "codex";
+  if (pluginId === "cersei") return "cersei";
   if (pluginId.startsWith("claude")) return "claude-code";
   return "custom";
 }

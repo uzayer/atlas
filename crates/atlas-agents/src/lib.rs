@@ -12,6 +12,7 @@
 //! - `events`     — `SessionDelta` wire shape + `DeltaSink` trait
 //! - `transcript` — JSONL replay (claude-code transcripts) for `load_session`
 
+pub mod backend;
 pub mod error;
 pub mod events;
 pub mod manager;
@@ -20,6 +21,8 @@ pub mod session;
 pub mod transcript;
 pub mod worker;
 
+pub use atlas_cersei::SessionMeta;
+pub use backend::{AcpBackend, AgentBackend, CerseiBackend};
 pub use error::{Error, Result};
 pub use events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
 pub use manager::{AgentManager, SessionKey};

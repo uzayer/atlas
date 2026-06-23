@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { stripInjectedContext } from "@/features/chat/lib/atlas-context";
 import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
 import { AtlasLoader } from "@/components/atlas-loader";
 import { timeAgo } from "@/lib/time-ago";
@@ -20,6 +21,7 @@ import { useChatStore } from "../stores/chat-store";
 import {
   listClaudeSessions,
   listCodexSessions,
+  listCerseiSessions,
   deleteClaudeSession,
   type ClaudeSessionMeta,
 } from "../lib/claude-api";
@@ -28,8 +30,10 @@ import {
   ensureAgent,
   getAgentSync,
   CODEX_PLUGIN_ID,
+  CERSEI_PLUGIN_ID,
   DEFAULT_PLUGIN_ID,
 } from "../lib/agents-api";
+import { AtlasIcon } from "@/components/atlas-icon";
 import type { SessionMessage } from "@/types/agents";
 
 // Module-level click-token table per target tab id. Each call to
@@ -64,7 +68,7 @@ interface SidebarItem {
   messageCount: number;
   /** Which coding agent ran this session (drives the row icon). Defaults to
    *  "claude" — historical Claude-only sessions + anything without metadata. */
-  agent: "claude" | "codex";
+  agent: "claude" | "codex" | "cersei";
   // agent-only
   filePath?: string;
   // chat-only
@@ -209,6 +213,17 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     refetchInterval: false,
   });
 
+  // Native Atlas (Cersei) sessions — persisted as JSON under the app config
+  // dir, same merge treatment as Codex.
+  const cerseiQueryKey = ["cersei-sessions", cwd] as const;
+  const { data: cerseiList = [] } = useQuery({
+    queryKey: cerseiQueryKey,
+    queryFn: () => listCerseiSessions(cwd),
+    enabled: cwd.length > 0,
+    staleTime: 30_000,
+    refetchInterval: false,
+  });
+
   // Start (or replace) the Rust file watcher for this cwd. The single
   // `atlas:sessions-changed` listener below dispatches against `queryKey`
   // closed over the current cwd, so the listener doesn't have to be
@@ -234,9 +249,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     // Now it attaches once per `cwd` and stays attached.
     const key = ["claude-sessions", cwd] as const;
     const codexKey = ["codex-sessions", cwd] as const;
+    const cerseiKey = ["cersei-sessions", cwd] as const;
     const invalidate = () => {
       queryClient.invalidateQueries({ queryKey: key });
       queryClient.invalidateQueries({ queryKey: codexKey });
+      queryClient.invalidateQueries({ queryKey: cerseiKey });
     };
     const unlistenPromise = listen<{ cwd: string }>(
       "atlas:sessions-changed",
@@ -292,10 +309,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     // first; a Codex id never collides with a Claude JSONL id.
     const diskById = new Map<
       string,
-      { meta: ClaudeSessionMeta; agent: "claude" | "codex" }
+      { meta: ClaudeSessionMeta; agent: "claude" | "codex" | "cersei" }
     >();
     for (const d of agentList) diskById.set(d.id, { meta: d, agent: "claude" });
     for (const d of codexList) diskById.set(d.id, { meta: d, agent: "codex" });
+    for (const d of cerseiList) diskById.set(d.id, { meta: d, agent: "cersei" });
 
     const allIds = new Set<string>([
       ...liveById.keys(),
@@ -306,16 +324,19 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       const live = liveById.get(id);
       const diskEntry = diskById.get(id);
       const disk = diskEntry?.meta;
-      const firstUser = live?.firstUserContent ?? "";
+      // Strip Atlas-injected memory scaffolding before deriving the title/preview
+      // (resumed sessions echo the injected prompt). A dirty fragment cleans to "".
+      const firstUser = stripInjectedContext(live?.firstUserContent ?? "");
+      const liveTitle = stripInjectedContext(live?.title ?? "");
       const diskPreview =
         disk?.preview && disk.preview !== "(no user message)"
-          ? disk.preview
+          ? stripInjectedContext(disk.preview)
           : "";
       const title =
-        (live?.title && live.title !== "New Chat" ? live.title : "") ||
+        (liveTitle && liveTitle !== "New Chat" ? liveTitle : "") ||
         firstUser.slice(0, 80) ||
         diskPreview ||
-        live?.title ||
+        liveTitle ||
         "New session";
       const lastUpdated =
         live?.status === "running"
@@ -336,7 +357,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         agent: live
           ? live.agentType === "codex"
             ? "codex"
-            : "claude"
+            : live.agentType === "cersei"
+              ? "cersei"
+              : "claude"
           : (diskEntry?.agent ?? "claude"),
         filePath: disk?.file_path,
       };
@@ -347,7 +370,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     return agents
       .filter((a) => a.messageCount > 0)
       .sort((a, b) => (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? ""));
-  }, [agentList, codexList, tabSummaries]);
+  }, [agentList, codexList, cerseiList, tabSummaries]);
 
   // Sessions currently running (used to show a spinner on the matching row).
   // Keys MUST match the `id`s used when constructing `items` above, otherwise
@@ -406,7 +429,12 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       dirty: false,
       data: {},
     });
-    createSession(newId, current.agentType === "codex" ? "codex" : "claude-code");
+    createSession(
+      newId,
+      current.agentType && current.agentType !== "custom"
+        ? current.agentType
+        : "claude-code"
+    );
     setActiveTab(newId);
   };
 
@@ -419,9 +447,13 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     // formula `items` uses to key live rows. Covers re-clicks, clicks while
     // loading, and clicks on a row already open in another tab (incl. a
     // live-only Codex chat that has no disk JSONL to reload from).
+    // Only focus a tab that still EXISTS — a closed chat tab leaves its session
+    // behind (orphan), and focusing that dead tab id makes `setActiveTab` bounce
+    // to tab[0] ("jumps to a different chat"). Skip orphans → reload below.
+    const openTabIds = new Set(useLayoutStore.getState().tabs.map((t) => t.id));
     for (const [tid, s] of Object.entries(storeSnapshot)) {
       const liveId = s.acpSessionId ?? `live-${tid}`;
-      if (liveId === item.id) {
+      if (liveId === item.id && openTabIds.has(tid)) {
         setActiveTab(tid);
         return;
       }
@@ -439,7 +471,12 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     // Pick the agent that actually ran this session. This was hardcoded to the
     // default (Claude), so clicking a Codex row tried to resume it through the
     // Claude process → `loadSession` failed → it fell back to a blank session.
-    const pluginId = item.agent === "codex" ? CODEX_PLUGIN_ID : DEFAULT_PLUGIN_ID;
+    const pluginId =
+      item.agent === "codex"
+        ? CODEX_PLUGIN_ID
+        : item.agent === "cersei"
+          ? CERSEI_PLUGIN_ID
+          : DEFAULT_PLUGIN_ID;
 
     // Decide target tab. If the current tab's session is mid-flight
     // (status === "running"), we MUST NOT overwrite it — the agent is
@@ -704,7 +741,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
                       ? "AI Chat"
                       : item.agent === "codex"
                         ? "Codex"
-                        : "Claude Code"
+                        : item.agent === "cersei"
+                          ? "Atlas"
+                          : "Claude Code"
                   }
                 >
                   {isRunning ? (
@@ -712,6 +751,8 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
                   ) : item.kind === "agent" ? (
                     item.agent === "codex" ? (
                       <CodexIcon className="size-3" />
+                    ) : item.agent === "cersei" ? (
+                      <AtlasIcon size={12} />
                     ) : (
                       <ClaudeIcon className="size-3" />
                     )

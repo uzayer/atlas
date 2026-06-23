@@ -319,6 +319,7 @@ pub fn run() {
             commands::agents::agents_run_auth_method,
             commands::agents::agents_authenticate,
             commands::agents::codex_status,
+            commands::cersei::cersei_list_sessions,
             commands::byok::byok_list,
             commands::byok::byok_set,
             commands::byok::byok_delete,

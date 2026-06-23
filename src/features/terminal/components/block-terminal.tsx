@@ -4,11 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { Loader2, CheckCircle2, XCircle, ChevronRight, Folder, Copy, RotateCw, ChevronDown, ChevronUp, Search, X, GitBranch, Lock } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
-import { openFile } from "@/lib/open-file";
+import { openFileOrReveal } from "@/lib/open-file";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { resolveTerminalFont } from "../utils/resolve-font";
 import { resolveTerminalOutput, type AnsiSegment } from "../lib/ansi-to-segments";
-import { splitPaths } from "../lib/linkify-paths";
+import { splitLinks, normalizeUrl } from "../lib/linkify-paths";
 import { createTerminalKeymap } from "../lib/terminal-keymap";
 import { createPathLinkProvider } from "../lib/path-link-provider";
 import { BlockStreamParser, type TerminalBlock } from "../lib/block-parser";
@@ -715,20 +715,39 @@ function BlockAction({
 function BlockOutput({ segments, cwd, query }: { segments: AnsiSegment[]; cwd: string; query: string }) {
   const openPath = useCallback(
     (raw: string) => {
+      // Resolve to an absolute path, then open in Atlas if it's a kind we can
+      // render, else reveal it in Finder.
       void invoke<string | null>("resolve_path", { base: cwd, raw })
         .then((abs) => {
-          if (abs) openFile(abs);
+          if (abs) void openFileOrReveal(abs);
         })
         .catch(() => {});
     },
     [cwd]
   );
+  const openLink = useCallback((raw: string) => {
+    void import("@tauri-apps/plugin-opener")
+      .then(({ openUrl }) => openUrl(normalizeUrl(raw)))
+      .catch(() => {});
+  }, []);
 
   return (
     <pre className="whitespace-pre-wrap break-words px-3 py-2 font-mono text-[12px] leading-[1.45] text-[var(--text-secondary)]">
       {segments.flatMap((s, i) =>
-        splitPaths(s.text).map((p, j) =>
-          p.isPath ? (
+        splitLinks(s.text).map((p, j) =>
+          p.kind === "url" ? (
+            <span
+              key={`${i}-${j}`}
+              style={s.style}
+              title="⌘-click to open in browser"
+              className="cursor-pointer hover:text-[var(--accent-primary)] hover:underline"
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey) openLink(p.text);
+              }}
+            >
+              {renderHL(p.text, query)}
+            </span>
+          ) : p.kind === "path" ? (
             <span
               key={`${i}-${j}`}
               style={s.style}

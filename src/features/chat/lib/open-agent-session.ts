@@ -53,10 +53,15 @@ export async function openAgentSession({ acpSessionId, title, cwd }: OpenOpts): 
     replaceMessages,
   } = chat.actions;
 
-  // 1. Already open in some tab → focus it (covers re-clicks + running chats).
+  // 1. Already open in a LIVE tab → focus it (covers re-clicks + running chats).
+  //    Closing a chat tab leaves its chat-store session behind (orphan), so we
+  //    must skip sessions whose tab no longer exists — otherwise `setActiveTab`
+  //    can't find the dead tab and bounces to tab[0], "jumping" to an unrelated
+  //    chat instead of loading the clicked session.
   if (acpSessionId) {
+    const openTabIds = new Set(layout.tabs.map((t) => t.id));
     for (const [tid, s] of Object.entries(chat.sessions)) {
-      if (s.acpSessionId === acpSessionId) {
+      if (s.acpSessionId === acpSessionId && openTabIds.has(tid)) {
         setActiveTab(tid);
         return;
       }

@@ -30,6 +30,7 @@ import {
 import { pickAndAddWorkspace } from "../lib/pick-workspace";
 import { useRunningChatKeys } from "../lib/agent-activity";
 import { openAgentSession } from "@/features/chat/lib/open-agent-session";
+import { stripInjectedContext } from "@/features/chat/lib/atlas-context";
 import { AtlasLoader } from "@/components/atlas-loader";
 import { AgentIcons } from "@/components/agent-icons";
 import { useRecentChatsStore, type RecentChat } from "../stores/recent-chats-store";
@@ -374,7 +375,7 @@ function ChatRow({ chat, running, onOpen }: { chat: RecentChat; running: boolean
           running ? "text-[var(--text-primary)]" : "text-[var(--text-secondary)]",
         )}
       >
-        {chat.title}
+        {stripInjectedContext(chat.title) || chat.projectName}
       </div>
       {/* Timestamp — bottom-left, aligned with the title start (past the icon). */}
       <span className="absolute bottom-1 left-7 text-[9px] font-mono text-[var(--text-tertiary)] tabular-nums">

@@ -725,7 +725,13 @@ export function MessageInput({
                 title="Coding agent (switch with ⌥/ on a new chat)"
               >
                 <AgentMark agentType={agentType} className="!h-4 !w-4 !text-[9px] !rounded" />
-                {AGENT_LABEL[agentType === "codex" ? "codex" : "claude-code"]}
+                {AGENT_LABEL[
+                  agentType === "codex"
+                    ? "codex"
+                    : agentType === "cersei"
+                      ? "cersei"
+                      : "claude-code"
+                ]}
               </span>
               {agentType === "claude-code" && (
               <button

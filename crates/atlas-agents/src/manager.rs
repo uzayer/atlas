@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::backend::{AcpBackend, AgentBackend, CerseiBackend};
 use crate::error::{Error, Result};
 use crate::events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
 use crate::plugin::{PluginSpec, TranscriptKind, builtin_plugins, find_plugin};
@@ -46,18 +47,25 @@ pub struct AgentManager {
 
 struct ManagerInner {
     acp: AgentRegistry,
+    cersei: atlas_cersei::CerseiRuntime,
     sessions: DashMap<SessionKey, Arc<SessionHandle>>,
     agent_plugins: DashMap<AgentId, String>,
+    /// Per-agent backend (ACP subprocess vs in-process Cersei), chosen at spawn.
+    agent_backends: DashMap<AgentId, Arc<dyn AgentBackend>>,
     sink: Arc<dyn DeltaSink>,
 }
 
 impl AgentManager {
-    pub fn new(sink: Arc<dyn DeltaSink>) -> Self {
+    /// `config_dir` is the app config dir (holds `byok-keys.json` +
+    /// `cersei-sessions/`); the native agent reads keys + persists sessions there.
+    pub fn new(sink: Arc<dyn DeltaSink>, config_dir: std::path::PathBuf) -> Self {
         Self {
             inner: Arc::new(ManagerInner {
                 acp: AgentRegistry::new(),
+                cersei: atlas_cersei::CerseiRuntime::new(config_dir),
                 sessions: DashMap::new(),
                 agent_plugins: DashMap::new(),
+                agent_backends: DashMap::new(),
                 sink,
             }),
         }
@@ -71,15 +79,34 @@ impl AgentManager {
         self.inner.acp.list()
     }
 
-    /// Spawn a plugin's process and register the resulting agent.
+    /// Spawn a plugin and register the resulting agent. ACP plugins launch a
+    /// subprocess; the native `cersei` plugin is registered in-process.
     pub async fn spawn(&self, plugin_id: &str) -> Result<AgentInfo> {
         let plugin = find_plugin(plugin_id).ok_or_else(|| Error::UnknownPlugin(plugin_id.into()))?;
         let event_sink: Arc<dyn EventSink> = Arc::new(self.clone());
-        let info = self.inner.acp.spawn(&plugin.plugin_id, event_sink).await?;
+
+        let (info, backend): (AgentInfo, Arc<dyn AgentBackend>) =
+            if plugin.plugin_id == atlas_cersei::CERSEI_PLUGIN_ID {
+                let info = self.inner.cersei.spawn(event_sink);
+                (info, Arc::new(CerseiBackend(self.inner.cersei.clone())))
+            } else {
+                let info = self.inner.acp.spawn(&plugin.plugin_id, event_sink).await?;
+                (info, Arc::new(AcpBackend(self.inner.acp.clone())))
+            };
+
         self.inner
             .agent_plugins
             .insert(info.agent_id, plugin.plugin_id);
+        self.inner.agent_backends.insert(info.agent_id, backend);
         Ok(info)
+    }
+
+    fn backend_for(&self, agent_id: AgentId) -> Result<Arc<dyn AgentBackend>> {
+        self.inner
+            .agent_backends
+            .get(&agent_id)
+            .map(|e| e.value().clone())
+            .ok_or(Error::Acp(atlas_acp::AcpError::UnknownAgent))
     }
 
     /// Auth methods the agent advertised during `initialize` — surfaced
@@ -87,14 +114,14 @@ impl AgentManager {
     /// adapter actually supports (Claude Subscription, Anthropic Console,
     /// SSO, etc.) without hard-coding labels.
     pub fn auth_methods(&self, agent_id: AgentId) -> Result<Vec<AuthMethodWire>> {
-        Ok(self.inner.acp.auth_methods(agent_id)?)
+        Ok(self.backend_for(agent_id)?.auth_methods(agent_id)?)
     }
 
     /// Run the agent's ACP `authenticate` flow for `method_id` (e.g. Codex's
     /// "chatgpt" browser OAuth). Used by agents whose auth methods don't ship a
     /// terminal command (so the terminal-subprocess path doesn't apply).
     pub async fn authenticate(&self, agent_id: AgentId, method_id: String) -> Result<()> {
-        self.inner.acp.authenticate(agent_id, method_id).await?;
+        self.backend_for(agent_id)?.authenticate(agent_id, method_id).await?;
         Ok(())
     }
 
@@ -112,7 +139,9 @@ impl AgentManager {
             self.inner.sessions.remove(&key);
         }
         self.inner.agent_plugins.remove(&agent_id);
-        self.inner.acp.kill(agent_id)?;
+        let backend = self.backend_for(agent_id)?;
+        self.inner.agent_backends.remove(&agent_id);
+        backend.kill(agent_id)?;
         Ok(())
     }
 
@@ -120,7 +149,7 @@ impl AgentManager {
     pub async fn new_session(&self, agent_id: AgentId, cwd: PathBuf) -> Result<SessionKey> {
         let cwd_str = cwd.to_string_lossy().into_owned();
         let plugin_id = self.plugin_id_for(agent_id)?;
-        let resp: NewSessionInfo = self.inner.acp.new_session(agent_id, cwd).await?;
+        let resp: NewSessionInfo = self.backend_for(agent_id)?.new_session(agent_id, cwd).await?;
         let session_id_str = serde_json::to_value(&resp.session_id)
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -174,6 +203,24 @@ impl AgentManager {
         let plugin_id = self.plugin_id_for(agent_id)?;
         let plugin = find_plugin(&plugin_id).ok_or_else(|| Error::UnknownPlugin(plugin_id.clone()))?;
 
+        if plugin.transcript == TranscriptKind::CerseiJson {
+            // Native agent: the runtime persists its own JSON transcript. Build
+            // the UI seed messages from it, restore the runtime's history (so a
+            // follow-up turn keeps context), then install.
+            let seeds = cersei_replay_to_messages(
+                self.inner.cersei.replay_session(&cwd_str, &session_id_str),
+            );
+            let modes = self
+                .backend_for(agent_id)?
+                .load_session(agent_id, session_id.clone(), cwd)
+                .await?;
+            if self.inner.sessions.contains_key(&key) {
+                return Ok(key);
+            }
+            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes);
+            return Ok(key);
+        }
+
         if plugin.transcript == TranscriptKind::None {
             // Transcript-less plugins (Codex) have no on-disk format Atlas can
             // parse. Instead the agent REPLAYS the conversation to us via
@@ -189,7 +236,7 @@ impl AgentManager {
                 Vec::new(),
                 None,
             );
-            match self.inner.acp.load_session(agent_id, session_id, cwd).await {
+            match self.backend_for(agent_id)?.load_session(agent_id, session_id, cwd).await {
                 Ok(modes) => {
                     self.seed_modes(&key, modes);
                     Ok(key)
@@ -207,7 +254,10 @@ impl AgentManager {
             // worker is ready for a follow-up `send_prompt`; the resumed
             // session's advertised modes come back here.
             let seeds = transcript::replay(plugin.transcript, &cwd_str, &session_id_str).await?;
-            let modes = self.inner.acp.load_session(agent_id, session_id.clone(), cwd).await?;
+            let modes = self
+                .backend_for(agent_id)?
+                .load_session(agent_id, session_id.clone(), cwd)
+                .await?;
 
             // Re-check after the awaits — another concurrent caller may have
             // installed the same session while we were doing I/O.
@@ -237,6 +287,11 @@ impl AgentManager {
         }
     }
 
+    /// Stored native-agent sessions for a project (chat session sidebar).
+    pub fn cersei_list_sessions(&self, cwd: &str) -> Vec<atlas_cersei::SessionMeta> {
+        self.inner.cersei.list_sessions(cwd)
+    }
+
     pub fn snapshot(&self, key: &SessionKey) -> Result<SessionSnapshot> {
         let handle = self.handle_for(key)?;
         let snap = handle.state.lock().snapshot();
@@ -264,8 +319,7 @@ impl AgentManager {
     /// delta the same way it does for any clean turn end.
     pub fn cancel(&self, key: &SessionKey) -> Result<()> {
         let handle = self.handle_for(key)?;
-        self.inner
-            .acp
+        self.backend_for(handle.agent_id)?
             .cancel_turn(handle.agent_id, handle.acp_session_id.clone())?;
         Ok(())
     }
@@ -307,8 +361,7 @@ impl AgentManager {
             session_id: session_id.to_string(),
         };
         let handle = self.handle_for(&key)?;
-        self.inner
-            .acp
+        self.backend_for(agent_id)?
             .respond_permission(agent_id, request_id, decision)?;
         let envelope = SessionDeltaEnvelope {
             agent_id: handle.agent_id,
@@ -369,11 +422,19 @@ impl AgentManager {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
 
+        // Backend was registered at spawn(); fall back to ACP defensively.
+        let backend: Arc<dyn AgentBackend> = self
+            .inner
+            .agent_backends
+            .get(&key.agent_id)
+            .map(|e| e.value().clone())
+            .unwrap_or_else(|| Arc::new(AcpBackend(self.inner.acp.clone())));
+
         let worker = SessionWorker {
             state: state.clone(),
             agent_id: key.agent_id,
             acp_session_id: acp_session_id.clone(),
-            registry: self.inner.acp.clone(),
+            backend,
             sink: self.inner.sink.clone(),
             rx: cmd_rx,
         };
@@ -780,6 +841,40 @@ impl EventSink for AgentManager {
     fn emit(&self, agent_id: AgentId, event: AcpEvent) {
         self.dispatch(agent_id, event);
     }
+}
+
+/// Convert the native agent's UI-neutral replay items into `Message`s for the
+/// resumed session's transcript (mirrors what the ACP replay paths produce).
+fn cersei_replay_to_messages(items: Vec<atlas_cersei::ReplayItem>) -> Vec<Message> {
+    use atlas_cersei::ReplayItem;
+    items
+        .into_iter()
+        .map(|it| match it {
+            ReplayItem::User { text } => crate::session::new_user_message(text),
+            ReplayItem::Assistant { text } => new_assistant_text(text),
+            ReplayItem::Thinking { text } => new_assistant_thinking(text),
+            ReplayItem::Tool {
+                id,
+                name,
+                input,
+                result,
+                is_error,
+            } => new_assistant_tool(ToolCall {
+                id,
+                tool_name: name.clone(),
+                title: Some(name),
+                kind: None,
+                status: if is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                },
+                arguments: input,
+                result,
+                locations: Vec::new(),
+            }),
+        })
+        .collect()
 }
 
 /// Parse the ACP `SessionModeState` blob (from `session/new` | `session/load`)
