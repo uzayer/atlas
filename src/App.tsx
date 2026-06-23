@@ -1,6 +1,7 @@
 import { startTransition, useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AppLayout } from "@/features/layout/components/app-layout";
+import { SkillCaptureHost } from "@/features/skills/components/skill-capture-host";
 import { AppContextMenu } from "@/components/app-context-menu";
 import { CommandPalette } from "@/components/command-palette";
 import { NewTabPalette } from "@/components/new-tab-palette";
@@ -22,7 +23,11 @@ import type { AgentDelta } from "@/types/agents";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { HintOverlay } from "@/features/hint-nav/components/hint-overlay";
 import { BrowserOverlayWatcher } from "@/features/browser/components/browser-overlay-watcher";
-import { fileIndex, openFileIndex, markFileIndexClosed } from "@/features/file-picker/lib/file-picker-api";
+import {
+  fileIndex,
+  openFileIndex,
+  markFileIndexClosed,
+} from "@/features/file-picker/lib/file-picker-api";
 import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
 import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import { pickAndAddWorkspace } from "@/features/workspaces/lib/pick-workspace";
@@ -49,7 +54,11 @@ import { warmMarkdownWorker } from "@/lib/markdown-cache";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
 import { NotificationPanel } from "@/features/notifications/components/notification-panel";
 import { Toaster } from "sonner";
-import { clampScale, SCALE_STEP, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
+import {
+  clampScale,
+  SCALE_STEP,
+  DEFAULT_SCALE,
+} from "@/features/settings/lib/ui-scale";
 
 // Interface-zoom helpers (⌘+/⌘-/⌘0). They read + write the persisted
 // `uiScale` setting; `updateSettings` applies it to the native WebView zoom.
@@ -160,9 +169,9 @@ export function App() {
       // both clobber the CLI workspace and swallow the CLI switch (`switching`
       // guard). So we suppress hydrate's auto-switch when a CLI path is present
       // and perform the CLI open as the sole, final switch.
-      const cliPath = await invoke<string | null>("cli_take_initial_project_path").catch(
-        () => null,
-      );
+      const cliPath = await invoke<string | null>(
+        "cli_take_initial_project_path",
+      ).catch(() => null);
       try {
         const payload = await invoke<AppStateWire>("bootstrap_app_state");
         if (cancelled) return;
@@ -339,7 +348,8 @@ export function App() {
     // first interaction (e.g. scrolling the chat) eats the catch-up. Firing this
     // on the focus/visibility RISING edge lets listeners (chat virtualizer,
     // markdown worker) warm the pipeline before the user touches anything.
-    const signalActive = () => window.dispatchEvent(new CustomEvent("atlas:window-active"));
+    const signalActive = () =>
+      window.dispatchEvent(new CustomEvent("atlas:window-active"));
     void appWindow
       .onFocusChanged(({ payload: focused }) => {
         if (focused && !windowFocused) signalActive();
@@ -460,14 +470,22 @@ export function App() {
       ) {
         return;
       }
-      const texts = Array.from(pendingText, ([sessionId, text]) => ({ sessionId, text }));
-      const thoughts = Array.from(pendingThought, ([sessionId, text]) => ({ sessionId, text }));
+      const texts = Array.from(pendingText, ([sessionId, text]) => ({
+        sessionId,
+        text,
+      }));
+      const thoughts = Array.from(pendingThought, ([sessionId, text]) => ({
+        sessionId,
+        text,
+      }));
       const deltas = pendingDeltas.slice();
       pendingText.clear();
       pendingThought.clear();
       pendingDeltas.length = 0;
       toolDeltaPos.clear();
-      useChatStore.getState().actions.applyAgentBatch({ texts, thoughts, deltas });
+      useChatStore
+        .getState()
+        .actions.applyAgentBatch({ texts, thoughts, deltas });
     };
     const schedule = () => {
       if (rafId !== null) return;
@@ -496,7 +514,10 @@ export function App() {
       for (const [tabId, s] of Object.entries(sessions)) {
         if (s.acpSessionId === acpSessionId) return { tabId, title: s.title };
       }
-      return { tabId: undefined as string | undefined, title: undefined as string | undefined };
+      return {
+        tabId: undefined as string | undefined,
+        title: undefined as string | undefined,
+      };
     };
     const notify = () => useNotificationsStore.getState().actions;
 
@@ -537,14 +558,14 @@ export function App() {
         case "text_chunk":
           pendingText.set(
             env.session_id,
-            (pendingText.get(env.session_id) ?? "") + env.delta
+            (pendingText.get(env.session_id) ?? "") + env.delta,
           );
           schedule();
           return;
         case "thinking_chunk":
           pendingThought.set(
             env.session_id,
-            (pendingThought.get(env.session_id) ?? "") + env.delta
+            (pendingThought.get(env.session_id) ?? "") + env.delta,
           );
           schedule();
           return;
@@ -689,7 +710,11 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    type Payload = { workspaceId?: string; dirs: string[]; fullRefresh: boolean };
+    type Payload = {
+      workspaceId?: string;
+      dirs: string[];
+      fullRefresh: boolean;
+    };
     listen<Payload>("atlas:explorer:changed", (e) => {
       if (cancelled) return;
       // Ignore changes from a backgrounded workspace's resident watcher —
@@ -739,16 +764,15 @@ export function App() {
     for (const t of tabs) {
       if (t.type !== "editor" && t.type !== "media" && t.type !== "unsupported")
         continue;
-      const absPath = (t.data as Record<string, unknown> | undefined)?.filePath as
-        | string
-        | undefined;
+      const absPath = (t.data as Record<string, unknown> | undefined)
+        ?.filePath as string | undefined;
       if (!absPath) continue;
       if (seenFileTabsRef.current.has(absPath)) continue;
       seenFileTabsRef.current.add(absPath);
       const rel =
         projectPath && absPath.startsWith(projectPath + "/")
           ? absPath.slice(projectPath.length + 1)
-          : absPath.split("/").pop() ?? absPath;
+          : (absPath.split("/").pop() ?? absPath);
       useRecentFilesStore.getState().actions.push({ absPath, rel });
     }
   }, [tabs, currentProject?.path]);
@@ -916,7 +940,8 @@ export function App() {
       // ⌘9 always jumps to the LAST tab (browser convention), regardless
       // of how many tabs there are; ⌘1–8 select by index.
       // ⌘9 = last tab in the focused column (the store treats i<0 as "last").
-      action: i === 8 ? () => activateTabByIndex(-1) : () => activateTabByIndex(i),
+      action:
+        i === 8 ? () => activateTabByIndex(-1) : () => activateTabByIndex(i),
     })),
     {
       combo: { key: "w", meta: true },
@@ -973,13 +998,21 @@ export function App() {
         const chat = useChatStore.getState();
         const sess = chat.sessions[tab.id];
         const cur = sess?.agentType === "codex" ? "codex" : "claude-code";
-        const next: "claude-code" | "codex" = cur === "codex" ? "claude-code" : "codex";
+        const next: "claude-code" | "codex" =
+          cur === "codex" ? "claude-code" : "codex";
         if ((sess?.messages.length ?? 0) === 0) {
           chat.actions.switchChatAgent(tab.id, next);
         } else {
           const id = `chat-${Date.now()}`;
           chat.actions.createSession(id, next);
-          addTab({ id, type: "chat", title: "New Chat", closable: true, dirty: false, data: {} });
+          addTab({
+            id,
+            type: "chat",
+            title: "New Chat",
+            closable: true,
+            dirty: false,
+            data: {},
+          });
         }
       },
     },
@@ -1061,7 +1094,10 @@ export function App() {
   return (
     <>
       <AppContextMenu>
-        <div className="h-screen w-screen" onContextMenu={(e) => e.preventDefault()}>
+        <div
+          className="h-screen w-screen"
+          onContextMenu={(e) => e.preventDefault()}
+        >
           <AppLayout />
         </div>
       </AppContextMenu>
@@ -1082,6 +1118,10 @@ export function App() {
       <HintOverlay />
       <NotificationPanel />
       <BrowserOverlayWatcher />
+      {/* Global "Save as skill" capture host — listens for the
+          atlas:skill-capture window event from any view (chat, model-chat,
+          memory-chat), so the button works everywhere, not just in ChatPanel. */}
+      <SkillCaptureHost />
       <Toaster
         position="bottom-right"
         toastOptions={{

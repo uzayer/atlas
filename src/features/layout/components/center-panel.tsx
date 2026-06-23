@@ -1,8 +1,21 @@
-import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense, Fragment } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  useMemo,
+  lazy,
+  Suspense,
+  Fragment,
+} from "react";
 import { cn } from "@/lib/utils";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { useLayoutStore, type Tab, type WorkspaceView } from "../stores/layout-store";
+import {
+  useLayoutStore,
+  type Tab,
+  type WorkspaceView,
+} from "../stores/layout-store";
 import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 // Chat is the default landing surface — always loaded so the first paint
 // shows the agent UI without a Suspense flash.
@@ -15,22 +28,86 @@ import { UnsupportedView } from "@/features/unsupported/components/unsupported-v
 // them eager added multi-second parse cost to cold start on machines that
 // don't have them in the OS file cache yet. The Suspense fallback in the
 // tab content area absorbs the brief load.
-const TerminalPanel = lazy(() => import("@/features/terminal/components/terminal-panel").then(m => ({ default: m.TerminalPanel })));
-const EditorPanel = lazy(() => import("@/features/editor/components/editor-panel").then(m => ({ default: m.EditorPanel })));
-const BrowserPanel = lazy(() => import("@/features/browser/components/browser-panel").then(m => ({ default: m.BrowserPanel })));
-const MediaViewer = lazy(() => import("@/features/media/components/media-viewer").then(m => ({ default: m.MediaViewer })));
-const SvgViewer = lazy(() => import("@/features/svg/components/svg-viewer").then(m => ({ default: m.SvgViewer })));
-const PdfViewer = lazy(() => import("@/features/pdf/components/pdf-viewer").then(m => ({ default: m.PdfViewer })));
-const CanvasPanel = lazy(() => import("@/features/canvas/components/canvas-panel").then(m => ({ default: m.CanvasPanel })));
-const KnowledgePanel = lazy(() => import("@/features/knowledge/components/knowledge-panel").then(m => ({ default: m.KnowledgePanel })));
-const KnowledgeGraph = lazy(() => import("@/features/knowledge/components/knowledge-graph").then(m => ({ default: m.KnowledgeGraph })));
-const ResearchPanel = lazy(() => import("@/features/research/components/research-panel").then(m => ({ default: m.ResearchPanel })));
-const SettingsPanel = lazy(() => import("@/features/settings/components/settings-panel").then(m => ({ default: m.SettingsPanel })));
-const LogPanel = lazy(() => import("@/features/log/components/log-panel").then(m => ({ default: m.LogPanel })));
-const PomodoroPanel = lazy(() => import("@/features/pomodoro/components/pomodoro-panel").then(m => ({ default: m.PomodoroPanel })));
-const MissionControlPanel = lazy(() => import("@/features/mission-control/components/mission-control-panel").then(m => ({ default: m.MissionControlPanel })));
-const ModelChatPanel = lazy(() => import("@/features/model-chat/components/model-chat-panel").then(m => ({ default: m.ModelChatPanel })));
-const MemoryPanel = lazy(() => import("@/features/memory/components/memory-panel").then(m => ({ default: m.MemoryPanel })));
+const TerminalPanel = lazy(() =>
+  import("@/features/terminal/components/terminal-panel").then((m) => ({
+    default: m.TerminalPanel,
+  })),
+);
+const EditorPanel = lazy(() =>
+  import("@/features/editor/components/editor-panel").then((m) => ({
+    default: m.EditorPanel,
+  })),
+);
+const BrowserPanel = lazy(() =>
+  import("@/features/browser/components/browser-panel").then((m) => ({
+    default: m.BrowserPanel,
+  })),
+);
+const MediaViewer = lazy(() =>
+  import("@/features/media/components/media-viewer").then((m) => ({
+    default: m.MediaViewer,
+  })),
+);
+const SvgViewer = lazy(() =>
+  import("@/features/svg/components/svg-viewer").then((m) => ({
+    default: m.SvgViewer,
+  })),
+);
+const PdfViewer = lazy(() =>
+  import("@/features/pdf/components/pdf-viewer").then((m) => ({
+    default: m.PdfViewer,
+  })),
+);
+const CanvasPanel = lazy(() =>
+  import("@/features/canvas/components/canvas-panel").then((m) => ({
+    default: m.CanvasPanel,
+  })),
+);
+const KnowledgePanel = lazy(() =>
+  import("@/features/knowledge/components/knowledge-panel").then((m) => ({
+    default: m.KnowledgePanel,
+  })),
+);
+const KnowledgeGraph = lazy(() =>
+  import("@/features/knowledge/components/knowledge-graph").then((m) => ({
+    default: m.KnowledgeGraph,
+  })),
+);
+const ResearchPanel = lazy(() =>
+  import("@/features/research/components/research-panel").then((m) => ({
+    default: m.ResearchPanel,
+  })),
+);
+const SettingsPanel = lazy(() =>
+  import("@/features/settings/components/settings-panel").then((m) => ({
+    default: m.SettingsPanel,
+  })),
+);
+const LogPanel = lazy(() =>
+  import("@/features/log/components/log-panel").then((m) => ({
+    default: m.LogPanel,
+  })),
+);
+const PomodoroPanel = lazy(() =>
+  import("@/features/pomodoro/components/pomodoro-panel").then((m) => ({
+    default: m.PomodoroPanel,
+  })),
+);
+const MissionControlPanel = lazy(() =>
+  import("@/features/mission-control/components/mission-control-panel").then(
+    (m) => ({ default: m.MissionControlPanel }),
+  ),
+);
+const ModelChatPanel = lazy(() =>
+  import("@/features/model-chat/components/model-chat-panel").then((m) => ({
+    default: m.ModelChatPanel,
+  })),
+);
+const MemoryPanel = lazy(() =>
+  import("@/features/memory/components/memory-panel").then((m) => ({
+    default: m.MemoryPanel,
+  })),
+);
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { PanelSkeleton } from "@/components/panel-skeleton";
 import { AtlasIcon } from "@/components/atlas-icon";
@@ -58,8 +135,7 @@ import {
   Timer,
   FileText,
   Columns2,
-  LayoutDashboard,
-} from "lucide-react";
+  LayoutDashboard,} from "lucide-react";
 import type { TabType } from "@/lib/constants";
 
 const tabIcons: Record<TabType, React.ElementType> = {
@@ -128,8 +204,23 @@ export function CenterPanel() {
   const tabHistory = useLayoutStore.use.tabHistory();
   const tabHistoryIndex = useLayoutStore.use.tabHistoryIndex();
   const mirrorView: WorkspaceView = useMemo(
-    () => ({ tabs, groupOrder, activeByGroup, focusedGroupId, tabHistory, tabHistoryIndex, activeTabId: activeByGroup[focusedGroupId] ?? null }),
-    [tabs, groupOrder, activeByGroup, focusedGroupId, tabHistory, tabHistoryIndex],
+    () => ({
+      tabs,
+      groupOrder,
+      activeByGroup,
+      focusedGroupId,
+      tabHistory,
+      tabHistoryIndex,
+      activeTabId: activeByGroup[focusedGroupId] ?? null,
+    }),
+    [
+      tabs,
+      groupOrder,
+      activeByGroup,
+      focusedGroupId,
+      tabHistory,
+      tabHistoryIndex,
+    ],
   );
 
   // Running-tab ids (shallow-equal so streaming chunks don't churn it),
@@ -139,10 +230,13 @@ export function CenterPanel() {
       Object.entries(s.sessions)
         .filter(([, sess]) => sess.status === "running")
         .map(([id]) => id)
-        .sort()
-    )
+        .sort(),
+    ),
   );
-  const runningTabIds = useMemo(() => new Set(runningTabIdsArray), [runningTabIdsArray]);
+  const runningTabIds = useMemo(
+    () => new Set(runningTabIdsArray),
+    [runningTabIdsArray],
+  );
 
   if (!currentProject) return <WelcomeScreen />;
 
@@ -244,7 +338,7 @@ function TabColumn({
   const tabHistoryIndex = view.tabHistoryIndex;
   const tabs = useMemo(
     () => tabsAll.filter((t) => GROUP_OF(t) === groupId),
-    [tabsAll, groupId]
+    [tabsAll, groupId],
   );
   const activeId = view.activeByGroup[groupId] ?? null;
   const isFocused = isActive && view.focusedGroupId === groupId;
@@ -265,9 +359,7 @@ function TabColumn({
 
   return (
     <div
-      className={cn(
-        "h-full flex flex-col overflow-hidden bg-bg-surface"
-      )}
+      className={cn("h-full flex flex-col overflow-hidden bg-bg-surface")}
       onMouseDownCapture={() => setFocusedGroup(groupId)}
     >
       {tabBarVisible && (
@@ -276,7 +368,7 @@ function TabColumn({
             "flex items-stretch h-[29px] shrink-0 bg-bg-base border-b border-border-default transition-opacity",
             // When split, dim the UNFOCUSED columns' tab bars so the focused
             // one stands out (the focused pane also shows a white dot, below).
-            !soloColumn && !isFocused && "opacity-45"
+            !soloColumn && !isFocused && "opacity-45",
           )}
         >
           <div className="flex items-center gap-0.5 px-1 border-r border-border-default shrink-0">
@@ -287,7 +379,7 @@ function TabColumn({
                 "flex items-center justify-center w-6 h-6 rounded transition-colors outline-none",
                 canGoBack
                   ? "text-text-secondary hover:text-text-primary hover:bg-bg-hover cursor-pointer"
-                  : "text-text-tertiary/40 cursor-not-allowed"
+                  : "text-text-tertiary/40 cursor-not-allowed",
               )}
               title="Back"
             >
@@ -300,7 +392,7 @@ function TabColumn({
                 "flex items-center justify-center w-6 h-6 rounded transition-colors outline-none",
                 canGoForward
                   ? "text-text-secondary hover:text-text-primary hover:bg-bg-hover cursor-pointer"
-                  : "text-text-tertiary/40 cursor-not-allowed"
+                  : "text-text-tertiary/40 cursor-not-allowed",
               )}
               title="Forward"
             >
@@ -319,33 +411,53 @@ function TabColumn({
                   role="tab"
                   tabIndex={0}
                   onClick={() => setActiveTab(tab.id)}
-                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setActiveTab(tab.id); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ")
+                      setActiveTab(tab.id);
+                  }}
                   className={cn(
                     "group relative flex items-center gap-1.5 pl-3 h-full text-[12px] font-medium shrink-0 cursor-pointer select-none border-r border-border-default",
                     "transition-[padding-right,background-color,color] duration-150",
                     tab.closable ? "pr-3 hover:pr-7" : "pr-3",
                     isActive
                       ? "text-text-primary bg-bg-surface"
-                      : "text-text-tertiary bg-bg-base hover:text-text-secondary hover:bg-bg-hover"
+                      : "text-text-tertiary bg-bg-base hover:text-text-secondary hover:bg-bg-hover",
                   )}
                 >
                   {isRunning ? (
-                    <Loader2 size={12} className="animate-spin text-accent shrink-0" />
+                    <Loader2
+                      size={12}
+                      className="animate-spin text-accent shrink-0"
+                    />
                   ) : (
-                    <Icon size={12} className={cn("shrink-0", isActive ? "text-text-secondary" : "text-text-tertiary")} />
+                    <Icon
+                      size={12}
+                      className={cn(
+                        "shrink-0",
+                        isActive ? "text-text-secondary" : "text-text-tertiary",
+                      )}
+                    />
                   )}
-                  <span className={cn("truncate max-w-[140px] leading-none", tab.dirty && "italic")}>
+                  <span
+                    className={cn(
+                      "truncate max-w-[140px] leading-none",
+                      tab.dirty && "italic",
+                    )}
+                  >
                     {tab.title}
                   </span>
                   {tab.closable && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeTab(tab.id);
+                      }}
                       title="Close tab"
                       className={cn(
                         "absolute right-1.5 top-1/2 -translate-y-1/2",
                         "inline-flex items-center justify-center w-4 h-4 rounded-full",
                         "text-text-tertiary opacity-0 group-hover:opacity-100",
-                        "hover:bg-[#ffffff22] hover:text-text-primary transition-opacity duration-150"
+                        "hover:bg-[#ffffff22] hover:text-text-primary transition-opacity duration-150",
                       )}
                     >
                       <X size={10} strokeWidth={2.2} />
@@ -360,7 +472,10 @@ function TabColumn({
             <div
               aria-hidden
               className="pointer-events-none absolute right-full top-0 h-full w-8"
-              style={{ background: "linear-gradient(to right, transparent, var(--bg-base))" }}
+              style={{
+                background:
+                  "linear-gradient(to right, transparent, var(--bg-base))",
+              }}
             />
             {/* Selected-pane indicator: a white dot before the +/x actions. */}
             {!soloColumn && isFocused && (
@@ -414,7 +529,7 @@ function TabContentContainer({
   const tabsAll = view.tabs;
   const tabs = useMemo(
     () => tabsAll.filter((t) => GROUP_OF(t) === groupId),
-    [tabsAll, groupId]
+    [tabsAll, groupId],
   );
   const activeTabId = view.activeByGroup[groupId] ?? null;
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -454,21 +569,39 @@ function TabContentContainer({
   }
 
   if (!activeTab) {
-    return <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden" }} />;
+    return (
+      <div
+        ref={ref}
+        style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden" }}
+      />
+    );
   }
 
   // Keep editor/terminal/browser/knowledge-graph/pdf mounted across tab
   // switches *within this column* (expensive to rebuild).
   const persistentTabs = tabs.filter((t) => PERSISTENT_TYPES.has(t.type));
-  const activeIsNonPersistent = !persistentTabs.find((t) => t.id === activeTab.id);
+  const activeIsNonPersistent = !persistentTabs.find(
+    (t) => t.id === activeTab.id,
+  );
 
   return (
-    <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden", position: "relative" }}>
+    <div
+      ref={ref}
+      style={{
+        flex: "1 1 0%",
+        minHeight: 0,
+        overflow: "hidden",
+        position: "relative",
+      }}
+    >
       <Suspense fallback={<PanelLoading />}>
         {persistentTabs.map((tab) => {
           const isActive = tab.id === activeTab.id;
           return (
-            <div key={tab.id} style={{ display: isActive ? "contents" : "none" }}>
+            <div
+              key={tab.id}
+              style={{ display: isActive ? "contents" : "none" }}
+            >
               {tab.type === "editor" ? (
                 <EditorPanel
                   tabId={tab.id}
@@ -480,11 +613,18 @@ function TabContentContainer({
               ) : tab.type === "knowledge" ? (
                 <KnowledgePanel />
               ) : tab.type === "browser" ? (
-                <BrowserPanel tabId={tab.id} groupId={GROUP_OF(tab)} initialUrl={tab.data.url as string | undefined} />
+                <BrowserPanel
+                  tabId={tab.id}
+                  groupId={GROUP_OF(tab)}
+                  initialUrl={tab.data.url as string | undefined}
+                />
               ) : tab.type === "knowledge-graph" ? (
                 <KnowledgeGraph />
               ) : tab.type === "pdf" ? (
-                <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />
+                <PdfViewer
+                  filePath={tab.data.filePath as string}
+                  tabId={tab.id}
+                />
               ) : (
                 <TerminalPanel tabId={tab.id} />
               )}
@@ -523,7 +663,11 @@ function TabContent({ tab }: { tab: Tab }) {
     case "browser":
       return <BrowserPanel initialUrl={tab.data.url as string | undefined} />;
     case "settings":
-      return <SettingsPanel initialSection={tab.data.section as string | undefined} />;
+      return (
+        <SettingsPanel
+          initialSection={tab.data.section as string | undefined}
+        />
+      );
     case "log":
       return <LogPanel />;
     case "pomodoro":
@@ -535,7 +679,9 @@ function TabContent({ tab }: { tab: Tab }) {
     case "svg":
       return <SvgViewer filePath={tab.data.filePath as string} />;
     case "pdf":
-      return <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />;
+      return (
+        <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />
+      );
     case "unsupported":
       return <UnsupportedView filePath={tab.data.filePath as string} />;
     default:
@@ -560,7 +706,11 @@ function PlaceholderContent({ tab }: { tab: Tab }) {
   );
 }
 
-const NEW_TAB_OPTIONS: Array<{ type: TabType; label: string; icon: React.ElementType }> = [
+const NEW_TAB_OPTIONS: Array<{
+  type: TabType;
+  label: string;
+  icon: React.ElementType;
+}> = [
   { type: "chat", label: "Agents", icon: AtlasIcon },
   { type: "model-chat", label: "Chat", icon: MessageSquare },
   { type: "terminal", label: "Terminal", icon: Terminal },
@@ -591,10 +741,10 @@ function NewTabDropdown({
           dirty: false,
           data: {},
         },
-        groupId
+        groupId,
       );
     },
-    [addTab, groupId]
+    [addTab, groupId],
   );
 
   return (

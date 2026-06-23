@@ -16,6 +16,7 @@ import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { listClaudeSessions, readClaudeSession } from "./claude-api";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
+import { skills } from "@/features/skills/lib/skills-api";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,7 @@ export type MentionKind =
   | "folder"
   | "symbol"
   | "knowledge"
+  | "skill"
   | "repo"
   | "paper"
   | "branch"
@@ -68,6 +70,21 @@ export interface MentionKnowledge {
   folder: string | null;
 }
 
+export interface MentionSkill {
+  kind: "skill";
+  /** `${scope}:${name}` — dedupe key across scopes. */
+  id: string;
+  displayName: string;   // skill name (the `#skill:<name>` token)
+  description: string;
+  scope: "global" | "project";
+  /** Sanitized on-disk name, passed to `skills_read` at compose time. */
+  skillName: string;
+  /** Project root for project-scope reads; null for global. */
+  projectPath: string | null;
+  /** Absolute path to the canonical `SKILL.md` (Rust read fallback). */
+  filePath: string;
+}
+
 export interface MentionRepo {
   kind: "repo";
   id: string;            // absolute path to the cloned repo
@@ -108,6 +125,7 @@ export type MentionData =
   | MentionFolder
   | MentionSymbol
   | MentionKnowledge
+  | MentionSkill
   | MentionRepo
   | MentionPaper
   | MentionBranch
@@ -129,6 +147,7 @@ export const MENTION_CATEGORIES: readonly MentionCategory[] = [
   { kind: "folder",       label: "Folders",         aliases: ["folder", "dir", "d/"],     weight: 0.95 },
   { kind: "symbol",       label: "Symbols",         aliases: ["symbol", "sym", "s/"],     weight: 0.85 },
   { kind: "knowledge",    label: "Knowledge",       aliases: ["note", "knowledge", "k/"], weight: 0.85 },
+  { kind: "skill",        label: "Skills",          aliases: ["skill", "sk/"],            weight: 0.9  },
   { kind: "repo",         label: "Cloned Repos",    aliases: ["repo", "github", "gh/"],   weight: 0.8  },
   { kind: "paper",        label: "Papers",          aliases: ["paper", "p/"],             weight: 0.7  },
   { kind: "branch",       label: "Branches",        aliases: ["branch", "b/"],            weight: 0.6  },
@@ -264,6 +283,8 @@ export function toShortForm(m: MentionData): string {
       return `@symbol:${m.displayName}`;
     case "knowledge":
       return `@note:${m.id}`;
+    case "skill":
+      return `#skill:${m.displayName}`;
     case "repo":
       return `@repo:${m.displayName}`;
     case "paper":
@@ -298,6 +319,13 @@ export async function searchMentions(
   ctx: MentionContext,
 ): Promise<MentionData[]> {
   if (scope === "past_message") return [];
+  // Skills take the cheaper path: list the canonical store(s) and
+  // substring-filter JS-side (no Rust `mention_search` change needed). Only
+  // reachable when scope is locked to "skill" — i.e. the `#` trigger or the
+  // Skills category — so the unscoped `@` blend stays unchanged.
+  if (scope === "skill") {
+    return searchSkills(stripCategoryAlias(query, "skill"), ctx);
+  }
   // File/folder mentions read from the same backend FileIndex as Cmd+P. If it
   // got stuck/unloaded, recover here too (cheap + coalesced once confirmed).
   if (scope === null || scope === "file" || scope === "folder") {
@@ -321,6 +349,66 @@ export async function searchMentions(
     console.warn("mention_search invoke failed:", e);
     return [];
   }
+}
+
+/** Skill search for the `#skill:` rail. Lists the canonical store for global
+ *  and (when a project is open) project scope, then substring-filters by name
+ *  or description. Project skills sort first (more specific), then alpha.
+ *  Reuses the existing `skills_list` IPC — no new backend command. */
+async function searchSkills(
+  query: string,
+  ctx: MentionContext,
+): Promise<MentionSkill[]> {
+  const q = query.trim().toLowerCase();
+  const sources: { scope: "global" | "project"; projectPath: string | null }[] = [
+    { scope: "global", projectPath: null },
+  ];
+  if (ctx.projectPath) {
+    sources.push({ scope: "project", projectPath: ctx.projectPath });
+  }
+
+  const lists = await Promise.all(
+    sources.map(async (s) => {
+      try {
+        const metas = await skills.list(s.scope, s.projectPath);
+        return metas.map((meta) => ({ meta, source: s }));
+      } catch (e) {
+        console.warn(`skills_list (${s.scope}) failed:`, e);
+        return [];
+      }
+    }),
+  );
+
+  const seen = new Set<string>();
+  const out: MentionSkill[] = [];
+  for (const { meta, source } of lists.flat()) {
+    const id = `${source.scope}:${meta.name}`;
+    if (seen.has(id)) continue;
+    if (
+      q &&
+      !meta.name.toLowerCase().includes(q) &&
+      !meta.description.toLowerCase().includes(q)
+    ) {
+      continue;
+    }
+    seen.add(id);
+    out.push({
+      kind: "skill",
+      id,
+      displayName: meta.name,
+      description: meta.description,
+      scope: source.scope,
+      skillName: meta.name,
+      projectPath: source.projectPath,
+      filePath: meta.path,
+    });
+  }
+
+  out.sort((a, b) => {
+    if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1;
+    return a.displayName.localeCompare(b.displayName);
+  });
+  return out;
 }
 
 /** Push knowledge entries into the Rust mention cache. Call from
@@ -416,14 +504,29 @@ export async function composePrompt(
   mentions: MentionData[]
 ): Promise<string> {
   if (mentions.length === 0) return prosePlainText;
-  const wireMentions = mentions.map((m) =>
-    m.kind === "knowledge"
-      ? {
+  const wireMentions = await Promise.all(
+    mentions.map(async (m) => {
+      if (m.kind === "knowledge") {
+        return {
           ...m,
           inlineBody:
             useKnowledgeStore.getState().entries.find((e) => e.id === m.id)?.content ?? null,
+        };
+      }
+      // Skills have no in-memory store, so read the frontmatter-stripped body
+      // now (one cheap IPC per mentioned skill). Rust falls back to reading
+      // `filePath` if this is null.
+      if (m.kind === "skill") {
+        let inlineBody: string | null = null;
+        try {
+          inlineBody = (await skills.read(m.scope, m.skillName, m.projectPath)).body;
+        } catch (e) {
+          console.warn("skills.read for compose failed:", e);
         }
-      : m
+        return { ...m, inlineBody };
+      }
+      return m;
+    })
   );
   try {
     return await invoke<string>("compose_prompt", {

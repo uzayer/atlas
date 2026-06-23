@@ -380,6 +380,20 @@ pub fn run() {
             commands::memory_chat_sessions::memory_chat_session_delete,
             commands::pdf_annotations::pdf_annotations_load,
             commands::pdf_annotations::pdf_annotations_save,
+            commands::skills::skills_list,
+            commands::skills::skills_read,
+            commands::skills::skills_create,
+            commands::skills::skills_set_enabled,
+            commands::skills::skills_delete,
+            commands::skills::skills_path,
+            commands::skills::skills_adopt,
+            commands::skills::agents_list_skill_targets,
+            commands::skills::tools_list,
+            commands::skills::skills_reconcile,
+            commands::skills::skills_project,
+            commands::skills::skills_unproject,
+            commands::skills::skills_promote,
+            commands::skills::skills_freeze,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas");
