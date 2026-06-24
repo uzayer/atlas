@@ -65,13 +65,15 @@ impl SessionWorker {
                     }
                 }
                 SessionCommand::SetModel(model_id) => {
-                    // ACP agents have no generic set_model call (model changes
-                    // come back via `current_model_update`); the native backend
-                    // applies it to the session. Either way we mirror the
-                    // selection into state so the UI keeps it.
-                    if let Err(e) =
-                        self.backend
-                            .set_model(self.agent_id, &self.acp_session_id, model_id.clone())
+                    // Push to the backend: ACP agents now support `session/set_model`
+                    // (Claude Code / Codex); the native backend applies it to the
+                    // next turn. We also mirror the selection into state so the UI
+                    // keeps it — the agent may echo a `current_model_update`, which
+                    // is idempotent.
+                    if let Err(e) = self
+                        .backend
+                        .set_session_model(self.agent_id, self.acp_session_id.clone(), model_id.clone())
+                        .await
                     {
                         tracing::warn!(target: "atlas_agents::worker", "set_model failed: {e}");
                     }

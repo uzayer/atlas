@@ -88,6 +88,10 @@ export interface ChatSession {
    *  native Cersei agent this is the bare model id; the provider lives in
    *  `cerseiProvider` and the two are pushed to the backend as `provider/model`. */
   acpCurrentModel?: string;
+  /** Models the ACP agent advertised (Claude Code / Codex) — drives the
+   *  composer's model picker. Seeded from the snapshot's `available_models`;
+   *  empty for agents (or the native one) that don't expose ACP model lists. */
+  acpAvailableModels?: SessionModeInfo[];
   /** BYOK provider id backing the native Cersei agent's model selection
    *  (e.g. "anthropic", "openai"). Unused by the ACP agents. */
   cerseiProvider?: string;

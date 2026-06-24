@@ -78,6 +78,9 @@ export interface SessionSnapshot {
   current_mode: string | null;
   current_model: string | null;
   available_modes: SessionModeInfo[];
+  /** Models the agent advertised (ACP `session/new` `models`). Drives the
+   *  Claude Code / Codex model picker; empty when unsupported. */
+  available_models: SessionModeInfo[];
   available_commands: unknown[];
   plan: PlanEntry[];
   messages: SessionMessage[];

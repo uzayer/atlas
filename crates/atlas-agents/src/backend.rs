@@ -45,9 +45,14 @@ pub trait AgentBackend: Send + Sync {
         session_id: SessionId,
         mode_id: String,
     ) -> AcpResult<()>;
-    /// Update the session's model. Default: no-op (ACP agents take model via
-    /// their own notifications).
-    fn set_model(&self, _agent_id: AgentId, _session_id: &SessionId, _model: String) -> AcpResult<()> {
+    /// Select the session's model. ACP → `session/set_model`; native agent
+    /// applies it to the next turn. Default: no-op.
+    async fn set_session_model(
+        &self,
+        _agent_id: AgentId,
+        _session_id: SessionId,
+        _model_id: String,
+    ) -> AcpResult<()> {
         Ok(())
     }
     /// Update the session's reasoning-effort level. Default: no-op (only the
@@ -117,6 +122,19 @@ impl AgentBackend for AcpBackend {
     ) -> AcpResult<()> {
         self.0.set_session_mode(agent_id, session_id, mode_id).await
     }
+    async fn set_session_model(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        model_id: String,
+    ) -> AcpResult<()> {
+        // Current adapters (claude-agent-acp / codex-acp) expose the model as a
+        // `config_options` entry (id "model") and accept selection via
+        // `session/set_config_option`, not the legacy `session/set_model`.
+        self.0
+            .set_session_config_option(agent_id, session_id, "model", model_id)
+            .await
+    }
     fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<()> {
         self.0.mark_turn_started(agent_id, session_id)
     }
@@ -183,8 +201,13 @@ impl AgentBackend for CerseiBackend {
     ) -> AcpResult<()> {
         self.0.set_session_mode(agent_id, &session_id_str(&session_id), mode_id)
     }
-    fn set_model(&self, agent_id: AgentId, session_id: &SessionId, model: String) -> AcpResult<()> {
-        self.0.set_model(agent_id, &session_id_str(session_id), model)
+    async fn set_session_model(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        model_id: String,
+    ) -> AcpResult<()> {
+        self.0.set_model(agent_id, &session_id_str(&session_id), model_id)
     }
     fn set_effort(&self, agent_id: AgentId, session_id: &SessionId, effort: String) -> AcpResult<()> {
         self.0.set_effort(agent_id, &session_id_str(session_id), effort)

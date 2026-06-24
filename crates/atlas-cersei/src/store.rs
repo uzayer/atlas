@@ -212,6 +212,37 @@ mod tests {
     }
 
     #[test]
+    fn corpus_sessions_flattens_transcript_and_usage() {
+        let dir = temp_dir();
+        let cwd = "/proj/corpus";
+        let msgs = vec![
+            Message::user("how does auth work"),
+            Message::assistant("it uses JWT tokens"),
+        ];
+        save(
+            &dir,
+            cwd,
+            "c1",
+            "anthropic",
+            "claude-opus-4-8",
+            &msgs,
+            "2026-06-24T00:00:00Z",
+            &StoredUsage { input_tokens: 300, output_tokens: 120, cost: 0.02 },
+        );
+
+        let corpus = corpus_sessions(&dir, cwd);
+        assert_eq!(corpus.len(), 1);
+        let c = &corpus[0];
+        assert_eq!(c.id, "c1");
+        assert_eq!(c.first_user, "how does auth work");
+        assert!(c.transcript.contains("how does auth work"));
+        assert!(c.transcript.contains("it uses JWT tokens"), "assistant turn must be indexed");
+        assert_eq!(c.total_tokens, 420);
+        // Isolated per cwd.
+        assert!(corpus_sessions(&dir, "/proj/other").is_empty());
+    }
+
+    #[test]
     fn byok_reads_shared_keys_file() {
         let dir = temp_dir();
         fs::write(
@@ -234,26 +265,33 @@ mod tests {
     }
 }
 
+/// Plain text of a message (joins text blocks; ignores images/tool payloads).
+fn message_text(m: &Message) -> String {
+    use cersei::types::{ContentBlock, MessageContent};
+    match &m.content {
+        MessageContent::Text(t) => t.clone(),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 /// First user message's FULL text — used as the session title/preview. Returned
 /// untruncated so the caller can strip Atlas-injected context (which may be
 /// prepended) from the whole block before truncating; truncating here first
 /// would chop an injected block mid-way and defeat the strip.
 pub fn first_user_text(messages: &[Message]) -> Option<String> {
-    use cersei::types::{ContentBlock, MessageContent, Role};
+    use cersei::types::Role;
     for m in messages {
         if m.role != Role::User {
             continue;
         }
-        let text = match &m.content {
-            MessageContent::Text(t) => t.clone(),
-            MessageContent::Blocks(blocks) => blocks
-                .iter()
-                .find_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default(),
-        };
+        let text = message_text(m);
         let text = text.trim();
         if text.is_empty() {
             continue;
@@ -261,4 +299,52 @@ pub fn first_user_text(messages: &[Message]) -> Option<String> {
         return Some(text.to_string());
     }
     None
+}
+
+/// One stored session flattened for the memory corpus (Chat / Graph indexing).
+/// `first_user` + `transcript` are RAW (the caller strips Atlas-injected
+/// context, which it can — `atlas-cersei` can't depend on the strip helper).
+#[derive(Debug, Clone)]
+pub struct CorpusSession {
+    pub id: String,
+    pub first_user: String,
+    pub transcript: String,
+    pub updated_at: String,
+    pub total_tokens: u64,
+}
+
+/// Flatten every stored session for `cwd` into corpus-ready records so the
+/// native agent's conversations are searchable in Memory ▸ Chat / Graph
+/// (parity with Codex threads).
+pub fn corpus_sessions(config_dir: &Path, cwd: &str) -> Vec<CorpusSession> {
+    use cersei::types::Role;
+    let dir = project_dir(config_dir, cwd);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| {
+            let raw = fs::read_to_string(e.path()).ok()?;
+            let doc: StoredSession = serde_json::from_str(&raw).ok()?;
+            let first_user = first_user_text(&doc.messages).unwrap_or_default();
+            // Only the conversational turns (user + assistant), newline-joined.
+            let transcript = doc
+                .messages
+                .iter()
+                .filter(|m| matches!(m.role, Role::User | Role::Assistant))
+                .map(message_text)
+                .filter(|t| !t.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            Some(CorpusSession {
+                id: doc.session_id,
+                first_user,
+                transcript,
+                updated_at: doc.updated_at,
+                total_tokens: doc.usage.input_tokens + doc.usage.output_tokens,
+            })
+        })
+        .collect()
 }

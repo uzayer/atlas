@@ -25,6 +25,8 @@ pub use atlas_cersei::SessionMeta;
 // Memory-RAG grounding seam for the native agent — the Tauri layer registers a
 // retrieval backend; the agent gets a `search_memory` tool.
 pub use atlas_cersei::{MemDoc, MemorySearchFn, ReplayItem, register_memory_search};
+// Native-agent session transcripts for the memory corpus (Chat / Graph index).
+pub use atlas_cersei::{corpus_sessions as cersei_corpus_sessions, CorpusSession as CerseiCorpusSession};
 pub use backend::{AcpBackend, AgentBackend, CerseiBackend};
 pub use error::{Error, Result};
 pub use events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};

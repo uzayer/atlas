@@ -123,16 +123,21 @@ export function MemoryTimelineView() {
 
   const onActivate = useCallback(
     (id: string) => {
-      // A session card → its Codex thread (session id == thread id).
+      // A session card → its source view (Codex thread / Claude / Atlas session).
       if (id.startsWith("session:")) {
         const s = timeline?.sessions.find((x) => x.id === id.slice(8));
-        if (s) navigateToMemory(s.agent === "codex" ? "codex" : "claude", s.id);
+        if (s) {
+          const sub =
+            s.agent === "codex" ? "codex" : s.agent === "cersei" ? "cersei" : "claude";
+          navigateToMemory(sub, s.id);
+        }
         return;
       }
       // A memory-doc id from a panel row ("memory:" prefix is optional).
       const doc = id.startsWith("memory:") ? id.slice(7) : id;
       if (doc.startsWith("codex:")) navigateToMemory("codex", doc);
       else if (doc.startsWith("claude:")) navigateToMemory("claude", doc);
+      else if (doc.startsWith("cersei:")) navigateToMemory("cersei", doc);
     },
     [timeline, navigateToMemory],
   );

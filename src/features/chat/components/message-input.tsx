@@ -10,6 +10,9 @@ import {
   Loader2,
   Brain,
   Database,
+  Cpu,
+  ChevronDown,
+  Search,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useChatStore } from "../stores/chat-store";
@@ -331,6 +334,115 @@ function AcpModePicker({ tabId }: { tabId: string }) {
               </button>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Composer model picker for the ACP agents (Claude Code / Codex). These agents
+ * advertise their selectable models (id + name + description) in `session/new`
+ * — ACP's first-party model selection, the same surface Zed drives. We render a
+ * dropup mirroring the mode picker. Hidden when the agent exposes no models or
+ * for the native agent (which uses ProviderModelPills + its BYOK catalog).
+ */
+function AcpModelPicker({ tabId }: { tabId: string }) {
+  const currentModel = useChatStore((s) => s.sessions[tabId]?.acpCurrentModel);
+  const availableModels = useChatStore((s) => s.sessions[tabId]?.acpAvailableModels);
+  const { setAcpModel } = useChatStore.use.actions();
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    const list = availableModels ?? [];
+    const s = q.trim().toLowerCase();
+    if (!s) return list;
+    return list.filter(
+      (m) =>
+        m.name.toLowerCase().includes(s) ||
+        m.id.toLowerCase().includes(s) ||
+        (m.description ?? "").toLowerCase().includes(s),
+    );
+  }, [availableModels, q]);
+
+  if (!availableModels || availableModels.length === 0) return null;
+  const current = availableModels.find((m) => m.id === currentModel);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => {
+          setQ("");
+          setOpen((o) => !o);
+        }}
+        className="flex items-center gap-1 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+        title="Model"
+      >
+        <Cpu size={11} className="shrink-0 text-[var(--text-tertiary)]" />
+        <span className="max-w-[120px] truncate">{current?.name ?? currentModel ?? "Model"}</span>
+        <ChevronDown size={10} className="shrink-0 text-[var(--text-tertiary)]" />
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 mb-1.5 z-50 w-[260px] overflow-hidden rounded-lg border border-[var(--border-default)] bg-[var(--bg-elevated)] shadow-lg">
+          {/* Search combobox */}
+          <div className="flex items-center gap-1.5 h-8 border-b border-[var(--border-subtle)] px-2.5">
+            <Search size={12} className="shrink-0 text-[var(--text-tertiary)]" />
+            <input
+              autoFocus
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search models…"
+              spellCheck={false}
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
+            />
+          </div>
+          <div className="max-h-[280px] overflow-y-auto hide-scrollbar p-1">
+            {filtered.length === 0 ? (
+              <div className="px-2.5 py-2 text-[11px] text-[var(--text-tertiary)]">No models</div>
+            ) : (
+              filtered.map((m) => {
+                const active = m.id === currentModel;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => {
+                      setAcpModel(tabId, m.id);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full items-start gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors cursor-pointer",
+                      active ? "bg-[var(--bg-selected)]" : "hover:bg-[var(--bg-hover)]",
+                    )}
+                  >
+                    <span className="flex-1 min-w-0">
+                      <span className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-primary)]">
+                        <span className="truncate">{m.name}</span>
+                        {active && (
+                          <Check size={11} className="shrink-0 text-[var(--accent-primary)]" />
+                        )}
+                      </span>
+                      {m.description && (
+                        <span className="mt-0.5 block text-[9px] leading-snug text-[var(--text-tertiary)] line-clamp-2">
+                          {m.description}
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -954,6 +1066,10 @@ export function MessageInput({
               {agentType !== "claude-code" && (hasAcpModes || acpModesPending) && (
                 <AcpModePicker tabId={tabId} />
               )}
+              {/* ACP first-party model picker — Claude Code / Codex advertise
+                  their models in `session/new` (the native agent uses the BYOK
+                  ProviderModelPills below instead). Renders nothing if empty. */}
+              {agentType !== "cersei" && <AcpModelPicker tabId={tabId} />}
               {agentType === "cersei" && (
                 <ProviderModelPills
                   provider={cerseiProvider}

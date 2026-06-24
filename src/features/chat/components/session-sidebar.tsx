@@ -180,6 +180,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     replaceMessages,
     setAcpBinding,
     setAcpModes,
+    setAcpModels,
     clearSession,
     setSessionTitle,
     setTranscriptLoading,
@@ -584,6 +585,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       // Seed the composer mode picker from the resumed session's advertised
       // modes (Codex). Claude ignores these in favour of its own pill.
       setAcpModes(targetTabId, snapshot.current_mode, snapshot.available_modes);
+      // Seed the ACP model picker too (Claude Code / Codex). On resume the agent
+      // may not re-advertise models, so setAcpModels falls back to the cache.
+      if (snapshot.available_models.length > 0) {
+        setAcpModels(targetTabId, snapshot.current_model, snapshot.available_models);
+      }
       setTranscriptLoading(targetTabId, false);
     })();
   };

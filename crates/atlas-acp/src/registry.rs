@@ -2,10 +2,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use agent_client_protocol::schema::{
-    AuthenticateRequest, CancelNotification, ContentBlock, LoadSessionRequest, NewSessionRequest,
-    NewSessionResponse, PermissionOptionId, PromptRequest, RequestPermissionOutcome,
-    SelectedPermissionOutcome, SessionId, SessionModeId, SetSessionModeRequest, StopReason,
-    TextContent,
+    AuthenticateRequest, CancelNotification, ContentBlock, LoadSessionRequest, ModelId,
+    NewSessionRequest, NewSessionResponse, PermissionOptionId, PromptRequest,
+    RequestPermissionOutcome, SelectedPermissionOutcome, SessionConfigOptionValue, SessionId,
+    SessionModeId, SetSessionConfigOptionRequest, SetSessionModelRequest, SetSessionModeRequest,
+    StopReason, TextContent,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -117,15 +118,74 @@ impl From<NewSessionResponse> for NewSessionInfo {
         // schema type (modes / models / config_options are all `non_exhaustive`
         // and gated on unstable features). The TS side already speaks JSON.
         let modes = resp.modes.as_ref().and_then(|m| serde_json::to_value(m).ok());
-        let models = serde_json::to_value(&resp)
-            .ok()
-            .and_then(|v| v.get("models").cloned());
+        // Model selection arrives two ways depending on the agent/version:
+        //  1. the dedicated `models` blob (`SessionModelState`), or
+        //  2. a `config_options` entry with id/category "model" — the shape the
+        //     current Claude Code (`claude-agent-acp`) + Codex adapters use, since
+        //     model selection moved into `SessionConfigOption`.
+        // Normalise (2) into the (1) shape so the rest of the pipeline + the UI
+        // are agnostic. Selection is then pushed via `session/set_config_option`.
+        let models = resp
+            .models
+            .as_ref()
+            .and_then(|m| serde_json::to_value(m).ok())
+            .filter(|v| !v.is_null())
+            .or_else(|| {
+                let co = serde_json::to_value(&resp.config_options).ok()?;
+                model_blob_from_config_options(&co)
+            });
         Self {
             session_id: resp.session_id,
             modes,
             models,
         }
     }
+}
+
+/// Normalise a `config_options` array into a `SessionModelState`-shaped JSON
+/// blob (`{ currentModelId, availableModels: [{modelId,name,description}] }`) by
+/// finding the `select` option with id/category "model". Returns `None` if
+/// there's no model option (so the caller falls through to "no models"). Handles
+/// both ungrouped and grouped option lists.
+fn model_blob_from_config_options(config_options: &serde_json::Value) -> Option<serde_json::Value> {
+    let arr = config_options.as_array()?;
+    let opt = arr.iter().find(|o| {
+        o.get("id").and_then(|v| v.as_str()) == Some("model")
+            || o.get("category").and_then(|v| v.as_str()) == Some("model")
+    })?;
+    let current = opt.get("currentValue").and_then(|v| v.as_str())?.to_string();
+    // `options` is either an array of `{value,name,description}` (ungrouped) or
+    // an array of `{group,name,options:[...]}` (grouped) — flatten both.
+    let raw = opt.get("options").and_then(|v| v.as_array())?;
+    let mut available: Vec<serde_json::Value> = Vec::new();
+    for item in raw {
+        let leaves = if item.get("value").is_some() {
+            std::slice::from_ref(item).to_vec()
+        } else if let Some(group) = item.get("options").and_then(|v| v.as_array()) {
+            group.clone()
+        } else {
+            Vec::new()
+        };
+        for o in leaves {
+            let Some(value) = o.get("value").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let name = o.get("name").and_then(|v| v.as_str()).unwrap_or(value);
+            let description = o.get("description").and_then(|v| v.as_str());
+            available.push(serde_json::json!({
+                "modelId": value,
+                "name": name,
+                "description": description,
+            }));
+        }
+    }
+    if available.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "currentModelId": current,
+        "availableModels": available,
+    }))
 }
 
 struct AgentEntry {
@@ -221,7 +281,20 @@ impl AgentRegistry {
             .block_task()
             .await?;
         self.register_session(agent_id, resp.session_id.clone())?;
-        Ok(resp.into())
+        let info: NewSessionInfo = resp.into();
+        // Diagnostic: surface what the agent advertised for model selection, so a
+        // missing model picker can be diagnosed (agent didn't send `models` vs.
+        // a parse gap). Logs once per new session.
+        tracing::info!(
+            target: "atlas_acp::registry",
+            "new_session: modes_present={} models={}",
+            info.modes.is_some(),
+            info.models
+                .as_ref()
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "none".into()),
+        );
+        Ok(info)
     }
 
     /// Resume a previously-saved session by id. Same guard registration
@@ -350,6 +423,48 @@ impl AgentRegistry {
             .send_request(SetSessionModeRequest::new(
                 session_id,
                 SessionModeId::new(mode_id),
+            ))
+            .block_task()
+            .await?;
+        Ok(())
+    }
+
+    /// Select the session's model (ACP `session/set_model`). The agent confirms
+    /// by emitting a `current_model_update` session notification, which the
+    /// manager folds into `SessionState.current_model`.
+    pub async fn set_session_model(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        model_id: String,
+    ) -> Result<()> {
+        let connection = self.connection(agent_id)?;
+        connection
+            .send_request(SetSessionModelRequest::new(
+                session_id,
+                ModelId::new(model_id),
+            ))
+            .block_task()
+            .await?;
+        Ok(())
+    }
+
+    /// Set a session config option (`session/set_config_option`) — the current
+    /// mechanism Claude Code / Codex use for model (config_id "model"), effort,
+    /// etc. `value` is the option's selected value id.
+    pub async fn set_session_config_option(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        config_id: &str,
+        value: String,
+    ) -> Result<()> {
+        let connection = self.connection(agent_id)?;
+        connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                session_id,
+                config_id.to_string(),
+                SessionConfigOptionValue::value_id(value),
             ))
             .block_task()
             .await?;

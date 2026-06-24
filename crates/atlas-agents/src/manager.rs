@@ -165,6 +165,7 @@ impl AgentManager {
             plugin_id,
             Vec::new(),
             resp.modes,
+            resp.models,
         );
         Ok(key)
     }
@@ -217,7 +218,7 @@ impl AgentManager {
             if self.inner.sessions.contains_key(&key) {
                 return Ok(key);
             }
-            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes);
+            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes, None);
             return Ok(key);
         }
 
@@ -234,6 +235,7 @@ impl AgentManager {
                 cwd_str,
                 plugin_id,
                 Vec::new(),
+                None,
                 None,
             );
             match self.backend_for(agent_id)?.load_session(agent_id, session_id, cwd).await {
@@ -265,7 +267,7 @@ impl AgentManager {
                 return Ok(key);
             }
 
-            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes);
+            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes, None);
             Ok(key)
         }
     }
@@ -428,6 +430,7 @@ impl AgentManager {
         plugin_id: String,
         seed_messages: Vec<Message>,
         modes: Option<serde_json::Value>,
+        models: Option<serde_json::Value>,
     ) {
         let mut state = SessionState::new(
             key.agent_id,
@@ -446,6 +449,17 @@ impl AgentManager {
             }
             if !available.is_empty() {
                 state.available_modes = available;
+            }
+        }
+        // Seed the advertised models + current model from the `session/new`
+        // `models` blob (Claude Code / Codex model picking, ACP first-party).
+        if let Some(models) = &models {
+            let (current, available) = parse_session_models(models);
+            if let Some(c) = current {
+                state.current_model = Some(c);
+            }
+            if !available.is_empty() {
+                state.available_models = available;
             }
         }
         let state = Arc::new(Mutex::new(state));
@@ -963,6 +977,43 @@ fn parse_session_modes(modes: &serde_json::Value) -> (Option<String>, Vec<Sessio
             list.iter()
                 .filter_map(|m| {
                     let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+                    let name = m
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&id)
+                        .to_string();
+                    let description = m
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    Some(SessionModeInfo {
+                        id,
+                        name,
+                        description,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (current, available)
+}
+
+/// Parse the ACP `SessionModelState` blob (from `session/new`) into
+/// `(current_model_id, available_models)`. The schema serialises camelCase
+/// (`currentModelId`, `availableModels`), each model as `{modelId, name,
+/// description}`. Reuses `SessionModeInfo` (identical id/name/description shape).
+fn parse_session_models(models: &serde_json::Value) -> (Option<String>, Vec<SessionModeInfo>) {
+    let current = models
+        .get("currentModelId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let available = models
+        .get("availableModels")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|m| {
+                    let id = m.get("modelId").and_then(|v| v.as_str())?.to_string();
                     let name = m
                         .get("name")
                         .and_then(|v| v.as_str())

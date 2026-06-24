@@ -13,9 +13,20 @@
 //! to empty sections rather than erroring the whole command.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command as AsyncCommand;
+
+/// App config dir holding `cersei-sessions/` — set once at startup
+/// (`install_manager`) so the corpus reader can find native-agent transcripts
+/// without threading an `AppHandle` through `collect_corpus`'s many callers.
+static CERSEI_CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Record where the native agent persists its sessions (called from startup).
+pub fn set_cersei_config_dir(dir: PathBuf) {
+    let _ = CERSEI_CONFIG_DIR.set(dir);
+}
 
 #[derive(Debug, Serialize)]
 pub struct MemoryFile {
@@ -328,8 +339,49 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
     // in the separate `codebase_index_build` command.
     docs.extend(read_codebase_docs(&project_path));
     docs.extend(read_shared_memory_docs(&project_path));
+    docs.extend(read_cersei_docs(&project_path));
 
     docs
+}
+
+/// Fold native Atlas (cersei) session transcripts into the corpus so the
+/// agent's conversations are searchable in Memory ▸ Chat / Graph — parity with
+/// Codex threads. Atlas-injected context (memory blocks, mention bodies) is
+/// stripped so the index holds the user's actual words, not the scaffolding.
+fn read_cersei_docs(project_path: &str) -> Vec<MemoryDoc> {
+    use atlas_agents::transcript::strip_injected_context;
+    let Some(config_dir) = CERSEI_CONFIG_DIR.get() else {
+        return Vec::new();
+    };
+    let mut out: Vec<MemoryDoc> = Vec::new();
+    for s in atlas_agents::cersei_corpus_sessions(config_dir, project_path) {
+        let title_raw = strip_injected_context(&s.first_user);
+        let title_raw = title_raw.trim();
+        if title_raw.is_empty() {
+            continue;
+        }
+        let body = strip_injected_context(&s.transcript);
+        let ts = chrono::DateTime::parse_from_rfc3339(&s.updated_at)
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(0);
+        out.push(MemoryDoc {
+            id: format!("cersei:{}", s.id),
+            title: short_title(title_raw),
+            summary: short_title(title_raw),
+            kind: "thread".into(),
+            source: "cersei".into(),
+            file_path: None, // Native sessions live in cersei-sessions JSON, not an editable file.
+            timestamp_ms: ts,
+            text: if body.trim().is_empty() {
+                title_raw.to_string()
+            } else {
+                body
+            },
+            aliases: vec![],
+            links: vec![],
+        });
+    }
+    out
 }
 
 /// v3 Write half — surface the project's Shared Cross-Agent Memory (working

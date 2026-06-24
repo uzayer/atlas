@@ -115,6 +115,10 @@ pub struct SessionSnapshot {
     /// The full set of modes the agent advertised for this session. Empty for
     /// agents that don't expose modes; drives the composer's mode picker.
     pub available_modes: Vec<SessionModeInfo>,
+    /// Models the agent advertised (ACP `session/new` `models` blob, reused
+    /// shape: id/name/description). Empty when the agent exposes no model
+    /// selection; drives the composer's model picker for Claude Code / Codex.
+    pub available_models: Vec<SessionModeInfo>,
     pub available_commands: Vec<serde_json::Value>,
     pub plan: Vec<PlanEntry>,
     pub messages: Vec<Message>,
@@ -133,6 +137,7 @@ pub struct SessionState {
     pub current_mode: Option<String>,
     pub current_model: Option<String>,
     pub available_modes: Vec<SessionModeInfo>,
+    pub available_models: Vec<SessionModeInfo>,
     pub available_commands: Vec<serde_json::Value>,
     pub plan: Vec<PlanEntry>,
     pub messages: Vec<Message>,
@@ -153,6 +158,7 @@ impl SessionState {
             current_mode: None,
             current_model: None,
             available_modes: Vec::new(),
+            available_models: Vec::new(),
             available_commands: Vec::new(),
             plan: Vec::new(),
             messages: Vec::new(),
@@ -172,6 +178,7 @@ impl SessionState {
             current_mode: self.current_mode.clone(),
             current_model: self.current_model.clone(),
             available_modes: self.available_modes.clone(),
+            available_models: self.available_models.clone(),
             available_commands: self.available_commands.clone(),
             plan: self.plan.clone(),
             messages: self.messages.clone(),

@@ -79,6 +79,8 @@ pub fn install_manager(app: &AppHandle) {
         .path()
         .app_config_dir()
         .unwrap_or_else(|_| std::env::temp_dir());
+    // Let the memory corpus reader find native-agent transcripts (Chat/Graph).
+    super::agent_memory::set_cersei_config_dir(config_dir.clone());
     let manager = AgentManager::new(sink, config_dir);
     app.manage(manager);
 

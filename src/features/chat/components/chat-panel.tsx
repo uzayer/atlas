@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
 import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
 import { loadCachedAcpModes } from "../lib/acp-modes-cache";
+import { warmAcpModels, otherAcpAgent } from "../lib/warm-acp-models";
 import type { SessionKey } from "@/types/agents";
 import { composePrompt, type MentionData } from "../lib/mentions";
 import { usePaneFind } from "../lib/use-pane-find";
@@ -156,12 +157,29 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         try {
           const snap = await agents.snapshot(key);
           if (!cancelled) {
+            // Defensive `?.` — a snapshot from an older agent build may omit
+            // these arrays; a throw here used to silently skip ALL seeding.
+            const modes = snap.available_modes ?? [];
+            const models = snap.available_models ?? [];
+            console.debug("[acp-models] snapshot", {
+              agent: useChatStore.getState().sessions[tabId]?.agentType,
+              models: models.length,
+              current: snap.current_model,
+              modes: modes.length,
+            });
             // Only seed when the agent actually advertised modes, so we never
             // clobber the optimistic cached modes with an empty set.
-            if (snap.available_modes.length > 0) {
+            if (modes.length > 0) {
               useChatStore
                 .getState()
-                .actions.setAcpModes(tabId, snap.current_mode, snap.available_modes);
+                .actions.setAcpModes(tabId, snap.current_mode, modes);
+            }
+            // Seed the ACP model picker (Claude Code / Codex) from the snapshot's
+            // advertised models. Empty when the agent exposes no model selection.
+            if (models.length > 0) {
+              useChatStore
+                .getState()
+                .actions.setAcpModels(tabId, snap.current_model, models);
             }
             // Boot finished (with or without modes) — drop the loading state.
             useChatStore.getState().actions.setAcpModesPending(tabId, false);
@@ -209,6 +227,57 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     // matters even when acpSessionId was already undefined (switch during the
     // first bind), where acpSessionId alone wouldn't change.
   }, [tabId, !!session, session?.acpSessionId, session?.agentType]);
+
+  // Backfill the ACP model picker for ALREADY-bound sessions. The bind effect
+  // above returns early once `acpSessionId` is set, so a session that was bound
+  // before the model list existed (app update / HMR / resumed session) would
+  // never get its models. When we have a binding for a non-native agent but no
+  // models yet, fetch the snapshot once and seed them.
+  useEffect(() => {
+    const agentId = session?.acpAgentId;
+    const acpSessionId = session?.acpSessionId;
+    if (!agentId || !acpSessionId) return;
+    if (session?.agentType === "cersei") return;
+    if ((session?.acpAvailableModels?.length ?? 0) > 0) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const snap = await agents.snapshot({ agent_id: agentId, session_id: acpSessionId });
+        if (cancelled) return;
+        const models = snap.available_models ?? [];
+        console.debug("[acp-models] backfill", {
+          agent: session?.agentType,
+          models: models.length,
+        });
+        if (models.length > 0) {
+          useChatStore.getState().actions.setAcpModels(tabId, snap.current_model, models);
+        }
+      } catch {
+        // best-effort backfill
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    tabId,
+    session?.acpAgentId,
+    session?.acpSessionId,
+    session?.agentType,
+    session?.acpAvailableModels?.length,
+  ]);
+
+  // While a chat is active on one ACP agent, prefetch the OTHER agent's model
+  // list in the background so switching to it is instant (cached). Fire-and-
+  // forget, once per app session per agent.
+  useEffect(() => {
+    const at = session?.agentType;
+    if (!at) return;
+    const other = otherAcpAgent(at);
+    if (!other) return;
+    const cwd = useProjectStore.getState().currentProject?.path ?? "/";
+    void warmAcpModels(other, cwd);
+  }, [session?.agentType]);
 
   // Shift+Tab → cycle the agent permission mode. Registered on the window in
   // capture phase so the browser's default focus traversal never steals it.

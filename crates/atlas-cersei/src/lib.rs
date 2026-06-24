@@ -42,6 +42,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use store::SessionMeta;
+pub use store::{corpus_sessions, CorpusSession};
 
 /// The plugin id the native agent registers under (matches the frontend
 /// `AGENT_PLUGIN_ID.cersei`).

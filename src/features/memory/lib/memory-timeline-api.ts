@@ -15,7 +15,7 @@ export interface TimelineCommit {
 export interface TimelineSession {
   id: string;
   title: string;
-  agent: "codex" | "claude";
+  agent: "codex" | "claude" | "cersei";
   branch: string | null;
   sha: string | null;
   ts_ms: number;

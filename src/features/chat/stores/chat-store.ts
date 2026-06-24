@@ -18,6 +18,7 @@ import type {
 } from "@/types/agents";
 import { splitAtlasContext } from "../lib/atlas-context";
 import { loadCachedAcpModes, saveCachedAcpModes } from "../lib/acp-modes-cache";
+import { loadCachedAcpModels, saveCachedAcpModels } from "../lib/acp-models-cache";
 import { saveCerseiModelPref, saveCerseiEffort, saveCerseiCompress } from "../lib/cersei-model-pref";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
@@ -50,6 +51,18 @@ function pushAcpModeToAgent(state: ChatState, sessionId: string): void {
     key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
     modeId: session.acpCurrentMode,
   }).catch((err) => console.warn("agents_set_mode failed:", err));
+}
+
+/** Push an ACP agent's model selection (Claude Code / Codex) to its bound
+ *  agent via `agents_set_model` (ACP `session/set_model`). Plain model id (no
+ *  `provider/` prefix — that's the native Cersei form). No-op until bound. */
+function pushAcpModelToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId || !session.acpCurrentModel) return;
+  void invoke("agents_set_model", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    modelId: session.acpCurrentModel,
+  }).catch((err) => console.warn("agents_set_model failed:", err));
 }
 
 /** Push the native Cersei agent's `provider/model` selection to its bound
@@ -186,6 +199,15 @@ interface ChatActions {
      *  session boot resolves (modes confirmed, or bind failed) so the composer's
      *  picker never hangs on its loading spinner. */
     setAcpModesPending: (sessionId: string, pending: boolean) => void;
+    /** Seed the ACP model list (Claude Code / Codex) + current model from a
+     *  session snapshot's `available_models`. Caches per agentType. */
+    setAcpModels: (
+      sessionId: string,
+      currentModel: string | null,
+      availableModels: SessionModeInfo[]
+    ) => void;
+    /** Pick an ACP model and push it to the bound agent (`session/set_model`). */
+    setAcpModel: (sessionId: string, modelId: string) => void;
     /** Native Cersei agent: pick the BYOK provider. Clears the model so the
      *  composer re-selects a default for the new provider before pushing. */
     setCerseiProvider: (sessionId: string, provider: string) => void;
@@ -440,6 +462,14 @@ export const useChatStore = createSelectors(
                     };
                   })()
                 : {}),
+              // Models apply to BOTH Claude Code and Codex (ACP `session/new`
+              // model picking). Pre-fill from cache; empty for the native agent.
+              ...(() => {
+                const m = loadCachedAcpModels(agentType);
+                return m
+                  ? { acpAvailableModels: m.availableModels, acpCurrentModel: m.currentModel ?? undefined }
+                  : {};
+              })(),
             };
             s.activeSessionId = tabId;
           }),
@@ -477,6 +507,10 @@ export const useChatStore = createSelectors(
               sess.acpCurrentMode = cached?.currentMode ?? undefined;
               sess.acpModesPending = true;
             }
+            // Models apply to both agents — seed from cache (empty for cersei).
+            const cachedModels = loadCachedAcpModels(agentType);
+            sess.acpAvailableModels = cachedModels?.availableModels ?? [];
+            sess.acpCurrentModel = cachedModels?.currentModel ?? undefined;
           }),
         setActiveSession: (id) =>
           set((s) => {
@@ -623,6 +657,31 @@ export const useChatStore = createSelectors(
             if (session) session.acpCurrentMode = modeId;
           });
           pushAcpModeToAgent(get(), sessionId);
+        },
+        setAcpModels: (sessionId, currentModel, availableModels) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (!session) return;
+            session.acpAvailableModels = availableModels;
+            // Only seed the current model from the snapshot when it carries one;
+            // never clobber a user-driven selection the store already reflects.
+            if (currentModel && !session.acpCurrentModel) {
+              session.acpCurrentModel = currentModel;
+            }
+          });
+          // Persist for instant pre-fill on the next switch/resume (ACP
+          // `session/load` doesn't re-advertise models).
+          const at = get().sessions[sessionId]?.agentType;
+          if (availableModels.length > 0 && at) {
+            saveCachedAcpModels(at, { currentModel: currentModel ?? null, availableModels });
+          }
+        },
+        setAcpModel: (sessionId, modelId) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.acpCurrentModel = modelId;
+          });
+          pushAcpModelToAgent(get(), sessionId);
         },
         setCerseiProvider: (sessionId, provider) =>
           set((s) => {
