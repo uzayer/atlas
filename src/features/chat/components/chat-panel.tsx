@@ -116,6 +116,19 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         const cwd = project?.path ?? "/";
         const key = await agents.newSession(agent.agent_id, cwd);
         if (cancelled) return;
+        // Guard against an agent switch that landed mid-bind: if the tab's
+        // agentType changed since we picked `pluginId`, this binding is for the
+        // wrong agent — abandon it so we don't clobber the tab with a stale
+        // (e.g. Codex) session under the newly-chosen agent. The deps now watch
+        // agentType, so the effect re-runs and binds the right agent.
+        const nowAt = useChatStore.getState().sessions[tabId]?.agentType;
+        const nowPlugin =
+          nowAt === "codex"
+            ? CODEX_PLUGIN_ID
+            : nowAt === "cersei"
+              ? CERSEI_PLUGIN_ID
+              : DEFAULT_PLUGIN_ID;
+        if (nowPlugin !== pluginId) return;
         // Apply the tab's permission mode BEFORE exposing the binding.
         // `setAcpBinding` is what flushes any queued send, so if we set the
         // mode after it the first turn can race ahead of (e.g.)
@@ -190,7 +203,12 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     // the effect, the bind never starts, and every send sits in
     // the queue forever — the exact "messages get queued on a
     // brand-new project" symptom.
-  }, [tabId, !!session, session?.acpSessionId]);
+    // `agentType` is in the deps so switching the tab's agent (⌥/) re-runs the
+    // bind — its cleanup cancels any in-flight bind for the previous agent (the
+    // `cancelled` guard), preventing a stale bind from clobbering the tab. This
+    // matters even when acpSessionId was already undefined (switch during the
+    // first bind), where acpSessionId alone wouldn't change.
+  }, [tabId, !!session, session?.acpSessionId, session?.agentType]);
 
   // Shift+Tab → cycle the agent permission mode. Registered on the window in
   // capture phase so the browser's default focus traversal never steals it.

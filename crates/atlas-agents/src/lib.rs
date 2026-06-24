@@ -22,6 +22,9 @@ pub mod transcript;
 pub mod worker;
 
 pub use atlas_cersei::SessionMeta;
+// Memory-RAG grounding seam for the native agent — the Tauri layer registers a
+// retrieval backend; the agent gets a `search_memory` tool.
+pub use atlas_cersei::{MemDoc, MemorySearchFn, ReplayItem, register_memory_search};
 pub use backend::{AcpBackend, AgentBackend, CerseiBackend};
 pub use error::{Error, Result};
 pub use events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};

@@ -18,7 +18,7 @@ import type {
 } from "@/types/agents";
 import { splitAtlasContext } from "../lib/atlas-context";
 import { loadCachedAcpModes, saveCachedAcpModes } from "../lib/acp-modes-cache";
-import { saveCerseiModelPref } from "../lib/cersei-model-pref";
+import { saveCerseiModelPref, saveCerseiEffort } from "../lib/cersei-model-pref";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
 
@@ -67,6 +67,18 @@ function pushCerseiModelToAgent(state: ChatState, sessionId: string): void {
     key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
     modelId: `${provider}/${model}`,
   }).catch((err) => console.warn("agents_set_model failed:", err));
+}
+
+/** Push the native agent's reasoning-effort level to its bound agent via
+ *  `agents_set_effort`. No-op until bound / for non-cersei sessions. */
+function pushCerseiEffortToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId) return;
+  if (session.agentType !== "cersei") return;
+  void invoke("agents_set_effort", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    effort: session.cerseiEffort ?? "",
+  }).catch((err) => console.warn("agents_set_effort failed:", err));
 }
 
 /** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
@@ -169,6 +181,8 @@ interface ChatActions {
     /** Native Cersei agent: pick the model and push `provider/model` to the
      *  bound agent via `agents_set_model`. No-op until the session is bound. */
     setCerseiModel: (sessionId: string, model: string) => void;
+    /** Native Cersei agent: set the reasoning-effort level and push it. */
+    setCerseiEffort: (sessionId: string, effort: string) => void;
     replaceMessages: (
       sessionId: string,
       messages: Array<{
@@ -420,11 +434,16 @@ export const useChatStore = createSelectors(
           set((s) => {
             const sess = s.sessions[tabId];
             if (!sess) return;
+            // Drop any pending permissions that belonged to the old binding so a
+            // stale request from the previous agent can't render under the new
+            // one (agents are pooled per plugin, so the process keeps running —
+            // we only clear THIS session's queue, not the agent).
+            if (sess.acpSessionId) delete s.pendingPermissions[sess.acpSessionId];
             sess.agentType = agentType;
             sess.claudePermissionMode =
               agentType === "claude-code" ? "default" : undefined;
             // Drop the old ACP binding so the chat panel's mount effect re-binds
-            // to the newly chosen agent (its deps watch acpSessionId).
+            // to the newly chosen agent (deps watch acpSessionId + agentType).
             sess.acpAgentId = undefined;
             sess.acpSessionId = undefined;
             sess.acpCurrentMode = undefined;
@@ -612,6 +631,14 @@ export const useChatStore = createSelectors(
             saveCerseiModelPref({ provider: sess.cerseiProvider, model });
           }
           pushCerseiModelToAgent(get(), sessionId);
+        },
+        setCerseiEffort: (sessionId, effort) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.cerseiEffort = effort;
+          });
+          saveCerseiEffort(effort);
+          pushCerseiEffortToAgent(get(), sessionId);
         },
         replaceMessages: (sessionId, messages) =>
           set((s) => {
@@ -1054,6 +1081,14 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       ) {
         session.claudePermissionMode = env.mode_id as ClaudePermissionMode;
       }
+      return;
+    }
+    case "usage_updated": {
+      session.usage = env.usage;
+      return;
+    }
+    case "compaction": {
+      session.compacting = env.active;
       return;
     }
     case "model_changed": {

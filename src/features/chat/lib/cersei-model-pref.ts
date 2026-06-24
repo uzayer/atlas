@@ -38,3 +38,23 @@ export function saveCerseiModelPref(pref: CerseiModelPref): void {
     // storage full / unavailable — best-effort
   }
 }
+
+const EFFORT_KEY = "atlas:cersei-effort-pref";
+
+/** Last reasoning-effort level the user picked ("" = model default), or "". */
+export function loadCerseiEffort(): string {
+  try {
+    return localStorage.getItem(EFFORT_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Persist the reasoning-effort preference (best-effort). */
+export function saveCerseiEffort(effort: string): void {
+  try {
+    localStorage.setItem(EFFORT_KEY, effort);
+  } catch {
+    // best-effort
+  }
+}

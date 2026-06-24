@@ -249,9 +249,13 @@ export const MessageItem = memo(function MessageItem({
           {/* Tool calls */}
           {message.toolCalls.length > 0 && (
             <div className="space-y-1.5">
-              {message.toolCalls.map((tc) => (
-                <ToolCallCard key={tc.id} toolCall={tc} />
-              ))}
+              {message.toolCalls.map((tc) =>
+                tc.toolName === "search_memory" ? (
+                  <MemoryRecallCard key={tc.id} toolCall={tc} />
+                ) : (
+                  <ToolCallCard key={tc.id} toolCall={tc} />
+                )
+              )}
             </div>
           )}
 
@@ -764,6 +768,119 @@ const ToolCallCard = memo(function ToolCallCard({
           title={title}
           result={toolCall.result ?? ""}
         />
+      )}
+    </div>
+  );
+});
+
+/** Per-source tint for a recalled memory snippet. */
+const MEMORY_SOURCE_STYLE: Record<string, string> = {
+  claude: "text-[var(--accent-primary)] border-[var(--accent-primary)]/30",
+  codex: "text-[var(--status-success)] border-[var(--status-success)]/30",
+  codebase: "text-[var(--status-warning)] border-[var(--status-warning)]/30",
+  shared: "text-[var(--text-secondary)] border-[var(--border-strong)]",
+};
+
+interface RecalledDoc {
+  title: string;
+  source: string;
+  text: string;
+}
+
+/** Parse the `search_memory` result ("## title (source)\n body" blocks) into
+ *  structured snippets for rich rendering. */
+function parseRecalledDocs(result: string): RecalledDoc[] {
+  return result
+    .split(/\n(?=## )/)
+    .map((b) => b.trim())
+    .filter(Boolean)
+    .map((block) => {
+      const m = block.match(/^##\s+(.*?)\s*\(([^)]+)\)\s*\n?([\s\S]*)$/);
+      if (!m) return null;
+      return { title: m[1].trim(), source: m[2].trim(), text: m[3].trim() };
+    })
+    .filter((d): d is RecalledDoc => d !== null);
+}
+
+/** Rich card for the native agent's `search_memory` (RAG over indexed project
+ *  memory + codebase index). Shows the query and source-tagged recalled
+ *  snippets instead of a raw tool card. */
+const MemoryRecallCard = memo(function MemoryRecallCard({
+  toolCall,
+}: {
+  toolCall: ChatMessage["toolCalls"][number];
+}) {
+  const [open, setOpen] = useState(false);
+  const args = toolCall.arguments as Record<string, unknown>;
+  const query = typeof args.query === "string" ? args.query : "";
+  const isRunning = toolCall.status === "running" || toolCall.status === "pending";
+  const failed = toolCall.status === "failed";
+  const docs = !isRunning && toolCall.result ? parseRecalledDocs(toolCall.result) : [];
+
+  return (
+    <div className="rounded-md border border-l-2 border-[var(--border-default)] border-l-[var(--accent-primary)] bg-[var(--bg-secondary)] overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+      >
+        {isRunning ? (
+          <Loader2 size={12} className="shrink-0 animate-spin text-[var(--accent-primary)]" />
+        ) : (
+          <Brain size={12} className="shrink-0 text-[var(--accent-primary)]" />
+        )}
+        <span className="text-[11px] font-medium text-[var(--text-secondary)] shrink-0">
+          {isRunning ? "Searching memory" : "Recalled memory"}
+        </span>
+        {query && (
+          <span className="min-w-0 flex-1 truncate text-[11px] font-mono text-[var(--text-tertiary)]">
+            “{query}”
+          </span>
+        )}
+        {!isRunning && !failed && (
+          <span className="ml-auto shrink-0 text-[10px] text-[var(--text-tertiary)] tabular-nums">
+            {docs.length} {docs.length === 1 ? "snippet" : "snippets"}
+          </span>
+        )}
+        {docs.length > 0 && (
+          <ChevronRight
+            size={13}
+            className={cn("shrink-0 text-[var(--text-tertiary)] transition-transform", open && "rotate-90")}
+          />
+        )}
+      </button>
+      {failed && toolCall.result && (
+        <div className="border-t border-[var(--border-default)] px-3 py-1.5 text-[11px] text-[var(--text-tertiary)]">
+          {toolCall.result}
+        </div>
+      )}
+      {!isRunning && !failed && docs.length === 0 && (
+        <div className="border-t border-[var(--border-default)] px-3 py-1.5 text-[11px] text-[var(--text-tertiary)]">
+          No relevant project memory found.
+        </div>
+      )}
+      {open && docs.length > 0 && (
+        <div className="border-t border-[var(--border-default)] divide-y divide-[var(--border-subtle)]">
+          {docs.map((d, i) => (
+            <div key={i} className="px-3 py-2">
+              <div className="flex items-center gap-2">
+                <span
+                  className={cn(
+                    "shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide",
+                    MEMORY_SOURCE_STYLE[d.source] ?? MEMORY_SOURCE_STYLE.shared
+                  )}
+                >
+                  {d.source}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--text-primary)]">
+                  {d.title}
+                </span>
+              </div>
+              <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-[11px] leading-snug text-[var(--text-secondary)]">
+                {d.text}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

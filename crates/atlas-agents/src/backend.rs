@@ -50,6 +50,11 @@ pub trait AgentBackend: Send + Sync {
     fn set_model(&self, _agent_id: AgentId, _session_id: &SessionId, _model: String) -> AcpResult<()> {
         Ok(())
     }
+    /// Update the session's reasoning-effort level. Default: no-op (only the
+    /// native agent applies a thinking budget).
+    fn set_effort(&self, _agent_id: AgentId, _session_id: &SessionId, _effort: String) -> AcpResult<()> {
+        Ok(())
+    }
     fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<()>;
     fn cancel_turn(&self, agent_id: AgentId, session_id: SessionId) -> AcpResult<()>;
     fn respond_permission(
@@ -176,6 +181,9 @@ impl AgentBackend for CerseiBackend {
     }
     fn set_model(&self, agent_id: AgentId, session_id: &SessionId, model: String) -> AcpResult<()> {
         self.0.set_model(agent_id, &session_id_str(session_id), model)
+    }
+    fn set_effort(&self, agent_id: AgentId, session_id: &SessionId, effort: String) -> AcpResult<()> {
+        self.0.set_effort(agent_id, &session_id_str(session_id), effort)
     }
     fn mark_turn_started(&self, _agent_id: AgentId, _session_id: &SessionId) -> AcpResult<()> {
         Ok(())

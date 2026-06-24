@@ -12,8 +12,13 @@
 //! `atlas-agents`' manager + worker call, so a thin `AgentBackend` adapter in
 //! atlas-agents can route to either backend.
 
+mod context;
+mod mcp;
+mod memory;
 mod provider;
 mod store;
+
+pub use memory::{MemDoc, MemorySearchFn, register_memory_search};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +32,7 @@ use cersei::tools::PermissionLevel;
 use cersei::types::Message;
 use cersei_agent::delegate::{ProviderFactory, ToolsetFactory};
 use cersei_agent::delegate_tool::DelegateTool;
+use cersei_agent::system_prompt::{SystemPromptOptions, build_system_prompt};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -42,7 +48,10 @@ pub const CERSEI_PLUGIN_ID: &str = "cersei";
 /// Display name shown in the agent picker / marks.
 pub const CERSEI_DISPLAY_NAME: &str = "Atlas";
 
-const SYSTEM_PROMPT: &str = r#"You are Atlas, a coding agent embedded natively in the Atlas IDE. You run in-process — your tool calls are local and near-instant, so reach for them freely. You help the user read, write, and reason about their codebase.
+/// Atlas-specific behavioral guidance, injected as `custom_system_prompt` into
+/// `build_system_prompt` (which also emits Cersei's base capabilities + the
+/// dynamic git/cwd/docs context sections).
+const ATLAS_GUIDANCE: &str = r#"You are Atlas, a coding agent embedded natively in the Atlas IDE. You run in-process — your tool calls are local and near-instant, so reach for them freely. You help the user read, write, and reason about their codebase.
 
 # Exploration — understand before you act
 - Read the codebase first; resist easy assumptions. Let the shape of the existing system teach you how to move. Never guess a file's location, an API's signature, or a pattern — verify it with a tool.
@@ -60,6 +69,9 @@ const SYSTEM_PROMPT: &str = r#"You are Atlas, a coding agent embedded natively i
 - You can spawn parallel sub-agents with the `delegate` tool. Each child runs in its own fresh context with the coding tools and reports a summary back; children cannot delegate further. Use the `tasks` array to fan several out at once — they run concurrently.
 - Delegate when the work splits into independent, well-bounded pieces that can run in parallel without stepping on each other: e.g. researching several subsystems at once, or implementing disjoint slices of a change with non-overlapping file scopes. Each task prompt must be fully self-contained — the child can't see this conversation.
 - Keep the critical-path step yourself; delegate the sidecar work. Don't delegate a tightly-coupled next step you're blocked on, and don't delegate trivial one-shot tasks you can just do. After children return, integrate their results — don't redo their work.
+
+# Project memory
+- When available, the `search_memory` tool recalls Atlas's indexed project memory — prior decisions, conventions, feature notes, and codebase summaries. Reach for it BEFORE asking the user about project history or established patterns, and to ground a change in how this codebase already does things.
 
 # Doing, not explaining
 - Assume the user wants you to make the change and run the work needed to solve the problem — unless they explicitly ask for a plan, ask a question, or are brainstorming. Don't stop at a proposal; carry the task to a finished, verified state within the turn when feasible.
@@ -100,6 +112,10 @@ struct Inner {
     /// App config dir (holds `byok-keys.json` + `cersei-sessions/`).
     config_dir: PathBuf,
     agents: DashMap<AgentId, AgentEntry>,
+    /// MCP servers, connected once on first use. `None` = none configured /
+    /// none connected. Connecting spawns subprocess servers, so it's cached for
+    /// the app session (edits to `mcp-servers.json` apply on restart).
+    mcp: tokio::sync::OnceCell<Option<Arc<mcp::McpHandle>>>,
 }
 
 struct AgentEntry {
@@ -116,6 +132,10 @@ struct SessionEntry {
     model: Mutex<String>,
     /// Permission mode id (default / acceptEdits / plan / bypass).
     mode: Mutex<String>,
+    /// Reasoning-effort level (low/medium/high/max), or None for the model
+    /// default. Only applied for providers that support a thinking budget
+    /// (Anthropic) — ignored elsewhere.
+    effort: Mutex<Option<String>>,
     /// Cancellation token for the in-flight turn, if any.
     cancel: Mutex<Option<CancellationToken>>,
     /// Pending permission requests awaiting a UI decision.
@@ -129,6 +149,7 @@ impl CerseiRuntime {
             inner: Arc::new(Inner {
                 config_dir,
                 agents: DashMap::new(),
+                mcp: tokio::sync::OnceCell::new(),
             }),
         }
     }
@@ -170,6 +191,7 @@ impl CerseiRuntime {
             provider: Mutex::new(provider),
             model: Mutex::new(model),
             mode: Mutex::new("default".into()),
+            effort: Mutex::new(None),
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: AtomicBool::new(false),
@@ -208,6 +230,7 @@ impl CerseiRuntime {
             provider: Mutex::new(provider),
             model: Mutex::new(model),
             mode: Mutex::new("default".into()),
+            effort: Mutex::new(None),
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: AtomicBool::new(false),
@@ -250,6 +273,31 @@ impl CerseiRuntime {
         }
         *entry.model.lock() = model;
         Ok(())
+    }
+
+    /// Set the session's reasoning-effort level (low/medium/high/max), or clear
+    /// it with an empty string. Applied as a thinking budget on the next turn
+    /// for providers that support it (Anthropic).
+    pub fn set_effort(&self, agent_id: AgentId, session_id: &str, effort: String) -> Result<()> {
+        let entry = self.session(agent_id, session_id)?;
+        *entry.effort.lock() = if effort.trim().is_empty() {
+            None
+        } else {
+            Some(effort)
+        };
+        Ok(())
+    }
+
+    /// The connected MCP servers, connecting (once) on first call. `None` when
+    /// no servers are configured or none connected.
+    async fn mcp_handle(&self) -> Option<Arc<mcp::McpHandle>> {
+        self.inner
+            .mcp
+            .get_or_init(|| async {
+                mcp::McpHandle::connect(&self.inner.config_dir).await.map(Arc::new)
+            })
+            .await
+            .clone()
     }
 
     /// Cancel the in-flight turn: flip the flag, drop pending permissions
@@ -320,6 +368,7 @@ impl CerseiRuntime {
 
         let history = entry.history.lock().clone();
         let mode = entry.mode.lock().clone();
+        let effort = entry.effort.lock().clone();
 
         let policy = UiPolicy {
             sink: sink.clone(),
@@ -353,26 +402,70 @@ impl CerseiRuntime {
         };
         let toolset_factory: ToolsetFactory = Arc::new(|| cersei::tools::coding());
 
-        let tools = {
+        let mut tools = {
             let mut t = cersei::tools::coding();
             t.extend(cersei::tools::planning());
             t.push(Box::new(
                 DelegateTool::new(provider_factory, toolset_factory).with_model(model.clone()),
             ));
+            // Grounding: expose Atlas's indexed memory as a tool when the Tauri
+            // layer has registered a retrieval backend.
+            if memory::memory_search_available() {
+                t.push(Box::new(memory::SearchMemoryTool));
+            }
             t
         };
 
-        let built = cersei::Agent::builder()
+        // Connect + add MCP server tools (once-cached). Each discovered MCP tool
+        // is proxied to the model alongside the built-ins.
+        let mcp_handle = self.mcp_handle().await;
+        let mcp_instructions: Vec<(String, String)> = match &mcp_handle {
+            Some(h) => {
+                tools.extend(h.proxy_tools());
+                h.server_names
+                    .iter()
+                    .map(|n| (n.clone(), format!("MCP server `{n}` is connected; its tools are available to you.")))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+
+        // Ground the agent in the repo: git snapshot + cwd + project docs
+        // (AGENTS.md / CLAUDE.md) + the tool list, on top of our Atlas-specific
+        // guidance. `build_system_prompt` also emits Cersei's base sections.
+        let docs = context::project_docs(&entry.cwd);
+        let system_prompt = build_system_prompt(&SystemPromptOptions {
+            custom_system_prompt: Some(ATLAS_GUIDANCE.to_string()),
+            working_directory: Some(entry.cwd.clone()),
+            git_status: context::git_snapshot(&entry.cwd),
+            memory_content: docs,
+            tools_available: tools.iter().map(|t| t.name().to_string()).collect(),
+            mcp_instructions,
+            has_auto_compact: true,
+            ..Default::default()
+        });
+
+        let mut builder = cersei::Agent::builder()
             .provider_boxed(provider)
             .tools(tools)
             .working_dir(PathBuf::from(&entry.cwd))
             .with_messages(history)
             .permission_policy(policy)
             .cancel_token(token)
-            .system_prompt(SYSTEM_PROMPT)
+            .system_prompt(system_prompt)
             .model(model.clone())
             .max_turns(50)
-            .auto_compact(true)
+            .auto_compact(true);
+        // Reasoning effort → thinking budget. Only Anthropic exposes a usable
+        // per-request thinking budget today; other providers ignore it, so we
+        // only apply it there to avoid surprising behavior.
+        if provider_id == "anthropic" {
+            if let Some(level) = &effort {
+                let budget = cersei_agent::effort::EffortLevel::from_str(level).thinking_budget_tokens();
+                builder = builder.thinking_budget(budget);
+            }
+        }
+        let built = builder
             .build()
             .map_err(|e| AcpError::other(format!("build agent: {e}")))?;
         let built = Arc::new(built);
@@ -608,6 +701,43 @@ fn translate_event(
             if !todo_ids.contains(&id) {
                 emit_tool_update(sink, agent_id, session_id, &id, &result, is_error);
             }
+            TurnStep::Continue
+        }
+        E::CostUpdate {
+            cumulative_cost,
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            sink.emit(
+                agent_id,
+                AcpEvent::Usage {
+                    session_id: session_id.clone(),
+                    input_tokens,
+                    output_tokens,
+                    cost: cumulative_cost,
+                },
+            );
+            TurnStep::Continue
+        }
+        E::CompactStart { .. } => {
+            sink.emit(
+                agent_id,
+                AcpEvent::Compaction {
+                    session_id: session_id.clone(),
+                    active: true,
+                },
+            );
+            TurnStep::Continue
+        }
+        E::CompactEnd { .. } => {
+            sink.emit(
+                agent_id,
+                AcpEvent::Compaction {
+                    session_id: session_id.clone(),
+                    active: false,
+                },
+            );
             TurnStep::Continue
         }
         E::TurnComplete { stop_reason, .. } => TurnStep::SetStop(map_stop(stop_reason).to_string()),
@@ -1008,6 +1138,45 @@ mod tests {
     }
 
     #[test]
+    fn cost_update_emits_usage() {
+        let (c, step) = run(E::CostUpdate {
+            turn_cost: 0.01,
+            cumulative_cost: 0.05,
+            input_tokens: 1200,
+            output_tokens: 340,
+        });
+        assert!(matches!(step, TurnStep::Continue));
+        let evs = c.events.lock();
+        match &evs[0] {
+            AcpEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cost,
+                ..
+            } => {
+                assert_eq!(*input_tokens, 1200);
+                assert_eq!(*output_tokens, 340);
+                assert!((*cost - 0.05).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compact_events_toggle_compaction() {
+        let (c1, _) = run(E::CompactStart {
+            reason: cersei::events::CompactReason::ThresholdExceeded,
+            messages_before: 50,
+        });
+        assert!(matches!(c1.events.lock().first(), Some(AcpEvent::Compaction { active: true, .. })));
+        let (c2, _) = run(E::CompactEnd {
+            messages_after: 12,
+            tokens_freed: 8000,
+        });
+        assert!(matches!(c2.events.lock().first(), Some(AcpEvent::Compaction { active: false, .. })));
+    }
+
+    #[test]
     fn tool_kind_classification() {
         assert_eq!(tool_kind("Read"), "read");
         assert_eq!(tool_kind("Grep"), "read");
@@ -1099,6 +1268,7 @@ mod tests {
             provider: Mutex::new("anthropic".into()),
             model: Mutex::new("claude-opus-4-8".into()),
             mode: Mutex::new(mode.into()),
+            effort: Mutex::new(None),
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: std::sync::atomic::AtomicBool::new(false),

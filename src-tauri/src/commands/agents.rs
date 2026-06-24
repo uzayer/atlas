@@ -81,6 +81,26 @@ pub fn install_manager(app: &AppHandle) {
         .unwrap_or_else(|_| std::env::temp_dir());
     let manager = AgentManager::new(sink, config_dir);
     app.manage(manager);
+
+    // Wire the native agent's `search_memory` tool to Atlas's on-device memory
+    // retrieval. The closure resolves `MemoryChatState` lazily (it's managed
+    // after this call) and maps the retrieved docs into the agent's shape.
+    let app_for_search = app.clone();
+    atlas_agents::register_memory_search(std::sync::Arc::new(move |cwd, query, k| {
+        let app = app_for_search.clone();
+        Box::pin(async move {
+            let state = app.state::<crate::commands::memory_chat::MemoryChatState>();
+            crate::commands::memory_retrieve::retrieve(&app, state.inner(), &cwd, &query, k)
+                .await
+                .into_iter()
+                .map(|d| atlas_agents::MemDoc {
+                    title: d.title,
+                    source: d.source,
+                    text: d.text,
+                })
+                .collect()
+        })
+    }));
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -332,6 +352,15 @@ pub fn agents_set_model(
     manager: State<'_, AgentManager>,
 ) -> Result<(), String> {
     manager.set_model(&key, model_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn agents_set_effort(
+    key: SessionKey,
+    effort: String,
+    manager: State<'_, AgentManager>,
+) -> Result<(), String> {
+    manager.set_effort(&key, effort).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

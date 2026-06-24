@@ -31,6 +31,7 @@ pub enum SessionCommand {
     SendPrompt(String),
     SetMode(String),
     SetModel(String),
+    SetEffort(String),
 }
 
 pub struct SessionWorker {
@@ -78,6 +79,17 @@ impl SessionWorker {
                     st.touch();
                     drop(st);
                     self.emit(SessionDelta::ModelChanged { model_id });
+                }
+                SessionCommand::SetEffort(effort) => {
+                    // Native-agent only (no-op for ACP backends); applied to the
+                    // next turn's thinking budget. No delta — the UI owns the
+                    // pill state optimistically.
+                    if let Err(e) =
+                        self.backend
+                            .set_effort(self.agent_id, &self.acp_session_id, effort)
+                    {
+                        tracing::warn!(target: "atlas_agents::worker", "set_effort failed: {e}");
+                    }
                 }
             }
         }

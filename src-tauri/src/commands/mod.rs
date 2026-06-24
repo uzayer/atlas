@@ -27,6 +27,7 @@ pub mod knowledge_graph_layout;
 pub mod knowledge_links;
 pub mod knowledge_meta;
 pub mod log;
+pub mod mcp;
 pub mod memory_chat;
 pub mod memory_chat_sessions;
 pub mod memory_graph;

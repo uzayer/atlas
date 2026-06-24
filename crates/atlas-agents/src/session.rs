@@ -89,6 +89,9 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Estimated cumulative cost in USD (native agent; 0 when unknown).
+    #[serde(default)]
+    pub cost: f64,
 }
 
 /// One ACP-advertised session mode (e.g. Codex's read-only / auto / full-access).

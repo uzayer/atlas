@@ -61,6 +61,8 @@ export const agents = {
     invoke<void>("agents_set_mode", { key, modeId }),
   setModel: (key: SessionKey, modelId: string) =>
     invoke<void>("agents_set_model", { key, modelId }),
+  setEffort: (key: SessionKey, effort: string) =>
+    invoke<void>("agents_set_effort", { key, effort }),
 
   respondPermission: (
     agentId: AgentId,

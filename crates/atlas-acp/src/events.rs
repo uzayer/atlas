@@ -44,6 +44,20 @@ pub enum AcpEvent {
         turn_id: Uuid,
         error: String,
     },
+    /// Cumulative token usage + estimated cost for the session. Emitted by the
+    /// in-process native agent (ACP agents surface usage via their own updates).
+    Usage {
+        session_id: acp_schema::SessionId,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost: f64,
+    },
+    /// Context compaction started (`active = true`) or finished (`false`).
+    /// Native-agent only.
+    Compaction {
+        session_id: acp_schema::SessionId,
+        active: bool,
+    },
 }
 
 /// Implemented by the Tauri host so the driver can fan events out without

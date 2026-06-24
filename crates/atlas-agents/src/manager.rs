@@ -292,6 +292,11 @@ impl AgentManager {
         self.inner.cersei.list_sessions(cwd)
     }
 
+    /// UI-neutral transcript for a stored native-agent session (Memory tab).
+    pub fn cersei_session_transcript(&self, cwd: &str, session_id: &str) -> Vec<atlas_cersei::ReplayItem> {
+        self.inner.cersei.replay_session(cwd, session_id)
+    }
+
     pub fn snapshot(&self, key: &SessionKey) -> Result<SessionSnapshot> {
         let handle = self.handle_for(key)?;
         let snap = handle.state.lock().snapshot();
@@ -330,6 +335,10 @@ impl AgentManager {
 
     pub fn set_model(&self, key: &SessionKey, model_id: String) -> Result<()> {
         self.handle_for(key)?.send(SessionCommand::SetModel(model_id))
+    }
+
+    pub fn set_effort(&self, key: &SessionKey, effort: String) -> Result<()> {
+        self.handle_for(key)?.send(SessionCommand::SetEffort(effort))
     }
 
     /// Resolve a pending permission request.
@@ -545,6 +554,37 @@ impl AgentManager {
                         agent_id,
                         session_id: sid,
                         delta: SessionDelta::TurnFailed { error },
+                    });
+                }
+            }
+            AcpEvent::Usage {
+                session_id,
+                input_tokens,
+                output_tokens,
+                cost,
+            } => {
+                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
+                    let mut st = handle.state.lock();
+                    st.usage.input_tokens = input_tokens;
+                    st.usage.output_tokens = output_tokens;
+                    st.usage.cost = cost;
+                    let usage = st.usage.clone();
+                    let sid = st.session_id.clone();
+                    drop(st);
+                    self.emit(SessionDeltaEnvelope {
+                        agent_id,
+                        session_id: sid,
+                        delta: SessionDelta::UsageUpdated { usage },
+                    });
+                }
+            }
+            AcpEvent::Compaction { session_id, active } => {
+                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
+                    let sid = handle.state.lock().session_id.clone();
+                    self.emit(SessionDeltaEnvelope {
+                        agent_id,
+                        session_id: sid,
+                        delta: SessionDelta::Compaction { active },
                     });
                 }
             }

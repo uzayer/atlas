@@ -56,6 +56,10 @@ pub enum SessionDelta {
     UsageUpdated {
         usage: Usage,
     },
+    /// Context compaction is running (`active = true`) or just finished.
+    Compaction {
+        active: bool,
+    },
     /// Agent requested permission for a tool call. The UI's permission inbox
     /// owns this — `respond_permission` resolves it back through atlas-acp.
     PermissionRequest {

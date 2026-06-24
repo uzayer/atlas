@@ -91,6 +91,14 @@ export interface ChatSession {
   /** BYOK provider id backing the native Cersei agent's model selection
    *  (e.g. "anthropic", "openai"). Unused by the ACP agents. */
   cerseiProvider?: string;
+  /** Cumulative token/cost usage for the session (native agent surfaces it via
+   *  `usage_updated` deltas; drives the composer's token/cost pill). */
+  usage?: import("./agents").Usage;
+  /** True while the native agent is compacting its context window. */
+  compacting?: boolean;
+  /** Reasoning-effort level for the native agent ("" / low / medium / high /
+   *  max). Only meaningful for Anthropic models (maps to a thinking budget). */
+  cerseiEffort?: string;
   /** Available slash commands as reported by the agent for this session. */
   availableCommands?: unknown[];
   /**

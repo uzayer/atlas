@@ -8,12 +8,16 @@ import {
   X,
   Check,
   Loader2,
+  Brain,
+  Database,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { useChatStore } from "../stores/chat-store";
 import { agents } from "../lib/agents-api";
 import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL } from "@/types/agent";
 import { AgentMark } from "@/components/agent-mark";
 import { ProviderModelPills } from "./provider-model-pills";
+import { loadCerseiEffort } from "../lib/cersei-model-pref";
 // `ChatInput` pulls in CodeMirror (~870 KB) via `cm-mention-extension`.
 // We import it dynamically so the chunk is not in the initial preload set.
 // The import is kicked off at module-evaluation time (below, outside the
@@ -89,6 +93,144 @@ function acpModeColor(modeId: string | undefined): string {
   if (/read.?only|\bplan\b|ask|suggest/.test(id)) return "var(--accent-primary)";
   if (/auto|default|edit|accept|agent|workspace/.test(id)) return "var(--status-success)";
   return "var(--text-tertiary)";
+}
+
+interface CodebaseIndexStatus {
+  indexed: boolean;
+  file_count: number;
+  summary_count: number;
+  built_at_ms: number;
+}
+
+/** Codebase-index status pill for the native agent — the index that grounds
+ *  `search_memory`. Shows file count (or "Index memory" when unbuilt), flips to
+ *  "Indexing…" while the auto-indexer runs, and re-indexes on click. */
+function CerseiMemoryPill() {
+  const projectPath = useProjectStore((s) => s.currentProject?.path ?? null);
+  const [status, setStatus] = useState<CodebaseIndexStatus | null>(null);
+  const [indexing, setIndexing] = useState(false);
+
+  const refresh = useCallback(() => {
+    if (!projectPath) return;
+    invoke<CodebaseIndexStatus>("codebase_index_status", { projectPath })
+      .then(setStatus)
+      .catch(() => {});
+  }, [projectPath]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Track the auto-indexer (fired from App.tsx after a turn) for this project.
+  useEffect(() => {
+    const onIdx = (e: Event) => {
+      const d = (e as CustomEvent<{ path: string; active: boolean }>).detail;
+      if (!d || d.path !== projectPath) return;
+      setIndexing(d.active);
+      if (!d.active) refresh();
+    };
+    window.addEventListener("atlas:cersei-index", onIdx);
+    return () => window.removeEventListener("atlas:cersei-index", onIdx);
+  }, [projectPath, refresh]);
+
+  const reindex = () => {
+    if (!projectPath || indexing) return;
+    setIndexing(true);
+    void invoke("codebase_index_build", {
+      projectPath,
+      opts: { mode: "full", backend: "structural" },
+    })
+      .catch((err) => console.warn("manual codebase index failed:", err))
+      .finally(() => {
+        setIndexing(false);
+        refresh();
+      });
+  };
+
+  const label = indexing
+    ? "Indexing…"
+    : status?.indexed
+      ? `${status.file_count} indexed`
+      : "Index memory";
+
+  return (
+    <button
+      onClick={reindex}
+      disabled={indexing}
+      title="Codebase index that grounds the agent's memory recall — click to re-index"
+      className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-tertiary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer tabular-nums disabled:cursor-default"
+    >
+      {indexing ? (
+        <Loader2 size={11} className="animate-spin text-[var(--accent-primary)]" />
+      ) : (
+        <Database size={11} className={status?.indexed ? "text-[var(--accent-primary)]" : "text-[var(--text-tertiary)]"} />
+      )}
+      {label}
+    </button>
+  );
+}
+
+const EFFORT_CYCLE = ["", "low", "medium", "high", "max"] as const;
+
+/** Reasoning-effort pill for the native agent on Anthropic models (maps to a
+ *  thinking budget). Cycles off → low → medium → high → max. Hidden for
+ *  providers that don't support a thinking budget. */
+function EffortPill({ tabId }: { tabId: string }) {
+  const provider = useChatStore((s) => s.sessions[tabId]?.cerseiProvider ?? "");
+  const effort = useChatStore((s) => s.sessions[tabId]?.cerseiEffort ?? "");
+  const { setCerseiEffort } = useChatStore.use.actions();
+  if (provider !== "anthropic") return null;
+  const cycle = () => {
+    const i = EFFORT_CYCLE.indexOf(effort as (typeof EFFORT_CYCLE)[number]);
+    setCerseiEffort(tabId, EFFORT_CYCLE[(i + 1) % EFFORT_CYCLE.length]);
+  };
+  const active = effort !== "";
+  return (
+    <button
+      onClick={cycle}
+      className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+      title="Reasoning effort (thinking budget) — Anthropic models"
+    >
+      <Brain
+        size={11}
+        className={active ? "text-[var(--accent-primary)]" : "text-[var(--text-tertiary)]"}
+      />
+      {active ? `Think: ${effort}` : "Think"}
+    </button>
+  );
+}
+
+/** Compact tokens-used + cost pill for the native agent, plus a "compacting…"
+ *  state while the context window is being summarized. Hidden until the first
+ *  `usage_updated` delta lands. Narrow selectors so it only re-renders on its
+ *  own session's usage/compaction changes. */
+function CerseiUsagePill({ tabId }: { tabId: string }) {
+  const usage = useChatStore((s) => s.sessions[tabId]?.usage);
+  const compacting = useChatStore((s) => s.sessions[tabId]?.compacting ?? false);
+  if (compacting) {
+    return (
+      <span
+        className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--accent-primary)] select-none"
+        title="Compacting the context window to stay within the model's limit"
+      >
+        <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-primary)] animate-pulse" />
+        Compacting…
+      </span>
+    );
+  }
+  if (!usage) return null;
+  const total = (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+  if (total === 0) return null;
+  const tokens = total >= 1000 ? `${(total / 1000).toFixed(1)}K` : `${total}`;
+  const cost = usage.cost && usage.cost > 0 ? ` · $${usage.cost.toFixed(usage.cost < 1 ? 3 : 2)}` : "";
+  return (
+    <span
+      className="flex items-center gap-1.5 px-2 h-6.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[10px] leading-none font-medium text-[var(--text-tertiary)] select-none tabular-nums"
+      title={`${total.toLocaleString()} tokens (${usage.input_tokens?.toLocaleString()} in / ${usage.output_tokens?.toLocaleString()} out)${cost ? ` · est. $${usage.cost?.toFixed(4)}` : ""}`}
+    >
+      {tokens} tok{cost}
+    </span>
+  );
 }
 
 /**
@@ -210,6 +352,7 @@ export function MessageInput({
     setAcpModesPending,
     setCerseiProvider,
     setCerseiModel,
+    setCerseiEffort,
   } = useChatStore.use.actions();
   // Codex/other ACP agents advertise their own permission modes; show the
   // picker only when this session actually has modes (Claude uses its own pill).
@@ -303,6 +446,22 @@ export function MessageInput({
     const model = cerseiBinding.split("::")[2];
     setCerseiModel(tabId, model);
   }, [tabId, cerseiBinding, setCerseiModel]);
+  // Seed the reasoning-effort from the saved preference once per cersei session,
+  // then re-push it whenever the session is bound (mirrors the model re-push).
+  const cerseiEffort = useChatStore((s) => s.sessions[tabId]?.cerseiEffort);
+  const cerseiBound = useChatStore((s) => {
+    const sess = s.sessions[tabId];
+    return sess?.agentType === "cersei" && !!sess.acpAgentId && !!sess.acpSessionId
+      ? `${sess.acpAgentId}::${sess.acpSessionId}`
+      : null;
+  });
+  useEffect(() => {
+    if (agentType !== "cersei") return;
+    // Undefined = never set for this session → seed from the global pref.
+    const eff = cerseiEffort ?? loadCerseiEffort();
+    if (cerseiBound || cerseiEffort === undefined) setCerseiEffort(tabId, eff);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabId, agentType, cerseiBound]);
   // ACP-reported slash commands for this session (Codex). Claude keeps its
   // curated catalogue (the picker's default).
   const availableCommands = useChatStore((s) => s.sessions[tabId]?.availableCommands);
@@ -793,6 +952,9 @@ export function MessageInput({
                   onModel={onCerseiModel}
                 />
               )}
+              {agentType === "cersei" && <EffortPill tabId={tabId} />}
+              {agentType === "cersei" && <CerseiMemoryPill />}
+              {agentType === "cersei" && <CerseiUsagePill tabId={tabId} />}
               <button
                 onClick={() => {
                   // Insert a literal `@` at the caret and refocus the

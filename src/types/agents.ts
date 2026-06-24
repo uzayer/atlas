@@ -58,6 +58,8 @@ export interface Usage {
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  /** Estimated cumulative cost in USD (native agent; 0 when unknown). */
+  cost?: number;
 }
 
 /** One ACP-advertised session mode (e.g. Codex's read-only / auto / full-access). */
@@ -99,6 +101,7 @@ export type AgentDelta =
   | { kind: "model_changed"; agent_id: AgentId; session_id: AcpSessionId; model_id: string }
   | { kind: "available_commands"; agent_id: AgentId; session_id: AcpSessionId; commands: unknown[] }
   | { kind: "usage_updated"; agent_id: AgentId; session_id: AcpSessionId; usage: Usage }
+  | { kind: "compaction"; agent_id: AgentId; session_id: AcpSessionId; active: boolean }
   | {
       kind: "permission_request";
       agent_id: AgentId;

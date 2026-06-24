@@ -518,6 +518,40 @@ export function App() {
     };
     const notify = () => useNotificationsStore.getState().actions;
 
+    // After a native-agent turn that may have changed files, refresh the
+    // project's codebase index (incremental + structural — cheap, no LLM) so
+    // `search_memory` and the Memory tab stay current. Debounced per project so
+    // a burst of turns triggers one rebuild.
+    const indexTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const autoIndexAfterTurn = (acpSessionId: string) => {
+      const sessions = useChatStore.getState().sessions;
+      const sess = Object.values(sessions).find((s) => s.acpSessionId === acpSessionId);
+      if (sess?.agentType !== "cersei") return;
+      const path = sess.workingDirectory;
+      if (!path) return;
+      const existing = indexTimers.get(path);
+      if (existing) clearTimeout(existing);
+      indexTimers.set(
+        path,
+        setTimeout(() => {
+          indexTimers.delete(path);
+          // Broadcast index activity so the composer's memory pill can show
+          // "Indexing…" then refresh its status.
+          const emit = (active: boolean) =>
+            window.dispatchEvent(
+              new CustomEvent("atlas:cersei-index", { detail: { path, active } }),
+            );
+          emit(true);
+          void invoke("codebase_index_build", {
+            projectPath: path,
+            opts: { mode: "incremental", backend: "structural" },
+          })
+            .catch((err) => console.warn("auto codebase index failed:", err))
+            .finally(() => emit(false));
+        }, 4000),
+      );
+    };
+
     // Record a chat into the sidebar "Chats" (recently-invoked) list whenever a
     // session sees meaningful activity. Resolves project + title from the chat
     // session that owns this acpSessionId.
@@ -623,6 +657,8 @@ export function App() {
           // flips back to "idle" (see chat-store.ts:591).
           bufferDelta(env);
           schedule();
+          // Keep the native agent's project memory fresh (debounced, cheap).
+          if (env.stop_reason !== "cancelled") autoIndexAfterTurn(env.session_id);
           logEvent({
             source: "atlas",
             kind: "agent-turn-finished",
@@ -691,6 +727,7 @@ export function App() {
       window.removeEventListener("keydown", onUserActivity);
       window.removeEventListener("wheel", onUserActivity);
       window.clearInterval(keepWarm);
+      indexTimers.forEach((t) => clearTimeout(t));
       unlisten?.();
     };
   }, []);

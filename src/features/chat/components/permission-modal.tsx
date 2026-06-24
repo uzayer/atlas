@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-  Shield,
   CheckCircle2,
   XCircle,
   AlertTriangle,
@@ -17,12 +16,28 @@ import { Markdown } from "@/lib/markdown";
 import { extractPlanMarkdown } from "../lib/plans";
 import { extractQuestions } from "../lib/questions";
 import type { PermissionOptionRef, PendingPermission } from "@/types/acp";
+import { AGENT_LABEL, type AgentType } from "@/types/agent";
 
 function isAllow(kind: string) {
   return kind === "allow_once" || kind === "allow_always";
 }
 function isReject(kind: string) {
   return kind === "reject_once" || kind === "reject_always";
+}
+
+// Some agents bake their own brand into permission-option labels (e.g.
+// codex-acp emits "No, and tell Codex what to do differently"). Rewrite any
+// OTHER agent's brand to the agent actually bound to this session so the card
+// never names the wrong agent. Ordered longest-first to avoid partial matches.
+const AGENT_BRANDS = ["Claude Code", "Codex", "Claude"];
+function relabelAgentBrand(label: string, agentType: AgentType): string {
+  const display = (AGENT_LABEL as Record<string, string>)[agentType] ?? "the agent";
+  let out = label;
+  for (const brand of AGENT_BRANDS) {
+    if (brand === display) continue;
+    out = out.replace(new RegExp(`\\b${brand}\\b`, "g"), display);
+  }
+  return out;
 }
 
 interface PermissionModalProps {
@@ -50,6 +65,7 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
   const queueLength = useChatStore((s) =>
     acpSessionId ? (s.pendingPermissions[acpSessionId]?.length ?? 0) : 0,
   );
+  const agentType = useChatStore((s) => s.sessions[tabId]?.agentType ?? "claude-code");
   const popPermission = useChatStore.use.actions().popPermission;
 
   const [draft, setDraft] = useState("");
@@ -145,6 +161,7 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
           key={opt.optionId}
           index={i + 1}
           option={opt}
+          agentType={agentType}
           isPrimary={opt.optionId === primaryId}
           onSelect={() => resolve(opt.optionId)}
         />
@@ -294,6 +311,7 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
                 key={opt.optionId}
                 index={0}
                 option={opt}
+                agentType={agentType}
                 onSelect={() => resolve(opt.optionId)}
               />
             ))}
@@ -325,7 +343,6 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
     <div className="px-4 pt-2">
       <div className="mx-auto w-full max-w-[720px] overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--bg-elevated)] shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
         <div className="flex items-start gap-2 px-3 pt-3">
-          <Shield className="mt-0.5 size-3.5 shrink-0 text-accent" />
           <div className="flex-1 min-w-0">
             <div className="text-[13px] font-medium leading-snug text-text-primary">
               The agent wants to run{" "}
@@ -365,17 +382,20 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
 function PermissionOption({
   index,
   option,
+  agentType,
   isPrimary,
   onSelect,
 }: {
   index: number;
   option: PermissionOptionRef;
+  agentType: AgentType;
   isPrimary?: boolean;
   onSelect: () => void;
 }) {
   const allow = isAllow(option.kind);
   const reject = isReject(option.kind);
   const Icon = allow ? CheckCircle2 : reject ? XCircle : AlertTriangle;
+  const label = relabelAgentBrand(option.name, agentType);
 
   const tone = isPrimary
     ? "border-transparent bg-[var(--accent-primary)] text-[var(--bg-base)] hover:bg-[var(--accent-primary-hover)]"
@@ -403,7 +423,7 @@ function PermissionOption({
         </span>
       )}
       <Icon className="size-3.5 shrink-0" />
-      <span className="min-w-0 flex-1 font-medium break-words">{option.name}</span>
+      <span className="min-w-0 flex-1 font-medium break-words">{label}</span>
       {isPrimary && (
         <Kbd className="border-[var(--bg-base)]/20 bg-[var(--bg-base)]/10 text-[var(--bg-base)]">↵</Kbd>
       )}

@@ -41,6 +41,7 @@ export interface AgentMemory {
 export type MemorySubTab =
   | "claude"
   | "codex"
+  | "cersei"
   | "graph"
   | "policy"
   | "timeline"

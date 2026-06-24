@@ -23,11 +23,14 @@ import { MemoryTimelineView } from "./memory-timeline-view";
 import { MemoryChatView } from "./memory-chat-view";
 import { MemorySharingControls } from "./memory-sharing-controls";
 import { SharedMemoryView } from "./shared-memory-view";
+import { AtlasMemoryView } from "./atlas-memory-view";
 import { cn } from "@/lib/utils";
+import { invoke } from "@tauri-apps/api/core";
 import { PanelSkeleton } from "@/components/panel-skeleton";
 import { Markdown } from "@/lib/markdown";
 import { timeAgo } from "@/lib/time-ago";
 import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
+import { AtlasIcon } from "@/components/atlas-icon";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useMemoryStore } from "../stores/memory-store";
 import type { ClaudeMemory, CodexMemory, CodexThread } from "../lib/memory-types";
@@ -59,6 +62,19 @@ export function MemoryPanel() {
     (data?.claude.index ? 1 : 0) +
     (data?.claude.project_md ? 1 : 0) +
     (data?.claude.global_md ? 1 : 0);
+
+  // Native Atlas-agent session count for the agent picker pill (its sessions
+  // live in a separate store, not the `agent_memory_read` blob).
+  const [cerseiCount, setCerseiCount] = useState(0);
+  useEffect(() => {
+    if (!projectPath) {
+      setCerseiCount(0);
+      return;
+    }
+    invoke<unknown[]>("cersei_list_sessions", { projectPath })
+      .then((s) => setCerseiCount(s.length))
+      .catch(() => setCerseiCount(0));
+  }, [projectPath, sub]);
 
   return (
     <div className="h-full flex flex-col bg-[var(--bg-base)]">
@@ -108,6 +124,7 @@ export function MemoryPanel() {
               setSub={setSub}
               claudeCount={claudeCount}
               codexCount={codexCount}
+              cerseiCount={cerseiCount}
             />
           </PillGroup>
         </div>
@@ -143,6 +160,8 @@ export function MemoryPanel() {
               </p>
             </Centered>
           )
+        ) : sub === "cersei" ? (
+          <AtlasMemoryView projectPath={projectPath} />
         ) : loading && !data ? (
           <PanelSkeleton rows={8} />
         ) : !projectPath ? (
@@ -209,7 +228,7 @@ function Centered({ children }: { children: React.ReactNode }) {
 
 // ── Coding-agent combobox ────────────────────────────────────────────────────
 
-type AgentSub = "claude" | "codex";
+type AgentSub = "claude" | "codex" | "cersei";
 
 interface CodingAgentOption {
   sub: AgentSub;
@@ -227,21 +246,24 @@ function CodingAgentMenu({
   setSub,
   claudeCount,
   codexCount,
+  cerseiCount,
 }: {
   sub: string;
   setSub: (s: AgentSub) => void;
   claudeCount: number;
   codexCount: number;
+  cerseiCount: number;
 }) {
   const options = useMemo<CodingAgentOption[]>(
     () => [
+      { sub: "cersei", label: "Atlas", icon: <AtlasIcon size={14} />, count: cerseiCount },
       { sub: "claude", label: "Claude Code", icon: <ClaudeIcon className="size-3.5" />, count: claudeCount },
       { sub: "codex", label: "Codex", icon: <CodexIcon className="size-3.5" />, count: codexCount },
     ],
-    [claudeCount, codexCount],
+    [claudeCount, codexCount, cerseiCount],
   );
 
-  const isAgentActive = sub === "claude" || sub === "codex";
+  const isAgentActive = sub === "claude" || sub === "codex" || sub === "cersei";
   // Remember the last agent so the pill keeps its identity while the user is on
   // a non-agent tab (Graph/Policy/…).
   const [lastAgent, setLastAgent] = useState<AgentSub>(
