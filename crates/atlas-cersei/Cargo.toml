@@ -16,6 +16,9 @@ cersei = "0.1.9"
 # runner (parallel in-process sub-agents) — not re-exported by the `cersei`
 # facade. Same pin so Cargo unifies one build.
 cersei-agent = "0.1.9"
+# RTK (Rust Token Killer) tool-output compression — `CompressionLevel`, not
+# re-exported by the `cersei` facade. User-toggleable per session.
+cersei-compression = "0.1.9"
 # Cooperative cancellation of an in-flight turn (mirrors atlas-review).
 tokio-util = "0.7"
 # Shared identifiers + the EventSink / AcpEvent contract. The native runtime

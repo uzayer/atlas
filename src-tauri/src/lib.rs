@@ -97,6 +97,9 @@ pub fn run() {
             let app_state: AppStateHandle = Arc::new(Mutex::new(AppState::load(&app.handle())));
             app.manage(app_state);
             commands::agents::install_manager(&app.handle());
+            // Silent background refresh of model pricing from models.dev — first
+            // launch populates the cache; later launches update only on change.
+            commands::models_pricing::refresh_in_background(&app.handle());
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -257,6 +260,7 @@ pub fn run() {
             commands::research::load_project_session,
             commands::knowledge::list_knowledge,
             commands::knowledge::save_knowledge_note,
+            commands::knowledge::import_into_knowledge,
             commands::knowledge::delete_knowledge_note,
             commands::knowledge::create_knowledge_dir,
             commands::knowledge::log_interaction,
@@ -315,8 +319,11 @@ pub fn run() {
             commands::agents::agents_set_mode,
             commands::agents::agents_set_model,
             commands::agents::agents_set_effort,
+            commands::agents::agents_set_compress,
             commands::mcp::mcp_list,
             commands::mcp::mcp_save,
+            commands::models_pricing::models_pricing_get,
+            commands::models_pricing::models_pricing_refresh,
             commands::agents::agents_respond_permission,
             commands::agents::agents_list_auth_methods,
             commands::agents::agents_run_auth_method,

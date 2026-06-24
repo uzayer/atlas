@@ -18,6 +18,7 @@ import {
   ChevronRight,
   Paperclip,
   Maximize2,
+  Zap,
   X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -271,6 +272,13 @@ export const MessageItem = memo(function MessageItem({
           {/* Plan */}
           {message.plan && message.plan.length > 0 && (
             <PlanCard steps={message.plan} />
+          )}
+
+          {/* Per-turn usage footer (native agent) — token count + cost at the
+              end of the turn, since with the in-process agent we know the
+              model + have exact usage. */}
+          {message.usage && (message.usage.input + message.usage.output > 0) && (
+            <UsageFooter usage={message.usage} model={model ?? null} />
           )}
           </div>
         </div>
@@ -772,6 +780,41 @@ const ToolCallCard = memo(function ToolCallCard({
     </div>
   );
 });
+
+/** Compact token/cost line shown under the final message of a native-agent
+ *  turn. We know the model + have exact usage, so surface it inline. */
+function UsageFooter({
+  usage,
+  model,
+}: {
+  usage: { input: number; output: number; cost: number; saved?: number };
+  model: string | null;
+}) {
+  const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+  const cost =
+    usage.cost > 0 ? ` · $${usage.cost.toFixed(usage.cost < 1 ? 4 : 2)}` : "";
+  const saved = usage.saved ?? 0;
+  return (
+    <div className="flex items-center gap-2 pt-1 text-[10px] text-[var(--text-tertiary)] tabular-nums select-none">
+      <span
+        title={`${usage.input.toLocaleString()} input + ${usage.output.toLocaleString()} output tokens${
+          usage.cost > 0 ? ` · est. $${usage.cost.toFixed(4)}` : ""
+        }`}
+      >
+        ↑ {fmt(usage.input)} ↓ {fmt(usage.output)} · {fmt(usage.input + usage.output)} tokens{cost}
+      </span>
+      {model && <span className="text-[var(--text-tertiary)]/70">· {model}</span>}
+      {saved > 0 && (
+        <span
+          className="flex items-center gap-1 rounded-full border border-[var(--status-success)]/30 px-1.5 py-px text-[var(--status-success)]"
+          title="Tokens saved by RTK tool-output compression this turn"
+        >
+          <Zap size={9} className="fill-current" />~{fmt(saved)} saved
+        </span>
+      )}
+    </div>
+  );
+}
 
 /** Per-source tint for a recalled memory snippet. */
 const MEMORY_SOURCE_STYLE: Record<string, string> = {

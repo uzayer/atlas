@@ -432,6 +432,7 @@ dependencies = [
  "atlas-acp",
  "cersei",
  "cersei-agent",
+ "cersei-compression",
  "chrono",
  "dashmap",
  "parking_lot",

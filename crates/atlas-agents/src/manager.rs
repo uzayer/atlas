@@ -288,8 +288,25 @@ impl AgentManager {
     }
 
     /// Stored native-agent sessions for a project (chat session sidebar).
+    ///
+    /// The stored first-user message carries Atlas-injected context (memory
+    /// blocks, mention bodies). Strip that scaffolding from the preview/title
+    /// here — on the FULL text — then truncate, so the sidebar shows the user's
+    /// actual question instead of a "New session" fallback.
     pub fn cersei_list_sessions(&self, cwd: &str) -> Vec<atlas_cersei::SessionMeta> {
-        self.inner.cersei.list_sessions(cwd)
+        let mut metas = self.inner.cersei.list_sessions(cwd);
+        for m in &mut metas {
+            let cleaned = crate::transcript::strip_injected_context(&m.preview);
+            let cleaned = cleaned.trim();
+            if !cleaned.is_empty() {
+                m.preview = cleaned.chars().take(80).collect();
+            } else {
+                // Nothing but injected scaffolding — keep a sane truncation of
+                // the raw text rather than an empty title.
+                m.preview = m.preview.chars().take(80).collect();
+            }
+        }
+        metas
     }
 
     /// UI-neutral transcript for a stored native-agent session (Memory tab).
@@ -339,6 +356,10 @@ impl AgentManager {
 
     pub fn set_effort(&self, key: &SessionKey, effort: String) -> Result<()> {
         self.handle_for(key)?.send(SessionCommand::SetEffort(effort))
+    }
+
+    pub fn set_compress(&self, key: &SessionKey, on: bool) -> Result<()> {
+        self.handle_for(key)?.send(SessionCommand::SetCompress(on))
     }
 
     /// Resolve a pending permission request.
@@ -585,6 +606,16 @@ impl AgentManager {
                         agent_id,
                         session_id: sid,
                         delta: SessionDelta::Compaction { active },
+                    });
+                }
+            }
+            AcpEvent::CompressionSaved { session_id, saved_tokens } => {
+                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
+                    let sid = handle.state.lock().session_id.clone();
+                    self.emit(SessionDeltaEnvelope {
+                        agent_id,
+                        session_id: sid,
+                        delta: SessionDelta::CompressionSaved { saved_tokens },
                     });
                 }
             }

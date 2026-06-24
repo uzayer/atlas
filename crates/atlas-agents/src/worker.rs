@@ -32,6 +32,7 @@ pub enum SessionCommand {
     SetMode(String),
     SetModel(String),
     SetEffort(String),
+    SetCompress(bool),
 }
 
 pub struct SessionWorker {
@@ -89,6 +90,16 @@ impl SessionWorker {
                             .set_effort(self.agent_id, &self.acp_session_id, effort)
                     {
                         tracing::warn!(target: "atlas_agents::worker", "set_effort failed: {e}");
+                    }
+                }
+                SessionCommand::SetCompress(on) => {
+                    // Native-agent only; applied to the next turn's RTK
+                    // compression. UI owns the toggle state optimistically.
+                    if let Err(e) =
+                        self.backend
+                            .set_compress(self.agent_id, &self.acp_session_id, on)
+                    {
+                        tracing::warn!(target: "atlas_agents::worker", "set_compress failed: {e}");
                     }
                 }
             }

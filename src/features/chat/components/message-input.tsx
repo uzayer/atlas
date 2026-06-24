@@ -17,7 +17,7 @@ import { agents } from "../lib/agents-api";
 import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL } from "@/types/agent";
 import { AgentMark } from "@/components/agent-mark";
 import { ProviderModelPills } from "./provider-model-pills";
-import { loadCerseiEffort } from "../lib/cersei-model-pref";
+import { loadCerseiEffort, loadCerseiCompress } from "../lib/cersei-model-pref";
 // `ChatInput` pulls in CodeMirror (~870 KB) via `cm-mention-extension`.
 // We import it dynamically so the chunk is not in the initial preload set.
 // The import is kicked off at module-evaluation time (below, outside the
@@ -97,9 +97,10 @@ function acpModeColor(modeId: string | undefined): string {
 
 interface CodebaseIndexStatus {
   indexed: boolean;
-  file_count: number;
-  summary_count: number;
-  built_at_ms: number;
+  // Rust serializes this struct as camelCase (see codebase_index.rs).
+  fileCount: number;
+  summaryCount: number;
+  builtAtMs: number;
 }
 
 /** Codebase-index status pill for the native agent — the index that grounds
@@ -150,7 +151,7 @@ function CerseiMemoryPill() {
   const label = indexing
     ? "Indexing…"
     : status?.indexed
-      ? `${status.file_count} indexed`
+      ? `${status.fileCount} indexed`
       : "Index memory";
 
   return (
@@ -353,6 +354,7 @@ export function MessageInput({
     setCerseiProvider,
     setCerseiModel,
     setCerseiEffort,
+    setCerseiCompress,
   } = useChatStore.use.actions();
   // Codex/other ACP agents advertise their own permission modes; show the
   // picker only when this session actually has modes (Claude uses its own pill).
@@ -460,6 +462,14 @@ export function MessageInput({
     // Undefined = never set for this session → seed from the global pref.
     const eff = cerseiEffort ?? loadCerseiEffort();
     if (cerseiBound || cerseiEffort === undefined) setCerseiEffort(tabId, eff);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabId, agentType, cerseiBound]);
+  // Same seed/re-push for the RTK compression toggle.
+  const cerseiCompress = useChatStore((s) => s.sessions[tabId]?.cerseiCompress);
+  useEffect(() => {
+    if (agentType !== "cersei") return;
+    const on = cerseiCompress ?? loadCerseiCompress();
+    if (cerseiBound || cerseiCompress === undefined) setCerseiCompress(tabId, on);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabId, agentType, cerseiBound]);
   // ACP-reported slash commands for this session (Codex). Claude keeps its
@@ -950,6 +960,8 @@ export function MessageInput({
                   model={cerseiModel}
                   onProvider={onCerseiProvider}
                   onModel={onCerseiModel}
+                  compress={cerseiCompress ?? true}
+                  onCompress={(on) => setCerseiCompress(tabId, on)}
                 />
               )}
               {agentType === "cersei" && <EffortPill tabId={tabId} />}

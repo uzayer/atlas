@@ -102,6 +102,7 @@ export type AgentDelta =
   | { kind: "available_commands"; agent_id: AgentId; session_id: AcpSessionId; commands: unknown[] }
   | { kind: "usage_updated"; agent_id: AgentId; session_id: AcpSessionId; usage: Usage }
   | { kind: "compaction"; agent_id: AgentId; session_id: AcpSessionId; active: boolean }
+  | { kind: "compression_saved"; agent_id: AgentId; session_id: AcpSessionId; saved_tokens: number }
   | {
       kind: "permission_request";
       agent_id: AgentId;

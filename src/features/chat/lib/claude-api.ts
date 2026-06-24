@@ -15,6 +15,9 @@ export interface ClaudeSessionMeta {
   last_modified: string | null;
   message_count: number;
   preview: string;
+  /** Cumulative tokens processed across the session (native Atlas agent only;
+   *  Claude/Codex disk rows omit it → undefined). */
+  total_tokens?: number;
 }
 
 export interface ToolCallDump {

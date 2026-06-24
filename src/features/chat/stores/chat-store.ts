@@ -18,7 +18,7 @@ import type {
 } from "@/types/agents";
 import { splitAtlasContext } from "../lib/atlas-context";
 import { loadCachedAcpModes, saveCachedAcpModes } from "../lib/acp-modes-cache";
-import { saveCerseiModelPref, saveCerseiEffort } from "../lib/cersei-model-pref";
+import { saveCerseiModelPref, saveCerseiEffort, saveCerseiCompress } from "../lib/cersei-model-pref";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
 
@@ -79,6 +79,17 @@ function pushCerseiEffortToAgent(state: ChatState, sessionId: string): void {
     key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
     effort: session.cerseiEffort ?? "",
   }).catch((err) => console.warn("agents_set_effort failed:", err));
+}
+
+/** Push the native agent's RTK compression toggle via `agents_set_compress`. */
+function pushCerseiCompressToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId) return;
+  if (session.agentType !== "cersei") return;
+  void invoke("agents_set_compress", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    on: session.cerseiCompress ?? true,
+  }).catch((err) => console.warn("agents_set_compress failed:", err));
 }
 
 /** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
@@ -183,6 +194,8 @@ interface ChatActions {
     setCerseiModel: (sessionId: string, model: string) => void;
     /** Native Cersei agent: set the reasoning-effort level and push it. */
     setCerseiEffort: (sessionId: string, effort: string) => void;
+    /** Native Cersei agent: toggle RTK tool-output compression and push it. */
+    setCerseiCompress: (sessionId: string, on: boolean) => void;
     replaceMessages: (
       sessionId: string,
       messages: Array<{
@@ -640,6 +653,14 @@ export const useChatStore = createSelectors(
           saveCerseiEffort(effort);
           pushCerseiEffortToAgent(get(), sessionId);
         },
+        setCerseiCompress: (sessionId, on) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.cerseiCompress = on;
+          });
+          saveCerseiCompress(on);
+          pushCerseiCompressToAgent(get(), sessionId);
+        },
         replaceMessages: (sessionId, messages) =>
           set((s) => {
             const session = s.sessions[sessionId];
@@ -969,6 +990,33 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
         env.stop_reason === "cancelled"
           ? "idle"
           : "error";
+      // Per-turn usage footer (native agent): derive this turn's tokens/cost as
+      // the delta from the previous turn's cumulative snapshot, and attach it to
+      // the trailing assistant message so it renders at the end of the turn.
+      if (session.usage && session.agentType === "cersei") {
+        const cum = {
+          input: session.usage.input_tokens ?? 0,
+          output: session.usage.output_tokens ?? 0,
+          cost: session.usage.cost ?? 0,
+        };
+        const prev = session.lastUsageSnapshot ?? { input: 0, output: 0, cost: 0 };
+        const turn = {
+          input: Math.max(0, cum.input - prev.input),
+          output: Math.max(0, cum.output - prev.output),
+          cost: Math.max(0, cum.cost - prev.cost),
+          saved: session.pendingSavedTokens ?? 0,
+        };
+        session.lastUsageSnapshot = cum;
+        session.pendingSavedTokens = undefined;
+        if (turn.input + turn.output > 0) {
+          for (let i = session.messages.length - 1; i >= 0; i--) {
+            if (session.messages[i].role === "assistant") {
+              session.messages[i].usage = turn;
+              break;
+            }
+          }
+        }
+      }
       return;
     }
     case "turn_failed": {
@@ -1089,6 +1137,11 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
     }
     case "compaction": {
       session.compacting = env.active;
+      return;
+    }
+    case "compression_saved": {
+      // Stashed until turn_finished folds it into the message's usage footer.
+      session.pendingSavedTokens = env.saved_tokens;
       return;
     }
     case "model_changed": {

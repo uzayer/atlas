@@ -39,6 +39,7 @@ import {
 } from "@/features/chat/stores/recent-files-store";
 import { useRecentChatsStore } from "@/features/workspaces/stores/recent-chats-store";
 import { stripInjectedContext } from "@/features/chat/lib/atlas-context";
+import { openNewAgentChat } from "@/features/chat/lib/open-agent-session";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useNodeSetupStore } from "@/features/node-setup/stores/node-setup-store";
 import {
@@ -1027,26 +1028,26 @@ export function App() {
           (sess?.agentType ?? "claude-code") as (typeof SWITCHABLE_AGENTS)[number]
         );
         const next = SWITCHABLE_AGENTS[(Math.max(curIdx, 0) + 1) % SWITCHABLE_AGENTS.length];
+        // Empty chat flips agent in place. A started chat always starts a fresh
+        // session in the SAME tab bound to the next agent (singleton model —
+        // never a new tab, even mid-stream; the abandoned turn persists to the
+        // history sidebar).
         if ((sess?.messages.length ?? 0) === 0) {
           chat.actions.switchChatAgent(tab.id, next);
         } else {
-          const id = `chat-${Date.now()}`;
-          chat.actions.createSession(id, next);
-          addTab({ id, type: "chat", title: "New Chat", closable: true, dirty: false, data: {} });
+          chat.actions.clearSession(tab.id);
+          chat.actions.switchChatAgent(tab.id, next);
+          window.dispatchEvent(
+            new CustomEvent("atlas:chat-focus", { detail: { tabId: tab.id } }),
+          );
         }
       },
     },
     {
+      // ⌘T — new agent chat. Singleton: focuses the existing chat tab and resets
+      // it to a fresh session rather than opening a second chat tab.
       combo: { key: "t", meta: true },
-      action: () =>
-        addTab({
-          id: `chat-${Date.now()}`,
-          type: "chat",
-          title: "New Chat",
-          closable: true,
-          dirty: false,
-          data: {},
-        }),
+      action: () => openNewAgentChat(),
     },
     {
       // ⌘N — new untitled editor. The synthetic `untitled:<ts>` path

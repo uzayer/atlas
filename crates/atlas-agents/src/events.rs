@@ -60,6 +60,10 @@ pub enum SessionDelta {
     Compaction {
         active: bool,
     },
+    /// Approx tokens RTK compression saved on this turn (native agent).
+    CompressionSaved {
+        saved_tokens: u64,
+    },
     /// Agent requested permission for a tool call. The UI's permission inbox
     /// owns this — `respond_permission` resolves it back through atlas-acp.
     PermissionRequest {

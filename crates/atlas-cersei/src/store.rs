@@ -40,6 +40,15 @@ pub fn byok_providers(config_dir: &Path) -> Vec<String> {
     store.into_keys().collect()
 }
 
+/// Cumulative token/cost usage for a session, accumulated across turns. Serde
+/// `default` so older session files (written before usage was tracked) load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StoredUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: f64,
+}
+
 /// Persisted session document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
@@ -49,6 +58,8 @@ pub struct StoredSession {
     pub provider: String,
     pub model: String,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub usage: StoredUsage,
 }
 
 /// Sidebar-facing session metadata. Deliberately shaped like the frontend's
@@ -62,6 +73,8 @@ pub struct SessionMeta {
     pub last_modified: Option<String>,
     pub message_count: usize,
     pub preview: String,
+    /// Cumulative tokens processed (input + output) across the session's turns.
+    pub total_tokens: u64,
 }
 
 fn cwd_hash(cwd: &str) -> String {
@@ -91,6 +104,7 @@ pub fn save(
     model: &str,
     messages: &[Message],
     updated_at: &str,
+    usage: &StoredUsage,
 ) {
     let dir = project_dir(config_dir, cwd);
     if let Err(e) = fs::create_dir_all(&dir) {
@@ -104,6 +118,7 @@ pub fn save(
         provider: provider.to_string(),
         model: model.to_string(),
         messages: messages.to_vec(),
+        usage: usage.clone(),
     };
     match serde_json::to_string(&doc) {
         Ok(json) => {
@@ -137,6 +152,7 @@ pub fn list(config_dir: &Path, cwd: &str) -> Vec<SessionMeta> {
             Some(SessionMeta {
                 preview: first_user_text(&doc.messages).unwrap_or_else(|| "New session".into()),
                 message_count: doc.messages.len(),
+                total_tokens: doc.usage.input_tokens + doc.usage.output_tokens,
                 id: doc.session_id,
                 file_path: path.to_string_lossy().into_owned(),
                 started_at: Some(doc.updated_at.clone()),
@@ -168,7 +184,7 @@ mod tests {
         let dir = temp_dir();
         let cwd = "/proj/a";
         let msgs = vec![Message::user("hello"), Message::assistant("hi there")];
-        save(&dir, cwd, "s1", "anthropic", "claude-opus-4-8", &msgs, "2026-06-23T00:00:00Z");
+        save(&dir, cwd, "s1", "anthropic", "claude-opus-4-8", &msgs, "2026-06-23T00:00:00Z", &StoredUsage::default());
 
         let loaded = load(&dir, cwd, "s1").expect("session should load");
         assert_eq!(loaded.session_id, "s1");
@@ -183,14 +199,16 @@ mod tests {
     fn list_is_newest_first_with_preview() {
         let dir = temp_dir();
         let cwd = "/proj/list";
-        save(&dir, cwd, "old", "openai", "gpt-5.1", &[Message::user("first task")], "2026-06-23T00:00:00Z");
-        save(&dir, cwd, "new", "openai", "gpt-5.1", &[Message::user("second task")], "2026-06-23T12:00:00Z");
+        save(&dir, cwd, "old", "openai", "gpt-5.1", &[Message::user("first task")], "2026-06-23T00:00:00Z", &StoredUsage { input_tokens: 100, output_tokens: 50, cost: 0.01 });
+        save(&dir, cwd, "new", "openai", "gpt-5.1", &[Message::user("second task")], "2026-06-23T12:00:00Z", &StoredUsage::default());
 
         let metas = list(&dir, cwd);
         assert_eq!(metas.len(), 2);
         assert_eq!(metas[0].id, "new", "newest session must sort first");
         assert_eq!(metas[0].preview, "second task");
         assert_eq!(metas[0].message_count, 1);
+        // Usage persists + surfaces as cumulative total_tokens (oldest session).
+        assert_eq!(metas[1].total_tokens, 150);
     }
 
     #[test]
@@ -216,8 +234,11 @@ mod tests {
     }
 }
 
-/// First user message's text, truncated — used as the session title.
-fn first_user_text(messages: &[Message]) -> Option<String> {
+/// First user message's FULL text — used as the session title/preview. Returned
+/// untruncated so the caller can strip Atlas-injected context (which may be
+/// prepended) from the whole block before truncating; truncating here first
+/// would chop an injected block mid-way and defeat the strip.
+pub fn first_user_text(messages: &[Message]) -> Option<String> {
     use cersei::types::{ContentBlock, MessageContent, Role};
     for m in messages {
         if m.role != Role::User {
@@ -237,8 +258,7 @@ fn first_user_text(messages: &[Message]) -> Option<String> {
         if text.is_empty() {
             continue;
         }
-        let title: String = text.chars().take(80).collect();
-        return Some(title);
+        return Some(text.to_string());
     }
     None
 }

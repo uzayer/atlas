@@ -55,6 +55,10 @@ pub trait AgentBackend: Send + Sync {
     fn set_effort(&self, _agent_id: AgentId, _session_id: &SessionId, _effort: String) -> AcpResult<()> {
         Ok(())
     }
+    /// Toggle RTK tool-output compression. Default: no-op (native agent only).
+    fn set_compress(&self, _agent_id: AgentId, _session_id: &SessionId, _on: bool) -> AcpResult<()> {
+        Ok(())
+    }
     fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<()>;
     fn cancel_turn(&self, agent_id: AgentId, session_id: SessionId) -> AcpResult<()>;
     fn respond_permission(
@@ -184,6 +188,9 @@ impl AgentBackend for CerseiBackend {
     }
     fn set_effort(&self, agent_id: AgentId, session_id: &SessionId, effort: String) -> AcpResult<()> {
         self.0.set_effort(agent_id, &session_id_str(session_id), effort)
+    }
+    fn set_compress(&self, agent_id: AgentId, session_id: &SessionId, on: bool) -> AcpResult<()> {
+        self.0.set_compress(agent_id, &session_id_str(session_id), on)
     }
     fn mark_turn_started(&self, _agent_id: AgentId, _session_id: &SessionId) -> AcpResult<()> {
         Ok(())

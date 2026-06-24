@@ -118,6 +118,91 @@ pub async fn save_knowledge_note(
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Debug, Serialize, Default)]
+pub struct KbImportResult {
+    pub notes_imported: usize,
+    pub files_copied: usize,
+}
+
+/// A destination path that doesn't clobber an existing file — appends `-1`,
+/// `-2`, … before the extension. Import must never overwrite existing notes.
+fn unique_dest(dest: &Path) -> std::path::PathBuf {
+    if !dest.exists() {
+        return dest.to_path_buf();
+    }
+    let stem = dest.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let ext = dest.extension().map(|e| e.to_string_lossy().to_string());
+    let parent = dest.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    for n in 1.. {
+        let name = match &ext {
+            Some(e) => format!("{stem}-{n}.{e}"),
+            None => format!("{stem}-{n}"),
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// Recursively copy `src` (relative to `rel` under `kb`) into the KB dir. `.md`
+/// files become notes; other files (images, code, attachments) are copied so an
+/// imported vault stays intact. Hidden entries (`.obsidian`, `.git`, …) skipped.
+fn import_path(src: &Path, rel: &Path, kb: &Path, res: &mut KbImportResult) -> Result<(), String> {
+    if src.is_dir() {
+        for entry in fs::read_dir(src).map_err(|e| e.to_string())?.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            import_path(&entry.path(), &rel.join(&name), kb, res)?;
+        }
+        Ok(())
+    } else if src.is_file() {
+        let dest = unique_dest(&kb.join(rel));
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::copy(src, &dest).map_err(|e| e.to_string())?;
+        let is_md = src
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+            .unwrap_or(false);
+        if is_md {
+            res.notes_imported += 1;
+        } else {
+            res.files_copied += 1;
+        }
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+
+/// Import external `.md` files and/or folders (e.g. an Obsidian vault) into the
+/// project KB at `.atlas/knowledge/`, preserving folder structure. Folder
+/// sources are namespaced under their own name so the vault layout is kept.
+#[tauri::command]
+pub async fn import_into_knowledge(
+    project_path: String,
+    sources: Vec<String>,
+) -> Result<KbImportResult, String> {
+    tokio::task::spawn_blocking(move || -> Result<KbImportResult, String> {
+        let kb = Path::new(&project_path).join(".atlas").join("knowledge");
+        fs::create_dir_all(&kb).map_err(|e| e.to_string())?;
+        let mut res = KbImportResult::default();
+        for src in &sources {
+            let p = Path::new(src);
+            let Some(name) = p.file_name() else { continue };
+            import_path(p, Path::new(name), &kb, &mut res)?;
+        }
+        Ok(res)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Delete a knowledge note
 #[tauri::command]
 pub async fn delete_knowledge_note(

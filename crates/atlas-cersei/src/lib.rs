@@ -13,6 +13,7 @@
 //! atlas-agents can route to either backend.
 
 mod context;
+mod cwd_tool;
 mod mcp;
 mod memory;
 mod provider;
@@ -136,6 +137,11 @@ struct SessionEntry {
     /// default. Only applied for providers that support a thinking budget
     /// (Anthropic) — ignored elsewhere.
     effort: Mutex<Option<String>>,
+    /// Whether RTK tool-output compression is enabled (token savings). Default on.
+    compress: Mutex<bool>,
+    /// Cumulative token/cost usage across the session's turns — persisted so the
+    /// "tokens processed" figure survives a reload.
+    usage: Mutex<store::StoredUsage>,
     /// Cancellation token for the in-flight turn, if any.
     cancel: Mutex<Option<CancellationToken>>,
     /// Pending permission requests awaiting a UI decision.
@@ -192,6 +198,8 @@ impl CerseiRuntime {
             model: Mutex::new(model),
             mode: Mutex::new("default".into()),
             effort: Mutex::new(None),
+            compress: Mutex::new(true),
+            usage: Mutex::new(store::StoredUsage::default()),
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: AtomicBool::new(false),
@@ -216,11 +224,11 @@ impl CerseiRuntime {
         let sid = session_id_str(&session_id);
         let cwd_str = cwd.to_string_lossy().into_owned();
         let stored = store::load(&self.inner.config_dir, &cwd_str, &sid);
-        let (provider, model, history) = match stored {
-            Some(doc) => (doc.provider, doc.model, doc.messages),
+        let (provider, model, history, usage) = match stored {
+            Some(doc) => (doc.provider, doc.model, doc.messages, doc.usage),
             None => {
                 let (p, m) = self.default_provider_model();
-                (p, m, Vec::new())
+                (p, m, Vec::new(), store::StoredUsage::default())
             }
         };
         let entry = Arc::new(SessionEntry {
@@ -231,6 +239,8 @@ impl CerseiRuntime {
             model: Mutex::new(model),
             mode: Mutex::new("default".into()),
             effort: Mutex::new(None),
+            compress: Mutex::new(true),
+            usage: Mutex::new(usage),
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: AtomicBool::new(false),
@@ -285,6 +295,13 @@ impl CerseiRuntime {
         } else {
             Some(effort)
         };
+        Ok(())
+    }
+
+    /// Toggle RTK tool-output compression for the session (token savings).
+    pub fn set_compress(&self, agent_id: AgentId, session_id: &str, on: bool) -> Result<()> {
+        let entry = self.session(agent_id, session_id)?;
+        *entry.compress.lock() = on;
         Ok(())
     }
 
@@ -369,6 +386,7 @@ impl CerseiRuntime {
         let history = entry.history.lock().clone();
         let mode = entry.mode.lock().clone();
         let effort = entry.effort.lock().clone();
+        let compress = *entry.compress.lock();
 
         let policy = UiPolicy {
             sink: sink.clone(),
@@ -400,10 +418,13 @@ impl CerseiRuntime {
                 provider::build_provider(&pid, &key, &m).expect("delegate provider rebuild")
             })
         };
-        let toolset_factory: ToolsetFactory = Arc::new(|| cersei::tools::coding());
+        // Sub-agents (delegate) get the same cwd-resolving file tools — the raw
+        // SDK file tools ignore the working dir (see `cwd_tool`).
+        let toolset_factory: ToolsetFactory =
+            Arc::new(|| crate::cwd_tool::wrap_file_tools(cersei::tools::coding()));
 
         let mut tools = {
-            let mut t = cersei::tools::coding();
+            let mut t = crate::cwd_tool::wrap_file_tools(cersei::tools::coding());
             t.extend(cersei::tools::planning());
             t.push(Box::new(
                 DelegateTool::new(provider_factory, toolset_factory).with_model(model.clone()),
@@ -455,7 +476,14 @@ impl CerseiRuntime {
             .system_prompt(system_prompt)
             .model(model.clone())
             .max_turns(50)
-            .auto_compact(true);
+            .auto_compact(true)
+            // RTK tool-output compression — Minimal when on (safe token savings),
+            // Off when the user disabled it.
+            .compression_level(if compress {
+                cersei_compression::CompressionLevel::Minimal
+            } else {
+                cersei_compression::CompressionLevel::Off
+            });
         // Reasoning effort → thinking budget. Only Anthropic exposes a usable
         // per-request thinking budget today; other providers ignore it, so we
         // only apply it there to avoid surprising behavior.
@@ -475,8 +503,15 @@ impl CerseiRuntime {
         // TodoWrite tool-call ids — surfaced as plan cards, so their tool
         // start/end are suppressed from the raw tool-card stream.
         let mut todo_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // RTK savings accounting: mirror cersei's per-tool-output compression to
+        // measure how many tokens it saved this turn (cersei doesn't report it).
+        let mut acct = CompressAccount::new(if compress {
+            cersei_compression::CompressionLevel::Minimal
+        } else {
+            cersei_compression::CompressionLevel::Off
+        });
         while let Some(ev) = stream.next().await {
-            match translate_event(ev, &sink, agent_id, &session_id, &mut todo_ids) {
+            match translate_event(ev, &sink, agent_id, &session_id, &mut todo_ids, &mut acct) {
                 TurnStep::Continue => {}
                 TurnStep::SetStop(s) => stop = s,
                 TurnStep::Done(s) => {
@@ -498,6 +533,29 @@ impl CerseiRuntime {
             stop = "cancelled".to_string();
         }
 
+        // Report RTK compression savings for the turn (≈ chars/4 tokens).
+        let saved_tokens = acct.saved_chars / 4;
+        if saved_tokens > 0 {
+            sink.emit(
+                agent_id,
+                AcpEvent::CompressionSaved {
+                    session_id: session_id.clone(),
+                    saved_tokens,
+                },
+            );
+        }
+
+        // Fold this turn's usage into the session's cumulative total (cersei's
+        // per-turn cumulative counters reset because the agent is rebuilt each
+        // turn) so "tokens processed" persists across reloads.
+        let usage_snapshot = {
+            let mut u = entry.usage.lock();
+            u.input_tokens += acct.input_tokens;
+            u.output_tokens += acct.output_tokens;
+            u.cost += acct.cost;
+            u.clone()
+        };
+
         // Persist the updated conversation for resume + context continuation.
         let msgs = built.messages();
         *entry.history.lock() = msgs.clone();
@@ -510,6 +568,7 @@ impl CerseiRuntime {
             &model,
             &msgs,
             &now,
+            &usage_snapshot,
         );
         *entry.cancel.lock() = None;
         Ok(stop)
@@ -553,6 +612,34 @@ impl CerseiRuntime {
 
 // ─── Permission policy ────────────────────────────────────────────────────────
 
+/// The four permission behaviors the native agent supports. We map onto these
+/// from whatever mode-id string arrives so a bypass/plan/accept id from another
+/// agent's vocabulary still does the right thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeKind {
+    Ask,
+    AcceptEdits,
+    Plan,
+    Bypass,
+}
+
+/// Normalize a mode id to a [`ModeKind`], tolerant of aliases from Claude Code /
+/// Codex (e.g. `bypassPermissions`, `danger-full-access`, `read-only`).
+fn mode_kind(mode: &str) -> ModeKind {
+    let m = mode.to_ascii_lowercase().replace(['-', '_', ' '], "");
+    match m.as_str() {
+        "bypass" | "bypasspermissions" | "dangerfullaccess" | "fullaccess" | "yolo" => {
+            ModeKind::Bypass
+        }
+        "plan" | "readonly" | "planmode" => ModeKind::Plan,
+        "acceptedits" | "accept" | "autoedit" | "autoedits" | "auto" | "edit" => {
+            ModeKind::AcceptEdits
+        }
+        // "default" / "ask" / unknown → prompt.
+        _ => ModeKind::Ask,
+    }
+}
+
 struct UiPolicy {
     sink: Arc<dyn EventSink>,
     agent_id: AgentId,
@@ -564,10 +651,15 @@ struct UiPolicy {
 #[async_trait]
 impl PermissionPolicy for UiPolicy {
     async fn check(&self, request: &PermissionRequest) -> CerseiDecision {
-        // Mode shortcuts that don't need a prompt.
-        match self.mode.as_str() {
-            "bypass" => return CerseiDecision::Allow,
-            "plan" => {
+        // Mode shortcuts that don't need a prompt. Normalize first — the mode id
+        // can arrive from another agent's vocabulary (Claude's
+        // "bypassPermissions", Codex's "danger-full-access", etc.) if a mode
+        // picker seeded cross-agent ids, so we match on the normalized KIND
+        // rather than the exact cersei id. Without this, "Bypass" silently fell
+        // through to prompting on every action.
+        match mode_kind(&self.mode) {
+            ModeKind::Bypass => return CerseiDecision::Allow,
+            ModeKind::Plan => {
                 return match request.permission_level {
                     PermissionLevel::None | PermissionLevel::ReadOnly => CerseiDecision::Allow,
                     _ => CerseiDecision::Deny(
@@ -575,7 +667,7 @@ impl PermissionPolicy for UiPolicy {
                     ),
                 };
             }
-            "acceptEdits" => {
+            ModeKind::AcceptEdits => {
                 // Auto-allow file edits/reads; still prompt for shell/dangerous.
                 if matches!(
                     request.permission_level,
@@ -584,7 +676,7 @@ impl PermissionPolicy for UiPolicy {
                     return CerseiDecision::Allow;
                 }
             }
-            _ => {}
+            ModeKind::Ask => {}
         }
         if matches!(request.permission_level, PermissionLevel::Forbidden) {
             return CerseiDecision::Deny("This operation is not permitted.".into());
@@ -650,6 +742,34 @@ fn map_decision(d: atlas_acp::PermissionDecision) -> CerseiDecision {
 
 // ─── Turn-stream event translation ──────────────────────────────────────────
 
+/// Mirrors cersei's per-tool-output RTK compression to measure the tokens it
+/// saves this turn (the SDK applies compression but never reports the savings).
+struct CompressAccount {
+    level: cersei_compression::CompressionLevel,
+    saved_chars: u64,
+    /// tool-call id → (name, input), captured at ToolStart for the ToolEnd calc.
+    inputs: std::collections::HashMap<String, (String, serde_json::Value)>,
+    /// Latest cumulative usage seen in a `CostUpdate` this turn — persisted so
+    /// "tokens processed" survives reload (cersei rebuilds the agent per turn,
+    /// so its cumulative counters reset; we accumulate across turns ourselves).
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: f64,
+}
+
+impl CompressAccount {
+    fn new(level: cersei_compression::CompressionLevel) -> Self {
+        Self {
+            level,
+            saved_chars: 0,
+            inputs: std::collections::HashMap::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: 0.0,
+        }
+    }
+}
+
 /// Outcome of translating one Cersei `AgentEvent` in the turn loop.
 enum TurnStep {
     /// Keep streaming.
@@ -672,6 +792,7 @@ fn translate_event(
     agent_id: AgentId,
     session_id: &SessionId,
     todo_ids: &mut std::collections::HashSet<String>,
+    acct: &mut CompressAccount,
 ) -> TurnStep {
     use cersei::events::AgentEvent as E;
     match ev {
@@ -689,6 +810,10 @@ fn translate_event(
                 todo_ids.insert(id.clone());
                 emit_plan(sink, agent_id, session_id, &input);
             } else {
+                // Cache (name, input) so ToolEnd can compute compression savings.
+                if !acct.level.is_off() {
+                    acct.inputs.insert(id.clone(), (name.clone(), input.clone()));
+                }
                 emit_tool_call(sink, agent_id, session_id, &id, &name, input);
             }
             TurnStep::Continue
@@ -700,6 +825,17 @@ fn translate_event(
             // completion so no phantom tool card appears.
             if !todo_ids.contains(&id) {
                 emit_tool_update(sink, agent_id, session_id, &id, &result, is_error);
+                // Measure what RTK compression would shave off this result —
+                // exactly what cersei feeds the model (errors are sent raw).
+                if !is_error {
+                    if let Some((name, input)) = acct.inputs.remove(&id) {
+                        let compressed = cersei_compression::compress_tool_output(
+                            &name, &input, &result, acct.level,
+                        );
+                        acct.saved_chars +=
+                            (result.len() as u64).saturating_sub(compressed.len() as u64);
+                    }
+                }
             }
             TurnStep::Continue
         }
@@ -709,6 +845,11 @@ fn translate_event(
             output_tokens,
             ..
         } => {
+            // Remember the latest cumulative figures so the caller can fold them
+            // into the session's persisted total after the turn.
+            acct.input_tokens = input_tokens;
+            acct.output_tokens = output_tokens;
+            acct.cost = cumulative_cost;
             sink.emit(
                 agent_id,
                 AcpEvent::Usage {
@@ -1005,7 +1146,8 @@ mod tests {
         let (s, c) = sink();
         let sid = SessionId::new("sess-1".to_string());
         let mut todo = std::collections::HashSet::new();
-        let step = translate_event(ev, &s, AgentId::new(), &sid, &mut todo);
+        let mut acct = CompressAccount::new(cersei_compression::CompressionLevel::Off);
+        let step = translate_event(ev, &s, AgentId::new(), &sid, &mut todo, &mut acct);
         (c, step)
     }
 
@@ -1043,6 +1185,7 @@ mod tests {
         let (s, c) = sink();
         let sid = SessionId::new("sess-1".to_string());
         let mut todo = std::collections::HashSet::new();
+        let mut acct = CompressAccount::new(cersei_compression::CompressionLevel::Off);
         translate_event(
             E::ToolStart {
                 name: "TodoWrite".into(),
@@ -1058,6 +1201,7 @@ mod tests {
             AgentId::new(),
             &sid,
             &mut todo,
+            &mut acct,
         );
         // Rendered as a plan card, and the id is tracked for ToolEnd suppression.
         assert!(todo.contains("td1"));
@@ -1076,6 +1220,7 @@ mod tests {
         let sid = SessionId::new("sess-1".to_string());
         let mut todo = std::collections::HashSet::new();
         todo.insert("td1".to_string());
+        let mut acct = CompressAccount::new(cersei_compression::CompressionLevel::Off);
         let step = translate_event(
             E::ToolEnd {
                 name: "TodoWrite".into(),
@@ -1088,6 +1233,7 @@ mod tests {
             AgentId::new(),
             &sid,
             &mut todo,
+            &mut acct,
         );
         assert!(matches!(step, TurnStep::Continue));
         assert_eq!(c.events.lock().len(), 0, "TodoWrite ToolEnd must not emit a tool card");
@@ -1240,8 +1386,9 @@ mod tests {
             },
         ];
         let mut last = TurnStep::Continue;
+        let mut acct = CompressAccount::new(cersei_compression::CompressionLevel::Off);
         for ev in seq {
-            last = translate_event(ev, &s, aid, &sid, &mut todo);
+            last = translate_event(ev, &s, aid, &sid, &mut todo, &mut acct);
         }
         // Bind the count first: holding the lock across `.map()` (which re-locks
         // inside `update_json`) would deadlock parking_lot's non-reentrant Mutex.
@@ -1269,6 +1416,8 @@ mod tests {
             model: Mutex::new("claude-opus-4-8".into()),
             mode: Mutex::new(mode.into()),
             effort: Mutex::new(None),
+            compress: Mutex::new(true),
+            usage: Mutex::new(store::StoredUsage::default()),
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: std::sync::atomic::AtomicBool::new(false),
@@ -1295,6 +1444,33 @@ mod tests {
     #[tokio::test]
     async fn bypass_mode_allows_everything() {
         let p = policy("bypass");
+        assert!(matches!(
+            p.check(&req(PermissionLevel::Dangerous)).await,
+            CerseiDecision::Allow
+        ));
+    }
+
+    #[test]
+    fn mode_kind_normalizes_cross_agent_aliases() {
+        // The fix for "bypass still prompts": ids from other agents' vocabularies
+        // must still resolve to the right behavior.
+        assert_eq!(mode_kind("bypass"), ModeKind::Bypass);
+        assert_eq!(mode_kind("bypassPermissions"), ModeKind::Bypass);
+        assert_eq!(mode_kind("danger-full-access"), ModeKind::Bypass);
+        assert_eq!(mode_kind("full-access"), ModeKind::Bypass);
+        assert_eq!(mode_kind("plan"), ModeKind::Plan);
+        assert_eq!(mode_kind("read-only"), ModeKind::Plan);
+        assert_eq!(mode_kind("acceptEdits"), ModeKind::AcceptEdits);
+        assert_eq!(mode_kind("auto"), ModeKind::AcceptEdits);
+        assert_eq!(mode_kind("default"), ModeKind::Ask);
+        assert_eq!(mode_kind("whatever"), ModeKind::Ask);
+    }
+
+    #[tokio::test]
+    async fn bypass_alias_allows_everything() {
+        // A Claude-style "bypassPermissions" id reaching the cersei runtime must
+        // still auto-allow (the reported bug).
+        let p = policy("bypassPermissions");
         assert!(matches!(
             p.check(&req(PermissionLevel::Dangerous)).await,
             CerseiDecision::Allow

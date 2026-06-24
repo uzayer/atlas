@@ -26,6 +26,7 @@ import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
+import { useModelPricingStore } from "../stores/model-pricing-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { isDev } from "@/lib/env";
@@ -105,6 +106,22 @@ function GeneralSettings() {
   const { updateSettings } = useProjectStore.use.actions();
   const [cli, setCli] = useState<CliStatus | null>(null);
   const [installing, setInstalling] = useState(false);
+
+  // Model pricing (models.dev) — manual refresh + count for the picker.
+  const pricingPrices = useModelPricingStore.use.prices();
+  const pricingLoading = useModelPricingStore.use.loading();
+  const { load: loadPricing, refresh: refreshPricing } = useModelPricingStore.use.actions();
+  useEffect(() => {
+    void loadPricing();
+  }, [loadPricing]);
+  const pricedModelCount = Object.keys(pricingPrices).filter((k) => k.includes("/")).length;
+  const updatePricing = async () => {
+    await refreshPricing();
+    const n = Object.keys(useModelPricingStore.getState().prices).filter((k) =>
+      k.includes("/"),
+    ).length;
+    toast.success(`Model pricing updated — ${n} models`);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -188,6 +205,23 @@ function GeneralSettings() {
           )}
         >
           {installing ? "Installing…" : cli?.installed ? "Reinstall" : "Install"}
+        </button>
+      </SettingRow>
+      <SettingRow
+        label="Model pricing"
+        description={`Per-model prices (USD / 1M tokens) from models.dev, shown in the model picker. Refreshed automatically on launch and updated only when prices change. ${pricedModelCount > 0 ? `${pricedModelCount} models priced.` : "Not yet fetched."}`}
+      >
+        <button
+          type="button"
+          onClick={() => void updatePricing()}
+          disabled={pricingLoading}
+          className={cn(
+            "h-7 rounded-md px-2.5 text-[11px] font-medium border border-border-default bg-bg-elevated",
+            "text-text-primary hover:bg-bg-hover transition-colors",
+            "disabled:opacity-50 disabled:cursor-not-allowed",
+          )}
+        >
+          {pricingLoading ? "Updating…" : "Update pricing"}
         </button>
       </SettingRow>
     </div>

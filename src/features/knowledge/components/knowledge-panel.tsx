@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useKnowledgeStore } from "../stores/knowledge-store";
 import { useKnowledgeMetaStore, usePageMeta } from "../stores/knowledge-meta-store";
@@ -24,6 +25,7 @@ import {
 } from "@/features/editor-notion/lib/outline";
 import type { Editor } from "@tiptap/core";
 import { KnowledgeSidebar } from "./knowledge-sidebar";
+import { KnowledgeFinder } from "./knowledge-finder";
 import { EditorTopbar } from "./editor-topbar";
 import { EditorFooter } from "./editor-footer";
 import { KnowledgeInspector } from "./knowledge-inspector";
@@ -58,7 +60,9 @@ export function KnowledgePanel() {
   const currentProject = useProjectStore.use.currentProject();
 
   const editorRef = useRef<TiptapEditorHandle>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const [isDirty, setIsDirty] = useState(false);
+  const [finderOpen, setFinderOpen] = useState(false);
   const [activeRepoName, setActiveRepoName] = useState<string | null>(null);
   const [repoReadme, setRepoReadme] = useState<string | null>(null);
   const [clonedRepos, setClonedRepos] = useState<
@@ -177,6 +181,15 @@ export function KnowledgePanel() {
     if (!currentProject || !editorRef.current) return;
     const md = await editorRef.current.flush();
     if (md === null) return;
+    // CONTENT-based dirty check, not the React `isDirty` flag. The flag is a
+    // stale closure (set async via onDirty) — gating Cmd+S / navigation on it
+    // is exactly how a draft got lost: a keystroke could race ahead of the
+    // state update and the save would silently no-op. Comparing the live
+    // markdown to what's loaded is race-free and never skips a real change.
+    if (md === useKnowledgeStore.getState().editContent) {
+      setIsDirty(false);
+      return;
+    }
     setEditContent(md);
     await saveEntry(currentProject.path);
     setIsDirty(false);
@@ -185,6 +198,30 @@ export function KnowledgePanel() {
     // the new state.
     void invalidateLinks();
   }, [currentProject, setEditContent, saveEntry, invalidateLinks]);
+
+  // Debounced autosave — the real safety net against losing a draft to an
+  // accidental navigation, tab switch, or crash. Fires ~1.2s after the last
+  // edit; idempotent (the content check above skips no-op writes).
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleAutosave = useCallback(() => {
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      autosaveTimer.current = null;
+      void flushAndSave();
+    }, 1200);
+  }, [flushAndSave]);
+
+  // Flush on window blur (switching apps) and on unmount (tab close / switch
+  // away from the KB tab) so unsaved edits are never stranded.
+  useEffect(() => {
+    const onBlur = () => void flushAndSave();
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      void flushAndSave();
+    };
+  }, [flushAndSave]);
 
   // Cmd+; / Cmd+' — toggle KB sidebar / inspector. Picked over the old
   // Cmd+{ / Cmd+} bindings because those conflicted with the global
@@ -205,6 +242,20 @@ export function KnowledgePanel() {
     return () => window.removeEventListener("keydown", handler);
   }, [toggleKnowledgeSidebar, toggleKnowledgeInspector]);
 
+  // Cmd+F — open the KB finder, but only when focus is inside this KB panel
+  // (so it doesn't hijack the shortcut for other tabs / the app).
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "f") {
+        if (!rootRef.current?.contains(document.activeElement)) return;
+        e.preventDefault();
+        setFinderOpen(true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
   // Cmd+S
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -219,25 +270,94 @@ export function KnowledgePanel() {
         if (ae instanceof HTMLElement && ae !== document.body) {
           ae.blur();
         }
-        if (currentProject && isDirty) {
+        // Always flush — never gate on the stale `isDirty` flag (the content
+        // check inside flushAndSave decides whether a write is needed).
+        if (currentProject) {
           void flushAndSave();
         }
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [currentProject, isDirty, flushAndSave]);
+  }, [currentProject, flushAndSave]);
+
+  // Open a non-note file (image, code) in the CodeMirror editor rather than the
+  // KB note editor.
+  const openInCodeMirror = useCallback((filePath: string) => {
+    useLayoutStore.getState().actions.addTab({
+      id: `editor-${filePath}`,
+      type: "editor",
+      title: filePath.split("/").pop() ?? "file",
+      closable: true,
+      dirty: false,
+      data: { filePath },
+    });
+  }, []);
+
+  // Import external .md files (Obsidian-style). .md → KB notes; any non-.md
+  // files picked directly open in the CodeMirror editor instead.
+  const handleImportFiles = useCallback(async () => {
+    if (!currentProject) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const sel = await open({ multiple: true });
+    const paths = Array.isArray(sel) ? sel : sel ? [sel] : [];
+    if (!paths.length) return;
+    const md = paths.filter((p) => /\.(md|markdown)$/i.test(p));
+    const other = paths.filter((p) => !/\.(md|markdown)$/i.test(p));
+    if (md.length) {
+      try {
+        const res = await invoke<{ notes_imported: number; files_copied: number }>(
+          "import_into_knowledge",
+          { projectPath: currentProject.path, sources: md },
+        );
+        await loadEntries(currentProject.path);
+        toast.success(`Imported ${res.notes_imported} note${res.notes_imported === 1 ? "" : "s"}`);
+      } catch (e) {
+        toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    other.forEach(openInCodeMirror);
+  }, [currentProject, loadEntries, openInCodeMirror]);
+
+  // Import a whole folder (e.g. an Obsidian vault): .md become notes, other
+  // files (images, code, attachments) are copied in so the vault stays intact.
+  const handleImportFolder = useCallback(async () => {
+    if (!currentProject) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const dir = await open({ directory: true });
+    if (!dir || Array.isArray(dir)) return;
+    try {
+      const res = await invoke<{ notes_imported: number; files_copied: number }>(
+        "import_into_knowledge",
+        { projectPath: currentProject.path, sources: [dir] },
+      );
+      await loadEntries(currentProject.path);
+      toast.success(
+        `Imported ${res.notes_imported} note${res.notes_imported === 1 ? "" : "s"}` +
+          (res.files_copied ? ` + ${res.files_copied} file${res.files_copied === 1 ? "" : "s"}` : ""),
+      );
+    } catch (e) {
+      toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [currentProject, loadEntries]);
 
   const handleSelectEntry = useCallback(
     async (id: string) => {
-      if (isDirty && activeEntryId && id !== activeEntryId) {
+      // Always flush the outgoing note before swapping — unconditionally, not
+      // gated on `isDirty` (which could be a stale `false` and drop the draft).
+      // flushAndSave's content check makes the no-change case a cheap no-op.
+      if (activeEntryId && id !== activeEntryId) {
+        if (autosaveTimer.current) {
+          clearTimeout(autosaveTimer.current);
+          autosaveTimer.current = null;
+        }
         await flushAndSave();
       }
       selectEntry(id);
       setActiveRepoName(null);
       setRepoReadme(null);
     },
-    [isDirty, activeEntryId, flushAndSave, selectEntry],
+    [activeEntryId, flushAndSave, selectEntry],
   );
 
   // Honor "open this note" requests from outside the panel (the left-panel
@@ -374,7 +494,14 @@ export function KnowledgePanel() {
   );
 
   return (
-    <div className="h-full flex" style={{ background: "var(--bg-canvas)" }}>
+    <div ref={rootRef} className="relative h-full flex" style={{ background: "var(--bg-canvas)" }}>
+      {finderOpen && (
+        <KnowledgeFinder
+          entries={sidebarEntries}
+          onSelect={(id) => void handleSelectEntry(id)}
+          onClose={() => setFinderOpen(false)}
+        />
+      )}
       {showSidebar && (
         <>
           <KnowledgeSidebar
@@ -383,10 +510,13 @@ export function KnowledgePanel() {
             activeEntryId={activeEntryId}
             activeRepoName={activeRepoName}
             recentIds={recentIds}
+            onClearRecents={() => setRecentIds([])}
             onSelectEntry={handleSelectEntry}
             onDeleteEntry={handleDeleteEntry}
             onNewFolder={() => setShowFolderInput((v) => !v)}
             onNewNote={() => createEntry(currentProject.path)}
+            onImportFiles={handleImportFiles}
+            onImportFolder={handleImportFolder}
             onOpenGraph={() =>
               useLayoutStore.getState().actions.addTab({
                 id: "knowledge-graph",
@@ -498,7 +628,10 @@ export function KnowledgePanel() {
                   }}
                   documentId={`note:${activeEntryId}`}
                   initialMarkdown={editContent}
-                  onDirty={() => setIsDirty(true)}
+                  onDirty={() => {
+                    setIsDirty(true);
+                    scheduleAutosave();
+                  }}
                 />
                 {backlinksFooter.length > 0 && (
                   <div

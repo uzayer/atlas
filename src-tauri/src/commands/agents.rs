@@ -364,6 +364,15 @@ pub fn agents_set_effort(
 }
 
 #[tauri::command]
+pub fn agents_set_compress(
+    key: SessionKey,
+    on: bool,
+    manager: State<'_, AgentManager>,
+) -> Result<(), String> {
+    manager.set_compress(&key, on).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn agents_respond_permission(
     agent_id: AgentId,
     session_id: String,

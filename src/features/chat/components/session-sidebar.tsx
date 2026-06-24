@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { stripInjectedContext } from "@/features/chat/lib/atlas-context";
+import { openNewAgentChat } from "@/features/chat/lib/open-agent-session";
 import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
 import { AtlasLoader } from "@/components/atlas-loader";
 import { timeAgo } from "@/lib/time-ago";
@@ -59,6 +60,13 @@ function snapshotMessageToWire(m: SessionMessage) {
   };
 }
 
+/** Compact token count: 1234 → "1.2k", 1_200_000 → "1.2M". */
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${n}`;
+}
+
 interface SidebarItem {
   id: string; // acpSessionId for agent rows, tabId for chat rows
   kind: "agent" | "chat";
@@ -71,6 +79,8 @@ interface SidebarItem {
   agent: "claude" | "codex" | "cersei";
   // agent-only
   filePath?: string;
+  /** Cumulative tokens processed (native Atlas agent sessions only). */
+  totalTokens?: number;
   // chat-only
   tabId?: string;
 }
@@ -362,6 +372,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
               : "claude"
           : (diskEntry?.agent ?? "claude"),
         filePath: disk?.file_path,
+        totalTokens: disk?.total_tokens,
       };
     });
 
@@ -393,50 +404,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     return items.filter((it) => it.title.toLowerCase().includes(q));
   }, [items, search]);
 
-  const handleNewChat = () => {
-    const current = useChatStore.getState().sessions[tabId];
-    const hasConversation =
-      !!current &&
-      ((current.userMessageCount ?? 0) > 0 || current.messages.length > 0);
-
-    // If the current tab is empty there's nothing to lose — reuse it. Reset it
-    // to pristine and focus the composer so the click visibly does something;
-    // previously this branch just cleared an already-empty session and bailed,
-    // which read as "I click + and nothing happens".
-    if (!hasConversation) {
-      clearSession(tabId);
-      window.dispatchEvent(
-        new CustomEvent("atlas:chat-focus", { detail: { tabId } }),
-      );
-      return;
-    }
-
-    // Otherwise PRESERVE the current conversation by opening a brand-new chat
-    // tab/session instead of wiping this one in place. Wiping was the
-    // "New Chat deletes my last session" bug: `clearSession` resets the live
-    // row to empty, so it dropped out of the history list immediately — and in
-    // a fresh workspace its JSONL hadn't been written yet, so there was no
-    // disk-backed row to fall back to and the conversation vanished. Keeping
-    // the old tab open leaves it as a live (and clickable) history row.
-    const newId = `chat-${Date.now().toString(36)}-${Math.random()
-      .toString(36)
-      .slice(2, 6)}`;
-    addTab({
-      id: newId,
-      type: "chat",
-      title: "New Chat",
-      closable: true,
-      dirty: false,
-      data: {},
-    });
-    createSession(
-      newId,
-      current.agentType && current.agentType !== "custom"
-        ? current.agentType
-        : "claude-code"
-    );
-    setActiveTab(newId);
-  };
+  // Singleton model: "New chat" always starts a fresh session in the CURRENT
+  // tab (never a second tab). Shared with ⌘T / the palette / the context menu.
+  const handleNewChat = () => openNewAgentChat();
 
   const handleOpenAgent = (item: SidebarItem) => {
     const storeSnapshot = useChatStore.getState().sessions;
@@ -764,10 +734,18 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
                   {item.title}
                 </span>
               </div>
-              <div className="pl-[18px]">
+              <div className="pl-[18px] flex items-center gap-1.5">
                 <span className="text-[9px] text-[var(--text-tertiary)]">
                   {timeAgo(item.lastUpdated, { suffix: true })}
                 </span>
+                {!!item.totalTokens && item.totalTokens > 0 && (
+                  <span
+                    className="text-[9px] text-[var(--text-tertiary)] tabular-nums"
+                    title={`${item.totalTokens.toLocaleString()} tokens processed`}
+                  >
+                    · {formatTokenCount(item.totalTokens)} tok
+                  </span>
+                )}
               </div>
 
               {/* Delete is Claude-only for now: it removes the JSONL file, but

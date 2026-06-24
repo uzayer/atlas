@@ -9,6 +9,7 @@ import {
   useLayoutEffect,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { Sparkles } from "lucide-react";
 import type { ChatMessage } from "@/types/agent";
 import { MessageItem } from "./message-item";
 import { useChatStore } from "../stores/chat-store";
@@ -117,6 +118,35 @@ function isEmptyMessage(m: ChatMessage): boolean {
   const hasFiles = m.fileChanges.length > 0;
   const hasPlan = m.plan != null && m.plan.length > 0;
   return !hasProse && !hasThinking && !hasTools && !hasFiles && !hasPlan;
+}
+
+/** Shown in the thread while the turn is running but the agent hasn't emitted
+ *  its first token yet — the otherwise-blank wait after sending. Mirrors the
+ *  assistant row layout (avatar + label) with an animated "thinking" cue. */
+function WorkingIndicator() {
+  // Mirror MessageItem's layout (px-6 → flex gap-4 max-w-[760px] mx-auto, w-8
+  // avatar) so the "Thinking" row lines up with the assistant messages above it.
+  return (
+    <div className="group px-6 pb-6 animate-scale-in">
+      <div className="flex gap-4 max-w-[760px] mx-auto">
+        <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5 bg-[var(--bg-elevated)] border border-[var(--border-default)]">
+          <Sparkles size={14} className="text-[var(--text-secondary)] animate-pulse" />
+        </div>
+        <div className="flex h-8 items-center gap-1.5">
+          <span className="text-[12px] text-[var(--text-secondary)]">Thinking</span>
+          <span className="flex items-center gap-0.5">
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="h-1 w-1 rounded-full bg-[var(--text-tertiary)] animate-bounce"
+                style={{ animationDelay: `${i * 150}ms` }}
+              />
+            ))}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
@@ -624,6 +654,11 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
             })}
           </div>
         )}
+        {/* Working indicator: the turn is running but no assistant token has
+            arrived yet (the 5–8s the model spends before its first chunk). The
+            streaming spinner only shows once an assistant message exists, so
+            without this the thread looks idle after sending. */}
+        {isStreaming && !streamingId && <WorkingIndicator />}
       </div>
 
       {/* Bottom fade — visual cue that there's more content below the

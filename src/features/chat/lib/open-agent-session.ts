@@ -114,3 +114,51 @@ export async function openAgentSession({ acpSessionId, title, cwd }: OpenOpts): 
     );
   }
 }
+
+/**
+ * Open / focus the SINGLE agent chat tab and start a fresh chat in it.
+ *
+ * The agent chat is a singleton tab — "New chat" never spawns a second tab
+ * (the user switches between past chats via the session-history sidebar). If a
+ * chat tab is already open we focus it and reset its session in place (a brand
+ * new session in the SAME tab); the previous conversation, if any, is already
+ * persisted to disk per-turn, so it stays reachable from the history sidebar.
+ * The fresh session is NOT added to history until the user actually submits
+ * (the sidebar filters on `userMessageCount > 0`).
+ *
+ * New chat ALWAYS resets the current tab in place — even mid-stream — because
+ * jumping to a new tab breaks the flow and scrambles the thread. Nothing is
+ * lost: the Rust SessionWorker keeps running independently of this frontend
+ * reset and persists the turn's transcript to disk, so the abandoned chat
+ * reappears in the history sidebar. We DO cancel that in-flight turn first so a
+ * chat the user walked away from doesn't keep burning tokens invisibly.
+ */
+export function openNewAgentChat(): void {
+  const layout = useLayoutStore.getState();
+  const chat = useChatStore.getState();
+  const { addTab, setActiveTab } = layout.actions;
+  const { clearSession, createSession } = chat.actions;
+
+  const focus = (id: string) =>
+    window.dispatchEvent(new CustomEvent("atlas:chat-focus", { detail: { tabId: id } }));
+
+  const existing = layout.tabs.find((t) => t.type === "chat");
+  if (existing) {
+    setActiveTab(existing.id);
+    const s = chat.sessions[existing.id];
+    // Stop an in-flight turn before resetting so it doesn't keep streaming into
+    // an orphaned (hidden) session. Its transcript still persists → history.
+    if (s?.status === "running" && s.acpAgentId && s.acpSessionId) {
+      agents.cancel({ agent_id: s.acpAgentId, session_id: s.acpSessionId }).catch(() => {});
+    }
+    clearSession(existing.id);
+    focus(existing.id);
+    return;
+  }
+
+  // No chat tab open yet → create the one and only one.
+  const id = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  addTab({ id, type: "chat", title: "Agents", closable: true, dirty: false, data: {} });
+  createSession(id);
+  setActiveTab(id);
+}

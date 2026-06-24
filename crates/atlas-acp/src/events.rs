@@ -58,6 +58,11 @@ pub enum AcpEvent {
         session_id: acp_schema::SessionId,
         active: bool,
     },
+    /// Approx tokens saved by RTK tool-output compression this turn. Native-only.
+    CompressionSaved {
+        session_id: acp_schema::SessionId,
+        saved_tokens: u64,
+    },
 }
 
 /// Implemented by the Tauri host so the driver can fan events out without

@@ -99,6 +99,14 @@ export interface ChatSession {
   /** Reasoning-effort level for the native agent ("" / low / medium / high /
    *  max). Only meaningful for Anthropic models (maps to a thinking budget). */
   cerseiEffort?: string;
+  /** RTK tool-output compression for the native agent (default on). */
+  cerseiCompress?: boolean;
+  /** Cumulative usage snapshot at the end of the previous turn — used to derive
+   *  per-turn usage for the message footer. */
+  lastUsageSnapshot?: { input: number; output: number; cost: number };
+  /** Tokens RTK compression saved on the in-flight turn, captured from the
+   *  `compression_saved` delta and folded into the usage footer at turn end. */
+  pendingSavedTokens?: number;
   /** Available slash commands as reported by the agent for this session. */
   availableCommands?: unknown[];
   /**
@@ -150,6 +158,10 @@ export interface ChatMessage {
   atlasProse?: string;
   atlasContext?: string;
   atlasContextBlockCount?: number;
+  /** Per-turn token usage + cost for the native agent, attached when the turn
+   *  finishes. Drives the end-of-message usage footer. `saved` = approx tokens
+   *  RTK compression shaved off this turn (0 when compression was off). */
+  usage?: { input: number; output: number; cost: number; saved?: number };
 }
 
 export interface ToolCallDisplay {
