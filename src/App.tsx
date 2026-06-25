@@ -1,7 +1,6 @@
 import { startTransition, useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AppLayout } from "@/features/layout/components/app-layout";
-import { SkillCaptureHost } from "@/features/skills/components/skill-capture-host";
 import { AppContextMenu } from "@/components/app-context-menu";
 import { CommandPalette } from "@/components/command-palette";
 import { NewTabPalette } from "@/components/new-tab-palette";
@@ -1118,10 +1117,6 @@ export function App() {
       <HintOverlay />
       <NotificationPanel />
       <BrowserOverlayWatcher />
-      {/* Global "Save as skill" capture host — listens for the
-          atlas:skill-capture window event from any view (chat, model-chat,
-          memory-chat), so the button works everywhere, not just in ChatPanel. */}
-      <SkillCaptureHost />
       <Toaster
         position="bottom-right"
         toastOptions={{

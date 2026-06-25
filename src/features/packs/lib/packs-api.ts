@@ -6,6 +6,7 @@ import type {
   PackProjectReport,
   PackProjectionView,
   PackSearchHit,
+  PackUpdateCheck,
   Scope,
 } from "./types";
 
@@ -55,6 +56,14 @@ export const packs = {
   list: (scope: Scope, projectPath?: string | null) =>
     invoke<InstalledPack[]>("pack_list", {
       scope,
+      projectPath: projectPath ?? null,
+    }),
+
+  /** Cheap "is this pack behind its source?" check (git ls-remote, no clone). */
+  checkUpdate: (scope: Scope, pack: string, projectPath?: string | null) =>
+    invoke<PackUpdateCheck>("pack_check_update", {
+      scope,
+      pack,
       projectPath: projectPath ?? null,
     }),
 

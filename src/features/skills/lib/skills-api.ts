@@ -38,23 +38,6 @@ export const skills = {
       projectPath: projectPath ?? null,
     }),
 
-  create: (
-    scope: Scope,
-    name: string,
-    description: string,
-    body: string,
-    agents: string[],
-    projectPath?: string | null,
-  ) =>
-    invoke<SkillMeta>("skills_create", {
-      scope,
-      name,
-      description,
-      body,
-      agents,
-      projectPath: projectPath ?? null,
-    }),
-
   setEnabled: (
     scope: Scope,
     name: string,

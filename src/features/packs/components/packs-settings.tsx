@@ -5,9 +5,17 @@
 // the shared `StatusToken` so this surface is a companion to My Skills.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, Loader2, Package, RefreshCw, Search } from "lucide-react";
+import {
+  ArrowUpCircle,
+  Check,
+  Download,
+  Package,
+  RefreshCw,
+  Search,
+} from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { AtlasLoader } from "@/components/atlas-loader";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { skills as skillsApi } from "@/features/skills/lib/skills-api";
 import type { AgentTarget } from "@/features/skills/lib/types";
@@ -38,6 +46,14 @@ function kindCounts(components: { kind: ComponentKind }[]): string {
     .join(" · ");
 }
 
+/** State of a pack row's Check/Update control. */
+type UpdateState =
+  | "idle"
+  | "checking"
+  | "available"
+  | "uptodate"
+  | "updating";
+
 export function PacksSettings({ scope }: { scope: Scope }) {
   const projectPath = useProjectStore.use.currentProject()?.path ?? null;
 
@@ -48,6 +64,10 @@ export function PacksSettings({ scope }: { scope: Scope }) {
   const [tools, setTools] = useState<AgentTarget[]>([]);
   /** packName → set of toolIds currently projected. */
   const [projected, setProjected] = useState<Record<string, Set<string>>>({});
+  /** packName → state of its Check/Update control. */
+  const [updateState, setUpdateState] = useState<Record<string, UpdateState>>(
+    {},
+  );
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -145,6 +165,58 @@ export function PacksSettings({ scope }: { scope: Scope }) {
     [scope, effectiveProject, refreshInstalled],
   );
 
+  const setU = (name: string, s: UpdateState) =>
+    setUpdateState((m) => ({ ...m, [name]: s }));
+
+  // Cheap remote-HEAD check (no clone). On a hit, the control morphs to "Update".
+  const checkForUpdate = useCallback(
+    async (name: string) => {
+      setU(name, "checking");
+      setError(null);
+      try {
+        const res = await packsApi.checkUpdate(scope, name, effectiveProject);
+        setU(name, res.hasUpdate ? "available" : "uptodate");
+        if (!res.hasUpdate) window.setTimeout(() => setU(name, "idle"), 2500);
+      } catch (e) {
+        setError(String(e));
+        setU(name, "idle");
+      }
+    },
+    [scope, effectiveProject],
+  );
+
+  // Apply the update: re-install (content-hash dedup), then re-project into the
+  // tools it's currently in so snapshot modes (copy/hooks/rules) refresh —
+  // symlink projections already follow the store.
+  const applyUpdate = useCallback(
+    async (name: string, source: string) => {
+      setU(name, "updating");
+      setError(null);
+      try {
+        const res = await packsApi.install(scope, source, false, effectiveProject);
+        if (res.state === "updated") {
+          for (const toolId of projected[name] ?? new Set<string>()) {
+            await packsApi.project(
+              scope,
+              name,
+              toolId,
+              null,
+              true,
+              effectiveProject,
+            );
+          }
+        }
+        await refreshInstalled();
+        setU(name, "uptodate");
+        window.setTimeout(() => setU(name, "idle"), 2500);
+      } catch (e) {
+        setError(String(e));
+        setU(name, "available");
+      }
+    },
+    [scope, effectiveProject, projected, refreshInstalled],
+  );
+
   return (
     <div className="flex flex-col gap-6 p-6">
       <header className="flex items-center gap-2.5">
@@ -152,10 +224,8 @@ export function PacksSettings({ scope }: { scope: Scope }) {
         <div>
           <h2 className="text-sm font-semibold text-text-primary">Packs</h2>
           <p className="mt-0.5 text-[11px] leading-snug text-text-tertiary">
-            Install skill packs from the open registry and project their
-            components into your agents. Skills a pack ships also appear in My
-            Skills and are invokable with{" "}
-            <span className="font-mono text-text-secondary">#skill:</span>.
+            Install from the registry · project into your agents · invoke with{" "}
+            <span className="font-mono text-text-secondary">#</span>.
           </p>
         </div>
       </header>
@@ -174,19 +244,17 @@ export function PacksSettings({ scope }: { scope: Scope }) {
 
       {/* ── Browse ─────────────────────────────────────────────────── */}
       <section className="flex flex-col gap-3">
-        <div className="flex h-8 items-center gap-1.5 rounded-md border border-border-default bg-bg-input px-2.5 focus-within:border-border-strong">
+        <div className="flex h-8 items-center gap-1.5 rounded-md border border-border-default bg-bg-input px-2.5 transition-colors focus-within:border-border-strong focus-within:ring-1 focus-within:ring-border-strong">
           <Search size={12} className="shrink-0 text-text-tertiary" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && void runSearch()}
-            placeholder="Search skills.sh — e.g. pdf, review, postgres…"
+            placeholder="Search skills.sh · pdf, review, postgres…"
             spellCheck={false}
             className="min-w-0 flex-1 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-tertiary"
           />
-          {searching && (
-            <Loader2 size={12} className="animate-spin text-text-tertiary" />
-          )}
+          {searching && <AtlasLoader size={12} className="text-text-tertiary" />}
         </div>
 
         {results.length > 0 && (
@@ -219,7 +287,7 @@ export function PacksSettings({ scope }: { scope: Scope }) {
                     )}
                   >
                     {installing ? (
-                      <Loader2 size={12} className="animate-spin" />
+                      <AtlasLoader size={12} />
                     ) : (
                       <Download size={12} />
                     )}
@@ -235,9 +303,7 @@ export function PacksSettings({ scope }: { scope: Scope }) {
       {/* ── Installed library ──────────────────────────────────────── */}
       <section className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <h3 className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
-            Installed
-          </h3>
+          <h3 className="eyebrow">Installed</h3>
           <button
             type="button"
             onClick={() => void refreshInstalled()}
@@ -260,14 +326,21 @@ export function PacksSettings({ scope }: { scope: Scope }) {
                   key={p.pack.name}
                   className="rounded-md border border-border-default bg-bg-raised px-3 py-2.5"
                 >
-                  <div className="min-w-0">
-                    <div className="truncate text-[12px] font-medium text-text-primary">
-                      {p.pack.name}
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-[12px] font-medium text-text-primary">
+                        {p.pack.name}
+                      </div>
+                      <div className="truncate text-[11px] text-text-tertiary">
+                        {p.source} ·{" "}
+                        {kindCounts(p.pack.components) || "no components"}
+                      </div>
                     </div>
-                    <div className="truncate text-[11px] text-text-tertiary">
-                      {p.source} ·{" "}
-                      {kindCounts(p.pack.components) || "no components"}
-                    </div>
+                    <UpdateControl
+                      state={updateState[p.pack.name] ?? "idle"}
+                      onCheck={() => void checkForUpdate(p.pack.name)}
+                      onUpdate={() => void applyUpdate(p.pack.name, p.source)}
+                    />
                   </div>
 
                   {/* Per-tool projection toggles (shared StatusToken). */}
@@ -300,4 +373,68 @@ export function PacksSettings({ scope }: { scope: Scope }) {
       </section>
     </div>
   );
+}
+
+/** A single control that morphs across the update lifecycle. Fixed width so the
+ *  pack row never shifts as the label changes; accent only for the actionable
+ *  "Update"; bars loader (not a spinner) while working. */
+function UpdateControl({
+  state,
+  onCheck,
+  onUpdate,
+}: {
+  state: UpdateState;
+  onCheck: () => void;
+  onUpdate: () => void;
+}) {
+  const base =
+    "inline-flex h-7 min-w-[96px] shrink-0 items-center justify-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium outline-none transition-colors active:scale-95 focus-visible:ring-1 focus-visible:ring-border-strong";
+
+  switch (state) {
+    case "checking":
+      return (
+        <span
+          className={cn(base, "border border-border-default text-text-tertiary")}
+        >
+          <AtlasLoader size={11} /> Checking
+        </span>
+      );
+    case "updating":
+      return (
+        <span className={cn(base, "bg-accent text-bg-base")}>
+          <AtlasLoader size={11} /> Updating
+        </span>
+      );
+    case "available":
+      return (
+        <button
+          type="button"
+          onClick={onUpdate}
+          className={cn(base, "bg-accent text-bg-base hover:bg-accent-hover")}
+        >
+          <ArrowUpCircle size={12} /> Update
+        </button>
+      );
+    case "uptodate":
+      return (
+        <span
+          className={cn(base, "border border-border-subtle text-text-tertiary")}
+        >
+          <Check size={12} className="animate-scale-in" /> Up to date
+        </span>
+      );
+    default:
+      return (
+        <button
+          type="button"
+          onClick={onCheck}
+          className={cn(
+            base,
+            "border border-border-default text-text-secondary hover:bg-bg-hover hover:text-text-primary",
+          )}
+        >
+          <RefreshCw size={12} /> Check
+        </button>
+      );
+  }
 }

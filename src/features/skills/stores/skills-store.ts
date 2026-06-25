@@ -22,12 +22,6 @@ interface SkillsState {
     /** Set the active project (does not refetch on its own). */
     load: (projectPath: string | null) => Promise<void>;
     setScope: (scope: Scope) => Promise<void>;
-    create: (
-      name: string,
-      description: string,
-      body: string,
-      agents: string[],
-    ) => Promise<SkillMeta>;
     setEnabled: (
       name: string,
       agent: string,
@@ -95,20 +89,6 @@ export const useSkillsStore = createSelectors(
           if (get().scope !== scope) return;
           set({ skills: [], agents: [], loaded: true });
         }
-      },
-
-      create: async (name, description, body, agents) => {
-        const { scope, projectPath } = get();
-        const meta = await skillsApi.create(
-          scope,
-          name,
-          description,
-          body,
-          agents,
-          projectPath,
-        );
-        await get().actions.refresh();
-        return meta;
       },
 
       setEnabled: async (name, agent, enabled) => {

@@ -72,6 +72,12 @@ export interface PackInstallResult {
   contentHash: string;
 }
 
+/** Result of a cheap update check (git ls-remote vs the installed commit). */
+export interface PackUpdateCheck {
+  hasUpdate: boolean;
+  remoteCommit: string;
+}
+
 /** An installed pack as surfaced to the UI (manifest + provenance). */
 export interface InstalledPack {
   pack: Pack;

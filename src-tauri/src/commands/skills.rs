@@ -505,7 +505,9 @@ fn parse_frontmatter(raw: &str) -> (Frontmatter, String) {
     (fm, body)
 }
 
-/// Render a `SKILL.md` with frontmatter for the given fields.
+/// Render a `SKILL.md` with frontmatter for the given fields. Only used by the
+/// test-only `create_skill` helper now that manual authoring is removed.
+#[cfg(test)]
 fn render_skill_md(name: &str, description: &str, body: &str) -> String {
     // Keep values single-line; frontmatter is scalar-only here.
     let desc = description.replace(['\n', '\r'], " ");
@@ -1095,6 +1097,9 @@ fn read_skill(root: &Path, name: &str) -> Result<SkillContent, String> {
     })
 }
 
+// Manual skill authoring (the `skills_create` IPC command) was removed; skills
+// now come from packs. `create_skill` is retained only as a test setup helper.
+#[cfg(test)]
 fn create_skill(
     root: &Path,
     scope: &str,
@@ -1288,6 +1293,7 @@ fn list_targets(root: &Path, scope: &str) -> Vec<AgentTarget> {
 /// link, so nothing to do for them. A copy whose on-disk hash already differs
 /// from its ledger-recorded hash is *drifted* (edited out-of-band) → leave it
 /// for explicit resolution, never silently overwrite.
+#[cfg(test)]
 fn propagate_edit(root: &Path, scope: &str, safe_name: &str) -> Result<(), String> {
     let canonical = canonical_skill_dir(&skills_base(root), safe_name)?;
     let canonical_hash = hash_skill_dir(&canonical);
@@ -1705,24 +1711,6 @@ pub async fn skills_read(
         .map_err(|e| e.to_string())?
 }
 
-/// Create a skill in the canonical store and symlink it into the given agents.
-#[tauri::command]
-pub async fn skills_create(
-    scope: String,
-    name: String,
-    description: String,
-    body: String,
-    agents: Vec<String>,
-    project_path: Option<String>,
-) -> Result<SkillMeta, String> {
-    let root = root_for(&scope, project_path.as_deref())?;
-    tokio::task::spawn_blocking(move || {
-        create_skill(&root, &scope, &name, &description, &body, &agents)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 /// Enable/disable a single agent for a skill (create/remove its symlink).
 #[tauri::command]
 pub async fn skills_set_enabled(
@@ -2106,6 +2094,16 @@ pub struct PackInstallResult {
     pub content_hash: String,
 }
 
+/// Result of a cheap "is this pack behind its source?" check (no content fetch).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackUpdateCheck {
+    /// `true` when the remote HEAD SHA differs from the installed commit.
+    pub has_update: bool,
+    /// The remote HEAD SHA.
+    pub remote_commit: String,
+}
+
 /// An installed pack as surfaced to the UI (manifest + provenance).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2266,6 +2264,33 @@ fn git_clone_shallow(owner: &str, repo: &str, dest: &Path) -> Result<String, Str
         .output()
         .map_err(|e| format!("failed to read HEAD: {e}"))?;
     Ok(String::from_utf8_lossy(&rev.stdout).trim().to_string())
+}
+
+/// Resolve the remote default-branch HEAD SHA WITHOUT fetching content
+/// (`git ls-remote <url> HEAD`). Network-only, auth-free for public repos, never
+/// prompts. Used to detect whether an installed pack is behind its source.
+fn git_ls_remote_head(owner: &str, repo: &str) -> Result<String, String> {
+    let url = format!("https://github.com/{owner}/{repo}.git");
+    let out = std::process::Command::new("git")
+        .args(["ls-remote", "--quiet"])
+        .arg(&url)
+        .arg("HEAD")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("failed to run `git` (is it installed?): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git ls-remote of {owner}/{repo} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // Output is `<sha>\tHEAD` — take the first whitespace-delimited token.
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "git ls-remote returned no HEAD".to_string())
 }
 
 /// Clone `owner/repo` to a temp dir and strip its `.git`. Returns
@@ -2452,6 +2477,34 @@ pub async fn pack_list(
     tokio::task::spawn_blocking(move || list_installed_packs(&root))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Cheaply check whether an installed pack is behind its source repo: compares
+/// the remote HEAD SHA (`git ls-remote`, no clone) to the commit in the lock.
+/// Read-only — applying the update is `pack_install_remote`.
+#[tauri::command]
+pub async fn pack_check_update(
+    scope: String,
+    pack: String,
+    project_path: Option<String>,
+) -> Result<PackUpdateCheck, String> {
+    let root = root_for(&scope, project_path.as_deref())?;
+    tokio::task::spawn_blocking(move || {
+        let safe = sanitize_name(&pack)?;
+        let lock = read_pack_lock(&root);
+        let entry = lock
+            .packs
+            .get(&safe)
+            .ok_or_else(|| format!("pack not installed: {pack}"))?;
+        let (owner, repo) = parse_owner_repo(&entry.source)?;
+        let remote = git_ls_remote_head(&owner, &repo)?;
+        Ok(PackUpdateCheck {
+            has_update: remote != entry.commit,
+            remote_commit: remote,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── Pack projection (pack-install plan, Phase 3) ─────────────────────────────────

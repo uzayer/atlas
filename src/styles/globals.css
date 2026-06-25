@@ -173,6 +173,23 @@
 .atlas-mention-chip[data-mention-kind="paper"]        { color: var(--status-warning); }
 .atlas-mention-chip[data-mention-kind="branch"]       { color: var(--text-secondary); }
 .atlas-mention-chip[data-mention-kind="past_message"] { color: var(--text-secondary); }
+/* Invokable capabilities — distinguished by glyph/sigil, not color (white). */
+.atlas-mention-chip[data-mention-kind="skill"]        { color: var(--accent-primary); }
+.atlas-mention-chip[data-mention-kind="command"]      { color: var(--accent-primary); }
+.atlas-mention-chip[data-mention-kind="agent"]        { color: var(--accent-primary); }
+.atlas-mention-chip[data-mention-kind="rule"]         { color: var(--accent-primary); }
+
+/* Inline variant for sent chat messages: flows in selectable prose, carries the
+   same kind glyph the picker/composer use so a sent message matches what you
+   typed. */
+.atlas-mention-chip--msg {
+  height: auto;
+  padding: 1px 5px;
+  margin: 0 1px;
+  vertical-align: baseline;
+  user-select: text;
+  font-size: 11px;
+}
 
 @layer base {
   *,

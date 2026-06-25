@@ -11,17 +11,20 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Loader2,
-  Plus,
+  Puzzle,
   RefreshCw,
   Search,
   Snowflake,
   ArrowUpCircle,
   Pencil,
   Trash2,
+  Zap,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { AtlasLoader } from "@/components/atlas-loader";
+import { PanelSkeleton } from "@/components/panel-skeleton";
+import { CachedMarkdown } from "@/lib/markdown-cache";
 import { openFile } from "@/lib/open-file";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { skills as api } from "@/features/skills/lib/skills-api";
@@ -32,7 +35,6 @@ import type {
   Scope,
   ToolInfo,
 } from "@/features/skills/lib/types";
-import { SkillCreateDialog } from "@/features/skills/components/skill-create-dialog";
 import {
   Legend,
   StatusToken,
@@ -50,7 +52,7 @@ interface MergedSkill {
 
 const SCOPES_ALL: Scope[] = ["global", "project"];
 
-export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
+export function SkillsSettings() {
   const projectPath = useProjectStore.use.currentProject()?.path ?? null;
 
   const [global, setGlobal] = useState<ReconcileView | null>(null);
@@ -62,7 +64,6 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
     null,
   );
   const [components, setComponents] = useState<PackComponentMeta[]>([]);
-  const [createOpen, setCreateOpen] = useState(false);
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
@@ -165,6 +166,49 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
   const selectedSkill = useMemo(
     () => filtered.find((s) => s.name === selected) ?? null,
     [filtered, selected],
+  );
+
+  // ── Keyboard navigation (↑/↓ through skills then pack components) ────────────
+  const compKey = (c: PackComponentMeta) => `${c.kind}:${c.pack}:${c.name}`;
+  const navItems = useMemo(
+    () => [
+      ...filtered.map((s) => ({ kind: "skill" as const, skill: s })),
+      ...filteredComponents.map((c) => ({ kind: "comp" as const, comp: c })),
+    ],
+    [filtered, filteredComponents],
+  );
+  const currentNavIndex = useMemo(() => {
+    if (selectedComp) {
+      const k = compKey(selectedComp);
+      return navItems.findIndex(
+        (it) => it.kind === "comp" && compKey(it.comp) === k,
+      );
+    }
+    if (selected)
+      return navItems.findIndex(
+        (it) => it.kind === "skill" && it.skill.name === selected,
+      );
+    return -1;
+  }, [navItems, selected, selectedComp]);
+  const onListKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      if (navItems.length === 0) return;
+      e.preventDefault();
+      const delta = e.key === "ArrowDown" ? 1 : -1;
+      const base = currentNavIndex < 0 ? (delta === 1 ? -1 : 0) : currentNavIndex;
+      const next = Math.max(0, Math.min(navItems.length - 1, base + delta));
+      const it = navItems[next];
+      if (!it) return;
+      if (it.kind === "skill") {
+        setSelectedComp(null);
+        setSelected(it.skill.name);
+      } else {
+        setSelected(null);
+        setSelectedComp(it.comp);
+      }
+    },
+    [navItems, currentNavIndex],
   );
 
   // ── Cell helpers ──────────────────────────────────────────────────────────
@@ -319,13 +363,6 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
     });
   };
 
-  // New skills are created at the wrapper's active scope, falling back to the
-  // project (if open) then global. Project scope without a project → global.
-  const createScope: Scope =
-    scope === "project" && !projectPath
-      ? "global"
-      : (scope ?? (projectPath ? "project" : "global"));
-
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -335,12 +372,10 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-sm font-semibold text-text-primary">Skills</h2>
-            <p className="mt-0.5 max-w-[560px] text-[11px] leading-snug text-text-tertiary">
-              Reusable procedures you invoke with{" "}
+            <p className="mt-0.5 text-[11px] leading-snug text-text-tertiary">
+              Invoke with{" "}
               <span className="font-mono text-text-secondary">#skill:</span> in
-              chat (works for every agent). One canonical library, projected
-              into the tools you choose. Toggle a cell to symlink a skill into
-              that tool; Atlas keeps everything in sync.
+              chat · projected into the tools you choose.
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
@@ -354,18 +389,10 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
             >
               <Snowflake size={12} />
             </IconButton>
-            <button
-              type="button"
-              onClick={() => setCreateOpen(true)}
-              className="flex h-7 items-center gap-1 rounded-md bg-accent px-2.5 text-[11px] font-medium text-bg-base transition-colors hover:bg-accent-hover"
-            >
-              <Plus size={12} />
-              New skill
-            </button>
           </div>
         </div>
 
-        <div className="flex h-7 w-full max-w-[320px] items-center gap-1.5 rounded-md border border-border-default bg-bg-input px-2 focus-within:border-border-strong">
+        <div className="flex h-7 w-full max-w-[320px] items-center gap-1.5 rounded-md border border-border-default bg-bg-input px-2 transition-colors focus-within:border-border-strong focus-within:ring-1 focus-within:ring-border-strong">
           <Search size={11} className="shrink-0 text-text-tertiary" />
           <input
             value={query}
@@ -380,13 +407,16 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
       {/* Body: list + matrix detail */}
       <div className="flex min-h-0 flex-1 border-t border-border-subtle">
         {/* Master list */}
-        <div className="w-[300px] shrink-0 overflow-y-auto hide-scrollbar border-r border-border-subtle">
+        <div
+          tabIndex={0}
+          onKeyDown={onListKeyDown}
+          className="w-[300px] shrink-0 overflow-y-auto hide-scrollbar border-r border-border-subtle outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-border-strong"
+        >
           {loading ? (
-            <Empty>
-              <Loader2 size={13} className="animate-spin text-text-tertiary" />
-            </Empty>
+            <PanelSkeleton rows={8} />
           ) : filtered.length === 0 && filteredComponents.length === 0 ? (
             <Empty>
+              <Puzzle size={16} className="mb-1 text-text-ghost" />
               {query.trim()
                 ? "Nothing matches your filter."
                 : "No skills yet. Create one to start your library."}
@@ -406,7 +436,7 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
                 />
               ))}
               {filteredComponents.length > 0 && (
-                <div className="border-t border-border-subtle bg-bg-raised px-3 py-1.5 text-[9px] font-semibold uppercase tracking-wider text-text-tertiary">
+                <div className="eyebrow border-t border-border-subtle bg-bg-raised px-3 py-1.5">
                   Pack Components
                 </div>
               )}
@@ -433,11 +463,19 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
         </div>
 
         {/* Detail / matrix */}
-        <div className="min-w-0 flex-1 overflow-y-auto hide-scrollbar">
+        <div
+          key={selectedComp ? `c:${selectedComp.pack}:${selectedComp.name}` : `s:${selected ?? ""}`}
+          className="min-w-0 flex-1 overflow-y-auto hide-scrollbar animate-fade-in"
+        >
           {selectedComp ? (
             <ComponentDetail comp={selectedComp} />
           ) : !selectedSkill ? (
-            <Empty>Select a skill to manage where it's delivered.</Empty>
+            <Empty>
+              <Zap size={18} className="text-text-ghost" />
+              <span className="text-text-secondary">Nothing selected</span>
+              Pick a skill to manage where it's delivered, or a pack component to
+              see how to invoke it.
+            </Empty>
           ) : (
             <SkillMatrix
               skill={selectedSkill}
@@ -447,6 +485,7 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
               toolDetected={toolDetected}
               busy={busy}
               hasProject={projectPath !== null}
+              projectPath={projectPath}
               onToggle={toggleCell}
               onAvailableEverywhere={() => availableEverywhere(selectedSkill)}
               onPromote={() => promote(selectedSkill)}
@@ -456,23 +495,6 @@ export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
           )}
         </div>
       </div>
-
-      <SkillCreateDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        scope={createScope}
-        onCreate={async (name, description, body) => {
-          await api.create(
-            createScope,
-            name,
-            description,
-            body,
-            [],
-            rootFor(createScope),
-          );
-          await load();
-        }}
-      />
     </div>
   );
 }
@@ -497,7 +519,7 @@ function SkillListRow({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2 border-b border-border-subtle px-3 py-2.5 text-left transition-colors",
+        "flex w-full items-center gap-2 border-b border-border-subtle px-3 py-2.5 text-left outline-none transition-colors active:bg-bg-active",
         active ? "bg-bg-selected" : "hover:bg-bg-hover",
       )}
     >
@@ -518,10 +540,13 @@ function SkillListRow({
           {skill.description || "No description."}
         </p>
       </div>
-      <div className="flex shrink-0 items-center gap-1 text-[10px] tabular-nums">
+      <div className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums">
         {summary.warn && <span className="text-warning">drift</span>}
         {summary.synced > 0 && (
-          <span className="text-text-secondary">{summary.synced}●</span>
+          <span className="inline-flex items-center gap-1 text-text-secondary">
+            <span className="dot" />
+            {summary.synced}
+          </span>
         )}
       </div>
     </button>
@@ -544,7 +569,7 @@ function ComponentListRow({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2 border-b border-border-subtle px-3 py-2.5 text-left transition-colors",
+        "flex w-full items-center gap-2 border-b border-border-subtle px-3 py-2.5 text-left outline-none transition-colors active:bg-bg-active",
         active ? "bg-bg-selected" : "hover:bg-bg-hover",
       )}
     >
@@ -584,18 +609,14 @@ function ComponentDetail({ comp }: { comp: PackComponentMeta }) {
         </p>
       </div>
 
-      <div className="rounded-lg border border-border-default p-4">
-        <div className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
-          Invoke
-        </div>
-        <p className="mt-2 text-[11px] leading-snug text-text-secondary">
-          Reference this {comp.kind} in chat with{" "}
-          <span className="font-mono text-text-primary">
-            #{comp.kind}:{comp.name}
-          </span>{" "}
-          — its body is inlined into the message so any agent acts on it.
-          Delivering it into a tool (Claude Code / Codex) is managed from the
-          Packs tab.
+      <div className="border-t border-border-subtle pt-4">
+        <div className="eyebrow">Invoke</div>
+        <code className="mt-2 inline-block rounded-sm bg-bg-raised px-1.5 py-0.5 font-mono text-[11px] text-text-primary">
+          #{comp.kind}:{comp.name}
+        </code>
+        <p className="mt-2 text-[11px] leading-snug text-text-tertiary">
+          Type this in chat to inline its body for any agent. Delivery into a
+          tool (Claude Code / Codex) is managed from the Packs tab.
         </p>
       </div>
 
@@ -617,6 +638,7 @@ function SkillMatrix({
   toolDetected,
   busy,
   hasProject,
+  projectPath,
   onToggle,
   onAvailableEverywhere,
   onPromote,
@@ -630,6 +652,7 @@ function SkillMatrix({
   toolDetected: (tool: ToolInfo, scope: Scope) => boolean;
   busy: Set<string>;
   hasProject: boolean;
+  projectPath: string | null;
   onToggle: (name: string, scope: Scope, tool: ToolInfo) => void;
   onAvailableEverywhere: () => void;
   onPromote: () => void;
@@ -639,6 +662,20 @@ function SkillMatrix({
   const managed = skill.managedGlobal || skill.managedProject;
   const canPromote = hasProject && skill.managedProject && !skill.managedGlobal;
   const fromPack = !managed && !!skill.pack;
+
+  // Where to read the SKILL.md body from: a project-only managed skill reads at
+  // project scope; everything else (global, pack-provided) reads at global,
+  // where `read_skill` falls back to the pack store.
+  const readScope: Scope =
+    skill.managedProject && !skill.managedGlobal ? "project" : "global";
+  const bodyProjectPath = readScope === "project" ? projectPath : null;
+  const packTools = fromPack
+    ? tools
+        .filter((t) =>
+          scopes.some((s) => cellFor(skill.name, s, t.id).status === "pack"),
+        )
+        .map((t) => t.displayName)
+    : [];
 
   return (
     <div className="space-y-5 p-6">
@@ -659,17 +696,6 @@ function SkillMatrix({
           <p className="mt-0.5 text-[11px] text-text-tertiary">
             {skill.description || "No description."}
           </p>
-          {fromPack && (
-            <p className="mt-1 text-[10px] leading-snug text-text-tertiary">
-              Provided by pack{" "}
-              <span className="text-text-secondary">{skill.pack}</span> — invoke
-              it with{" "}
-              <span className="font-mono text-text-secondary">
-                #skill:{skill.name}
-              </span>
-              . Manage which tools it ships to in the Packs tab.
-            </p>
-          )}
         </div>
         {managed && (
           <div className="flex shrink-0 items-center gap-1">
@@ -704,42 +730,121 @@ function SkillMatrix({
         </div>
       )}
 
-      {/* Tool × scope matrix */}
-      <div className="overflow-hidden rounded-lg border border-border-default">
-        <div
-          className="grid"
-          style={{
-            gridTemplateColumns: `120px repeat(${tools.length}, 1fr)`,
-          }}
-        >
-          {/* Header row */}
-          <Th>Scope</Th>
-          {tools.map((t) => (
-            <Th key={t.id}>{t.displayName}</Th>
-          ))}
-          {/* One row per scope */}
-          {scopes.map((scope) => (
-            <MatrixRow
-              key={scope}
-              scope={scope}
-              tools={tools}
-              skillName={skill.name}
-              cellFor={cellFor}
-              toolDetected={toolDetected}
-              busy={busy}
-              readOnly={fromPack}
-              onToggle={onToggle}
-            />
-          ))}
-        </div>
-      </div>
+      {/* Delivery — a compact line for pack skills (read-only), the actionable
+          tool × scope matrix for your own skills. */}
+      {fromPack ? (
+        <p className="text-[11px] leading-snug text-text-tertiary">
+          Delivered by pack{" "}
+          <span className="text-text-secondary">{skill.pack}</span>
+          {packTools.length > 0
+            ? ` · in ${packTools.join(", ")}`
+            : " · not projected into a tool"}
+          {" · "}
+          <span className="font-mono text-text-secondary">
+            #skill:{skill.name}
+          </span>
+          . Manage delivery in the Packs tab.
+        </p>
+      ) : (
+        <>
+          <div className="overflow-hidden rounded border border-border-default">
+            <div
+              className="grid"
+              style={{
+                gridTemplateColumns: `120px repeat(${tools.length}, 1fr)`,
+              }}
+            >
+              <Th>Scope</Th>
+              {tools.map((t) => (
+                <Th key={t.id}>{t.displayName}</Th>
+              ))}
+              {scopes.map((scope) => (
+                <MatrixRow
+                  key={scope}
+                  scope={scope}
+                  tools={tools}
+                  skillName={skill.name}
+                  cellFor={cellFor}
+                  toolDetected={toolDetected}
+                  busy={busy}
+                  onToggle={onToggle}
+                />
+              ))}
+            </div>
+          </div>
+          <Legend />
+          <p className="text-[10px] leading-snug text-text-tertiary">
+            Click a cell to symlink (or unlink) this skill in that tool. Drifted
+            or external cells are never overwritten; resolve those by hand.
+          </p>
+        </>
+      )}
 
-      <Legend />
-      <p className="text-[10px] leading-snug text-text-tertiary">
-        {fromPack
-          ? "This skill is delivered by a pack — its tool delivery is managed in the Packs tab."
-          : "Click a cell to symlink (or unlink) this skill in that tool. Drifted or external cells are never overwritten — resolve those by hand."}
-      </p>
+      {/* About — the skill's actual content (SKILL.md body). */}
+      <SkillBody
+        scope={readScope}
+        name={skill.name}
+        projectPath={bodyProjectPath}
+      />
+    </div>
+  );
+}
+
+/** Fetches and renders a skill's SKILL.md body (resolves pack skills too).
+ *  Renders nothing when the body is empty or unreadable (e.g. an un-adopted
+ *  external skill). */
+function SkillBody({
+  scope,
+  name,
+  projectPath,
+}: {
+  scope: Scope;
+  name: string;
+  projectPath: string | null;
+}) {
+  const [body, setBody] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setBody(null);
+    api
+      .read(scope, name, projectPath)
+      .then((c) => {
+        if (alive) {
+          setBody(c.body.trim() || null);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (alive) {
+          setBody(null);
+          setLoading(false);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [scope, name, projectPath]);
+
+  if (loading) {
+    return (
+      <div className="border-t border-border-subtle pt-4">
+        <div className="eyebrow mb-2">About</div>
+        <PanelSkeleton rows={5} className="p-0" />
+      </div>
+    );
+  }
+  if (!body) return null;
+
+  return (
+    <div className="border-t border-border-subtle pt-4">
+      <div className="eyebrow mb-2">About</div>
+      <CachedMarkdown
+        source={body}
+        className="prose-chat text-[12px] text-text-secondary"
+      />
     </div>
   );
 }
@@ -817,7 +922,7 @@ function statusSummary(
 
 function Th({ children }: { children: React.ReactNode }) {
   return (
-    <div className="bg-bg-raised px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+    <div className="eyebrow border-b border-border-default bg-bg-raised px-3 py-2">
       {children}
     </div>
   );
@@ -833,7 +938,7 @@ function Tag({
   return (
     <span
       title={title}
-      className="inline-flex h-[16px] max-w-[140px] items-center truncate rounded-full border border-border-default bg-bg-raised px-1.5 text-[9px] text-text-tertiary"
+      className="inline-flex h-[18px] max-w-[140px] items-center truncate rounded-full border border-border-default bg-bg-raised px-2 text-[10px] text-text-tertiary"
     >
       {children}
     </span>
@@ -885,15 +990,14 @@ function SmallButton({
       disabled={busy}
       className="inline-flex h-7 items-center gap-1 rounded-md border border-border-default bg-bg-elevated px-2.5 text-[11px] font-medium text-text-primary transition-colors hover:bg-bg-hover disabled:opacity-50"
     >
-      {busy && <Loader2 size={11} className="animate-spin" />}
-      {children}
+      {busy ? <AtlasLoader size={11} /> : children}
     </button>
   );
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-full items-center justify-center gap-1.5 px-6 py-10 text-center text-[11px] leading-snug text-text-tertiary">
+    <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 py-10 text-center text-[11px] leading-snug text-text-tertiary">
       {children}
     </div>
   );

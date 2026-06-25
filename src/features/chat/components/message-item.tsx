@@ -19,7 +19,6 @@ import {
   Paperclip,
   Maximize2,
   X,
-  Zap,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -335,16 +334,6 @@ function MessageActions({ message }: { message: ChatMessage }) {
     }
   };
 
-  // Capture this turn as a reusable skill: open the prefilled create dialog
-  // (handled by SkillCaptureHost). The message body seeds the SKILL.md body.
-  const handleSaveAsSkill = () => {
-    window.dispatchEvent(
-      new CustomEvent("atlas:skill-capture", {
-        detail: { body: message.content },
-      }),
-    );
-  };
-
   return (
     <div
       className={cn(
@@ -378,9 +367,6 @@ function MessageActions({ message }: { message: ChatMessage }) {
         ) : (
           <Bookmark size={12} />
         )}
-      </ActionButton>
-      <ActionButton onClick={handleSaveAsSkill} title="Save as skill">
-        <Zap size={12} />
       </ActionButton>
     </div>
   );

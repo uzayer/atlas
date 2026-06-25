@@ -6,7 +6,7 @@
 // tool, mapping its projected/not state onto `synced`/`absent`. A `pack` status
 // is read-only here — pack-delivered projections are managed in the Packs tab.
 
-import { Loader2 } from "lucide-react";
+import { AtlasLoader } from "@/components/atlas-loader";
 
 import { cn } from "@/lib/utils";
 import type { ProjectionCell, ProjectionStatus } from "@/features/skills/lib/types";
@@ -23,17 +23,17 @@ export const STATUS_META: Record<
   synced: {
     label: "on",
     cls: "bg-accent text-bg-base",
-    hint: "Projected and in sync — click to remove",
+    hint: "Projected and in sync · click to remove",
   },
   drifted: {
     label: "drift",
     cls: "text-warning border border-warning/40",
-    hint: "Edited outside Atlas — resolve manually",
+    hint: "Edited outside Atlas · resolve manually",
   },
   external: {
     label: "ext",
     cls: "text-text-tertiary border border-border-default",
-    hint: "Owned by the tool — adopt to manage",
+    hint: "Owned by the tool · adopt to manage",
   },
   conflict: {
     label: "conflict",
@@ -43,12 +43,12 @@ export const STATUS_META: Record<
   absent: {
     label: "off",
     cls: "text-text-ghost border border-border-subtle",
-    hint: "Not delivered — click to enable",
+    hint: "Not delivered · click to enable",
   },
   pack: {
     label: "pack",
     cls: "border border-border-strong bg-bg-raised text-text-secondary",
-    hint: "Delivered by a pack — manage it in the Packs tab",
+    hint: "Delivered by a pack · manage it in the Packs tab",
   },
 };
 
@@ -102,9 +102,14 @@ export function StatusToken({
       onClick={onClick}
       disabled={busy}
       title={`${meta.hint}${mode ? ` (${mode})` : ""}`}
-      className={cn(chip, meta.cls, busy && "opacity-50")}
+      className={cn(
+        chip,
+        meta.cls,
+        "outline-none transition-[transform,background-color,color] focus-visible:ring-1 focus-visible:ring-border-strong active:scale-95",
+        busy && "opacity-50",
+      )}
     >
-      {busy ? <Loader2 size={9} className="animate-spin" /> : meta.label}
+      {busy ? <AtlasLoader size={9} /> : meta.label}
     </button>
   );
 }

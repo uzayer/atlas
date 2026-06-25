@@ -61,7 +61,7 @@ export function SkillsAndPacks() {
 
       <div className="min-h-0 flex-1">
         {tab === "skills" ? (
-          <SkillsSettings scope={scope} />
+          <SkillsSettings />
         ) : (
           <ScrollArea className="h-full">
             <PacksSettings scope={scope} />
@@ -83,7 +83,7 @@ function ScopeSelect({
   hasProject: boolean;
 }) {
   return (
-    <div className="flex items-center gap-0.5 rounded-md border border-border-default bg-bg-input p-0.5">
+    <div className="flex items-center gap-0.5 rounded-md border border-border-default bg-bg-raised p-0.5">
       {(["global", "project"] as Scope[]).map((s) => {
         const disabled = s === "project" && !hasProject;
         return (
