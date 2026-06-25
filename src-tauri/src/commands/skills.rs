@@ -174,6 +174,18 @@ pub struct PluginManifest {
     pub description: Option<String>,
     #[serde(default)]
     pub author: Option<serde_json::Value>,
+    // Claude Code plugin component paths. Each is a string or array of strings,
+    // relative to the manifest root — they let a plugin keep components in
+    // non-conventional locations (e.g. `.claude/skills`, `plugin/hooks/hooks.json`)
+    // instead of top-level `skills/`, `hooks/`, etc.
+    #[serde(default)]
+    pub skills: Option<serde_json::Value>,
+    #[serde(default)]
+    pub commands: Option<serde_json::Value>,
+    #[serde(default)]
+    pub agents: Option<serde_json::Value>,
+    #[serde(default)]
+    pub hooks: Option<serde_json::Value>,
 }
 
 /// A parsed pack: canonical name, root dir, the manifest if present, and every
@@ -2004,8 +2016,69 @@ fn collect_kind(
     }
 }
 
+/// Flatten a manifest component field (`"path"` or `["a","b"]`) into paths.
+fn manifest_field_paths(v: &Option<serde_json::Value>) -> Vec<String> {
+    match v {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// The (kind, relative-path) components a manifest explicitly declares.
+fn manifest_declared(m: &PluginManifest) -> Vec<(ComponentKind, String)> {
+    let mut out = Vec::new();
+    for (kind, field) in [
+        (ComponentKind::Skill, &m.skills),
+        (ComponentKind::Command, &m.commands),
+        (ComponentKind::Agent, &m.agents),
+        (ComponentKind::Hook, &m.hooks),
+    ] {
+        for p in manifest_field_paths(field) {
+            out.push((kind, p));
+        }
+    }
+    out
+}
+
+/// Resolve a manifest-declared path under `pack_root` and collect its components
+/// of `kind`. Handles a directory (scanned) or a direct file (e.g. a `hooks.json`
+/// pointed at by `"hooks"`). Paths that don't exist or escape the root are
+/// ignored — manifest content is never trusted blindly.
+fn collect_manifest_path(
+    pack_root: &Path,
+    kind: ComponentKind,
+    rel: &str,
+    out: &mut Vec<PackComponent>,
+) {
+    let candidate = pack_root.join(rel.trim_start_matches("./"));
+    if pack_rel(pack_root, &candidate).is_none() {
+        return; // traversal / escape
+    }
+    if candidate.is_dir() {
+        collect_kind(pack_root, kind, &candidate, out);
+    } else if candidate.is_file()
+        && kind != ComponentKind::Skill
+        && kind_accepts_file(kind, &candidate)
+    {
+        if let (Some(rel_path), Some(name)) = (
+            pack_rel(pack_root, &candidate),
+            component_file_name(kind, &candidate),
+        ) {
+            out.push(PackComponent { kind, rel_path, name });
+        }
+    }
+}
+
 /// Parse a pack directory into a [`Pack`]: read the optional manifest, then
-/// enumerate components from the conventional layout dirs. Output is sorted by
+/// enumerate components. If the manifest declares component paths
+/// (`skills`/`commands`/`agents`/`hooks`) it is authoritative — only those paths
+/// are collected, so unrelated top-level dirs (e.g. a product repo's build
+/// `scripts/`) are not mistaken for components. Otherwise we fall back to
+/// inferring from the conventional top-level layout. Output is sorted by
 /// `(kind, rel_path)` for deterministic results.
 fn pack_parse(dir: &Path) -> Result<Pack, String> {
     if !dir.is_dir() {
@@ -2015,13 +2088,22 @@ fn pack_parse(dir: &Path) -> Result<Pack, String> {
     let name = pack_name(dir, manifest.as_ref())?;
 
     let mut components = Vec::new();
-    let rd = fs::read_dir(dir).map_err(|e| e.to_string())?;
-    for entry in rd.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
+    let declared = manifest.as_ref().map(manifest_declared).unwrap_or_default();
+    if declared.is_empty() {
+        // No manifest-declared paths → infer from conventional top-level layout.
+        let rd = fs::read_dir(dir).map_err(|e| e.to_string())?;
+        for entry in rd.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            if let Some(kind) = ComponentKind::from_dir_name(&entry.file_name().to_string_lossy()) {
+                collect_kind(dir, kind, &entry.path(), &mut components);
+            }
         }
-        if let Some(kind) = ComponentKind::from_dir_name(&entry.file_name().to_string_lossy()) {
-            collect_kind(dir, kind, &entry.path(), &mut components);
+    } else {
+        // Manifest is authoritative — collect only what it declares.
+        for (kind, rel) in declared {
+            collect_manifest_path(dir, kind, &rel, &mut components);
         }
     }
     components.sort_by(|a, b| (a.kind.as_str(), &a.rel_path).cmp(&(b.kind.as_str(), &b.rel_path)));
@@ -2679,10 +2761,69 @@ fn entry_pack_tag(entry: &serde_json::Value) -> Option<&str> {
 /// Merge a pack's hooks JSON into a tool settings file, tagging each injected
 /// top-level entry with `_atlasPack=<pack>`. Idempotent: prior entries for this
 /// pack are dropped first. Preserves all other settings keys.
+/// Single-quote a string for safe use in a POSIX shell command.
+fn sh_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Resolve a pack's plugin root in every hook `command` so bundled scripts load
+/// once the hooks are merged into a plain `settings.json`.
+///
+/// Claude Code only defines `CLAUDE_PLUGIN_ROOT` for *real* plugin hooks; a
+/// merged settings.json hook runs without it, so two breakage shapes appear:
+///   1. literal `${CLAUDE_PLUGIN_ROOT}/foo.js` paths expand to nothing, and
+///   2. self-bootstrapping hooks (e.g. ECC) read `process.env.CLAUDE_PLUGIN_ROOT`
+///      at runtime, fall back to `~/.claude`, and `require` a missing script
+///      (`cjs/loader` throws on every fire).
+///
+/// We fix both: substitute the literal placeholder with the absolute store path,
+/// then prepend `CLAUDE_PLUGIN_ROOT=<store>` as a leading shell assignment so the
+/// runtime lookup resolves too. Recurses through the nested `hooks` arrays Claude
+/// Code uses; only touches `type:"command"` leaves (the default when unset).
+fn rewrite_hook_commands(value: &mut serde_json::Value, plugin_root: &str) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_command = map
+                .get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| t == "command")
+                .unwrap_or(true);
+            if is_command {
+                if let Some(serde_json::Value::String(cmd)) = map.get_mut("command") {
+                    let resolved = cmd
+                        .replace("${CLAUDE_PLUGIN_ROOT}", plugin_root)
+                        .replace("$CLAUDE_PLUGIN_ROOT", plugin_root);
+                    // Skip only if the command *opens* with the assignment already
+                    // (an inner `process.env.CLAUDE_PLUGIN_ROOT=` must not count).
+                    *cmd = if resolved.trim_start().starts_with("CLAUDE_PLUGIN_ROOT=") {
+                        resolved
+                    } else {
+                        format!(
+                            "CLAUDE_PLUGIN_ROOT={} {}",
+                            sh_single_quote(plugin_root),
+                            resolved
+                        )
+                    };
+                }
+            }
+            for v in map.values_mut() {
+                rewrite_hook_commands(v, plugin_root);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                rewrite_hook_commands(v, plugin_root);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn merge_hooks_into_settings(
     settings_path: &Path,
     hooks_src: &Path,
     pack: &str,
+    plugin_root: &Path,
 ) -> Result<(), String> {
     let incoming: serde_json::Value = {
         let raw = fs::read_to_string(hooks_src).map_err(|e| e.to_string())?;
@@ -2725,6 +2866,7 @@ fn merge_hooks_into_settings(
             dst_arr.retain(|e| entry_pack_tag(e) != Some(pack));
             for entry in arr {
                 let mut tagged = entry.clone();
+                rewrite_hook_commands(&mut tagged, &plugin_root.to_string_lossy());
                 if let Some(o) = tagged.as_object_mut() {
                     o.insert(
                         ATLAS_PACK_TAG.to_string(),
@@ -2936,7 +3078,7 @@ fn project_pack(
             }
             HomeStyle::SettingsMerge => {
                 let target = root.join(home.rel);
-                merge_hooks_into_settings(&target, &src_abs, &safe_pack)?;
+                merge_hooks_into_settings(&target, &src_abs, &safe_pack, &store)?;
                 new_entries.push(PackProjEntry {
                     kind: comp.kind,
                     rel_path: comp.rel_path.clone(),
@@ -3924,7 +4066,7 @@ mod tests {
         write_file(&dir.join("rules/style.md"), "rule body");
         write_file(
             &dir.join("hooks/hooks.json"),
-            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"node ${CLAUDE_PLUGIN_ROOT}/scripts/setup.js"}]}]}}"#,
         );
         write_file(&dir.join("scripts/setup.js"), "console.log(1)");
         dir
@@ -3937,6 +4079,49 @@ mod tests {
         fs::create_dir_all(root.join(".codex")).unwrap();
         install_pack_from_dir(&root, src, "owner/repo", "c1", false).unwrap();
         root
+    }
+
+    #[test]
+    fn pack_parse_honors_manifest_declared_paths() {
+        // Plugin keeps its real components in non-conventional locations and
+        // declares them in the manifest; an unrelated top-level build `scripts/`
+        // must NOT be ingested (the impeccable misdetection).
+        let dir = tmp_pack_dir();
+        write_file(
+            &dir.join(".claude-plugin/plugin.json"),
+            r#"{"name":"mani","skills":"./.claude/skills","hooks":"./plugin/hooks/hooks.json"}"#,
+        );
+        write_file(&dir.join(".claude/skills/foo/SKILL.md"), "---\nname: foo\n---\nbody");
+        write_file(&dir.join("plugin/hooks/hooks.json"), r#"{"hooks":{}}"#);
+        write_file(&dir.join("scripts/build.js"), "console.log(1)"); // build tooling, not a component
+
+        let pack = pack_parse(&dir).unwrap();
+        assert!(pack
+            .components
+            .iter()
+            .any(|c| c.kind == ComponentKind::Skill && c.name == "foo"));
+        assert!(pack.components.iter().any(|c| c.kind == ComponentKind::Hook));
+        assert!(
+            !pack.components.iter().any(|c| c.kind == ComponentKind::Script),
+            "manifest-declared pack must not ingest top-level build scripts"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pack_parse_falls_back_to_layout_without_manifest_paths() {
+        // Manifest present but declares no component paths → top-level inference.
+        let dir = tmp_pack_dir();
+        write_file(&dir.join(".claude-plugin/plugin.json"), r#"{"name":"lay"}"#);
+        write_file(&dir.join("agents/a.md"), "agent");
+        write_file(&dir.join("scripts/setup.js"), "x");
+
+        let pack = pack_parse(&dir).unwrap();
+        assert!(pack.components.iter().any(|c| c.kind == ComponentKind::Agent));
+        assert!(pack.components.iter().any(|c| c.kind == ComponentKind::Script));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -4016,6 +4201,69 @@ mod tests {
             .count();
         assert_eq!(tagged2, 1);
         assert!(arr2.iter().any(|e| e["matcher"] == "X"));
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&src).ok();
+    }
+
+    #[test]
+    fn pack_project_hook_rewrites_plugin_root_to_store_dir() {
+        let src = make_full_src_pack();
+        let root = installed_root(&src);
+
+        project_pack(&root, "global", "demo-pack", "claude-code", Some(&[ComponentKind::Hook]), false)
+            .unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let cmd = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+
+        let store = root.join(".atlas/packs/demo-pack");
+        let store_str = store.to_string_lossy().to_string();
+        // The unresolved `${...}` placeholder is gone, replaced by the store dir.
+        assert!(!cmd.contains("${CLAUDE_PLUGIN_ROOT}"), "placeholder not rewritten: {cmd}");
+        assert!(cmd.contains(&store_str), "command should point at store dir: {cmd}");
+        assert!(cmd.ends_with("/scripts/setup.js"));
+        // …and the root is exported so runtime env lookups resolve too.
+        assert!(
+            cmd.starts_with(&format!("CLAUDE_PLUGIN_ROOT={} ", sh_single_quote(&store_str))),
+            "command should export plugin root: {cmd}"
+        );
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&src).ok();
+    }
+
+    #[test]
+    fn pack_project_hook_exports_root_for_runtime_env_bootstrap() {
+        // ECC-style hook: no literal `${...}` — it reads process.env at runtime
+        // (note the inner `process.env.CLAUDE_PLUGIN_ROOT=r` must NOT be mistaken
+        // for a leading shell assignment).
+        let src = tmp_pack_dir();
+        write_file(&src.join(".claude-plugin/plugin.json"), r#"{"name":"boot-pack"}"#);
+        write_file(
+            &src.join("hooks/hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"node -e \"var r=process.env.CLAUDE_PLUGIN_ROOT;process.env.CLAUDE_PLUGIN_ROOT=r;require(r)\""}]}]}}"#,
+        );
+        let root = installed_root(&src);
+
+        project_pack(&root, "global", "boot-pack", "claude-code", Some(&[ComponentKind::Hook]), false)
+            .unwrap();
+
+        let settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join(".claude/settings.json")).unwrap())
+                .unwrap();
+        let cmd = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let store_str = root.join(".atlas/packs/boot-pack").to_string_lossy().to_string();
+        assert!(
+            cmd.starts_with(&format!("CLAUDE_PLUGIN_ROOT={} node -e", sh_single_quote(&store_str))),
+            "runtime-env hook should be prefixed with the root: {cmd}"
+        );
 
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&src).ok();
