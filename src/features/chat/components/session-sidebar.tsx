@@ -181,6 +181,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     setAcpBinding,
     setAcpModes,
     setAcpModels,
+    setSessionAgentType,
     clearSession,
     setSessionTitle,
     setTranscriptLoading,
@@ -448,6 +449,18 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         : item.agent === "cersei"
           ? CERSEI_PLUGIN_ID
           : DEFAULT_PLUGIN_ID;
+    // The composer's agent label must follow the RESUMED session's real agent,
+    // not whatever was selected in this tab. Without this, opening (say) an
+    // Atlas/Codex session into a Claude-Code tab left the composer on Claude;
+    // the user then "switched" agents, which (correctly) spawns a NEW chat —
+    // so resuming forced an annoying detour. `item.agent` is already narrowed
+    // to a shipped agent, so map it straight to the composer's SwitchableAgent.
+    const resumedAgentType =
+      item.agent === "codex"
+        ? "codex"
+        : item.agent === "cersei"
+          ? "cersei"
+          : "claude-code";
 
     // Decide target tab. If the current tab's session is mid-flight
     // (status === "running"), we MUST NOT overwrite it — the agent is
@@ -471,8 +484,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         data: {},
       });
       // Pre-create the chat-store session before the ChatPanel mounts so
-      // the optimistic binding below has something to attach to.
-      createSession(targetTabId);
+      // the optimistic binding below has something to attach to — with the
+      // resumed session's agent so the composer is correct from the first frame.
+      createSession(targetTabId, resumedAgentType);
       setActiveTab(targetTabId);
     }
 
@@ -486,6 +500,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     // session id IMMEDIATELY when the default agent is already cached
     // (App.tsx pre-spawns it at startup, so it almost always is).
     clearSession(targetTabId);
+    // Relabel the composer to the resumed session's agent (no-op if already
+    // matching). Keeps the existing binding — does NOT spawn a new chat.
+    setSessionAgentType(targetTabId, resumedAgentType);
     setSessionTitle(targetTabId, item.title.slice(0, 40));
     const cachedAgent = getAgentSync(pluginId);
     if (cachedAgent) {

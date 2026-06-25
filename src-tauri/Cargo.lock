@@ -355,6 +355,7 @@ dependencies = [
  "atlas-agents",
  "atlas-codeindex",
  "atlas-embed",
+ "atlas-gitdiff",
  "atlas-review",
  "atlas-terminal",
  "base64 0.21.7",
@@ -467,6 +468,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tokenizers 0.23.1",
+]
+
+[[package]]
+name = "atlas-gitdiff"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

@@ -7,9 +7,12 @@ import {
   Undo2,
   AlertTriangle,
   ChevronDown,
+  GitCompare,
+  FileCode2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useGitStore, type GitFileStatus } from "../../stores/git-store";
+import { openGitDiff } from "../../lib/git-diff-api";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { DiffView } from "../diff-view";
@@ -41,6 +44,8 @@ function FileRow({
   action,
   onAction,
   onDiscard,
+  onOpenDiff,
+  onOpenInEditor,
 }: {
   file: GitFileStatus;
   selected: boolean;
@@ -48,6 +53,8 @@ function FileRow({
   action: "stage" | "unstage";
   onAction: () => void;
   onDiscard?: () => void;
+  onOpenDiff?: () => void;
+  onOpenInEditor?: () => void;
 }) {
   const badge = statusBadge(file.status);
   const name = file.path.split("/").pop() ?? file.path;
@@ -68,6 +75,30 @@ function FileRow({
         <span className="text-text-secondary group-hover:text-text-primary">{name}</span>
       </span>
       <div className="flex items-center opacity-0 group-hover:opacity-100 shrink-0">
+        {onOpenDiff && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenDiff();
+            }}
+            className="p-0.5 rounded text-text-tertiary hover:text-text-primary"
+            title="Open in diff view"
+          >
+            <GitCompare size={11} />
+          </button>
+        )}
+        {onOpenInEditor && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenInEditor();
+            }}
+            className="p-0.5 rounded text-text-tertiary hover:text-text-primary"
+            title="Open in code editor"
+          >
+            <FileCode2 size={11} />
+          </button>
+        )}
         {onDiscard && (
           <button
             onClick={(e) => {
@@ -248,6 +279,8 @@ export function ChangesView() {
                 onSelect={() => setSelected((cur) => (cur === f.path ? null : f.path))}
                 action="unstage"
                 onAction={() => run(() => actions.unstageFiles([f.path]))}
+                onOpenDiff={repoPath ? () => openGitDiff(repoPath, f.path, true) : undefined}
+                onOpenInEditor={() => openFile(f.path)}
               />
             ))}
           </div>
@@ -287,6 +320,8 @@ export function ChangesView() {
               action="stage"
               onAction={() => run(() => actions.stageFiles([f.path]))}
               onDiscard={() => handleRevert(f)}
+              onOpenDiff={repoPath ? () => openGitDiff(repoPath, f.path, false) : undefined}
+              onOpenInEditor={() => openFile(f.path)}
             />
           ))}
           {files.length === 0 && (
@@ -302,6 +337,9 @@ export function ChangesView() {
       <DiffView
         diff={fileDiff ?? diff}
         onOpenFile={openFile}
+        onOpenDiff={
+          repoPath ? (p) => openGitDiff(repoPath, p, false) : undefined
+        }
         onRefresh={() => run(() => actions.loadDiff())}
         filters={!selected}
         emptyLabel={selected ? "No diff for this file" : "No changes"}

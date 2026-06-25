@@ -156,6 +156,12 @@ interface ChatActions {
     /** Re-bind a fresh (message-less) chat to a different agent. Clears the ACP
      *  binding so the chat panel re-creates a session with the new agent. */
     switchChatAgent: (tabId: string, agentType: SwitchableAgent) => void;
+    /** Sync the composer's agent label to an ALREADY-bound session's real
+     *  agent (e.g. resuming a history session whose agent differs from the
+     *  tab's current selection). Unlike `switchChatAgent` this does NOT clear
+     *  the ACP binding — the session stays attached to its live agent process,
+     *  so it never spawns a fresh chat. */
+    setSessionAgentType: (tabId: string, agentType: SwitchableAgent) => void;
     setActiveSession: (id: string | null) => void;
     addMessage: (
       sessionId: string,
@@ -511,6 +517,27 @@ export const useChatStore = createSelectors(
             const cachedModels = loadCachedAcpModels(agentType);
             sess.acpAvailableModels = cachedModels?.availableModels ?? [];
             sess.acpCurrentModel = cachedModels?.currentModel ?? undefined;
+          }),
+        setSessionAgentType: (tabId, agentType) =>
+          set((s) => {
+            const sess = s.sessions[tabId];
+            if (!sess || sess.agentType === agentType) return;
+            sess.agentType = agentType;
+            sess.claudePermissionMode =
+              agentType === "claude-code"
+                ? (sess.claudePermissionMode ?? "default")
+                : undefined;
+            if (agentType === "claude-code") {
+              // Claude has no ACP modes — clear any stale picker state left by
+              // the previously-selected agent so no ghost mode pill shows.
+              sess.acpAvailableModes = [];
+              sess.acpModesPending = false;
+              sess.acpCurrentMode = undefined;
+            }
+            // For codex/cersei the resume flow calls `setAcpModes` immediately
+            // after with the session's real advertised modes, so no cache
+            // seeding is needed here. Crucially the ACP binding
+            // (acpAgentId/acpSessionId) is left intact — this only relabels.
           }),
         setActiveSession: (id) =>
           set((s) => {

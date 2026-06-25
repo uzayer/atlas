@@ -11,6 +11,7 @@ import {
   UnfoldVertical,
   RefreshCw,
   MoreHorizontal,
+  GitCompare,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { parseDiff, buildRows, type DiffFile } from "../lib/diff";
@@ -29,6 +30,7 @@ type SortMode = "default" | "most-changes";
 export function DiffView({
   diff,
   onOpenFile,
+  onOpenDiff,
   onRefresh,
   filters = false,
   emptyLabel = "No changes",
@@ -36,6 +38,8 @@ export function DiffView({
 }: {
   diff: string;
   onOpenFile?: (path: string) => void;
+  /** Open this file in the dedicated side-by-side diff tab. */
+  onOpenDiff?: (path: string) => void;
   onRefresh?: () => void;
   filters?: boolean;
   emptyLabel?: string;
@@ -185,6 +189,18 @@ export function DiffView({
                     <span className="text-[11px] text-text-secondary font-mono truncate flex-1 select-text">
                       {file.path}
                     </span>
+                    {onOpenDiff && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenDiff(file.path);
+                        }}
+                        className="opacity-0 group-hover:opacity-100 p-0.5 text-text-tertiary hover:text-text-primary"
+                        title="Open in diff view"
+                      >
+                        <GitCompare size={10} />
+                      </button>
+                    )}
                     {onOpenFile && (
                       <button
                         onClick={(e) => {
@@ -192,7 +208,7 @@ export function DiffView({
                           onOpenFile(file.path);
                         }}
                         className="opacity-0 group-hover:opacity-100 p-0.5 text-text-tertiary hover:text-text-primary"
-                        title="Open file"
+                        title="Open in code editor"
                       >
                         <ExternalLink size={9} />
                       </button>

@@ -57,6 +57,9 @@ atlas-review = { path = "../crates/atlas-review" }
 # Deterministic codebase scanner (Cersei tree-sitter). Feeds the Memory-Chat RAG
 # with up-to-date source structure. Drives `commands::codebase_index`.
 atlas-codeindex = { path = "../crates/atlas-codeindex" }
+# Structured side-by-side git diff engine (vendors delta's word-diff). Drives
+# `commands::gitdiff` (diff viewer + editor gutter).
+atlas-gitdiff = { path = "../crates/atlas-gitdiff" }
 dirs = "6"
 sha2 = "0.10"
 # URL parsing for the embedded browser (`commands::browser`). Already in the

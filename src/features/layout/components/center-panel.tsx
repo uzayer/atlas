@@ -21,6 +21,7 @@ const BrowserPanel = lazy(() => import("@/features/browser/components/browser-pa
 const MediaViewer = lazy(() => import("@/features/media/components/media-viewer").then(m => ({ default: m.MediaViewer })));
 const SvgViewer = lazy(() => import("@/features/svg/components/svg-viewer").then(m => ({ default: m.SvgViewer })));
 const PdfViewer = lazy(() => import("@/features/pdf/components/pdf-viewer").then(m => ({ default: m.PdfViewer })));
+const GitDiffPanel = lazy(() => import("@/features/git/components/git-diff-panel").then(m => ({ default: m.GitDiffPanel })));
 const CanvasPanel = lazy(() => import("@/features/canvas/components/canvas-panel").then(m => ({ default: m.CanvasPanel })));
 const KnowledgePanel = lazy(() => import("@/features/knowledge/components/knowledge-panel").then(m => ({ default: m.KnowledgePanel })));
 const KnowledgeGraph = lazy(() => import("@/features/knowledge/components/knowledge-graph").then(m => ({ default: m.KnowledgeGraph })));
@@ -536,6 +537,14 @@ function TabContent({ tab }: { tab: Tab }) {
       return <SvgViewer filePath={tab.data.filePath as string} />;
     case "pdf":
       return <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />;
+    case "diff":
+      return (
+        <GitDiffPanel
+          repoPath={tab.data.repoPath as string}
+          file={tab.data.file as string}
+          staged={!!tab.data.staged}
+        />
+      );
     case "unsupported":
       return <UnsupportedView filePath={tab.data.filePath as string} />;
     default:

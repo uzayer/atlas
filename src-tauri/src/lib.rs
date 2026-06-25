@@ -136,6 +136,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::window::window_zoom,
+            commands::clipboard::clipboard_file_paths,
             commands::window::set_window_title,
             commands::browser::browser_open_window,
             commands::browser::browser_embed_create,
@@ -246,6 +247,8 @@ pub fn run() {
             // Legacy Claude-CLI subprocess commands (claude_run/stream/stop/check/version)
             // were replaced by ACP. Session-history readers below are still in use.
             commands::claude::list_claude_sessions,
+            commands::gitdiff::git_diff_structured,
+            commands::gitdiff::git_diff_line_status,
             commands::claude::delete_claude_session,
             commands::claude::read_claude_session,
             commands::claude::claude_session_stats,
