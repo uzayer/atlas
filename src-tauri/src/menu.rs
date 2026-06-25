@@ -43,16 +43,22 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         ],
     )?;
 
-    // Standard Edit menu — provides Cmd+C/V/X/A/Z key equivalents that native
+    // Standard Edit menu — provides Cmd+C/V/X/A key equivalents that native
     // webviews (including the embedded browser) rely on.
+    //
+    // Undo/Redo are DELIBERATELY OMITTED. The predefined items bind Cmd+Z /
+    // Cmd+Shift+Z to AppKit's `undo:` / `redo:` editing selectors, which macOS
+    // routes straight to WKWebView's native editing-undo via the responder
+    // chain — WITHOUT dispatching a JS keydown to the page. That shadowed
+    // CodeMirror's own history (`historyKeymap`), so Cmd+Z did nothing in the
+    // code editor. Without these items Cmd+Z reaches the page as a normal
+    // keydown: CodeMirror handles its undo, and the embedded browser's text
+    // fields still undo via WebKit's built-in editing default action.
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
         true,
         &[
-            &PredefinedMenuItem::undo(app, None)?,
-            &PredefinedMenuItem::redo(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,

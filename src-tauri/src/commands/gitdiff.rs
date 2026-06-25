@@ -29,9 +29,17 @@ fn run_git_diff(path: &str, file: &str, staged: bool, context: u32) -> Result<St
         return Ok(text);
     }
 
-    // Empty (e.g. an untracked/new file the index doesn't know) — diff the file
-    // against /dev/null so it shows as fully added. `--no-index` exits non-zero
-    // by design, so ignore the status and just take stdout.
+    // Empty diff. This is the COMMON case for a clean, tracked file — and it
+    // genuinely means "no changes", so return empty. We must NOT fall back to
+    // `--no-index` here: that would diff the file against /dev/null and report
+    // EVERY line as added, which is what made the editor gutter mark all lines
+    // until the first edit. Only an UNTRACKED file should render as all-added.
+    if is_tracked(path, file) {
+        return Ok(String::new());
+    }
+
+    // Untracked / brand-new file — diff against /dev/null so it shows as fully
+    // added. `--no-index` exits non-zero by design, so ignore status; take stdout.
     let nul = devnull();
     let no_index = Command::new("git")
         .args(["diff", "--no-color", &ctx, "--no-index", "--", nul, file])
@@ -39,6 +47,17 @@ fn run_git_diff(path: &str, file: &str, staged: bool, context: u32) -> Result<St
         .output()
         .map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&no_index.stdout).to_string())
+}
+
+/// Whether `file` is tracked by git (in the index). `git ls-files
+/// --error-unmatch` exits 0 only for tracked paths.
+fn is_tracked(path: &str, file: &str) -> bool {
+    Command::new("git")
+        .args(["ls-files", "--error-unmatch", "--", file])
+        .current_dir(path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn devnull() -> &'static str {

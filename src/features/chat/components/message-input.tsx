@@ -2,7 +2,6 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import {
   ArrowUp,
-  AtSign,
   Square,
   Pencil,
   X,
@@ -1083,25 +1082,6 @@ export function MessageInput({
               {agentType === "cersei" && <EffortPill tabId={tabId} />}
               {agentType === "cersei" && <CerseiMemoryPill />}
               {agentType === "cersei" && <CerseiUsagePill tabId={tabId} />}
-              <button
-                onClick={() => {
-                  // Insert a literal `@` at the caret and refocus the
-                  // editor — the trigger plugin picks it up and opens
-                  // the picker just like a typed `@`.
-                  const view = inputRef.current?.view();
-                  if (!view) return;
-                  const head = view.state.selection.main.head;
-                  view.dispatch({
-                    changes: { from: head, to: head, insert: "@" },
-                    selection: { anchor: head + 1 },
-                  });
-                  inputRef.current?.focus();
-                }}
-                className="flex items-center justify-center w-6 h-6 rounded-md text-[var(--text-tertiary)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
-                title="Mention (@)"
-              >
-                <AtSign size={12} />
-              </button>
             </div>
 
             <div className="flex items-center">
