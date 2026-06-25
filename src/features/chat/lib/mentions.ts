@@ -17,6 +17,7 @@ import { listClaudeSessions, readClaudeSession } from "./claude-api";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
 import { skills } from "@/features/skills/lib/skills-api";
+import type { PackComponentKind } from "@/features/skills/lib/types";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,7 @@ export type MentionKind =
   | "symbol"
   | "knowledge"
   | "skill"
+  | "component"
   | "repo"
   | "paper"
   | "branch"
@@ -85,6 +87,22 @@ export interface MentionSkill {
   filePath: string;
 }
 
+export interface MentionComponent {
+  kind: "component";
+  /** `${scope}:${componentKind}:${pack}:${name}` — dedupe key. */
+  id: string;
+  displayName: string;   // component name (the `#<kind>:<name>` token)
+  description: string;
+  /** "command" | "agent" | "rule". */
+  componentKind: PackComponentKind;
+  /** Originating pack name. */
+  pack: string;
+  scope: "global" | "project";
+  projectPath: string | null;
+  /** Absolute path to the component body file (Rust read fallback). */
+  filePath: string;
+}
+
 export interface MentionRepo {
   kind: "repo";
   id: string;            // absolute path to the cloned repo
@@ -126,6 +144,7 @@ export type MentionData =
   | MentionSymbol
   | MentionKnowledge
   | MentionSkill
+  | MentionComponent
   | MentionRepo
   | MentionPaper
   | MentionBranch
@@ -148,6 +167,7 @@ export const MENTION_CATEGORIES: readonly MentionCategory[] = [
   { kind: "symbol",       label: "Symbols",         aliases: ["symbol", "sym", "s/"],     weight: 0.85 },
   { kind: "knowledge",    label: "Knowledge",       aliases: ["note", "knowledge", "k/"], weight: 0.85 },
   { kind: "skill",        label: "Skills",          aliases: ["skill", "sk/"],            weight: 0.9  },
+  { kind: "component",    label: "Pack Components", aliases: ["command", "agent", "rule", "cmd", "c/"], weight: 0.88 },
   { kind: "repo",         label: "Cloned Repos",    aliases: ["repo", "github", "gh/"],   weight: 0.8  },
   { kind: "paper",        label: "Papers",          aliases: ["paper", "p/"],             weight: 0.7  },
   { kind: "branch",       label: "Branches",        aliases: ["branch", "b/"],            weight: 0.6  },
@@ -285,6 +305,8 @@ export function toShortForm(m: MentionData): string {
       return `@note:${m.id}`;
     case "skill":
       return `#skill:${m.displayName}`;
+    case "component":
+      return `#${m.componentKind}:${m.displayName}`;
     case "repo":
       return `@repo:${m.displayName}`;
     case "paper":
@@ -323,8 +345,18 @@ export async function searchMentions(
   // substring-filter JS-side (no Rust `mention_search` change needed). Only
   // reachable when scope is locked to "skill" — i.e. the `#` trigger or the
   // Skills category — so the unscoped `@` blend stays unchanged.
+  // The `#` rail (scope locked to "skill") invokes skills AND pack-delivered
+  // components (command/agent/rule) — both inline their body at send time.
   if (scope === "skill") {
-    return searchSkills(stripCategoryAlias(query, "skill"), ctx);
+    const q = stripCategoryAlias(query, "skill");
+    const [sk, comps] = await Promise.all([
+      searchSkills(q, ctx),
+      searchPackComponents(q, ctx),
+    ]);
+    return [...sk, ...comps];
+  }
+  if (scope === "component") {
+    return searchPackComponents(stripCategoryAlias(query, "component"), ctx);
   }
   // File/folder mentions read from the same backend FileIndex as Cmd+P. If it
   // got stuck/unloaded, recover here too (cheap + coalesced once confirmed).
@@ -408,6 +440,68 @@ async function searchSkills(
     if (a.scope !== b.scope) return a.scope === "project" ? -1 : 1;
     return a.displayName.localeCompare(b.displayName);
   });
+  return out;
+}
+
+/** Pack-component search for the `#` rail — lists installed-pack commands,
+ *  agents, and rules (via `pack_components_list`) and substring-filters by name,
+ *  description, or kind. Grouped by kind, then alpha. Mirrors `searchSkills`. */
+async function searchPackComponents(
+  query: string,
+  ctx: MentionContext,
+): Promise<MentionComponent[]> {
+  const q = query.trim().toLowerCase();
+  const sources: { scope: "global" | "project"; projectPath: string | null }[] = [
+    { scope: "global", projectPath: null },
+  ];
+  if (ctx.projectPath) {
+    sources.push({ scope: "project", projectPath: ctx.projectPath });
+  }
+
+  const lists = await Promise.all(
+    sources.map(async (s) => {
+      try {
+        const metas = await skills.componentsList(s.scope, s.projectPath);
+        return metas.map((meta) => ({ meta, source: s }));
+      } catch (e) {
+        console.warn(`pack_components_list (${s.scope}) failed:`, e);
+        return [];
+      }
+    }),
+  );
+
+  const seen = new Set<string>();
+  const out: MentionComponent[] = [];
+  for (const { meta, source } of lists.flat()) {
+    const id = `${source.scope}:${meta.kind}:${meta.pack}:${meta.name}`;
+    if (seen.has(id)) continue;
+    if (
+      q &&
+      !meta.name.toLowerCase().includes(q) &&
+      !meta.description.toLowerCase().includes(q) &&
+      !meta.kind.includes(q)
+    ) {
+      continue;
+    }
+    seen.add(id);
+    out.push({
+      kind: "component",
+      id,
+      displayName: meta.name,
+      description: meta.description,
+      componentKind: meta.kind,
+      pack: meta.pack,
+      scope: source.scope,
+      projectPath: source.projectPath,
+      filePath: meta.path,
+    });
+  }
+
+  out.sort((a, b) =>
+    a.componentKind !== b.componentKind
+      ? a.componentKind.localeCompare(b.componentKind)
+      : a.displayName.localeCompare(b.displayName),
+  );
   return out;
 }
 

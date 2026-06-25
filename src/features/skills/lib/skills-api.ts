@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentTarget,
+  PackComponentMeta,
   ReconcileView,
   Scope,
   SkillContent,
@@ -27,6 +28,13 @@ export const skills = {
     invoke<SkillContent>("skills_read", {
       scope,
       name,
+      projectPath: projectPath ?? null,
+    }),
+
+  /** Invokable pack-delivered components (command/agent/rule) in this scope. */
+  componentsList: (scope: Scope, projectPath?: string | null) =>
+    invoke<PackComponentMeta[]>("pack_components_list", {
+      scope,
       projectPath: projectPath ?? null,
     }),
 

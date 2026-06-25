@@ -343,6 +343,7 @@ function kindGlyph(kind: MentionKind): string {
     case "symbol":       return ICON_HASH;
     case "knowledge":    return ICON_BOOK_OPEN;
     case "skill":        return ICON_ZAP;
+    case "component":    return ICON_ZAP;
     case "repo":         return ICON_FOLDER_GIT;
     case "paper":        return ICON_NEWSPAPER;
     case "branch":       return ICON_GIT_BRANCH;
@@ -357,6 +358,7 @@ function chipTitle(m: MentionData): string {
     case "symbol":       return `${m.symbolKind} · ${m.filePath}:${m.line}`;
     case "knowledge":    return `${m.source} · ${m.filePath}`;
     case "skill":        return m.description || m.displayName;
+    case "component":    return m.description || m.displayName;
     case "repo":         return m.absPath;
     case "paper":        return m.authors.length ? m.authors.join(", ") : "paper";
     case "branch":       return `${m.refKind} · ${m.sha.slice(0, 7)}`;

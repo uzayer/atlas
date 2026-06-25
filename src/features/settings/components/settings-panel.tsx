@@ -26,7 +26,7 @@ import {
 import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
-import { SkillsSettings } from "./skills-settings";
+import { SkillsAndPacks } from "./skills-and-packs";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -84,7 +84,7 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
         </div>
       ) : activeSection === "skills" ? (
         <div className="flex-1 min-w-0 min-h-0">
-          <SkillsSettings />
+          <SkillsAndPacks />
         </div>
       ) : (
         <ScrollArea className="flex-1 p-6">

@@ -30,6 +30,33 @@ export interface SkillMeta {
    * "Make for all agents".
    */
   managed: boolean;
+  /**
+   * When this skill is *provided by an installed pack* (not authored in the
+   * canonical store), the originating pack name. Absent for authored/external
+   * skills. Pack-provided skills are still `#skill:`-invokable; manage their
+   * tool projection from the Packs tab.
+   */
+  pack?: string | null;
+}
+
+/** Invokable pack-delivered component kinds (their body is a usable prompt). */
+export type PackComponentKind = "command" | "agent" | "rule";
+
+/**
+ * An invokable component (command/agent/rule) shipped by an installed pack.
+ * Mirrors the Rust `PackComponentMeta` (serde camelCase). Surfaced in the
+ * My Skills list and the `#<kind>:` mention rail. Read-only — projection of
+ * these into tools is managed from the Packs tab.
+ */
+export interface PackComponentMeta {
+  pack: string;
+  kind: PackComponentKind;
+  name: string;
+  /** Component path within the pack store (e.g. `commands/ship.md`). */
+  relPath: string;
+  /** Absolute path to the component body file. */
+  path: string;
+  description: string;
 }
 
 /** Full body of one skill, for the detail view. */
@@ -74,6 +101,8 @@ export interface ToolInfo {
  * - `external`   — a real skill Atlas didn't author (no canonical twin).
  * - `conflict`   — external name collides with a canonical skill, content differs.
  * - `absent`     — tool detected, skill not present there.
+ * - `pack`       — projection owned by an installed pack (read-only here; manage
+ *                  it from the Packs tab).
  */
 export type ProjectionStatus =
   | "canonical"
@@ -81,7 +110,8 @@ export type ProjectionStatus =
   | "drifted"
   | "external"
   | "conflict"
-  | "absent";
+  | "absent"
+  | "pack";
 
 /** One cell of the skill × tool matrix. */
 export interface ProjectionCell {
@@ -90,6 +120,8 @@ export interface ProjectionCell {
   status: ProjectionStatus;
   /** `"symlink"` | `"copy"` | null. */
   mode: "symlink" | "copy" | null;
+  /** Owning pack name when `status === "pack"`. */
+  pack?: string | null;
 }
 
 /** One reconciled skill row: canonical facts + the per-tool matrix. */
@@ -98,6 +130,8 @@ export interface ReconciledSkill {
   description: string;
   scope: Scope;
   managed: boolean;
+  /** Set when this skill is provided by an installed pack (origin badge). */
+  pack?: string | null;
   cells: ProjectionCell[];
 }
 

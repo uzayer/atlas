@@ -26,13 +26,17 @@ import { openFile } from "@/lib/open-file";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { skills as api } from "@/features/skills/lib/skills-api";
 import type {
+  PackComponentMeta,
   ProjectionCell,
-  ProjectionStatus,
   ReconcileView,
   Scope,
   ToolInfo,
 } from "@/features/skills/lib/types";
 import { SkillCreateDialog } from "@/features/skills/components/skill-create-dialog";
+import {
+  Legend,
+  StatusToken,
+} from "@/features/skills/components/projection-toggles";
 
 /** A skill unified across both scopes for the master list + matrix. */
 interface MergedSkill {
@@ -40,11 +44,13 @@ interface MergedSkill {
   description: string;
   managedGlobal: boolean;
   managedProject: boolean;
+  /** Owning pack when this skill is pack-delivered (read-only in My Skills). */
+  pack?: string | null;
 }
 
 const SCOPES_ALL: Scope[] = ["global", "project"];
 
-export function SkillsSettings() {
+export function SkillsSettings({ scope }: { scope?: Scope } = {}) {
   const projectPath = useProjectStore.use.currentProject()?.path ?? null;
 
   const [global, setGlobal] = useState<ReconcileView | null>(null);
@@ -52,20 +58,34 @@ export function SkillsSettings() {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedComp, setSelectedComp] = useState<PackComponentMeta | null>(
+    null,
+  );
+  const [components, setComponents] = useState<PackComponentMeta[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [g, p] = await Promise.all([
+      const [g, p, cg, cp] = await Promise.all([
         api.reconcile("global", null),
         projectPath
           ? api.reconcile("project", projectPath)
           : Promise.resolve(null),
+        api.componentsList("global", null),
+        projectPath
+          ? api.componentsList("project", projectPath)
+          : Promise.resolve([] as PackComponentMeta[]),
       ]);
       setGlobal(g);
       setProject(p);
+      // Dedupe pack components across scopes by (kind, pack, name).
+      const byKey = new Map<string, PackComponentMeta>();
+      for (const c of [...cg, ...cp]) {
+        byKey.set(`${c.kind}:${c.pack}:${c.name}`, c);
+      }
+      setComponents([...byKey.values()]);
     } catch (e) {
       toast.error(
         `Couldn't reconcile skills: ${e instanceof Error ? e.message : String(e)}`,
@@ -101,10 +121,12 @@ export function SkillsSettings() {
           description: s.description,
           managedGlobal: false,
           managedProject: false,
+          pack: null as string | null,
         };
         if (!cur.description && s.description) cur.description = s.description;
         if (scope === "global" && s.managed) cur.managedGlobal = true;
         if (scope === "project" && s.managed) cur.managedProject = true;
+        if (!cur.pack && s.pack) cur.pack = s.pack;
         byName.set(s.name, cur);
       }
     };
@@ -122,6 +144,23 @@ export function SkillsSettings() {
         s.description.toLowerCase().includes(q),
     );
   }, [merged, query]);
+
+  const filteredComponents = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const list = q
+      ? components.filter(
+          (c) =>
+            c.name.toLowerCase().includes(q) ||
+            c.description.toLowerCase().includes(q) ||
+            c.kind.includes(q),
+        )
+      : components;
+    return [...list].sort((a, b) =>
+      a.kind !== b.kind
+        ? a.kind.localeCompare(b.kind)
+        : a.name.localeCompare(b.name),
+    );
+  }, [components, query]);
 
   const selectedSkill = useMemo(
     () => filtered.find((s) => s.name === selected) ?? null,
@@ -215,6 +254,11 @@ export function SkillsSettings() {
           `"${name}" is an external skill ${tool.displayName} owns. Adopt it into your library first.`,
         );
         return;
+      case "pack":
+        toast.error(
+          `"${name}" is delivered by pack "${cell.pack ?? ""}". Manage its tools in the Packs tab.`,
+        );
+        return;
       case "canonical":
         return; // the source row — nothing to toggle
     }
@@ -275,7 +319,12 @@ export function SkillsSettings() {
     });
   };
 
-  const createScope: Scope = projectPath ? "project" : "global";
+  // New skills are created at the wrapper's active scope, falling back to the
+  // project (if open) then global. Project scope without a project → global.
+  const createScope: Scope =
+    scope === "project" && !projectPath
+      ? "global"
+      : (scope ?? (projectPath ? "project" : "global"));
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -321,7 +370,7 @@ export function SkillsSettings() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Filter skills…"
+            placeholder="Filter skills & pack components…"
             spellCheck={false}
             className="min-w-0 flex-1 bg-transparent text-[11px] text-text-primary outline-none placeholder:text-text-tertiary"
           />
@@ -336,28 +385,58 @@ export function SkillsSettings() {
             <Empty>
               <Loader2 size={13} className="animate-spin text-text-tertiary" />
             </Empty>
-          ) : filtered.length === 0 ? (
+          ) : filtered.length === 0 && filteredComponents.length === 0 ? (
             <Empty>
               {query.trim()
-                ? "No skills match your filter."
+                ? "Nothing matches your filter."
                 : "No skills yet. Create one to start your library."}
             </Empty>
           ) : (
-            filtered.map((s) => (
-              <SkillListRow
-                key={s.name}
-                skill={s}
-                active={s.name === selected}
-                summary={statusSummary(s, tools, scopesShown, cellFor)}
-                onClick={() => setSelected(s.name)}
-              />
-            ))
+            <>
+              {filtered.map((s) => (
+                <SkillListRow
+                  key={s.name}
+                  skill={s}
+                  active={!selectedComp && s.name === selected}
+                  summary={statusSummary(s, tools, scopesShown, cellFor)}
+                  onClick={() => {
+                    setSelectedComp(null);
+                    setSelected(s.name);
+                  }}
+                />
+              ))}
+              {filteredComponents.length > 0 && (
+                <div className="border-t border-border-subtle bg-bg-raised px-3 py-1.5 text-[9px] font-semibold uppercase tracking-wider text-text-tertiary">
+                  Pack Components
+                </div>
+              )}
+              {filteredComponents.map((c) => {
+                const key = `${c.kind}:${c.pack}:${c.name}`;
+                return (
+                  <ComponentListRow
+                    key={key}
+                    comp={c}
+                    active={
+                      !!selectedComp &&
+                      `${selectedComp.kind}:${selectedComp.pack}:${selectedComp.name}` ===
+                        key
+                    }
+                    onClick={() => {
+                      setSelected(null);
+                      setSelectedComp(c);
+                    }}
+                  />
+                );
+              })}
+            </>
           )}
         </div>
 
         {/* Detail / matrix */}
         <div className="min-w-0 flex-1 overflow-y-auto hide-scrollbar">
-          {!selectedSkill ? (
+          {selectedComp ? (
+            <ComponentDetail comp={selectedComp} />
+          ) : !selectedSkill ? (
             <Empty>Select a skill to manage where it's delivered.</Empty>
           ) : (
             <SkillMatrix
@@ -412,6 +491,7 @@ function SkillListRow({
   onClick: () => void;
 }) {
   const managed = skill.managedGlobal || skill.managedProject;
+  const fromPack = !managed && skill.pack;
   return (
     <button
       type="button"
@@ -426,7 +506,13 @@ function SkillListRow({
           <span className="truncate text-[12px] font-medium text-text-primary">
             {skill.name}
           </span>
-          {!managed && <Tag>external</Tag>}
+          {fromPack ? (
+            <Tag title={`Delivered by pack "${skill.pack}"`}>
+              pack: {skill.pack}
+            </Tag>
+          ) : (
+            !managed && <Tag>external</Tag>
+          )}
         </div>
         <p className="mt-0.5 line-clamp-1 text-[11px] text-text-tertiary">
           {skill.description || "No description."}
@@ -439,6 +525,85 @@ function SkillListRow({
         )}
       </div>
     </button>
+  );
+}
+
+// ── Pack-component row + read-only detail ───────────────────────────────────────
+
+function ComponentListRow({
+  comp,
+  active,
+  onClick,
+}: {
+  comp: PackComponentMeta;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center gap-2 border-b border-border-subtle px-3 py-2.5 text-left transition-colors",
+        active ? "bg-bg-selected" : "hover:bg-bg-hover",
+      )}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-[12px] font-medium text-text-primary">
+            {comp.name}
+          </span>
+          <Tag>{comp.kind}</Tag>
+        </div>
+        <p className="mt-0.5 line-clamp-1 text-[11px] text-text-tertiary">
+          {comp.description || `from pack: ${comp.pack}`}
+        </p>
+      </div>
+      <span className="shrink-0 font-mono text-[9px] text-text-ghost">
+        #{comp.kind}:
+      </span>
+    </button>
+  );
+}
+
+function ComponentDetail({ comp }: { comp: PackComponentMeta }) {
+  return (
+    <div className="space-y-5 p-6">
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="truncate text-[13px] font-semibold text-text-primary">
+            {comp.name}
+          </h3>
+          <Tag>{comp.kind}</Tag>
+          <Tag title={`Delivered by pack "${comp.pack}"`}>
+            pack: {comp.pack}
+          </Tag>
+        </div>
+        <p className="mt-0.5 text-[11px] text-text-tertiary">
+          {comp.description || "No description."}
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-border-default p-4">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+          Invoke
+        </div>
+        <p className="mt-2 text-[11px] leading-snug text-text-secondary">
+          Reference this {comp.kind} in chat with{" "}
+          <span className="font-mono text-text-primary">
+            #{comp.kind}:{comp.name}
+          </span>{" "}
+          — its body is inlined into the message so any agent acts on it.
+          Delivering it into a tool (Claude Code / Codex) is managed from the
+          Packs tab.
+        </p>
+      </div>
+
+      <p className="text-[10px] leading-snug text-text-tertiary">
+        Pack component · read-only here · source{" "}
+        <span className="font-mono">{comp.relPath}</span>
+      </p>
+    </div>
   );
 }
 
@@ -473,6 +638,7 @@ function SkillMatrix({
 }) {
   const managed = skill.managedGlobal || skill.managedProject;
   const canPromote = hasProject && skill.managedProject && !skill.managedGlobal;
+  const fromPack = !managed && !!skill.pack;
 
   return (
     <div className="space-y-5 p-6">
@@ -482,11 +648,28 @@ function SkillMatrix({
             <h3 className="truncate text-[13px] font-semibold text-text-primary">
               {skill.name}
             </h3>
-            {!managed && <Tag>external</Tag>}
+            {fromPack ? (
+              <Tag title={`Delivered by pack "${skill.pack}"`}>
+                pack: {skill.pack}
+              </Tag>
+            ) : (
+              !managed && <Tag>external</Tag>
+            )}
           </div>
           <p className="mt-0.5 text-[11px] text-text-tertiary">
             {skill.description || "No description."}
           </p>
+          {fromPack && (
+            <p className="mt-1 text-[10px] leading-snug text-text-tertiary">
+              Provided by pack{" "}
+              <span className="text-text-secondary">{skill.pack}</span> — invoke
+              it with{" "}
+              <span className="font-mono text-text-secondary">
+                #skill:{skill.name}
+              </span>
+              . Manage which tools it ships to in the Packs tab.
+            </p>
+          )}
         </div>
         {managed && (
           <div className="flex shrink-0 items-center gap-1">
@@ -544,6 +727,7 @@ function SkillMatrix({
               cellFor={cellFor}
               toolDetected={toolDetected}
               busy={busy}
+              readOnly={fromPack}
               onToggle={onToggle}
             />
           ))}
@@ -552,8 +736,9 @@ function SkillMatrix({
 
       <Legend />
       <p className="text-[10px] leading-snug text-text-tertiary">
-        Click a cell to symlink (or unlink) this skill in that tool. Drifted or
-        external cells are never overwritten — resolve those by hand.
+        {fromPack
+          ? "This skill is delivered by a pack — its tool delivery is managed in the Packs tab."
+          : "Click a cell to symlink (or unlink) this skill in that tool. Drifted or external cells are never overwritten — resolve those by hand."}
       </p>
     </div>
   );
@@ -566,6 +751,7 @@ function MatrixRow({
   cellFor,
   toolDetected,
   busy,
+  readOnly,
   onToggle,
 }: {
   scope: Scope;
@@ -574,6 +760,7 @@ function MatrixRow({
   cellFor: (name: string, scope: Scope, toolId: string) => ProjectionCell;
   toolDetected: (tool: ToolInfo, scope: Scope) => boolean;
   busy: Set<string>;
+  readOnly?: boolean;
   onToggle: (name: string, scope: Scope, tool: ToolInfo) => void;
 }) {
   return (
@@ -595,119 +782,13 @@ function MatrixRow({
               mode={cell.mode}
               detected={detected}
               busy={busy.has(key)}
+              readOnly={readOnly}
               onClick={() => onToggle(skillName, scope, tool)}
             />
           </div>
         );
       })}
     </>
-  );
-}
-
-const STATUS_META: Record<
-  ProjectionStatus,
-  { label: string; cls: string; hint: string }
-> = {
-  canonical: {
-    label: "source",
-    cls: "text-text-secondary",
-    hint: "Lives in your library",
-  },
-  synced: {
-    label: "on",
-    cls: "bg-accent text-bg-base",
-    hint: "Projected and in sync — click to remove",
-  },
-  drifted: {
-    label: "drift",
-    cls: "text-warning border border-warning/40",
-    hint: "Edited outside Atlas — resolve manually",
-  },
-  external: {
-    label: "ext",
-    cls: "text-text-tertiary border border-border-default",
-    hint: "Owned by the tool — adopt to manage",
-  },
-  conflict: {
-    label: "conflict",
-    cls: "text-error border border-error/40",
-    hint: "Name collision with different content",
-  },
-  absent: {
-    label: "off",
-    cls: "text-text-ghost border border-border-subtle",
-    hint: "Not delivered — click to enable",
-  },
-};
-
-function StatusToken({
-  status,
-  mode,
-  detected,
-  busy,
-  onClick,
-}: {
-  status: ProjectionStatus;
-  mode: ProjectionCell["mode"];
-  detected: boolean;
-  busy: boolean;
-  onClick: () => void;
-}) {
-  const meta = STATUS_META[status];
-  if (!detected) {
-    return (
-      <span
-        title="Tool not detected in this scope"
-        className="text-[10px] text-text-ghost"
-      >
-        —
-      </span>
-    );
-  }
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={busy}
-      title={`${meta.hint}${mode ? ` (${mode})` : ""}`}
-      className={cn(
-        "inline-flex h-[18px] min-w-[40px] items-center justify-center gap-1 rounded-full px-2 text-[10px] font-medium transition-colors",
-        meta.cls,
-        busy && "opacity-50",
-      )}
-    >
-      {busy ? <Loader2 size={9} className="animate-spin" /> : meta.label}
-    </button>
-  );
-}
-
-function Legend() {
-  const items: ProjectionStatus[] = [
-    "synced",
-    "absent",
-    "drifted",
-    "external",
-    "conflict",
-  ];
-  return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-      {items.map((s) => (
-        <span
-          key={s}
-          className="flex items-center gap-1.5 text-[10px] text-text-tertiary"
-        >
-          <span
-            className={cn(
-              "inline-flex h-[14px] min-w-[32px] items-center justify-center rounded-full px-1.5 text-[9px] font-medium",
-              STATUS_META[s].cls,
-            )}
-          >
-            {STATUS_META[s].label}
-          </span>
-          {STATUS_META[s].hint}
-        </span>
-      ))}
-    </div>
   );
 }
 
@@ -742,9 +823,18 @@ function Th({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Tag({ children }: { children: React.ReactNode }) {
+function Tag({
+  children,
+  title,
+}: {
+  children: React.ReactNode;
+  title?: string;
+}) {
   return (
-    <span className="inline-flex h-[16px] items-center rounded-full border border-border-default bg-bg-raised px-1.5 text-[9px] text-text-tertiary">
+    <span
+      title={title}
+      className="inline-flex h-[16px] max-w-[140px] items-center truncate rounded-full border border-border-default bg-bg-raised px-1.5 text-[9px] text-text-tertiary"
+    >
       {children}
     </span>
   );

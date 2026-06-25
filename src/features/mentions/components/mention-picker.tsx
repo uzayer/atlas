@@ -746,6 +746,7 @@ function CategoryIcon({ kind }: { kind: MentionKind }) {
     case "symbol":       return <Hash size={size} />;
     case "knowledge":    return <BookOpen size={size} />;
     case "skill":        return <Zap size={size} />;
+    case "component":    return <Zap size={size} />;
     case "repo":         return <FolderGit2 size={size} />;
     case "paper":        return <Newspaper size={size} />;
     case "branch":       return <GitBranch size={size} />;
@@ -774,6 +775,7 @@ function secondaryLabel(m: MentionData): string {
     case "symbol":       return `${m.symbolKind} · ${shortPath(m.filePath)}`;
     case "knowledge":    return m.folder ? `${m.folder} · ${m.source}` : m.source;
     case "skill":        return m.scope === "project" ? `${m.description} · project` : m.description;
+    case "component":    return `${m.componentKind} · pack: ${m.pack}`;
     case "repo":         return m.hasReadme ? "cloned · README" : "cloned";
     case "paper":        return m.authors[0] ?? "";
     case "branch":       return m.refKind + (m.isCurrent ? " · HEAD" : "");
@@ -826,6 +828,7 @@ function mentionTitle(m: MentionData): string {
     case "symbol":       return `${m.filePath}:${m.line}`;
     case "knowledge":    return m.filePath;
     case "skill":        return m.description || m.filePath;
+    case "component":    return m.description || m.filePath;
     case "repo":         return m.absPath;
     case "paper":        return m.metadataPath;
     case "branch":       return `${m.refKind} ${m.id} (${m.sha.slice(0, 7)})`;

@@ -394,6 +394,15 @@ pub fn run() {
             commands::skills::skills_unproject,
             commands::skills::skills_promote,
             commands::skills::skills_freeze,
+            commands::skills::pack_inspect,
+            commands::skills::pack_search,
+            commands::skills::pack_remote_preview,
+            commands::skills::pack_install_remote,
+            commands::skills::pack_list,
+            commands::skills::pack_project,
+            commands::skills::pack_unproject,
+            commands::skills::pack_projections,
+            commands::skills::pack_components_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas");
