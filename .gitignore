@@ -30,3 +30,4 @@ src-tauri/target/
 *.md
 !README.md
 graphify-out/
+scripts/

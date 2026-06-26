@@ -125,11 +125,21 @@ pub fn claude_jsonl_path(cwd: &str, session_id: &str) -> Option<PathBuf> {
     Some(folder.join(format!("{session_id}.jsonl")))
 }
 
-/// Claude Code encodes the project cwd as a folder name by replacing `/` with
-/// `-`. E.g. `/Users/adib/Desktop/atlas` → `-Users-adib-Desktop-atlas`.
+/// Claude Code encodes the project cwd as a folder name by replacing every
+/// character that isn't ASCII alphanumeric with `-` (so `/`, spaces, `.`, `_`
+/// all collapse to `-`). E.g. `/Users/adib/Desktop/atlas` →
+/// `-Users-adib-Desktop-atlas`, and `/Users/adib/Codes/Test Atlas` →
+/// `-Users-adib-Codes-Test-Atlas`. Matching this exactly is required — Atlas
+/// reads the JSONL transcripts the Claude Agent SDK writes under that folder,
+/// so a path with a space or dot must resolve to the SAME slug or the listing
+/// finds nothing (was: only `/` was replaced → 0 rows for any path with a
+/// space).
 pub fn encode_cwd(cwd: &str) -> String {
     let trimmed = cwd.trim_end_matches('/');
-    trimmed.replace('/', "-")
+    trimmed
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Identify user content injected by Claude Code itself (system tags,

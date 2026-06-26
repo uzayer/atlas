@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   X,
@@ -17,13 +17,17 @@ import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
 import { AtlasLoader } from "@/components/atlas-loader";
 import { timeAgo } from "@/lib/time-ago";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "../stores/chat-store";
+import { bumpLoadToken, isLoadStale } from "../lib/load-tokens";
 import {
   listClaudeSessions,
   listCodexSessions,
   listCerseiSessions,
   deleteClaudeSession,
+  cerseiDeleteSession,
+  codexDeleteSession,
   type ClaudeSessionMeta,
 } from "../lib/claude-api";
 import {
@@ -35,30 +39,7 @@ import {
   DEFAULT_PLUGIN_ID,
 } from "../lib/agents-api";
 import { AtlasIcon } from "@/components/atlas-icon";
-import type { SessionMessage } from "@/types/agents";
-
-// Module-level click-token table per target tab id. Each call to
-// `handleOpenAgent` bumps the token for its target; in-flight async work
-// for older tokens bails before mutating state or hitting the agent. Prevents
-// rapid sidebar clicks from stacking N concurrent `loadSession` calls on the
-// same agent process (which froze the app at 5-6 clicks).
-const loadTokens: Record<string, number> = {};
-
-// Map an atlas-agents `SessionMessage` (rich Rust state) onto the wire
-// shape `replaceMessages` expects. Used to hydrate the chat-store from a
-// `agents.snapshot()` payload.
-function snapshotMessageToWire(m: SessionMessage) {
-  return {
-    role: m.role === "system" ? ("system" as const) : m.role,
-    content: m.content,
-    timestamp: m.timestamp,
-    toolCalls: m.tool_calls.map((tc) => ({
-      toolName: tc.tool_name,
-      kind: tc.kind ?? null,
-      arguments: (tc.arguments ?? {}) as Record<string, unknown>,
-    })),
-  };
-}
+import { snapshotMessageToWire } from "../lib/snapshot-message";
 
 /** Compact token count: 1234 → "1.2k", 1_200_000 → "1.2M". */
 function formatTokenCount(n: number): string {
@@ -92,7 +73,33 @@ interface SessionSidebarProps {
 export function SessionSidebar({ tabId }: SessionSidebarProps) {
   const queryClient = useQueryClient();
   const project = useProjectStore.use.currentProject();
-  const cwd = project?.path ?? "";
+  // `currentProject` is a legacy field that's transiently null during boot and
+  // workspace switches (it's repopulated by a fire-and-forget `void switchTo`).
+  // When it's null, `cwd` was "" → every history query (gated on
+  // `cwd.length > 0`) returned [] → the sidebar showed only ephemeral live rows.
+  // Fall back to the active workspace's path (the real source of truth).
+  const activeWorkspaceId = useWorkspaceStore.use.activeWorkspaceId();
+  const workspaces = useWorkspaceStore.use.workspaces();
+  const resolvedCwd =
+    project?.path ??
+    workspaces.find((w) => w.id === activeWorkspaceId)?.path ??
+    "";
+  // STICKY cwd. Even with the workspace fallback, `currentProject` and
+  // `activeWorkspaceId`/`workspaces` can momentarily DISAGREE mid-switch (e.g.
+  // when opening a Codex/Cersei session or hitting "+"), collapsing `resolvedCwd`
+  // to "" for a render or two. Because the three history queries are keyed on
+  // cwd, that blip flipped the keys to an empty/uncached entry → all lists
+  // flashed to [] and the whole history vanished until the next refetch (the
+  // "disappears, then comes back later" the user saw). Hold the last NON-EMPTY
+  // cwd so the query keys stay stable across these blips; only clear it when
+  // there is genuinely no project open (zero workspaces).
+  const lastCwdRef = useRef("");
+  if (resolvedCwd) {
+    lastCwdRef.current = resolvedCwd;
+  } else if (workspaces.length === 0) {
+    lastCwdRef.current = "";
+  }
+  const cwd = lastCwdRef.current;
 
   // Stable signature string of the slim per-tab fields the sidebar reads.
   // Returning a primitive means zustand's default Object.is equality short-
@@ -210,6 +217,10 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     enabled: cwd.length > 0,
     staleTime: 30_000,
     refetchInterval: false,
+    // Keep the prior rows on screen while the key changes or a refetch runs,
+    // instead of flashing to the empty default. Belt-and-braces with the sticky
+    // cwd above — together they guarantee history never blinks out.
+    placeholderData: keepPreviousData,
   });
 
   // Codex sessions live in `~/.codex` (SQLite), NOT Claude's JSONL dir, so they
@@ -222,7 +233,15 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     queryFn: () => listCodexSessions(cwd),
     enabled: cwd.length > 0,
     staleTime: 30_000,
-    refetchInterval: false,
+    // Codex (and Cersei) have NO file watcher — the ~/.codex watcher was removed
+    // because its SQLite WAL sidecars churn and stormed the refetch loop. So poll
+    // every few seconds instead: the read is in-process rusqlite (sub-ms) and
+    // keepPreviousData means the poll never flashes the list empty. Without this,
+    // a Codex session created after an agent switch only showed on the next window
+    // focus ("takes too long; unfocus→focus fixes it").
+    refetchInterval: 4000,
+    refetchIntervalInBackground: false,
+    placeholderData: keepPreviousData,
   });
 
   // Native Atlas (Cersei) sessions — persisted as JSON under the app config
@@ -233,7 +252,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     queryFn: () => listCerseiSessions(cwd),
     enabled: cwd.length > 0,
     staleTime: 30_000,
-    refetchInterval: false,
+    // No watcher for the Cersei store either — poll (cheap JSON dir read), same
+    // rationale as the Codex query above.
+    refetchInterval: 4000,
+    refetchIntervalInBackground: false,
+    placeholderData: keepPreviousData,
   });
 
   // Start (or replace) the Rust file watcher for this cwd. The single
@@ -360,9 +383,21 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         title,
         subtitle: null,
         lastUpdated,
-        messageCount: live
-          ? live.userMessageCount
-          : (disk?.message_count ?? 0),
+        // Show a row if EITHER the live session OR the on-disk record has
+        // content. A live session that reports userMessageCount=0 (just-bound or
+        // resumed, counter not caught up) must NOT shadow a disk row that
+        // genuinely has messages — that hid real sessions from history (frontend
+        // `items: 0` while `claude: 4`). Take the max of the two signals.
+        messageCount: Math.max(
+          live
+            ? live.userMessageCount > 0
+              ? live.userMessageCount
+              : live.hasAnyMessage
+                ? 1
+                : 0
+            : 0,
+          disk?.message_count ?? 0,
+        ),
         // Agent identity: prefer the live session's, else the agent that
         // produced the disk row (Claude JSONL vs Codex rollout). Drives the
         // row icon AND which agent process handleOpenAgent resumes through.
@@ -490,16 +525,30 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       setActiveTab(targetTabId);
     }
 
-    const project = useProjectStore.getState().currentProject;
-    // Empty-string fallback (not "/") to stay consistent with the component
-    // default and the sidebar filter (`workingDirectory === cwd || === ""`);
-    // a session stamped "/" would match neither arm and vanish from history.
-    const cwd = project?.path ?? "";
+    // Bind with the component's STICKY `cwd` (closed over below), not a fresh
+    // `getState().currentProject` read — that can be transiently null at click
+    // time, which would stamp the session's `workingDirectory` with "" out of
+    // step with the sticky filter and briefly strand the live row.
+
+    // Replacing the CURRENT chat in place (idle tab)? The session we're about to
+    // clear loses its live sidebar row. Cersei/Codex have no file watcher, so
+    // without a refetch the just-left chat vanishes from history until the user
+    // hits "+" (which refreshes). Capture it now → refresh the disk lists below
+    // so the abandoned chat re-lists from disk immediately.
+    const abandoningCurrent =
+      targetTabId === tabId &&
+      ((storeSnapshot[tabId]?.userMessageCount ?? 0) > 0 ||
+        (storeSnapshot[tabId]?.messages?.length ?? 0) > 0);
 
     // OPTIMISTIC SYNCHRONOUS UI: clear + retitle + bind the historical
     // session id IMMEDIATELY when the default agent is already cached
     // (App.tsx pre-spawns it at startup, so it almost always is).
     clearSession(targetTabId);
+    if (abandoningCurrent) {
+      queryClient.invalidateQueries({ queryKey });
+      queryClient.invalidateQueries({ queryKey: codexQueryKey });
+      queryClient.invalidateQueries({ queryKey: cerseiQueryKey });
+    }
     // Relabel the composer to the resumed session's agent (no-op if already
     // matching). Keeps the existing binding — does NOT spawn a new chat.
     setSessionAgentType(targetTabId, resumedAgentType);
@@ -518,9 +567,8 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     // Every subsequent await re-checks the token and bails if a newer click
     // has taken over — prevents 5-6 rapid clicks from piling up 5-6 in-flight
     // `loadSession` calls against the same agent.
-    const myToken = (loadTokens[targetTabId] ?? 0) + 1;
-    loadTokens[targetTabId] = myToken;
-    const isStale = () => loadTokens[targetTabId] !== myToken;
+    const myToken = bumpLoadToken(targetTabId);
+    const isStale = () => isLoadStale(targetTabId, myToken);
 
     void (async () => {
       // Yield once so multiple clicks in the same event-loop tick collapse:
@@ -613,9 +661,21 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
 
   const handleDeleteAgent = async (e: React.MouseEvent, item: SidebarItem) => {
     e.stopPropagation();
-    if (!item.filePath) return;
     try {
-      await deleteClaudeSession(item.filePath);
+      // Route to the agent that actually owns this session's storage. Claude
+      // sessions are JSONL files under ~/.claude/projects (deleted by path);
+      // Cersei sessions are JSON under the app config dir (deleted by id via
+      // its own command — the Claude path guard rejects them); Codex threads
+      // live in ~/.codex SQLite and are soft-deleted (archived=1) by id.
+      if (item.agent === "cersei") {
+        await cerseiDeleteSession(cwd, item.id);
+      } else if (item.agent === "codex") {
+        await codexDeleteSession(item.id);
+      } else if (item.filePath) {
+        await deleteClaudeSession(item.filePath);
+      } else {
+        return;
+      }
       if (activeAcpId === item.id) clearSession(tabId);
     } catch (err) {
       console.error("Failed to delete session:", err);
@@ -624,9 +684,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       );
     } finally {
       // Always refetch so the list reflects on-disk truth — whether the delete
-      // succeeded (row gone) or failed (row stays). Was inside `try`, so a
-      // failed delete never re-synced.
+      // succeeded (row gone) or failed (row stays). All three keys, since a
+      // delete shifts the merged/sorted cross-agent view.
       queryClient.invalidateQueries({ queryKey });
+      queryClient.invalidateQueries({ queryKey: codexQueryKey });
+      queryClient.invalidateQueries({ queryKey: cerseiQueryKey });
     }
   };
 
@@ -771,10 +833,13 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
                 )}
               </div>
 
-              {/* Delete is Claude-only for now: it removes the JSONL file, but
-                  Codex sessions live in `~/.codex` SQLite + rollout bundles
-                  with no single file to delete, so hide the control there. */}
-              {item.kind === "agent" && !!item.filePath && (
+              {/* Delete supported for all three: Claude removes the JSONL file,
+                  Cersei removes its JSON under the app config dir, Codex archives
+                  the thread (archived=1) in its ~/.codex SQLite (no file to rm). */}
+              {item.kind === "agent" &&
+                (item.agent === "cersei" ||
+                  item.agent === "codex" ||
+                  (item.agent === "claude" && !!item.filePath)) && (
                 <button
                   onClick={(e) => handleDeleteAgent(e, item)}
                   aria-label="Delete session"

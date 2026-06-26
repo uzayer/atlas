@@ -316,6 +316,15 @@ impl AgentManager {
         self.inner.cersei.replay_session(cwd, session_id)
     }
 
+    /// Delete a stored native-agent session's transcript (sidebar delete).
+    pub fn cersei_delete_session(
+        &self,
+        cwd: &str,
+        session_id: &str,
+    ) -> std::result::Result<(), String> {
+        self.inner.cersei.delete_session(cwd, session_id)
+    }
+
     pub fn snapshot(&self, key: &SessionKey) -> Result<SessionSnapshot> {
         let handle = self.handle_for(key)?;
         let snap = handle.state.lock().snapshot();

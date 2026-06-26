@@ -136,6 +136,27 @@ pub fn load(config_dir: &Path, cwd: &str, session_id: &str) -> Option<StoredSess
     serde_json::from_str(&raw).ok()
 }
 
+/// Delete a stored session's JSON file. Guards that the resolved path stays
+/// inside `<config_dir>/cersei-sessions` before removing (mirrors the
+/// `delete_claude_session` path guard). A missing file is treated as success.
+pub fn delete(config_dir: &Path, cwd: &str, session_id: &str) -> Result<(), String> {
+    let path = session_path(config_dir, cwd, session_id);
+    if !path.starts_with(sessions_root(config_dir)) {
+        return Err("refusing to delete: path outside cersei-sessions".into());
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The on-disk directory holding a project's stored sessions. Public so the
+/// session file-watcher can watch it for push-refresh.
+pub fn project_sessions_dir(config_dir: &Path, cwd: &str) -> PathBuf {
+    project_dir(config_dir, cwd)
+}
+
 /// List sessions stored for `cwd`, newest first.
 pub fn list(config_dir: &Path, cwd: &str) -> Vec<SessionMeta> {
     let dir = project_dir(config_dir, cwd);
@@ -147,8 +168,20 @@ pub fn list(config_dir: &Path, cwd: &str) -> Vec<SessionMeta> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| {
             let path = e.path();
-            let raw = fs::read_to_string(&path).ok()?;
-            let doc: StoredSession = serde_json::from_str(&raw).ok()?;
+            let raw = match fs::read_to_string(&path) {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(target: "atlas_cersei::store", "skip session {}: read failed: {err}", path.display());
+                    return None;
+                }
+            };
+            let doc: StoredSession = match serde_json::from_str(&raw) {
+                Ok(d) => d,
+                Err(err) => {
+                    tracing::warn!(target: "atlas_cersei::store", "skip session {}: parse failed: {err}", path.display());
+                    return None;
+                }
+            };
             Some(SessionMeta {
                 preview: first_user_text(&doc.messages).unwrap_or_else(|| "New session".into()),
                 message_count: doc.messages.len(),
@@ -326,8 +359,21 @@ pub fn corpus_sessions(config_dir: &Path, cwd: &str) -> Vec<CorpusSession> {
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| {
-            let raw = fs::read_to_string(e.path()).ok()?;
-            let doc: StoredSession = serde_json::from_str(&raw).ok()?;
+            let path = e.path();
+            let raw = match fs::read_to_string(&path) {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(target: "atlas_cersei::store", "skip corpus session {}: read failed: {err}", path.display());
+                    return None;
+                }
+            };
+            let doc: StoredSession = match serde_json::from_str(&raw) {
+                Ok(d) => d,
+                Err(err) => {
+                    tracing::warn!(target: "atlas_cersei::store", "skip corpus session {}: parse failed: {err}", path.display());
+                    return None;
+                }
+            };
             let first_user = first_user_text(&doc.messages).unwrap_or_default();
             // Only the conversational turns (user + assistant), newline-joined.
             let transcript = doc

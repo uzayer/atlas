@@ -234,6 +234,7 @@ interface ChatActions {
           toolName: string;
           kind?: string | null;
           arguments: Record<string, unknown>;
+          result?: string | null;
         }>;
       }>
     ) => void;
@@ -762,7 +763,7 @@ export const useChatStore = createSelectors(
                   toolName: tc.toolName,
                   kind: tc.kind ?? null,
                   arguments: tc.arguments,
-                  result: null,
+                  result: tc.result ?? null,
                   status: "completed" as const,
                   duration: null,
                 })),

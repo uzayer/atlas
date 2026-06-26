@@ -127,7 +127,7 @@ fn ms_to_rfc3339(ms: i64) -> Option<String> {
 pub async fn list_codex_sessions(cwd: String) -> Result<Vec<CodexSessionMeta>, String> {
     let cwd = cwd.trim_end_matches('/').to_string();
     let sessions = collect_codex_sessions(&cwd).await;
-    Ok(sessions
+    let rows: Vec<CodexSessionMeta> = sessions
         .into_iter()
         .map(|s| {
             // The threads table has no message count; treat any session with a
@@ -147,7 +147,37 @@ pub async fn list_codex_sessions(cwd: String) -> Result<Vec<CodexSessionMeta>, S
                 preview: s.title,
             }
         })
-        .collect())
+        .collect();
+    Ok(rows)
+}
+
+/// Archive (soft-delete) one Codex session so it leaves the history sidebar.
+/// Codex keeps threads in `~/.codex/state_<n>.sqlite` with no per-session file
+/// to remove, so we set `archived = 1` — the same flag `list_codex_sessions`
+/// filters on — rather than hard-deleting the row (recoverable, mirrors how
+/// Codex itself hides threads).
+#[tauri::command]
+pub async fn codex_delete_session(session_id: String) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("no home dir")?;
+    let codex_dir = home.join(".codex");
+    let db = newest_state_db(&codex_dir).ok_or("no Codex state DB found in ~/.codex")?;
+    // sqlite3's CLI can't bind params, so inline the id with the standard
+    // single-quote escape (double it). Thread ids are uuids, but be safe.
+    let escaped = session_id.replace('\'', "''");
+    let sql = format!("UPDATE threads SET archived = 1 WHERE id = '{escaped}';");
+    let out = AsyncCommand::new("sqlite3")
+        .arg(&db)
+        .arg(&sql)
+        .output()
+        .await
+        .map_err(|e| format!("failed to run sqlite3: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "sqlite3 archive failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -698,8 +728,12 @@ async fn read_codex(project_path: &str) -> CodexMemory {
     let home = dirs::home_dir().unwrap_or_default();
     let codex_dir = home.join(".codex");
 
-    let agents_md = std::fs::read_to_string(Path::new(project_path).join("AGENTS.md")).ok();
-    let global_agents_md = std::fs::read_to_string(codex_dir.join("AGENTS.md")).ok();
+    let agents_md = tokio::fs::read_to_string(Path::new(project_path).join("AGENTS.md"))
+        .await
+        .ok();
+    let global_agents_md = tokio::fs::read_to_string(codex_dir.join("AGENTS.md"))
+        .await
+        .ok();
 
     let db = newest_state_db(&codex_dir);
     let threads = match &db {
@@ -737,38 +771,57 @@ fn newest_state_db(codex_dir: &Path) -> Option<PathBuf> {
 }
 
 async fn query_codex_threads(db: &Path, project_path: &str) -> Vec<CodexThread> {
-    // CLI params aren't bindable in `-json` mode, so inline the cwd with the
-    // standard SQL single-quote escape (double it). A filesystem path won't
-    // normally contain quotes, but be safe.
-    let escaped = project_path.replace('\'', "''");
-    let sql = format!(
-        "SELECT id, title, first_user_message, model, git_branch, git_sha, approval_mode, \
-         tokens_used, created_at, updated_at FROM threads \
-         WHERE cwd = '{escaped}' AND archived = 0 \
-         ORDER BY updated_at DESC LIMIT 300;"
-    );
+    let db = db.to_path_buf();
+    let project_path = project_path.to_string();
 
-    let out = AsyncCommand::new("sqlite3")
-        .arg("-readonly")
-        .arg("-json")
-        .arg(db)
-        .arg(&sql)
-        .output()
-        .await;
+    // In-process read via rusqlite. The Codex DB is WAL, so a read-only
+    // connection reads concurrently with the agent's writes WITHOUT blocking —
+    // the old `sqlite3`-CLI read could land mid-`new_session` write, fail with
+    // SQLITE_BUSY, and we'd return an empty Vec → the sidebar's Codex history
+    // flickered to 0 on every switch (and the subprocess spawn added latency).
+    // Bound parameter (no SQL string interpolation). rusqlite is blocking, so
+    // it runs on the blocking pool.
+    let result = tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<CodexThread>> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        // Safety net for a brief WAL-checkpoint lock; WAL reads normally don't block.
+        conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, first_user_message, model, git_branch, git_sha, \
+             approval_mode, tokens_used, created_at, updated_at FROM threads \
+             WHERE cwd = ?1 AND archived = 0 ORDER BY updated_at DESC LIMIT 300",
+        )?;
+        let rows = stmt.query_map([&project_path], |row| {
+            Ok(CodexThread {
+                id: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                first_user_message: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                model: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                git_branch: row.get::<_, Option<String>>(4)?,
+                git_sha: row.get::<_, Option<String>>(5)?,
+                approval_mode: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                tokens_used: row.get::<_, Option<i64>>(7)?.unwrap_or_default(),
+                created_at: row.get::<_, Option<i64>>(8)?.unwrap_or_default(),
+                updated_at: row.get::<_, Option<i64>>(9)?.unwrap_or_default(),
+            })
+        })?;
+        rows.collect()
+    })
+    .await;
 
-    let Ok(out) = out else {
-        return Vec::new();
+    let mut threads = match result {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
+            tracing::warn!(target: "atlas::history", "codex rusqlite read failed: {e}");
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!(target: "atlas::history", "codex read task join failed: {e}");
+            return Vec::new();
+        }
     };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stdout = stdout.trim();
-    if stdout.is_empty() {
-        // sqlite3 emits nothing for an empty result set.
-        return Vec::new();
-    }
-    let mut threads = serde_json::from_str::<Vec<CodexThread>>(stdout).unwrap_or_default();
     // Strip Atlas-injected context blocks the agent recorded in the prompt, so
     // they never surface as a session preview/title (mirrors the Claude reader).
     for t in &mut threads {

@@ -42,7 +42,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use store::SessionMeta;
-pub use store::{corpus_sessions, CorpusSession};
+pub use store::{corpus_sessions, project_sessions_dir, CorpusSession};
 
 /// The plugin id the native agent registers under (matches the frontend
 /// `AGENT_PLUGIN_ID.cersei`).
@@ -261,6 +261,16 @@ impl CerseiRuntime {
     /// List stored sessions for a project (sidebar).
     pub fn list_sessions(&self, cwd: &str) -> Vec<SessionMeta> {
         store::list(&self.inner.config_dir, cwd)
+    }
+
+    /// Delete one stored session's transcript (sidebar delete). Guards the
+    /// path stays inside the cersei-sessions root; missing file is a no-op.
+    pub fn delete_session(
+        &self,
+        cwd: &str,
+        session_id: &str,
+    ) -> std::result::Result<(), String> {
+        store::delete(&self.inner.config_dir, cwd, session_id)
     }
 
     pub fn set_session_mode(&self, agent_id: AgentId, session_id: &str, mode_id: String) -> Result<()> {

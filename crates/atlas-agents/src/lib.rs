@@ -27,6 +27,8 @@ pub use atlas_cersei::SessionMeta;
 pub use atlas_cersei::{MemDoc, MemorySearchFn, ReplayItem, register_memory_search};
 // Native-agent session transcripts for the memory corpus (Chat / Graph index).
 pub use atlas_cersei::{corpus_sessions as cersei_corpus_sessions, CorpusSession as CerseiCorpusSession};
+// On-disk cersei session dir (cwd-hashed) — used by the session file-watcher.
+pub use atlas_cersei::project_sessions_dir as cersei_project_sessions_dir;
 pub use backend::{AcpBackend, AgentBackend, CerseiBackend};
 pub use error::{Error, Result};
 pub use events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
