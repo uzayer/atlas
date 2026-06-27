@@ -13,8 +13,8 @@
 //! atlas-agents can route to either backend.
 
 mod context;
-mod cwd_tool;
 mod mcp;
+pub mod tools;
 mod memory;
 mod provider;
 mod store;
@@ -57,7 +57,8 @@ const ATLAS_GUIDANCE: &str = r#"You are Atlas, a coding agent embedded natively 
 
 # Exploration — understand before you act
 - Read the codebase first; resist easy assumptions. Let the shape of the existing system teach you how to move. Never guess a file's location, an API's signature, or a pattern — verify it with a tool.
-- Search to discover, read to confirm. Use glob/code_search to find candidates, grep to inspect them, then read the files that matter.
+- Search to discover, read to confirm. Use Glob/List/code_search to find candidates, Grep to inspect them, then Read the files that matter.
+- Use the dedicated file tools, not the shell: Read (not cat/head/tail), Grep (not cat|grep), Glob (not find), List (not ls), Edit (not sed/awk) or Write for a full rewrite. Edit tolerates minor indentation/whitespace drift, so prefer it over shelling out to patch files. Bash starts each call in the project root — pass a relative path, don't rely on a prior `cd`.
 - Filter early: combine a grep pattern with a path/type filter rather than searching everything and sifting noise.
 - Issue independent tool calls in parallel in a single step (e.g. several reads, or a grep plus a glob). Only serialize when a later call genuinely depends on an earlier result. Parallel calls are cheap here — use them.
 - For a substantial change, trace the full call path and the existing conventions before editing.
@@ -429,13 +430,11 @@ impl CerseiRuntime {
                 provider::build_provider(&pid, &key, &m).expect("delegate provider rebuild")
             })
         };
-        // Sub-agents (delegate) get the same cwd-resolving file tools — the raw
-        // SDK file tools ignore the working dir (see `cwd_tool`).
-        let toolset_factory: ToolsetFactory =
-            Arc::new(|| crate::cwd_tool::wrap_file_tools(cersei::tools::coding()));
+        // Sub-agents (delegate) get the same Atlas-owned coding toolset.
+        let toolset_factory: ToolsetFactory = Arc::new(crate::tools::atlas_coding);
 
         let mut tools = {
-            let mut t = crate::cwd_tool::wrap_file_tools(cersei::tools::coding());
+            let mut t = crate::tools::atlas_coding();
             t.extend(cersei::tools::planning());
             t.push(Box::new(
                 DelegateTool::new(provider_factory, toolset_factory).with_model(model.clone()),
@@ -989,7 +988,12 @@ fn emit_session_update(
 /// Map a Cersei tool name to an ACP `ToolKind` token (drives the UI icon).
 fn tool_kind(name: &str) -> &'static str {
     let n = name.to_ascii_lowercase();
-    if n.contains("read") || n.contains("glob") || n.contains("grep") || n.contains("search") {
+    if n.contains("read")
+        || n.contains("glob")
+        || n.contains("grep")
+        || n.contains("search")
+        || n.contains("list")
+    {
         "read"
     } else if n.contains("edit") || n.contains("write") || n.contains("patch") || n.contains("notebook") {
         "edit"
@@ -1337,6 +1341,8 @@ mod tests {
     fn tool_kind_classification() {
         assert_eq!(tool_kind("Read"), "read");
         assert_eq!(tool_kind("Grep"), "read");
+        assert_eq!(tool_kind("Glob"), "read");
+        assert_eq!(tool_kind("List"), "read");
         assert_eq!(tool_kind("Edit"), "edit");
         assert_eq!(tool_kind("Write"), "edit");
         assert_eq!(tool_kind("Bash"), "execute");
