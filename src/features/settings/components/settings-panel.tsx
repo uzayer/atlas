@@ -12,6 +12,7 @@ import {
   FlaskConical,
   KeyRound,
   LayoutTemplate,
+  Zap,
   Plus,
   Minus,
 } from "lucide-react";
@@ -25,6 +26,7 @@ import {
 import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
+import { SkillsAndPacks } from "./skills-and-packs";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
 import { useModelPricingStore } from "../stores/model-pricing-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
@@ -40,6 +42,7 @@ const SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "layouts", label: "Layouts", icon: LayoutTemplate },
   { id: "providers", label: "API Keys", icon: KeyRound },
+  { id: "skills", label: "Skills", icon: Zap },
   { id: "keybindings", label: "Keybindings", icon: Keyboard },
   ...(isDev
     ? [{ id: "developer", label: "Developer", icon: FlaskConical }]
@@ -71,12 +74,18 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
         ))}
       </div>
 
-      {/* Settings content. The providers ("API Keys") section is full-bleed —
-          it owns its own toolbar + scrolling table and fills the area edge to
-          edge, so it's rendered outside the padded/max-width wrapper. */}
+      {/* Settings content. The providers ("API Keys") and skills sections are
+          full-bleed — each owns its own toolbar + scrolling layout and fills
+          the area edge to edge, so they render outside the padded/max-width
+          wrapper. (Skills uses a list + right-hand detail pane that needs the
+          room.) */}
       {activeSection === "providers" ? (
         <div className="flex-1 min-w-0 min-h-0">
           <ProvidersSettings />
+        </div>
+      ) : activeSection === "skills" ? (
+        <div className="flex-1 min-w-0 min-h-0">
+          <SkillsAndPacks />
         </div>
       ) : (
         <ScrollArea className="flex-1 p-6">

@@ -37,10 +37,7 @@ const FILE_PATH_KEYS = ["file_path", "path", "filename", "filePath"];
 // the ChatMessage. MessageItem just reads those — no regex per
 // render. The lazy fallback at render time exists only for legacy
 // messages saved before this metadata was added.
-import {
-  splitAtlasContext,
-  type SplitContext,
-} from "../lib/atlas-context";
+import { splitAtlasContext, type SplitContext } from "../lib/atlas-context";
 
 function getAtlasSplit(message: ChatMessage): SplitContext {
   if (message.atlasContext !== undefined) {
@@ -117,7 +114,11 @@ export const MessageItem = memo(function MessageItem({
   // `getAtlasSplit` reads from precomputed fields when present (set by
   // chat-store on insert) and falls back to a one-time regex parse
   // for legacy messages — no regex per render in the hot path.
-  const { prose, context, blockCount: contextBlockCount } = isUser
+  const {
+    prose,
+    context,
+    blockCount: contextBlockCount,
+  } = isUser
     ? getAtlasSplit(message)
     : { prose: message.content, context: null, blockCount: 0 };
 
@@ -133,7 +134,7 @@ export const MessageItem = memo(function MessageItem({
         // doesn't crowd the action row.
         isLastInGroup ? "pb-6" : "pb-1",
         isUser && "bg-[var(--bg-primary)]",
-        dividerAbove && "border-t border-dashed border-[var(--border-default)]"
+        dividerAbove && "border-t border-dashed border-[var(--border-default)]",
       )}
     >
       {/* Time-gap divider — marks a real pause between turns (iMessage
@@ -160,7 +161,7 @@ export const MessageItem = memo(function MessageItem({
               "w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5",
               isUser
                 ? "bg-[var(--accent-primary-muted)]"
-                : "bg-[var(--bg-elevated)] border border-[var(--border-default)]"
+                : "bg-[var(--bg-elevated)] border border-[var(--border-default)]",
             )}
           >
             {isUser ? (
@@ -184,102 +185,108 @@ export const MessageItem = memo(function MessageItem({
             <MessageActions message={message} />
           )}
           <div className="space-y-3">
-          {!compact && (
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">
-                {isUser ? "You" : isAssistant ? "Assistant" : message.role}
-              </span>
-              <span className="text-[10px] text-[var(--text-tertiary)] font-mono">
-                {new Date(message.timestamp).toLocaleTimeString([], {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </span>
-              {isAssistant && model && (
-                <span
-                  className="ml-auto shrink-0 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] px-1.5 py-px text-[9px] font-mono text-[var(--text-tertiary)]"
-                  title={`Model: ${model}`}
-                >
-                  {model}
+            {!compact && (
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold text-[var(--text-secondary)] uppercase tracking-wide">
+                  {isUser ? "You" : isAssistant ? "Assistant" : message.role}
                 </span>
-              )}
-            </div>
-          )}
-
-          {/* Thinking indicator: streaming + nothing emitted yet (no text, no
-              tool calls, no thoughts) */}
-          {streaming &&
-            !message.content &&
-            message.toolCalls.length === 0 &&
-            !message.thinking && (
-              <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--text-secondary)]">
-                <Loader2 size={13} className="animate-spin text-[var(--accent-primary)]" />
-                <span>Working…</span>
+                <span className="text-[10px] text-[var(--text-tertiary)] font-mono">
+                  {new Date(message.timestamp).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </span>
+                {isAssistant && model && (
+                  <span
+                    className="ml-auto shrink-0 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] px-1.5 py-px text-[9px] font-mono text-[var(--text-tertiary)]"
+                    title={`Model: ${model}`}
+                  >
+                    {model}
+                  </span>
+                )}
               </div>
             )}
 
-          {/* Thinking accordion — collapsible, default closed once stream
+            {/* Thinking indicator: streaming + nothing emitted yet (no text, no
+              tool calls, no thoughts) */}
+            {streaming &&
+              !message.content &&
+              message.toolCalls.length === 0 &&
+              !message.thinking && (
+                <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--text-secondary)]">
+                  <Loader2
+                    size={13}
+                    className="animate-spin text-[var(--accent-primary)]"
+                  />
+                  <span>Working…</span>
+                </div>
+              )}
+
+            {/* Thinking accordion — collapsible, default closed once stream
               settles; auto-open while actively streaming so the user sees
               progress. */}
-          {message.mode === "thinking" && message.thinking && (
-            <ThinkingAccordion thinking={message.thinking} streaming={streaming} />
-          )}
+            {message.mode === "thinking" && message.thinking && (
+              <ThinkingAccordion
+                thinking={message.thinking}
+                streaming={streaming}
+              />
+            )}
 
-          {/* Markdown text — render plain pre while streaming for speed; markdown once settled */}
-          {prose && streaming ? (
-            <pre className="text-sm text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words select-text font-sans">
-              {prose}
-              {/* Blinking caret so a live turn reads like a terminal
+            {/* Markdown text — render plain pre while streaming for speed; markdown once settled */}
+            {prose && streaming ? (
+              <pre className="text-sm text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words select-text font-sans">
+                {prose}
+                {/* Blinking caret so a live turn reads like a terminal
                   cursor — the clearest "this is generating now" cue. */}
-              <span className="atlas-stream-caret" aria-hidden />
-            </pre>
-          ) : null}
-          {prose && !streaming && (
-            <CachedMarkdown source={prose} className="text-sm" />
-          )}
+                <span className="atlas-stream-caret" aria-hidden />
+              </pre>
+            ) : null}
+            {prose && !streaming && (
+              <CachedMarkdown source={prose} className="text-sm" />
+            )}
 
-          {/* Heavy @-mention bodies (files / folders / repo READMEs / notes /
+            {/* Heavy @-mention bodies (files / folders / repo READMEs / notes /
               papers) collapsed by default so the thread stays scannable. */}
-          {context && (
-            <AtlasContextAccordion
-              context={context}
-              blockCount={contextBlockCount}
-            />
-          )}
+            {context && (
+              <AtlasContextAccordion
+                context={context}
+                blockCount={contextBlockCount}
+              />
+            )}
 
-          {/* Tool calls */}
-          {message.toolCalls.length > 0 && (
-            <div className="space-y-1.5">
-              {message.toolCalls.map((tc) =>
-                tc.toolName === "search_memory" ? (
-                  <MemoryRecallCard key={tc.id} toolCall={tc} />
-                ) : (
-                  <ToolCallCard key={tc.id} toolCall={tc} />
-                )
-              )}
-            </div>
-          )}
+            {/* Tool calls */}
+            {message.toolCalls.length > 0 && (
+              <div className="space-y-1.5">
+                {message.toolCalls.map((tc) =>
+                  tc.toolName === "search_memory" ? (
+                    <MemoryRecallCard key={tc.id} toolCall={tc} />
+                  ) : (
+                    <ToolCallCard key={tc.id} toolCall={tc} />
+                  ),
+                )}
+              </div>
+            )}
 
-          {/* File changes */}
-          {message.fileChanges.length > 0 && (
-            <div className="space-y-1">
-              {message.fileChanges.map((fc) => (
-                <FileChangeCard key={fc.path} change={fc} />
-              ))}
-            </div>
-          )}
+            {/* File changes */}
+            {message.fileChanges.length > 0 && (
+              <div className="space-y-1">
+                {message.fileChanges.map((fc) => (
+                  <FileChangeCard key={fc.path} change={fc} />
+                ))}
+              </div>
+            )}
 
-          {/* Plan */}
-          {message.plan && message.plan.length > 0 && (
-            <PlanCard steps={message.plan} />
-          )}
+            {/* Plan */}
+            {message.plan && message.plan.length > 0 && (
+              <PlanCard steps={message.plan} />
+            )}
 
-          {/* Per-turn usage footer (native agent) — token count + cost at the
-              end of the turn, since with the in-process agent we know the
-              model + have exact usage. */}
-          {message.usage && (message.usage.input + message.usage.output > 0) && (
-            <UsageFooter usage={message.usage} model={model ?? null} />
-          )}
+            {/* Per-turn usage footer (native agent) — token count + cost at the
+                end of the turn, since with the in-process agent we know the
+                model + have exact usage. */}
+            {message.usage && message.usage.input + message.usage.output > 0 && (
+              <UsageFooter usage={message.usage} model={model ?? null} />
+            )}
           </div>
         </div>
       </div>
@@ -293,7 +300,9 @@ function MessageActions({ message }: { message: ChatMessage }) {
 
   const handleReply = () => {
     window.dispatchEvent(
-      new CustomEvent("atlas:chat-reply", { detail: { content: message.content } })
+      new CustomEvent("atlas:chat-reply", {
+        detail: { content: message.content },
+      }),
     );
   };
 
@@ -316,7 +325,7 @@ function MessageActions({ message }: { message: ChatMessage }) {
     const id = `chat/${new Date().toISOString().replace(/[:.]/g, "-")}-${message.role}`;
     const md = [
       `# ${message.role === "user" ? "Question" : "Answer"} · ${new Date(
-        message.timestamp
+        message.timestamp,
       ).toLocaleString()}`,
       "",
       message.content,
@@ -331,7 +340,9 @@ function MessageActions({ message }: { message: ChatMessage }) {
       toast.success("Saved to knowledge base");
       setTimeout(() => setSaved(false), 1500);
     } catch (err) {
-      toast.error(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
+      toast.error(
+        `Save failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   };
 
@@ -348,7 +359,10 @@ function MessageActions({ message }: { message: ChatMessage }) {
     >
       <ActionButton onClick={handleCopy} title="Copy markdown">
         {copied ? (
-          <Check size={12} className="text-[var(--text-primary)] animate-scale-in" />
+          <Check
+            size={12}
+            className="text-[var(--text-primary)] animate-scale-in"
+          />
         ) : (
           <Copy size={12} />
         )}
@@ -358,7 +372,10 @@ function MessageActions({ message }: { message: ChatMessage }) {
       </ActionButton>
       <ActionButton onClick={handleSave} title="Save to knowledge base">
         {saved ? (
-          <Check size={12} className="text-[var(--text-primary)] animate-scale-in" />
+          <Check
+            size={12}
+            className="text-[var(--text-primary)] animate-scale-in"
+          />
         ) : (
           <Bookmark size={12} />
         )}
@@ -407,7 +424,7 @@ const AtlasContextAccordion = memo(function AtlasContextAccordion({
           size={12}
           className={cn(
             "transition-transform text-[var(--text-tertiary)]",
-            open && "rotate-90"
+            open && "rotate-90",
           )}
         />
         <Paperclip size={12} className="text-[var(--text-tertiary)]" />
@@ -451,11 +468,14 @@ const ThinkingAccordion = memo(function ThinkingAccordion({
           size={12}
           className={cn(
             "transition-transform text-[var(--text-tertiary)]",
-            open && "rotate-90"
+            open && "rotate-90",
           )}
         />
         {streaming ? (
-          <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
+          <Loader2
+            size={12}
+            className="animate-spin text-[var(--accent-primary)]"
+          />
         ) : (
           <Brain size={12} className="text-[var(--text-tertiary)]" />
         )}
@@ -494,27 +514,37 @@ interface EditPart {
 
 const asStr = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
-function getEditParts(toolName: string, args: Record<string, unknown>): EditPart[] {
+function getEditParts(
+  toolName: string,
+  args: Record<string, unknown>,
+): EditPart[] {
   const parts: EditPart[] = [];
   const edits = args.edits;
   if (Array.isArray(edits)) {
     for (const e of edits) {
       if (e && typeof e === "object") {
         const o = e as Record<string, unknown>;
-        const old = asStr(o.old_string) ?? asStr(o.oldString) ?? asStr(o.old_str) ?? "";
-        const neu = asStr(o.new_string) ?? asStr(o.newString) ?? asStr(o.new_str) ?? "";
+        const old =
+          asStr(o.old_string) ?? asStr(o.oldString) ?? asStr(o.old_str) ?? "";
+        const neu =
+          asStr(o.new_string) ?? asStr(o.newString) ?? asStr(o.new_str) ?? "";
         if (old || neu) parts.push({ old, neu });
       }
     }
     if (parts.length) return parts;
   }
-  const old = asStr(args.old_string) ?? asStr(args.oldString) ?? asStr(args.old_str);
-  const neu = asStr(args.new_string) ?? asStr(args.newString) ?? asStr(args.new_str);
+  const old =
+    asStr(args.old_string) ?? asStr(args.oldString) ?? asStr(args.old_str);
+  const neu =
+    asStr(args.new_string) ?? asStr(args.newString) ?? asStr(args.new_str);
   if (old != null || neu != null) return [{ old: old ?? "", neu: neu ?? "" }];
   // Whole-file write/create — only when the tool is actually an editor.
   if (EDIT_TOOLS.has(toolName.toLowerCase())) {
     const content =
-      asStr(args.content) ?? asStr(args.new_content) ?? asStr(args.text) ?? asStr(args.file_text);
+      asStr(args.content) ??
+      asStr(args.new_content) ??
+      asStr(args.text) ??
+      asStr(args.file_text);
     if (content != null) return [{ old: "", neu: content }];
   }
   return parts;
@@ -652,7 +682,10 @@ const ToolCallCard = memo(function ToolCallCard({
     toolCall.status === "failed" ? (
       <XCircle size={12} className="text-[var(--status-error)]" />
     ) : isRunning ? (
-      <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
+      <Loader2
+        size={12}
+        className="animate-spin text-[var(--accent-primary)]"
+      />
     ) : (
       <CheckCircle2 size={12} className="text-[var(--status-success)]" />
     );
@@ -661,9 +694,7 @@ const ToolCallCard = memo(function ToolCallCard({
   let title: string;
   if (isBash) {
     title =
-      (args.command as string) ??
-      (args.cmd as string) ??
-      toolCall.toolName;
+      (args.command as string) ?? (args.cmd as string) ?? toolCall.toolName;
   } else if (filePath) {
     title = `${toolCall.toolName} ${filePath}`;
   } else if (typeof args.pattern === "string") {
@@ -703,14 +734,15 @@ const ToolCallCard = memo(function ToolCallCard({
           ? "border-[var(--status-error)]/40 border-l-[var(--status-error)]"
           : isRunning
             ? "border-[var(--border-default)] border-l-[var(--accent-primary)]"
-            : "border-[var(--border-default)] border-l-[var(--border-strong)]"
+            : "border-[var(--border-default)] border-l-[var(--border-strong)]",
       )}
     >
       <div
         onClick={handleRowClick}
         className={cn(
           "flex items-center gap-2 px-3 py-1.5",
-          filePath && "cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
+          filePath &&
+            "cursor-pointer hover:bg-[var(--bg-hover)] transition-colors",
         )}
       >
         <span className="shrink-0" title={statusLabel} aria-label={statusLabel}>
@@ -752,7 +784,10 @@ const ToolCallCard = memo(function ToolCallCard({
           title="Copy Command + Output"
         >
           {copied ? (
-            <Check size={11} className="text-[var(--text-primary)] animate-scale-in" />
+            <Check
+              size={11}
+              className="text-[var(--text-primary)] animate-scale-in"
+            />
           ) : (
             <Copy size={11} />
           )}
@@ -981,9 +1016,15 @@ const PlanCard = memo(function PlanCard({
         <div key={step.id} className="flex items-start gap-2">
           <span className="mt-0.5">
             {step.status === "completed" ? (
-              <CheckCircle2 size={12} className="text-[var(--status-success)]" />
+              <CheckCircle2
+                size={12}
+                className="text-[var(--status-success)]"
+              />
             ) : step.status === "in_progress" ? (
-              <Loader2 size={12} className="animate-spin text-[var(--accent-primary)]" />
+              <Loader2
+                size={12}
+                className="animate-spin text-[var(--accent-primary)]"
+              />
             ) : (
               <div className="w-3 h-3 rounded-full border border-[var(--border-strong)]" />
             )}
@@ -993,7 +1034,7 @@ const PlanCard = memo(function PlanCard({
               "text-[11px]",
               step.status === "completed"
                 ? "text-[var(--text-tertiary)] line-through"
-                : "text-[var(--text-secondary)]"
+                : "text-[var(--text-secondary)]",
             )}
           >
             {step.description}

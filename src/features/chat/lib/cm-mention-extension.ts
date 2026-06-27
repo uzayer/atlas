@@ -133,8 +133,10 @@ function detectTrigger(view: EditorView): MentionTrigger | null {
   for (let i = lineBefore.length - 1; i >= 0; i--) {
     const ch = lineBefore[i];
     // `@` → unscoped picker; `~` → knowledge-only (mirrors the Tiptap KB
-    // editor's `~` shortcut so chat and notes behave the same).
-    if (ch === "@" || ch === "~") {
+    // editor's `~` shortcut so chat and notes behave the same); `#` →
+    // skills-only (the `#skill:` invoke rail). The whitespace-precedence
+    // guard below keeps `C#`, `issue#3`, `a@b` from opening the picker.
+    if (ch === "@" || ch === "~" || ch === "#") {
       const prev = i > 0 ? lineBefore[i - 1] : "";
       if (prev && !/\s/.test(prev) && prev !== "(" && prev !== "[") {
         return null;
@@ -155,7 +157,7 @@ function detectTrigger(view: EditorView): MentionTrigger | null {
         to: caret,
         query,
         anchor: { x: coords.left, y: coords.top },
-        scope: ch === "~" ? "knowledge" : null,
+        scope: ch === "~" ? "knowledge" : ch === "#" ? "skill" : null,
       };
     }
     if (/\s/.test(ch)) {
@@ -328,6 +330,11 @@ const ICON_GIT_BRANCH = lucideSvg(
 const ICON_MESSAGE_SQUARE = lucideSvg(
   `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>`,
 );
+// Lucide "zap" — skill mentions (the `#skill:` invoke rail). Keep in sync
+// with the `Zap` icon used in mention-picker.tsx's CategoryIcon.
+const ICON_ZAP = lucideSvg(
+  `<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>`,
+);
 
 function kindGlyph(kind: MentionKind): string {
   switch (kind) {
@@ -335,6 +342,8 @@ function kindGlyph(kind: MentionKind): string {
     case "folder":       return ICON_FOLDER;
     case "symbol":       return ICON_HASH;
     case "knowledge":    return ICON_BOOK_OPEN;
+    case "skill":        return ICON_ZAP;
+    case "component":    return ICON_ZAP;
     case "repo":         return ICON_FOLDER_GIT;
     case "paper":        return ICON_NEWSPAPER;
     case "branch":       return ICON_GIT_BRANCH;
@@ -348,6 +357,8 @@ function chipTitle(m: MentionData): string {
     case "folder":       return m.absPath;
     case "symbol":       return `${m.symbolKind} · ${m.filePath}:${m.line}`;
     case "knowledge":    return `${m.source} · ${m.filePath}`;
+    case "skill":        return m.description || m.displayName;
+    case "component":    return m.description || m.displayName;
     case "repo":         return m.absPath;
     case "paper":        return m.authors.length ? m.authors.join(", ") : "paper";
     case "branch":       return `${m.refKind} · ${m.sha.slice(0, 7)}`;
