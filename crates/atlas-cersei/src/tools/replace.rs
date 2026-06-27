@@ -173,7 +173,7 @@ fn block_anchor(content: &str, find: &str) -> Vec<String> {
     for &(start, end) in &candidates {
         let actual = end - start + 1;
         let lines_to_check = (block_size.saturating_sub(2)).min(actual.saturating_sub(2));
-        let mut similarity;
+        let similarity;
         if lines_to_check > 0 {
             let mut sum = 0.0;
             let mut j = 1;
