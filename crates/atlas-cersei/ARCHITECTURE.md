@@ -48,7 +48,7 @@ Atlas        ─┘   in-process, drives Cersei SDK, FAKES AcpEvent ┘
 │ atlas-cersei  (THIS CRATE)                                                │
 │   lib.rs       CerseiRuntime — sessions, turn loop, event translation     │
 │   provider.rs  BYOK (provider,model,key) → cersei Provider                │
-│   cwd_tool.rs  make file tools respect the project working dir            │
+│   tools/       Atlas-owned basic tools (Read/Write/Edit/Grep/Glob/List/Bash)│
 │   mcp.rs       connect MCP servers, expose their tools                    │
 │   memory.rs    `search_memory` RAG tool (backend injected from Tauri)     │
 │   context.rs   git snapshot + AGENTS.md/CLAUDE.md → system prompt          │
@@ -80,7 +80,7 @@ though under the hood it never speaks ACP on a wire.
 | `mcp.rs` | 110 | Connect configured MCP servers, surface their tools to the model. |
 | `context.rs` | 106 | Build the per-turn repo context (git status + project docs) for the system prompt. |
 | `memory.rs` | 95 | The `search_memory` RAG tool (retrieval backend injected from the Tauri layer). |
-| `cwd_tool.rs` | 74 | Decorator that rewrites relative `file_path`s to absolute under the session cwd. |
+| `tools/` | — | **Atlas-owned coding tools** (from-scratch, opencode-modeled): `Read/Write/Edit/Grep/Glob/List/Bash` + the 9-strategy replacer (`replace.rs`), L0 coercion (`coerce.rs`), corrective errors (`errors.rs`), truncation spill (`truncate.rs`), and the `cwd.rs` resolver/`CwdTool` (which folds the former `cwd_tool.rs`). `atlas_coding()` (`tools/mod.rs`) is the toolset seam. See `tools/ATTRIBUTION.md`. |
 
 ---
 
@@ -188,27 +188,42 @@ survives a reload.
 The toolset is assembled fresh **per turn** in `send_prompt`. It is the union of:
 
 ```
-   cersei::tools::coding()        ← file + search + shell tools (SDK built-ins)
-       wrapped by cwd_tool        ← Read/Write/Edit/NotebookEdit get cwd-resolved paths
+   crate::tools::atlas_coding()   ← Atlas-owned basic tools + retained SDK tools
  + cersei::tools::planning()      ← EnterPlanMode, ExitPlanMode, TodoWrite
  + DelegateTool                   ← spawn parallel in-process sub-agents
  + SearchMemoryTool   (if a RAG backend is registered)
  + MCP proxy tools    (one per tool discovered on each connected MCP server)
 ```
 
-### 6a. Coding tools (`cersei::tools::coding()`)
-The SDK's standard kit — reading, searching, editing, and running commands. From the
-guidance + `tool_kind` mapping these include the file tools **Read / Write / Edit /
-NotebookEdit**, search tools **Glob / Grep / code_search**, and a **shell/Bash** exec
-tool. These are the bread-and-butter "look at and change the codebase" tools.
+### 6a. Coding tools (`crate::tools::atlas_coding()`)
+The basic file/search/shell kit is **Atlas-owned** (a from-scratch reimplementation
+modeled on opencode, MIT — see `src/tools/` + `tools/ATTRIBUTION.md`), so it works
+reliably across every BYOK model rather than only strong ones:
+**Read / Write / Edit / Grep / Glob / List / Bash**. The crown jewel is `Edit`'s
+**9-strategy replacer** (`replace.rs`): a slightly-off `old_string` (indentation /
+whitespace / line-ending / escape drift) still lands on the right span, with a guarded
+fuzzy tail (unique + not-oversized) and a 2026 destructive-match guard so a wrong edit is
+never silently applied; on a genuine miss it returns a corrective error showing the real
+nearby lines. `atlas_coding()` (`tools/mod.rs`) is an explicit, hand-built vector, so any
+tool can be swapped for an SDK fallback by flipping one line. Retained SDK tools (not
+reimplemented): `WebFetch / WebSearch / ExaSearch / ApplyPatch / CodeSearch / PowerShell`,
+plus `NotebookEdit`.
 
-### 6b. The cwd wrapper (`cwd_tool.rs`) — a real bug fix worth knowing
+### 6b. cwd resolution (`tools/cwd.rs`) — a real bug fix worth knowing
 The SDK's file tools resolve `file_path` with a bare `Path::new(...)`, **ignoring** the
 working directory. A relative path (what the model naturally produces) would resolve
 against the *app bundle*, not your project → "File not found" → the model falls back to
-`cat` via shell. The `CwdTool` decorator rewrites a relative `file_path` to an absolute
-path under the session cwd before the real tool runs. Absolute paths pass through
-untouched. Only `Read/Write/Edit/NotebookEdit` are wrapped.
+`cat` via shell. Atlas's own tools resolve relative paths internally via
+`cwd::resolve_path(ctx.working_dir, …)`. Retained SDK tools that still ignore the cwd are
+wrapped in `CwdTool` (verified: **NotebookEdit**); `ApplyPatch` already joins
+`working_dir`, so it is left raw. (`cwd.rs` folds the former top-level `cwd_tool.rs`,
+which has been deleted.)
+
+### 6b-i. Search backend — ripgrep
+`Grep / Glob / List` shell out to **ripgrep (`rg`)** via `spawn_blocking` (gitignore-aware,
+matches opencode). If `rg` is not on `PATH` they return a **hard error** — never a silent
+literal-substring fallback (which would give wrong results for a real regex). `rg` must be
+installed in dev and **bundled with the packaged `.app`** (an open packaging follow-up).
 
 ### 6c. Planning tools (`cersei::tools::planning()`)
 `EnterPlanMode` / `ExitPlanMode` / `TodoWrite`. **TodoWrite is special**: instead of
@@ -389,12 +404,13 @@ actual repo state.
 | You want to… | Go to |
 |--------------|-------|
 | change how a Cersei event renders in the UI | `translate_event` / `emit_*` in `lib.rs` |
-| add/remove a tool | toolset assembly in `send_prompt` (`lib.rs` ~§6) |
+| add/remove a tool | `atlas_coding()` in `tools/mod.rs` (the toolset seam) |
+| change how Edit matches drifted `old_string` | `tools/replace.rs` (the 9-strategy replacer) |
 | change permission behavior | `UiPolicy::check` + `mode_kind` in `lib.rs` |
 | add a provider / change default model | `provider.rs` |
 | change what repo context the agent sees | `context.rs` |
 | change session storage / resume | `store.rs` |
-| debug "file not found" on relative paths | `cwd_tool.rs` |
+| debug "file not found" on relative paths | `tools/cwd.rs` (`resolve_path` / `CwdTool`) |
 | wire MCP | `mcp.rs` + `<config_dir>/mcp-servers.json` |
 | connect it to the rest of Atlas | `atlas-agents/src/backend.rs` (`CerseiBackend`) |
 ```
