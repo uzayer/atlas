@@ -15,6 +15,7 @@
 mod context;
 mod cwd_tool;
 mod mcp;
+mod tools;
 mod memory;
 mod provider;
 mod store;
