@@ -13,7 +13,6 @@
 //! atlas-agents can route to either backend.
 
 mod context;
-mod cwd_tool;
 mod mcp;
 mod tools;
 mod memory;
@@ -430,13 +429,11 @@ impl CerseiRuntime {
                 provider::build_provider(&pid, &key, &m).expect("delegate provider rebuild")
             })
         };
-        // Sub-agents (delegate) get the same cwd-resolving file tools — the raw
-        // SDK file tools ignore the working dir (see `cwd_tool`).
-        let toolset_factory: ToolsetFactory =
-            Arc::new(|| crate::cwd_tool::wrap_file_tools(cersei::tools::coding()));
+        // Sub-agents (delegate) get the same Atlas-owned coding toolset.
+        let toolset_factory: ToolsetFactory = Arc::new(crate::tools::atlas_coding);
 
         let mut tools = {
-            let mut t = crate::cwd_tool::wrap_file_tools(cersei::tools::coding());
+            let mut t = crate::tools::atlas_coding();
             t.extend(cersei::tools::planning());
             t.push(Box::new(
                 DelegateTool::new(provider_factory, toolset_factory).with_model(model.clone()),
