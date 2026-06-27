@@ -148,6 +148,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcstr"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -351,15 +360,18 @@ dependencies = [
 name = "atlas"
 version = "0.1.18"
 dependencies = [
+ "anyhow",
  "atlas-acp",
  "atlas-agents",
  "atlas-codeindex",
  "atlas-embed",
  "atlas-gitdiff",
+ "atlas-memory",
  "atlas-review",
  "atlas-terminal",
  "base64 0.21.7",
  "chrono",
+ "dashmap",
  "dirs 6.0.0",
  "futures",
  "ignore",
@@ -482,6 +494,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-memory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "atlas-embed",
+ "cersei-agent",
+ "cersei-embeddings",
+ "cersei-memory",
+ "grafeo",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "usearch",
+]
+
+[[package]]
 name = "atlas-review"
 version = "0.1.0"
 dependencies = [
@@ -554,6 +584,26 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "bincode"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
+dependencies = [
+ "bincode_derive",
+ "serde",
+ "unty",
+]
+
+[[package]]
+name = "bincode_derive"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
+dependencies = [
+ "virtue",
+]
 
 [[package]]
 name = "bit-set"
@@ -1042,6 +1092,7 @@ dependencies = [
  "cersei-types",
  "chrono",
  "dirs 5.0.1",
+ "grafeo",
  "parking_lot",
  "serde",
  "serde_json",
@@ -1437,6 +1488,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
+dependencies = [
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1460,6 +1524,15 @@ name = "crossbeam-epoch"
 version = "0.9.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f58bbc28f91df819d0aa2a2c00cd19754769c2fad90579b3592b1c9ba7a3115"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -2350,6 +2423,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "fs4"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3021,6 +3104,123 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafeo"
+version = "0.5.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6ef2cdd865e5588ec212696aa3481dcdd33fe6a9dc7618d18d061e7ff5a6938"
+dependencies = [
+ "grafeo-adapters",
+ "grafeo-common",
+ "grafeo-core",
+ "grafeo-engine",
+]
+
+[[package]]
+name = "grafeo-adapters"
+version = "0.5.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38cf1373a739aeaa070430588c4026b3c1aa11cd0ad6e6673bda22a390aacda4"
+dependencies = [
+ "bincode",
+ "grafeo-common",
+ "grafeo-core",
+ "hashbrown 0.17.1",
+ "parking_lot",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "grafeo-common"
+version = "0.5.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5f446c25eeedab9cccaabc85060dfa08dac2d1041974244864f36436b81ca5a"
+dependencies = [
+ "arcstr",
+ "bincode",
+ "bumpalo",
+ "byteorder",
+ "bytes",
+ "dashmap",
+ "foldhash 0.2.0",
+ "hashbrown 0.17.1",
+ "indexmap 2.13.0",
+ "parking_lot",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "grafeo-core"
+version = "0.5.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e185dd750843637a2d99e56100c08ef4cc34ce4a7b5f9cb9566f873bbf54c90"
+dependencies = [
+ "arcstr",
+ "bincode",
+ "byteorder",
+ "bytes",
+ "crc32fast",
+ "dashmap",
+ "foldhash 0.2.0",
+ "grafeo-common",
+ "hashbrown 0.17.1",
+ "indexmap 2.13.0",
+ "parking_lot",
+ "regex",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.18",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "grafeo-engine"
+version = "0.5.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ede967e6b0a16396c91752febdf037ab04ca69b851f6fb43565ee5f30586ee0d"
+dependencies = [
+ "arcstr",
+ "bincode",
+ "bytes",
+ "crc32fast",
+ "grafeo-adapters",
+ "grafeo-common",
+ "grafeo-core",
+ "grafeo-storage",
+ "hashbrown 0.17.1",
+ "indexmap 2.13.0",
+ "memmap2",
+ "parking_lot",
+ "regex",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "grafeo-storage"
+version = "0.5.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6857029da63e10209ae622ba85a87593ea08646ea17c02d5aa14461c7ff296f7"
+dependencies = [
+ "bincode",
+ "byteorder",
+ "bytes",
+ "crc32fast",
+ "crossbeam",
+ "fs2",
+ "grafeo-common",
+ "memmap2",
+ "parking_lot",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "gtk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3137,6 +3337,19 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
  "equivalent",
@@ -4577,6 +4790,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "numkong"
+version = "7.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b58d4bb97df102ebdde66a352a20c0bc65c7c407ee9bef12ebe317edc2458a55"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -8330,6 +8552,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
+
+[[package]]
 name = "unicode-normalization-alignments"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8381,6 +8612,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "unty"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8413,6 +8650,7 @@ checksum = "5c08f764417012cf6aea6d1380ef9ea8712c5795a938b726fc67b9bf7ea8824b"
 dependencies = [
  "cxx",
  "cxx-build",
+ "numkong",
 ]
 
 [[package]]
@@ -8468,6 +8706,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtue"
+version = "0.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "vswhom"

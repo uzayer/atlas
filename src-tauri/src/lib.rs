@@ -100,6 +100,23 @@ pub fn run() {
             // Silent background refresh of model pricing from models.dev — first
             // launch populates the cache; later launches update only on change.
             commands::models_pricing::refresh_in_background(&app.handle());
+
+            // Background memory indexer (Step 4): a single owned Tokio task drains
+            // a bounded queue and indexes each open project's corpus into its
+            // per-project `atlas_memory::MemoryEngine`, off the chat hot path. The
+            // `MemoryRegistry` is the cwd-keyed owner of every engine, shared by
+            // the indexer (write lock) and — later — the retrieve closure (read
+            // lock). Wired here so the queue + registry outlive every window.
+            let (job_tx, job_rx) = tokio::sync::mpsc::channel::<commands::memory_indexer::Job>(
+                commands::memory_indexer::QUEUE_CAPACITY,
+            );
+            let registry =
+                Arc::new(commands::memory_indexer::MemoryRegistry::new(job_tx));
+            app.manage(registry.clone());
+            let indexer_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::memory_indexer::MemoryIndexer::run(indexer_app, registry, job_rx).await;
+            });
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -393,6 +410,7 @@ pub fn run() {
             commands::memory_chat::memory_chat_send,
             commands::memory_chat::memory_chat_cancel,
             commands::memory_chat::memory_chat_retrieve,
+            commands::memory_indexer::force_reindex,
             commands::codebase_index::codebase_index_status,
             commands::codebase_index::codebase_index_build,
             commands::memory_chat_sessions::memory_chat_sessions_list,
