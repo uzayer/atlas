@@ -51,10 +51,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+# Already in the dependency tree (transitive); promoted to a direct dep so the
+# Step 7 session-extraction BYOK closure can return `anyhow::Result` into
+# `atlas_memory::extract::extract_and_store` (which is generic over the LLM seam).
+anyhow = "1"
 atlas-agents = { path = "../crates/atlas-agents" }
 atlas-terminal = { path = "../crates/atlas-terminal" }
 atlas-acp = { path = "../crates/atlas-acp" }
 atlas-embed = { path = "../crates/atlas-embed" }
+# On-device RAG/memory engine (MiniLM → usearch HNSW + manifest). The Tauri
+# layer owns the per-project engine registry + background indexer
+# (`commands::memory_indexer`); the crate itself stays Tauri-free.
+atlas-memory = { path = "../crates/atlas-memory" }
 # Native code-review engine (Cersei-backed). Drives `commands::review`.
 atlas-review = { path = "../crates/atlas-review" }
 # Deterministic codebase scanner (Cersei tree-sitter). Feeds the Memory-Chat RAG
@@ -90,6 +98,9 @@ futures = "0.3"
 ignore = "0.4"
 notify = "8"
 notify-debouncer-full = "0.6"
+# Per-cwd engine registry map for the background memory indexer
+# (`commands::memory_indexer`). Same 6.x already used by the workspace crates.
+dashmap = "6"
 nucleo-matcher = "0.3"
 parking_lot = "0.12"
 # Drop-in replacement for the system allocator. macOS's libmalloc is one of
