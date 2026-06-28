@@ -185,6 +185,11 @@ export function categoryForKind(kind: MentionKind): MentionCategory {
 export interface MentionContext {
   /** Project root (cwd for the chat). Required by per-project sources. */
   projectPath: string | null;
+  /** Active chat agent's skill-registry id (e.g. "claude-code" | "codex").
+   *  When set, the `#` skill rail only offers skills enabled for this agent,
+   *  so disabling a skill/pack for an agent removes it from that agent's chat.
+   *  Undefined = no agent filter (legacy callers). */
+  agentId?: string;
 }
 
 // ── Providers (removed) ─────────────────────────────────────────────────────
@@ -416,6 +421,12 @@ async function searchSkills(
   for (const { meta, source } of lists.flat()) {
     const id = `${source.scope}:${meta.name}`;
     if (seen.has(id)) continue;
+    // Per-agent gating: only offer skills enabled for the active chat agent.
+    // `enabledAgents` reflects the on-disk symlink state, which the Packs/Skills
+    // per-agent toggle updates — so a disabled skill drops out of this agent's `#`.
+    if (ctx.agentId && !meta.enabledAgents.includes(ctx.agentId)) {
+      continue;
+    }
     if (
       q &&
       !meta.name.toLowerCase().includes(q) &&
@@ -475,6 +486,11 @@ async function searchPackComponents(
   for (const { meta, source } of lists.flat()) {
     const id = `${source.scope}:${meta.kind}:${meta.pack}:${meta.name}`;
     if (seen.has(id)) continue;
+    // Per-agent gating: only offer pack components (command/agent/rule) that the
+    // pack has projected to the active agent. Mirrors the skill filter above.
+    if (ctx.agentId && !meta.enabledAgents.includes(ctx.agentId)) {
+      continue;
+    }
     if (
       q &&
       !meta.name.toLowerCase().includes(q) &&

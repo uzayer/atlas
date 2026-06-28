@@ -3208,6 +3208,10 @@ pub struct PackComponentMeta {
     /// Absolute path to the component's body file (the `.md`).
     pub path: String,
     pub description: String,
+    /// Registry tool ids (agents) this component is currently projected to —
+    /// i.e. enabled for. Empty = not projected anywhere. Lets the chat `#` rail
+    /// hide components a pack has disabled for the active agent.
+    pub enabled_agents: Vec<String>,
 }
 
 /// Pack component kinds that are chat-invokable — their body is a usable prompt
@@ -3224,7 +3228,11 @@ fn is_invokable_component(kind: ComponentKind) -> bool {
 /// read-only from the pack store. Reused by the Skills list and the `#` picker.
 fn pack_components(root: &Path) -> Vec<PackComponentMeta> {
     let mut out = Vec::new();
+    // Per-agent gating data: the pack projection ledger records which tools
+    // (agents) each pack component is projected to. Read once for the whole scan.
+    let proj = read_pack_proj(root);
     for installed in list_installed_packs(root).unwrap_or_default() {
+        let pack_safe = sanitize_name(&installed.pack.name).ok();
         for comp in &installed.pack.components {
             if !is_invokable_component(comp.kind) {
                 continue;
@@ -3234,6 +3242,23 @@ fn pack_components(root: &Path) -> Vec<PackComponentMeta> {
                 .ok()
                 .and_then(|raw| parse_frontmatter(&raw).0.description)
                 .unwrap_or_default();
+            // Tools this component is currently projected to (= enabled for that
+            // agent), matched by (kind, rel_path) in the pack projection ledger.
+            let enabled_agents: Vec<String> = pack_safe
+                .as_ref()
+                .and_then(|safe| proj.projections.get(safe))
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter(|(_tool, entries)| {
+                            entries
+                                .iter()
+                                .any(|e| e.kind == comp.kind && e.rel_path == comp.rel_path)
+                        })
+                        .map(|(tool, _)| tool.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             out.push(PackComponentMeta {
                 pack: installed.pack.name.clone(),
                 kind: comp.kind,
@@ -3241,6 +3266,7 @@ fn pack_components(root: &Path) -> Vec<PackComponentMeta> {
                 rel_path: comp.rel_path.clone(),
                 path: path.to_string_lossy().to_string(),
                 description,
+                enabled_agents,
             });
         }
     }

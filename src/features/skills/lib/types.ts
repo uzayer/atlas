@@ -57,6 +57,9 @@ export interface PackComponentMeta {
   /** Absolute path to the component body file. */
   path: string;
   description: string;
+  /** Registry tool ids (agents) this component is projected to / enabled for.
+   *  Empty = not projected anywhere. Drives per-agent gating in the `#` rail. */
+  enabledAgents: string[];
 }
 
 /** Full body of one skill, for the detail view. */

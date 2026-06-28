@@ -1016,6 +1016,9 @@ export function MessageInput({
               onMentionTrigger={setTrigger}
               onSlashTrigger={setSlashTrigger}
               keyInterceptor={keyInterceptor}
+              // The Cersei (Atlas) agent has no skill integration, so the `#`
+              // skill picker is hidden for it; other agents keep it.
+              allowSkillMention={agentType !== "cersei"}
             />
           ) : (
             // Same-height empty slot so the panel layout doesn't reflow when
@@ -1120,6 +1123,9 @@ export function MessageInput({
           anchor={trigger?.anchor ?? null}
           initialScope={trigger?.scope ?? null}
           projectPath={projectPath}
+          // Per-agent skill gating: the `#` rail only lists skills enabled for
+          // the active agent (registry ids "claude-code" / "codex" match agentType).
+          agentId={agentType}
           onSelect={handleMentionSelect}
           onClose={() => setTrigger(null)}
         />

@@ -99,6 +99,10 @@ interface ChatInputProps {
    * picker is open and routes accordingly.
    */
   keyInterceptor?: MentionKeyInterceptor | null;
+  /** When false, the `#` skill mention picker is disabled (the active agent
+   *  has no skill integration). Read live so switching agents takes effect
+   *  without remounting the view. Defaults to true. */
+  allowSkillMention?: boolean;
   /** Slot for future extensions. */
   extraExtensions?: Extension[];
   /** Min height in pixels (matches old textarea: 44). */
@@ -117,6 +121,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
       onMentionTrigger,
       onSlashTrigger,
       keyInterceptor,
+      allowSkillMention = true,
       extraExtensions,
       minHeight = 44,
       maxHeight = 200,
@@ -141,6 +146,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
       MentionKeyInterceptor | SlashKeyInterceptor | null | undefined
     >(keyInterceptor);
     keyInterceptorRef.current = keyInterceptor;
+    const allowSkillRef = useRef(allowSkillMention);
+    allowSkillRef.current = allowSkillMention;
 
     // Build the theme once — sized to the container, transparent
     // background so the parent's chip rounding shows through.
@@ -326,7 +333,10 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
               },
             }),
             ...mentionExtension,
-            mentionTriggerPlugin((t) => onMentionTriggerRef.current?.(t)),
+            mentionTriggerPlugin(
+              (t) => onMentionTriggerRef.current?.(t),
+              () => allowSkillRef.current,
+            ),
             slashTriggerPlugin((t) => onSlashTriggerRef.current?.(t)),
             // Prec.highest puts the picker keymap above lang-markdown's
             // Enter binding (which would otherwise continue a bullet) and

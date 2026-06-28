@@ -86,6 +86,9 @@ export interface MentionPickerProps {
   anchor: { x: number; y: number } | null;
   /** Active project root — required for project-scoped sources. */
   projectPath: string | null;
+  /** Active chat agent's skill-registry id. When set, the `#` skill rail only
+   *  lists skills enabled for this agent (per-agent skill/pack gating). */
+  agentId?: string;
   /** A mention was picked. Parent inserts the chip. */
   onSelect: (mention: MentionData) => void;
   /** Picker closed itself (Esc, no anchor, etc). */
@@ -128,6 +131,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       query,
       anchor,
       projectPath,
+      agentId,
       onSelect,
       onClose,
       excludeIds,
@@ -177,7 +181,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
     useEffect(() => {
       if (!open) return;
       const controller = new AbortController();
-      const ctx: MentionContext = { projectPath };
+      const ctx: MentionContext = { projectPath, agentId };
 
       // Empty query + no scope renders "Recent files + Browse
       // categories" — the picker ignores `results` entirely in that
@@ -226,7 +230,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       }
 
       return () => controller.abort();
-    }, [open, query, scope, pastSession, projectPath, excludeIds, indexNonce]);
+    }, [open, query, scope, pastSession, projectPath, agentId, excludeIds, indexNonce]);
 
     // Reset the keyboard cursor to the top ONLY when the user changes what
     // they're looking at (query/scope/session) — NOT when results merely

@@ -64,18 +64,21 @@ export interface MentionTrigger {
  *  the coords measurement (and the React callback) to a microtask so it
  *  runs after the view finishes committing. */
 export function mentionTriggerPlugin(
-  onChange: (trigger: MentionTrigger | null) => void
+  onChange: (trigger: MentionTrigger | null) => void,
+  // Returns whether the `#` skill picker is enabled. Read live so the active
+  // agent (e.g. Cersei, which has no skills) can toggle it without remounting.
+  allowSkill: () => boolean = () => true
 ): ViewPlugin<{ last: MentionTrigger | null; pending: number }> {
   return ViewPlugin.define((view) => {
     const state = {
       last: null as MentionTrigger | null,
       pending: 0,
     };
-    schedule(view, state, onChange);
+    schedule(view, state, onChange, allowSkill);
     return {
       update(u: ViewUpdate) {
         if (!u.docChanged && !u.selectionSet && !u.viewportChanged) return;
-        schedule(u.view, state, onChange);
+        schedule(u.view, state, onChange, allowSkill);
       },
     };
   });
@@ -84,25 +87,27 @@ export function mentionTriggerPlugin(
 function schedule(
   view: EditorView,
   state: { last: MentionTrigger | null; pending: number },
-  onChange: (t: MentionTrigger | null) => void
+  onChange: (t: MentionTrigger | null) => void,
+  allowSkill: () => boolean
 ): void {
   const ticket = ++state.pending;
   queueMicrotask(() => {
     // Drop the stale schedule if another update has fired since.
     if (ticket !== state.pending) return;
-    recompute(view, state, onChange);
+    recompute(view, state, onChange, allowSkill);
   });
 }
 
 function recompute(
   view: EditorView,
   state: { last: MentionTrigger | null; pending: number },
-  onChange: (t: MentionTrigger | null) => void
+  onChange: (t: MentionTrigger | null) => void,
+  allowSkill: () => boolean
 ): void {
   // The view may have been destroyed between the queueMicrotask schedule
   // and its callback firing (e.g. component unmount inside the same tick).
   if (!view.dom.isConnected) return;
-  const trig = detectTrigger(view);
+  const trig = detectTrigger(view, allowSkill);
   if (sameTrigger(state.last, trig)) return;
   state.last = trig;
   onChange(trig);
@@ -121,7 +126,10 @@ function sameTrigger(a: MentionTrigger | null, b: MentionTrigger | null): boolea
   );
 }
 
-function detectTrigger(view: EditorView): MentionTrigger | null {
+function detectTrigger(
+  view: EditorView,
+  allowSkill: () => boolean
+): MentionTrigger | null {
   const sel = view.state.selection.main;
   if (!sel.empty) return null;
   const caret = sel.head;
@@ -136,7 +144,7 @@ function detectTrigger(view: EditorView): MentionTrigger | null {
     // editor's `~` shortcut so chat and notes behave the same); `#` →
     // skills-only (the `#skill:` invoke rail). The whitespace-precedence
     // guard below keeps `C#`, `issue#3`, `a@b` from opening the picker.
-    if (ch === "@" || ch === "~" || ch === "#") {
+    if (ch === "@" || ch === "~" || (ch === "#" && allowSkill())) {
       const prev = i > 0 ? lineBefore[i - 1] : "";
       if (prev && !/\s/.test(prev) && prev !== "(" && prev !== "[") {
         return null;
