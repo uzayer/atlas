@@ -11,7 +11,7 @@ name = "atlas_codeindex"
 # Tree-sitter code intelligence (imports + symbols for Rust/TS/JS/Python/Go),
 # re-exported by the Cersei umbrella as `cersei::tools::tool_primitives::code_intel`.
 # Already compiled for the host via atlas-review, so no new grammar build.
-cersei = "0.1.9"
+cersei = "0.2.4"
 # gitignore-respecting project walk (same crate the file index uses).
 ignore = "0.4"
 # Content fingerprints for incremental rebuilds.

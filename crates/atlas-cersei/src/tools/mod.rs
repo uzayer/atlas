@@ -74,6 +74,13 @@ pub fn atlas_coding() -> Vec<Box<dyn Tool>> {
         Box::new(read::ReadTool),
         Box::new(write::WriteTool),
         Box::new(edit::EditTool),
+        // Native cersei `MultiEdit` (added in SDK 0.2.4): apply several string
+        // replacements to one file atomically (all-or-nothing). Atlas keeps its
+        // own 9-strategy `Edit` (broader fuzzy coverage than the SDK's 5-tier
+        // ladder), but has no MultiEdit of its own, so adopt the native one.
+        // It resolves a bare `file_path` and ignores `ctx.working_dir`, so it
+        // must stay cwd-wrapped (same as NotebookEdit).
+        CwdTool::wrap(Box::new(cersei::tools::multi_edit::MultiEditTool)),
         Box::new(grep::GrepTool),
         Box::new(glob::GlobTool),
         Box::new(list::ListTool),
