@@ -275,7 +275,17 @@ pub async fn memory_index_build(app: AppHandle, project_path: String) -> Result<
         return Err("model-not-downloaded".into());
     }
 
-    let docs = collect_corpus(&project_path).await;
+    // Exclude the codebase index (source "codebase") — the memory graph is about
+    // sessions / preferences / notes, not source files (a dedicated Code Graph was
+    // intentionally dropped). Folding the whole codebase in (added in 0.1.18)
+    // ballooned this corpus from dozens of docs to hundreds, making "Indexing
+    // memory…" crawl on the CPU embedder. The codebase still feeds the
+    // `memory_retrieve` HNSW path, which genuinely needs it.
+    let docs: Vec<MemoryDoc> = collect_corpus(&project_path)
+        .await
+        .into_iter()
+        .filter(|d| d.source != "codebase")
+        .collect();
     if docs.is_empty() {
         return Ok(MemoryGraph {
             nodes: vec![],
