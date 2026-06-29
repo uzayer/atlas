@@ -17,7 +17,6 @@ pub mod list;
 pub mod read;
 pub mod replace;
 pub mod truncate;
-pub mod write;
 
 use cersei::tools::Tool;
 
@@ -25,19 +24,28 @@ use cwd::CwdTool;
 
 /// The coding toolset handed to the Cersei agent (main turn + delegate factory).
 ///
-/// Atlas-owned: `Read / Write / Edit / List / Bash` resolve cwd internally, so
-/// they need no wrapper. `Grep` + `Glob` are the SDK's native in-process tools
-/// (rg-free since 0.2.5); they honor `ctx.working_dir`, so they're also raw.
-/// Retained SDK tools cover the surface Atlas does not reimplement;
-/// `NotebookEdit` ignores `ctx.working_dir` and so stays `CwdTool`-wrapped
-/// (`ApplyPatch` already joins `working_dir`, so it is safe raw).
+/// Atlas-owned: `Read / Edit / List / Bash` resolve cwd internally, so they need
+/// no wrapper — each is kept only because it's PROVEN more capable than the SDK
+/// equivalent (tests/sdk_native_capability.rs). `Grep` + `Glob` are the SDK's
+/// native in-process tools (rg-free since 0.2.5); `Write` + `MultiEdit` +
+/// `NotebookEdit` are SDK tools that ignore `ctx.working_dir`, so they stay
+/// `CwdTool`-wrapped. `ApplyPatch` already joins `working_dir`, so it is raw.
+/// As the SDK closes its gaps, the Atlas-owned set shrinks (Grep/Glob/Write
+/// already handed off).
 pub fn atlas_coding() -> Vec<Box<dyn Tool>> {
     use cersei::tools as t;
     vec![
         // ── Atlas-owned basic tools (resolve cwd internally — no wrapper) ─
+        // Kept because each is PROVEN more capable than the SDK's same-named
+        // tool (see tests/sdk_native_capability.rs): Read adds line-numbered
+        // output + did-you-mean + binary detection; Edit adds 2 replacer
+        // strategies (EscapeNormalized + TrimmedBoundary) the SDK's 5 miss.
         Box::new(read::ReadTool),
-        Box::new(write::WriteTool),
         Box::new(edit::EditTool),
+        // Write was a pure duplicate (SDK FileWriteTool is fully capable —
+        // creates parent dirs, same fields), so we hand it off to cersei. It
+        // ignores `ctx.working_dir`, so cwd-wrap it like MultiEdit/NotebookEdit.
+        CwdTool::wrap(Box::new(t::file_write::FileWriteTool)),
         // Native cersei `MultiEdit` (added in SDK 0.2.4): apply several string
         // replacements to one file atomically (all-or-nothing). Atlas keeps its
         // own 9-strategy `Edit` (broader fuzzy coverage than the SDK's 5-tier
