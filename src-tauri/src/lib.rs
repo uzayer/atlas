@@ -100,6 +100,23 @@ pub fn run() {
             // Silent background refresh of model pricing from models.dev — first
             // launch populates the cache; later launches update only on change.
             commands::models_pricing::refresh_in_background(&app.handle());
+
+            // Background memory indexer (Step 4): a single owned Tokio task drains
+            // a bounded queue and indexes each open project's corpus into its
+            // per-project `atlas_memory::MemoryEngine`, off the chat hot path. The
+            // `MemoryRegistry` is the cwd-keyed owner of every engine, shared by
+            // the indexer (write lock) and — later — the retrieve closure (read
+            // lock). Wired here so the queue + registry outlive every window.
+            let (job_tx, job_rx) = tokio::sync::mpsc::channel::<commands::memory_indexer::Job>(
+                commands::memory_indexer::QUEUE_CAPACITY,
+            );
+            let registry =
+                Arc::new(commands::memory_indexer::MemoryRegistry::new(job_tx));
+            app.manage(registry.clone());
+            let indexer_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::memory_indexer::MemoryIndexer::run(indexer_app, registry, job_rx).await;
+            });
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -334,6 +351,7 @@ pub fn run() {
             commands::agents::codex_status,
             commands::cersei::cersei_list_sessions,
             commands::cersei::cersei_session_transcript,
+            commands::cersei::cersei_delete_session,
             commands::byok::byok_list,
             commands::byok::byok_set,
             commands::byok::byok_delete,
@@ -366,6 +384,7 @@ pub fn run() {
             commands::plans::plans_append,
             commands::agent_memory::agent_memory_read,
             commands::agent_memory::list_codex_sessions,
+            commands::agent_memory::codex_delete_session,
             commands::memory_graph::memory_embed_status,
             commands::memory_graph::memory_embed_download,
             commands::memory_graph::memory_index_build,
@@ -391,6 +410,7 @@ pub fn run() {
             commands::memory_chat::memory_chat_send,
             commands::memory_chat::memory_chat_cancel,
             commands::memory_chat::memory_chat_retrieve,
+            commands::memory_indexer::force_reindex,
             commands::codebase_index::codebase_index_status,
             commands::codebase_index::codebase_index_build,
             commands::memory_chat_sessions::memory_chat_sessions_list,
@@ -399,6 +419,29 @@ pub fn run() {
             commands::memory_chat_sessions::memory_chat_session_delete,
             commands::pdf_annotations::pdf_annotations_load,
             commands::pdf_annotations::pdf_annotations_save,
+            commands::skills::skills_list,
+            commands::skills::skills_read,
+            commands::skills::skills_set_enabled,
+            commands::skills::skills_delete,
+            commands::skills::skills_path,
+            commands::skills::skills_adopt,
+            commands::skills::agents_list_skill_targets,
+            commands::skills::tools_list,
+            commands::skills::skills_reconcile,
+            commands::skills::skills_project,
+            commands::skills::skills_unproject,
+            commands::skills::skills_promote,
+            commands::skills::skills_freeze,
+            commands::skills::pack_inspect,
+            commands::skills::pack_search,
+            commands::skills::pack_remote_preview,
+            commands::skills::pack_install_remote,
+            commands::skills::pack_list,
+            commands::skills::pack_check_update,
+            commands::skills::pack_project,
+            commands::skills::pack_unproject,
+            commands::skills::pack_projections,
+            commands::skills::pack_components_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas");

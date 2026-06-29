@@ -58,6 +58,31 @@ pub enum MentionSpec {
         #[serde(default)]
         inline_body: Option<String>,
     },
+    /// A reusable procedure invoked with `#skill:<name>`. The body is the
+    /// `SKILL.md` minus its frontmatter — inlined as a context block so it
+    /// rides the same delivery rail as every other mention and reaches any
+    /// ACP agent (no native-skills folder required). Mirrors `Knowledge`:
+    /// the frontend pre-fills `inline_body` via `skills_read` (already
+    /// frontmatter-stripped); `file_path` is the read fallback.
+    Skill {
+        id: String,
+        display_name: String,
+        file_path: String,
+        #[serde(default)]
+        inline_body: Option<String>,
+    },
+    /// A pack-delivered component invoked with `#<kind>:<name>` — `command`,
+    /// `agent`, or `rule`. Like `Skill`, its body (frontmatter stripped) is
+    /// inlined as a context block so it reaches any ACP agent. The frontend
+    /// pre-fills `inline_body`; `file_path` is the read fallback.
+    Component {
+        id: String,
+        display_name: String,
+        component_kind: String,
+        file_path: String,
+        #[serde(default)]
+        inline_body: Option<String>,
+    },
     Repo {
         id: String,
         display_name: String,
@@ -89,6 +114,8 @@ impl MentionSpec {
             | MentionSpec::Folder { id, .. }
             | MentionSpec::Symbol { id, .. }
             | MentionSpec::Knowledge { id, .. }
+            | MentionSpec::Skill { id, .. }
+            | MentionSpec::Component { id, .. }
             | MentionSpec::Repo { id, .. }
             | MentionSpec::Paper { id, .. }
             | MentionSpec::Branch { id, .. }
@@ -102,6 +129,12 @@ impl MentionSpec {
             MentionSpec::Folder { display_name, .. } => format!("@folder:{display_name}"),
             MentionSpec::Symbol { display_name, .. } => format!("@symbol:{display_name}"),
             MentionSpec::Knowledge { id, .. } => format!("@note:{id}"),
+            MentionSpec::Skill { display_name, .. } => format!("#skill:{display_name}"),
+            MentionSpec::Component {
+                component_kind,
+                display_name,
+                ..
+            } => format!("#{component_kind}:{display_name}"),
             MentionSpec::Repo { display_name, .. } => format!("@repo:{display_name}"),
             MentionSpec::Paper { display_name, .. } => format!("@paper:{display_name}"),
             MentionSpec::Branch { display_name, .. } => format!("@branch:{display_name}"),
@@ -218,6 +251,41 @@ fn render_block(m: &MentionSpec) -> Option<String> {
                 body = clip_body(&body),
             ))
         }
+        MentionSpec::Skill {
+            file_path,
+            inline_body,
+            ..
+        } => {
+            // The frontend pre-fills `inline_body` from `skills_read` (already
+            // frontmatter-stripped). Fall back to reading the `SKILL.md` and
+            // stripping its frontmatter so the agent sees only the procedure.
+            let body = match inline_body.as_deref() {
+                Some(b) if !b.is_empty() => b.to_string(),
+                _ => read_skill_body(file_path),
+            };
+            Some(format!(
+                "## {sf}\n\n{body}",
+                sf = m.short_form(),
+                body = clip_body(&body),
+            ))
+        }
+        MentionSpec::Component {
+            file_path,
+            inline_body,
+            ..
+        } => {
+            // Same rail as Skill: inline the component body (a command/agent/rule
+            // markdown, frontmatter stripped) so any ACP agent receives it.
+            let body = match inline_body.as_deref() {
+                Some(b) if !b.is_empty() => b.to_string(),
+                _ => read_skill_body(file_path),
+            };
+            Some(format!(
+                "## {sf}\n\n{body}",
+                sf = m.short_form(),
+                body = clip_body(&body),
+            ))
+        }
         MentionSpec::Paper {
             authors,
             metadata_path,
@@ -259,6 +327,42 @@ fn render_block(m: &MentionSpec) -> Option<String> {
     }
 }
 
+/// Read a `SKILL.md` and return just the procedure body, stripping a leading
+/// `---` frontmatter block. The frontend normally pre-fills the already-parsed
+/// body, so this is only the fallback path; it intentionally mirrors the
+/// minimal frontmatter handling in `commands::skills::parse_frontmatter`
+/// without depending on it.
+fn read_skill_body(path: &str) -> String {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return "(unable to read skill)".to_string();
+    };
+    strip_frontmatter(&raw)
+}
+
+fn strip_frontmatter(raw: &str) -> String {
+    let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let mut lines = trimmed.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return raw.to_string(); // no frontmatter → all body
+    }
+    let mut body_lines: Vec<&str> = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        if !closed {
+            if line.trim_end() == "---" {
+                closed = true;
+            }
+            continue;
+        }
+        body_lines.push(line);
+    }
+    if !closed {
+        return raw.to_string(); // unterminated frontmatter → treat all as body
+    }
+    let body = body_lines.join("\n");
+    body.trim_start_matches(['\n', '\r']).to_string()
+}
+
 fn clip_body(body: &str) -> String {
     if body.len() <= MENTION_BODY_BUDGET_BYTES {
         return body.to_string();
@@ -266,6 +370,59 @@ fn clip_body(body: &str) -> String {
     let head = &body[..MENTION_BODY_BUDGET_BYTES];
     let elided = body.len() - MENTION_BODY_BUDGET_BYTES;
     format!("{head}\n\n… (truncated, {elided} bytes elided)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_leading_frontmatter_block() {
+        let raw = "---\nname: review-rust-diff\ndescription: Review a diff.\n---\n\nStep 1. Check unwrap().";
+        assert_eq!(strip_frontmatter(raw), "Step 1. Check unwrap().");
+    }
+
+    #[test]
+    fn no_frontmatter_is_passed_through() {
+        let raw = "Just a body, no frontmatter.\nSecond line.";
+        assert_eq!(strip_frontmatter(raw), raw);
+    }
+
+    #[test]
+    fn component_mention_inlines_body_with_kind_token() {
+        let spec = MentionSpec::Component {
+            id: "global:command:demo:ship".to_string(),
+            display_name: "ship".to_string(),
+            component_kind: "command".to_string(),
+            file_path: String::new(),
+            inline_body: Some("Do the ship steps.".to_string()),
+        };
+        let block = render_block(&spec).expect("component renders a block");
+        assert!(block.contains("## #command:ship"), "got: {block}");
+        assert!(block.contains("Do the ship steps."), "got: {block}");
+    }
+
+    #[test]
+    fn unterminated_frontmatter_is_treated_as_body() {
+        let raw = "---\nname: x\nbody but no close";
+        assert_eq!(strip_frontmatter(raw), raw);
+    }
+
+    #[test]
+    fn skill_short_form_and_block_use_hash_prefix() {
+        let m = MentionSpec::Skill {
+            id: "global:review-rust-diff".into(),
+            display_name: "review-rust-diff".into(),
+            file_path: "/nonexistent/SKILL.md".into(),
+            inline_body: Some("Review the diff the way I like.".into()),
+        };
+        assert_eq!(m.short_form(), "#skill:review-rust-diff");
+        let block = render_block(&m).expect("skill renders a block");
+        assert_eq!(
+            block,
+            "## #skill:review-rust-diff\n\nReview the diff the way I like."
+        );
+    }
 }
 
 fn read_repo_readme_body(repo_abs: &str, _repo_name: &str) -> Option<String> {

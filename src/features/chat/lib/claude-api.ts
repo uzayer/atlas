@@ -64,6 +64,24 @@ export function deleteClaudeSession(filePath: string): Promise<void> {
   return invoke<void>("delete_claude_session", { filePath });
 }
 
+/**
+ * Delete a native Atlas (Cersei) session by id. Cersei transcripts live under
+ * the app config dir (not `~/.claude/projects`), so they need their own command
+ * — `delete_claude_session` rejects any path outside the Claude projects dir.
+ */
+export function cerseiDeleteSession(cwd: string, sessionId: string): Promise<void> {
+  return invoke<void>("cersei_delete_session", { projectPath: cwd, sessionId });
+}
+
+/**
+ * Archive (soft-delete) a Codex session by thread id. Codex keeps threads in
+ * `~/.codex/state_<n>.sqlite` with no per-session file, so the backend sets
+ * `archived = 1` (the flag the listing filters on) rather than removing a row.
+ */
+export function codexDeleteSession(sessionId: string): Promise<void> {
+  return invoke<void>("codex_delete_session", { sessionId });
+}
+
 export interface ClaudeSessionStats {
   session_id: string;
   model: string | null;

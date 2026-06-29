@@ -4,7 +4,12 @@ import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_
 import { loadCachedAcpModes } from "../lib/acp-modes-cache";
 import { warmAcpModels, otherAcpAgent } from "../lib/warm-acp-models";
 import type { SessionKey } from "@/types/agents";
-import { composePrompt, type MentionData } from "../lib/mentions";
+import {
+  composePrompt,
+  type MentionData,
+  type MentionSkill,
+} from "../lib/mentions";
+import { sharedMemory } from "@/features/memory/lib/shared-memory-api";
 import { usePaneFind } from "../lib/use-pane-find";
 import { MessageInput } from "./message-input";
 import { SessionSidebar } from "./session-sidebar";
@@ -18,13 +23,15 @@ import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup
 // Both panels are modal-style and never visible on first paint. Lazy so
 // they don't add to the initial chunk.
 const BashHistoryPanel = lazy(() =>
-  import("./bash-history-panel").then((m) => ({ default: m.BashHistoryPanel }))
+  import("./bash-history-panel").then((m) => ({ default: m.BashHistoryPanel })),
 );
 const PlansPanel = lazy(() =>
-  import("./plans-panel").then((m) => ({ default: m.PlansPanel }))
+  import("./plans-panel").then((m) => ({ default: m.PlansPanel })),
 );
 const ChatSearchPalette = lazy(() =>
-  import("./chat-search-palette").then((m) => ({ default: m.ChatSearchPalette }))
+  import("./chat-search-palette").then((m) => ({
+    default: m.ChatSearchPalette,
+  })),
 );
 
 // `MessagesList` transitively imports `react-markdown` + `rehype-highlight` +
@@ -32,10 +39,23 @@ const ChatSearchPalette = lazy(() =>
 // an empty-chat first paint doesn't preload the markdown vendor chunk;
 // loads on demand the first time messages exist for this tab.
 const MessagesList = lazy(() =>
-  import("./messages-list").then((m) => ({ default: m.MessagesList }))
+  import("./messages-list").then((m) => ({ default: m.MessagesList })),
 );
 import type { MessagesListHandle } from "./messages-list";
-import { Sparkles, User, TerminalSquare, ClipboardList, ListFilter, Search, Loader2, ChevronDown, ArrowRight, LogIn, GitCompare, FlaskConical } from "lucide-react";
+import {
+  Sparkles,
+  User,
+  TerminalSquare,
+  ClipboardList,
+  ListFilter,
+  Search,
+  Loader2,
+  ChevronDown,
+  ArrowRight,
+  LogIn,
+  GitCompare,
+  FlaskConical,
+} from "lucide-react";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { PanelSkeleton } from "@/components/panel-skeleton";
 import { Kbd, KbdGroup } from "@/ui/kbd";
@@ -57,13 +77,11 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   // unchanged sub-paths, so `s.sessions[tabId]` only changes when this tab
   // mutates.
   const session = useChatStore((s) => s.sessions[tabId]);
-  const {
-    createSession,
-    addMessage,
-    updateSessionStatus,
-    setSessionTitle,
-  } = useChatStore.use.actions();
-  const [roleFilter, setRoleFilter] = useState<"all" | "user" | "assistant">("all");
+  const { createSession, addMessage, updateSessionStatus, setSessionTitle } =
+    useChatStore.use.actions();
+  const [roleFilter, setRoleFilter] = useState<"all" | "user" | "assistant">(
+    "all",
+  );
   const [bashPanelOpen, setBashPanelOpen] = useState(false);
   const [plansPanelOpen, setPlansPanelOpen] = useState(false);
   // Cmd+F find — scoped to this pane + tab (see usePaneFind).
@@ -283,7 +301,8 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   // capture phase so the browser's default focus traversal never steals it.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key !== "Tab" || !e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key !== "Tab" || !e.shiftKey || e.metaKey || e.ctrlKey || e.altKey)
+        return;
       const root = rootRef.current;
       const active = document.activeElement as HTMLElement | null;
       // Only intercept when focus is somewhere inside this chat panel.
@@ -417,7 +436,10 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     });
 
     if (session.messages.length === 0) {
-      setSessionTitle(tabId, actualContent.slice(0, 40) + (actualContent.length > 40 ? "..." : ""));
+      setSessionTitle(
+        tabId,
+        actualContent.slice(0, 40) + (actualContent.length > 40 ? "..." : ""),
+      );
     }
 
     updateSessionStatus(tabId, "running");
@@ -431,6 +453,27 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     } catch (err) {
       console.warn("composePrompt failed, sending raw text:", err);
       wirePrompt = actualContent;
+    }
+
+    // Best-effort, invisible: record that this turn applied one or more skills
+    // so cross-agent shared memory reflects it (no view projection — see
+    // EventKind::SkillUsed). Fire-and-forget; must never block or break send.
+    const usedSkills = mentions.filter(
+      (m): m is MentionSkill => m.kind === "skill",
+    );
+    const memoryProject =
+      useProjectStore.getState().currentProject?.path ?? null;
+    if (usedSkills.length > 0 && memoryProject) {
+      void sharedMemory
+        .appendEvent(
+          memoryProject,
+          bound.acpAgentId,
+          bound.acpSessionId,
+          "skill_used",
+          null,
+          { skills: usedSkills.map((m) => m.skillName) },
+        )
+        .catch(() => {});
     }
 
     // Non-blocking send: returns the instant the prompt is queued onto the
@@ -490,8 +533,8 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
               <Search size={11} />
               <span>Find in chat…</span>
               <span className="ml-auto">
-              	<KbdGroup>
-									<Kbd className="h-[16px] w-fit min-w-[16px]">⌘</Kbd>
+                <KbdGroup>
+                  <Kbd className="h-[16px] w-fit min-w-[16px]">⌘</Kbd>
                   <Kbd className="h-[16px] w-fit min-w-[16px]">F</Kbd>
                 </KbdGroup>
               </span>
@@ -522,10 +565,16 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
                         "flex items-center gap-2 px-3 h-[26px] text-[11px] cursor-default outline-none capitalize",
                         roleFilter === f
                           ? "text-[var(--text-primary)] bg-[var(--bg-selected)]"
-                          : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+                          : "text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]",
                       )}
                     >
-                      {f === "user" ? <User size={10} /> : f === "assistant" ? <Sparkles size={10} /> : <ListFilter size={10} />}
+                      {f === "user" ? (
+                        <User size={10} />
+                      ) : f === "assistant" ? (
+                        <Sparkles size={10} />
+                      ) : (
+                        <ListFilter size={10} />
+                      )}
                       <span>{f}</span>
                     </DropdownMenu.Item>
                   ))}
@@ -541,7 +590,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
                 "flex items-center gap-1 px-2 h-6 rounded text-[10px] cursor-pointer outline-none transition-colors",
                 bashPanelOpen
                   ? "text-[var(--text-primary)] bg-[var(--bg-selected)]"
-                  : "text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                  : "text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]",
               )}
               title="Toggle bash call history"
             >
@@ -557,7 +606,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
                 "flex items-center gap-1 px-2 h-6 rounded text-[10px] cursor-pointer outline-none transition-colors",
                 plansPanelOpen
                   ? "text-[var(--text-primary)] bg-[var(--bg-selected)]"
-                  : "text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+                  : "text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]",
               )}
               title="Toggle plans history"
             >
@@ -595,7 +644,10 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         <div className="relative">
           {/* Permission / question prompt — an inline card pinned above the
               composer (plan reviews still render as a centered modal). */}
-          <PermissionModal tabId={tabId} onSendMessage={(t) => handleSend(t, [])} />
+          <PermissionModal
+            tabId={tabId}
+            onSendMessage={(t) => handleSend(t, [])}
+          />
           {/* Bottom fade lives in MessagesList; the centered floating
               row (setup pill + scroll-to-bottom) lives inside
               ChatComposer below. */}
@@ -618,7 +670,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             onJump={(idx) => {
               if (roleFilter !== "all") setRoleFilter("all");
               window.dispatchEvent(
-                new CustomEvent("atlas:chat-jump", { detail: { index: idx } })
+                new CustomEvent("atlas:chat-jump", { detail: { index: idx } }),
               );
             }}
             onClose={() => setBashPanelOpen(false)}
@@ -639,7 +691,9 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             onOpenChange={setSearchPaletteOpen}
             messages={session.messages}
             onJump={(idx) =>
-              window.dispatchEvent(new CustomEvent("atlas:chat-jump", { detail: { index: idx } }))
+              window.dispatchEvent(
+                new CustomEvent("atlas:chat-jump", { detail: { index: idx } }),
+              )
             }
           />
         </Suspense>
@@ -687,7 +741,8 @@ function ChatComposer({
   // chat must not be blocked by Claude's status (Codex inherits its own
   // ~/.codex / OPENAI auth); it surfaces its own errors from the spawn path.
   const isClaude =
-    useChatStore((s) => s.sessions[tabId]?.agentType ?? "claude-code") === "claude-code";
+    useChatStore((s) => s.sessions[tabId]?.agentType ?? "claude-code") ===
+    "claude-code";
   const phase = useClaudeSetupStore.use.phase();
 
   // Codex sign-in state (only for Codex sessions). `null` = still probing.
@@ -712,7 +767,13 @@ function ChatComposer({
       await agents.authenticate(agent.agent_id, "chatgpt");
       setCodexAuthed(await codexStatus());
     } catch (err) {
-      logEvent({ source: "atlas", kind: "codex-auth", summary: "Codex sign-in failed", status: "failure", payload: { error: String(err) } });
+      logEvent({
+        source: "atlas",
+        kind: "codex-auth",
+        summary: "Codex sign-in failed",
+        status: "failure",
+        payload: { error: String(err) },
+      });
     } finally {
       setCodexSigningIn(false);
     }
@@ -725,7 +786,9 @@ function ChatComposer({
   // disable the composer. Shown for both agents since `npx` powers both.
   const nodePhase = useNodeSetupStore.use.phase();
   const nodeBusy =
-    nodePhase === "installing" || nodePhase === "installed" || nodePhase === "failed";
+    nodePhase === "installing" ||
+    nodePhase === "installed" ||
+    nodePhase === "failed";
   const showRow = setupVisible || nodeBusy || showJumpToBottom;
 
   return (
@@ -755,8 +818,14 @@ function ChatComposer({
                   disabled={codexSigningIn}
                   className="atlas-pill-in inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[11px] leading-none font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] transition-colors cursor-pointer disabled:opacity-60"
                 >
-                  {codexSigningIn ? <Loader2 size={11} className="animate-spin" /> : <LogIn size={11} />}
-                  {codexSigningIn ? "Opening OpenAI sign-in…" : "Sign in to Codex with ChatGPT"}
+                  {codexSigningIn ? (
+                    <Loader2 size={11} className="animate-spin" />
+                  ) : (
+                    <LogIn size={11} />
+                  )}
+                  {codexSigningIn
+                    ? "Opening OpenAI sign-in…"
+                    : "Sign in to Codex with ChatGPT"}
                 </button>
               )}
               {showJumpToBottom && (

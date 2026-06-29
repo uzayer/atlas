@@ -27,6 +27,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   BookOpen,
+  Bot,
   FileText,
   Folder,
   FolderGit2,
@@ -34,8 +35,12 @@ import {
   Hash,
   MessageSquare,
   Newspaper,
+  Scale,
+  SquareSlash,
+  Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Kbd } from "@/ui/kbd";
 
 import {
   MENTION_CATEGORIES,
@@ -81,6 +86,9 @@ export interface MentionPickerProps {
   anchor: { x: number; y: number } | null;
   /** Active project root — required for project-scoped sources. */
   projectPath: string | null;
+  /** Active chat agent's skill-registry id. When set, the `#` skill rail only
+   *  lists skills enabled for this agent (per-agent skill/pack gating). */
+  agentId?: string;
   /** A mention was picked. Parent inserts the chip. */
   onSelect: (mention: MentionData) => void;
   /** Picker closed itself (Esc, no anchor, etc). */
@@ -123,6 +131,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       query,
       anchor,
       projectPath,
+      agentId,
       onSelect,
       onClose,
       excludeIds,
@@ -172,7 +181,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
     useEffect(() => {
       if (!open) return;
       const controller = new AbortController();
-      const ctx: MentionContext = { projectPath };
+      const ctx: MentionContext = { projectPath, agentId };
 
       // Empty query + no scope renders "Recent files + Browse
       // categories" — the picker ignores `results` entirely in that
@@ -221,7 +230,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       }
 
       return () => controller.abort();
-    }, [open, query, scope, pastSession, projectPath, excludeIds, indexNonce]);
+    }, [open, query, scope, pastSession, projectPath, agentId, excludeIds, indexNonce]);
 
     // Reset the keyboard cursor to the top ONLY when the user changes what
     // they're looking at (query/scope/session) — NOT when results merely
@@ -305,9 +314,34 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         return out;
       }
       if (scope) {
-        out.push({ type: "header", label: categoryForKind(scope).label });
+        // Group results under per-kind sub-headers. Homogeneous scopes collapse
+        // to a single header (unchanged); the `#` rail (skills + pack components)
+        // splits into Skills / Commands / Agents / Rules.
+        const groupOf = (m: MentionData): { key: string; label: string } => {
+          if (m.kind === "component") {
+            const label =
+              m.componentKind === "command"
+                ? "Commands"
+                : m.componentKind === "agent"
+                  ? "Agents"
+                  : "Rules";
+            return { key: `component:${m.componentKind}`, label };
+          }
+          return { key: m.kind, label: categoryForKind(m.kind).label };
+        };
+        let lastKey: string | null = null;
         for (const m of results) {
+          const g = groupOf(m);
+          if (g.key !== lastKey) {
+            out.push({ type: "header", label: g.label });
+            lastKey = g.key;
+          }
           out.push({ type: "mention", mention: m });
+        }
+        // Keep the scope header visible even with zero results (empty-state copy
+        // renders below it).
+        if (out.length === 0) {
+          out.push({ type: "header", label: categoryForKind(scope).label });
         }
         return out;
       }
@@ -478,7 +512,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         className={cn(
           "atlas-mention-picker",
           "rounded-lg overflow-hidden",
-          "bg-[var(--bg-secondary)] border border-[var(--border-default)]",
+          "bg-bg-secondary border border-border-default",
           "shadow-[0_8px_24px_rgba(0,0,0,0.5)]",
           "flex flex-col"
         )}
@@ -495,11 +529,11 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       >
             {rows.length === 0 ||
             (rows.length === 1 && rows[0].type === "header") ? (
-              <div className="flex-1 px-3 py-6 text-center text-[11px] text-[var(--text-tertiary)] leading-snug">
+              <div className="flex-1 px-3 py-6 text-center text-[11px] text-text-tertiary leading-snug">
                 {indexing &&
                 (scope === null || scope === "file" || scope === "folder") ? (
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="size-1.5 rounded-full bg-[var(--text-tertiary)] animate-pulse" />
+                    <span className="size-1.5 rounded-full bg-text-tertiary animate-pulse" />
                     Indexing files…
                   </span>
                 ) : (
@@ -522,15 +556,20 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
                 onSelect={onSelectRef}
               />
             )}
-            <div className="border-t border-[var(--border-default)] px-3 h-[24px] flex items-center justify-between text-[9px] text-[var(--text-tertiary)] uppercase tracking-wider shrink-0">
-              <span>
+            <div className="border-t border-border-default px-3 h-[26px] flex items-center justify-between shrink-0">
+              <span className="text-[9px] text-text-tertiary uppercase tracking-wider">
                 {scope
                   ? `Scope: ${categoryForKind(scope).label}`
                   : query
                     ? "Filtered"
                     : "Top: recents · then categories"}
               </span>
-              <span>↑↓ · ↵ select · ⎋ close</span>
+              <span className="flex items-center gap-1.5 text-[9px] text-text-tertiary">
+                <Kbd>↑↓</Kbd>
+                <Kbd>↵</Kbd>
+                <span>select</span>
+                <Kbd>esc</Kbd>
+              </span>
             </div>
       </div>,
       document.body
@@ -610,7 +649,7 @@ function VirtualizedRows({
               <div
                 key={`h-${i}`}
                 style={style}
-                className="px-3 pt-2 pb-1 text-[9px] uppercase tracking-wider text-[var(--text-tertiary)] font-semibold"
+                className="eyebrow px-3 pt-2 pb-1"
               >
                 {row.label}
               </div>
@@ -673,7 +712,7 @@ function VirtualizedRows({
                 <span className="truncate flex-1 min-w-0">
                   {row.session.title}
                 </span>
-                <span className="text-[10px] text-[var(--text-tertiary)] shrink-0">
+                <span className="text-[10px] text-text-tertiary shrink-0">
                   {row.session.messageCount} msgs
                 </span>
               </button>
@@ -704,13 +743,13 @@ function VirtualizedRows({
                 {m.kind === "knowledge" && m.icon ? (
                   <span style={{ fontSize: 12, lineHeight: 1 }}>{m.icon}</span>
                 ) : (
-                  <CategoryIcon kind={m.kind} />
+                  mentionGlyph(m)
                 )}
               </span>
               <span className="truncate min-w-0 flex-shrink-0">
                 {primaryLabel(m)}
               </span>
-              <span className="flex-1 min-w-0 text-[10px] text-[var(--text-tertiary)] truncate">
+              <span className="flex-1 min-w-0 text-[10px] text-text-tertiary truncate">
                 {row.recentLabel ?? secondaryLabel(m)}
               </span>
             </button>
@@ -737,6 +776,24 @@ function dirOf(rel: string): string {
   return idx > 0 ? rel.slice(0, idx) : "";
 }
 
+/** Per-row icon. Pack components get a glyph per their componentKind so
+ *  commands/agents/rules are distinguishable at a glance; everything else
+ *  falls back to its category icon. */
+function mentionGlyph(m: MentionData) {
+  const size = 11;
+  if (m.kind === "component") {
+    switch (m.componentKind) {
+      case "command":
+        return <SquareSlash size={size} />;
+      case "agent":
+        return <Bot size={size} />;
+      case "rule":
+        return <Scale size={size} />;
+    }
+  }
+  return <CategoryIcon kind={m.kind} />;
+}
+
 function CategoryIcon({ kind }: { kind: MentionKind }) {
   const size = 11;
   switch (kind) {
@@ -744,6 +801,8 @@ function CategoryIcon({ kind }: { kind: MentionKind }) {
     case "folder":       return <Folder size={size} />;
     case "symbol":       return <Hash size={size} />;
     case "knowledge":    return <BookOpen size={size} />;
+    case "skill":        return <Zap size={size} />;
+    case "component":    return <Zap size={size} />;
     case "repo":         return <FolderGit2 size={size} />;
     case "paper":        return <Newspaper size={size} />;
     case "branch":       return <GitBranch size={size} />;
@@ -771,6 +830,8 @@ function secondaryLabel(m: MentionData): string {
       return dirOf(m.displayName);
     case "symbol":       return `${m.symbolKind} · ${shortPath(m.filePath)}`;
     case "knowledge":    return m.folder ? `${m.folder} · ${m.source}` : m.source;
+    case "skill":        return m.scope === "project" ? `${m.description} · project` : m.description;
+    case "component":    return `${m.componentKind} · pack: ${m.pack}`;
     case "repo":         return m.hasReadme ? "cloned · README" : "cloned";
     case "paper":        return m.authors[0] ?? "";
     case "branch":       return m.refKind + (m.isCurrent ? " · HEAD" : "");
@@ -822,6 +883,8 @@ function mentionTitle(m: MentionData): string {
     case "folder":       return m.absPath;
     case "symbol":       return `${m.filePath}:${m.line}`;
     case "knowledge":    return m.filePath;
+    case "skill":        return m.description || m.filePath;
+    case "component":    return m.description || m.filePath;
     case "repo":         return m.absPath;
     case "paper":        return m.metadataPath;
     case "branch":       return `${m.refKind} ${m.id} (${m.sha.slice(0, 7)})`;

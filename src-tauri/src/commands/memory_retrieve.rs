@@ -15,15 +15,17 @@
 //! bounded so it can never stall a turn.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_embed::{BruteForce, Embedder, VectorStore};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::agent_memory::collect_corpus;
 use super::memory_chat::MemoryChatState;
 use super::memory_delta::redact;
 use super::memory_graph::{load_doc_vectors, model_dir, MODEL_FILES};
+use super::memory_indexer::MemoryRegistry;
 
 /// Hard cap on the whole retrieve (embed + search + corpus read).
 const RETRIEVE_TIMEOUT_SECS: u64 = 6;
@@ -43,15 +45,84 @@ pub struct RetrievedDoc {
     pub text: String,
 }
 
+// Only used by the retained legacy `retrieve_brute_force` path (rollback).
+#[allow(dead_code)]
 struct DocText {
     title: String,
     source: String,
     text: String,
 }
 
-/// Retrieve up to `top_k` index docs relevant to `query`. Empty on any failure
-/// (no model, no index, embed error, timeout) — callers treat empty as "skip".
+/// Retrieve up to `top_k` index docs relevant to `query`, via the fused
+/// `MemoryEngine` (Step 6): HNSW (embedding, primary) + graph (down-weighted),
+/// RRF-fused and Jaccard-deduped behind the engine. Both seam consumers reach this
+/// — the Cersei `search_memory` pull tool (`agents.rs` closure) and the
+/// Claude/Codex push (site C) — so it improves all three agents at once.
+///
+/// `_chat_state` is unused now (the engine owns its own provider via the registry)
+/// but kept in the signature so the two call sites compile byte-for-byte unchanged.
+/// Empty on any failure (no model, no engine, timeout) — callers treat empty as
+/// "skip". Still time-bounded so it can never stall a turn.
 pub async fn retrieve(
+    app: &AppHandle,
+    _chat_state: &MemoryChatState,
+    project_path: &str,
+    query: &str,
+    top_k: usize,
+) -> Vec<RetrievedDoc> {
+    match tokio::time::timeout(
+        Duration::from_secs(RETRIEVE_TIMEOUT_SECS),
+        retrieve_engine(app, project_path, query, top_k),
+    )
+    .await
+    {
+        Ok(docs) => docs,
+        Err(_) => {
+            tracing::warn!(target: "atlas::shared_memory", "index retrieval exceeded {RETRIEVE_TIMEOUT_SECS}s; skipping");
+            Vec::new()
+        }
+    }
+}
+
+/// Engine-backed retrieval: resolve the project's `MemoryEngine` through the
+/// registry, take the **read lock**, embed+fuse via [`MemoryEngine::retrieve`]
+/// using the registry's **shared** provider, and map `atlas_memory::RetrievedDoc`
+/// onto the local [`RetrievedDoc`] (which keeps `id` for site-C session dedup).
+async fn retrieve_engine(
+    app: &AppHandle,
+    project_path: &str,
+    query: &str,
+    top_k: usize,
+) -> Vec<RetrievedDoc> {
+    if query.trim().len() < 4 || top_k == 0 {
+        return Vec::new();
+    }
+    let registry = app.state::<Arc<MemoryRegistry>>();
+    // Shared on-device provider (loaded once, reused by the indexer). Absent until
+    // the MiniLM model is downloaded → nothing to retrieve, skip silently.
+    let Some(provider) = registry.provider(app).await else {
+        return Vec::new();
+    };
+    let engine = registry.engine_for(project_path);
+    let guard = engine.read().await;
+    let docs = guard.retrieve(query, top_k, &provider).await;
+    drop(guard);
+
+    docs.into_iter()
+        .map(|d| RetrievedDoc {
+            id: d.id,
+            title: d.title,
+            source: d.source,
+            text: d.text,
+        })
+        .collect()
+}
+
+/// Legacy brute-force retrieval (pre-Step-6). Kept for rollback per the replan —
+/// Step 10 removes it. Wired to nothing now; flip `retrieve` back to call
+/// `retrieve_brute_force` to restore the old O(n) cosine path.
+#[allow(dead_code)]
+async fn retrieve_brute_force(
     app: &AppHandle,
     chat_state: &MemoryChatState,
     project_path: &str,
@@ -72,6 +143,7 @@ pub async fn retrieve(
     }
 }
 
+#[allow(dead_code)]
 async fn retrieve_inner(
     app: &AppHandle,
     chat_state: &MemoryChatState,
