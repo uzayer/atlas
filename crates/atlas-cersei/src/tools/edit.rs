@@ -126,7 +126,13 @@ impl Tool for EditTool {
         let input = coerce::coerce_edit_args(input);
         let input: Input = match serde_json::from_value(input) {
             Ok(i) => i,
-            Err(e) => return ToolResult::error(errors::decode_failure("Edit", &e.to_string())),
+            Err(e) => {
+                return ToolResult::error(errors::decode_failure(
+                    "Edit",
+                    &e.to_string(),
+                    r#"{"file_path": "src/main.rs", "old_string": "<exact text to replace>", "new_string": "<replacement>"}"#,
+                ))
+            }
         };
 
         let path = cwd::resolve_path(&ctx.working_dir, &input.file_path);

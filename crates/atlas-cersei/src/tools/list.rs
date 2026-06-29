@@ -49,7 +49,13 @@ impl Tool for ListTool {
         let input = coerce::dealias(coerce::unwrap_stringified(input), ALIASES);
         let input: Input = match serde_json::from_value(input) {
             Ok(i) => i,
-            Err(e) => return ToolResult::error(errors::decode_failure("List", &e.to_string())),
+            Err(e) => {
+                return ToolResult::error(errors::decode_failure(
+                    "List",
+                    &e.to_string(),
+                    r#"{"path": "src"}"#,
+                ))
+            }
         };
 
         let mut args = vec!["--files".to_string()];

@@ -133,22 +133,8 @@ atlas-embed = { path = "../crates/atlas-embed", features = ["metal"] }
 # (~30 s → ~60–90 s). Dev (`tauri dev`) is unaffected — these are
 # release-only settings.
 # ─── Cersei 0.2.4 local checkout ─────────────────────────────────────────────
-# Wire all cersei-* crates against the local 0.2.4 workspace so we don't depend
-# on a crates.io publication. The patch applies to the entire resolved tree.
-[patch.crates-io]
-cersei             = { path = "/Users/eemong/Codes/cersei/crates/cersei" }
-cersei-agent       = { path = "/Users/eemong/Codes/cersei/crates/cersei-agent" }
-cersei-compression = { path = "/Users/eemong/Codes/cersei/crates/cersei-compression" }
-cersei-embeddings  = { path = "/Users/eemong/Codes/cersei/crates/cersei-embeddings" }
-cersei-memory      = { path = "/Users/eemong/Codes/cersei/crates/cersei-memory" }
-cersei-types       = { path = "/Users/eemong/Codes/cersei/crates/cersei-types" }
-cersei-provider    = { path = "/Users/eemong/Codes/cersei/crates/cersei-provider" }
-cersei-tools       = { path = "/Users/eemong/Codes/cersei/crates/cersei-tools" }
-cersei-tools-derive = { path = "/Users/eemong/Codes/cersei/crates/cersei-tools-derive" }
-cersei-hooks       = { path = "/Users/eemong/Codes/cersei/crates/cersei-hooks" }
-cersei-mcp         = { path = "/Users/eemong/Codes/cersei/crates/cersei-mcp" }
-cersei-vms         = { path = "/Users/eemong/Codes/cersei/crates/cersei-vms" }
-cersei-skills      = { path = "/Users/eemong/Codes/cersei/crates/cersei-skills" }
+# cersei-* crates are sourced from crates.io (published 0.2.4); no [patch.crates-io]
+# override, so the build is portable for all contributors.
 
 [profile.release]
 codegen-units = 1   # Single codegen unit → better cross-function inlining

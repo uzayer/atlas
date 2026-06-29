@@ -122,7 +122,13 @@ impl Tool for BashTool {
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let input: Input = match serde_json::from_value(input) {
             Ok(i) => i,
-            Err(e) => return ToolResult::error(errors::decode_failure("Bash", &e.to_string())),
+            Err(e) => {
+                return ToolResult::error(errors::decode_failure(
+                    "Bash",
+                    &e.to_string(),
+                    r#"{"command": "cargo build"}"#,
+                ))
+            }
         };
         let timeout_ms = input.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
         let cwd = ctx.working_dir.clone();
@@ -139,8 +145,17 @@ impl Tool for BashTool {
                     } else {
                         ToolResult::success(body)
                     }
+                } else if body.trim().is_empty() {
+                    // Nonzero AND silent → a genuine failure with nothing to act on.
+                    ToolResult::error(format!(
+                        "Command failed with exit code {code} and produced no output."
+                    ))
                 } else {
-                    ToolResult::error(format!("Exit code {code}\n{body}"))
+                    // Nonzero WITH output is normal for many tools (grep no-match,
+                    // diff, test, find on an unreadable entry). Surface it as a
+                    // non-error result — the output (and any error text) is visible
+                    // and the model decides — rather than flagging a failed call.
+                    ToolResult::success(format!("{body}\n\n(Command exited with code {code}.)"))
                 }
             }
             Ok(Ok(Outcome::TimedOut { ms, output })) => {
@@ -182,11 +197,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonzero_exit_is_error() {
+    async fn nonzero_exit_no_output_is_error() {
         let tmp = TmpDir::new();
         let r = run(tmp.path(), serde_json::json!({"command": "exit 3"})).await;
         assert!(r.is_error);
-        assert!(r.content.contains("Exit code 3"));
+        assert!(r.content.contains("exit code 3"));
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_with_output_is_not_error() {
+        let tmp = TmpDir::new();
+        // grep no-match exits 1 but is a normal outcome — must not flag a failure.
+        let r = run(tmp.path(), serde_json::json!({"command": "echo found; exit 1"})).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("found"));
+        assert!(r.content.contains("exited with code 1"));
     }
 
     #[tokio::test]

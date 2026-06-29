@@ -117,11 +117,14 @@ pub fn read_did_you_mean(file_path: &str, siblings: &[String]) -> String {
     }
 }
 
-/// Generic decode-failure message that re-prompts the model to fix its JSON.
-pub fn decode_failure(tool: &str, err: &str) -> String {
+/// Decode-failure message that re-prompts the model with the *concrete* shape it
+/// must send. `example` is a minimal valid arguments object for `tool` — naming
+/// the required fields and showing JSON types is what lets weak models recover
+/// (a bare serde error like "expected struct Input" does not).
+pub fn decode_failure(tool: &str, err: &str, example: &str) -> String {
     format!(
-        "Invalid input for {tool}: {err}. Rewrite your tool call so the arguments satisfy \
-         the input schema (correct field names and JSON types)."
+        "Invalid input for {tool}: {err}. Call {tool} with a JSON object that matches its \
+         schema — for example: {example}"
     )
 }
 
@@ -143,6 +146,18 @@ mod tests {
         let content: String = (0..100).map(|i| format!("line {i}\n")).collect();
         let msg = edit_not_found("big.rs", "nope", &content);
         assert!(!msg.contains("This file is small"));
+    }
+
+    #[test]
+    fn decode_failure_shows_example() {
+        let msg = decode_failure(
+            "Read",
+            "invalid type: null, expected struct Input",
+            r#"{"file_path": "src/main.rs"}"#,
+        );
+        assert!(msg.contains("Invalid input for Read"));
+        // The concrete example (with the required field name) must be present.
+        assert!(msg.contains(r#"{"file_path": "src/main.rs"}"#));
     }
 
     #[test]

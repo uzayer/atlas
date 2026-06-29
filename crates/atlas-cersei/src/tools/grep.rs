@@ -57,7 +57,13 @@ impl Tool for GrepTool {
         let input = coerce::dealias(coerce::unwrap_stringified(input), ALIASES);
         let input: Input = match serde_json::from_value(input) {
             Ok(i) => i,
-            Err(e) => return ToolResult::error(errors::decode_failure("Grep", &e.to_string())),
+            Err(e) => {
+                return ToolResult::error(errors::decode_failure(
+                    "Grep",
+                    &e.to_string(),
+                    r#"{"pattern": "TODO", "path": "src", "include": "*.rs"}"#,
+                ))
+            }
         };
         if input.pattern.is_empty() {
             return ToolResult::error("pattern is required and must be non-empty.".to_string());

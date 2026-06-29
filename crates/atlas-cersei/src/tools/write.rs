@@ -58,7 +58,13 @@ impl Tool for WriteTool {
         let input = coerce::dealias(coerce::unwrap_stringified(input), ALIASES);
         let input: Input = match serde_json::from_value(input) {
             Ok(i) => i,
-            Err(e) => return ToolResult::error(errors::decode_failure("Write", &e.to_string())),
+            Err(e) => {
+                return ToolResult::error(errors::decode_failure(
+                    "Write",
+                    &e.to_string(),
+                    r#"{"file_path": "src/main.rs", "content": "<full file contents>"}"#,
+                ))
+            }
         };
 
         let path = cwd::resolve_path(&ctx.working_dir, &input.file_path);

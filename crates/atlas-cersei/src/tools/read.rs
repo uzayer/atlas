@@ -115,7 +115,13 @@ impl Tool for ReadTool {
         let input = coerce::dealias(coerce::unwrap_stringified(input), ALIASES);
         let input: Input = match serde_json::from_value(input) {
             Ok(i) => i,
-            Err(e) => return ToolResult::error(errors::decode_failure("Read", &e.to_string())),
+            Err(e) => {
+                return ToolResult::error(errors::decode_failure(
+                    "Read",
+                    &e.to_string(),
+                    r#"{"file_path": "src/main.rs"}"#,
+                ))
+            }
         };
 
         let path = cwd::resolve_path(&ctx.working_dir, &input.file_path);
