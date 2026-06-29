@@ -1,16 +1,19 @@
-//! `List` — gitignore-aware recursive file listing backed by ripgrep.
+//! `List` — gitignore-aware recursive file listing, in-process via the `ignore`
+//! crate (ripgrep's own walker). No external `rg`/`grep` binary required.
 
 use async_trait::async_trait;
 use cersei::tools::{PermissionLevel, Tool, ToolCategory, ToolContext, ToolResult};
+use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{coerce, cwd, errors, run_rg};
+use super::{coerce, cwd, errors};
 
 const LIMIT: usize = 400;
 
-const DESCRIPTION: &str = "Lists the files under a directory (recursively), via ripgrep, \
-honoring .gitignore. Prefer this over shell tools (ls / find) to see what files exist.\n\n\
+const DESCRIPTION: &str = "Lists the files under a directory (recursively), in-process, \
+honoring .gitignore and skipping hidden files. Prefer this over shell tools (ls / find) to \
+see what files exist — no external tools are required.\n\n\
 - path: optional directory (defaults to the project root).";
 
 const ALIASES: &[(&str, &str)] = &[("dir", "path"), ("directory", "path"), ("file_path", "path")];
@@ -58,28 +61,46 @@ impl Tool for ListTool {
             }
         };
 
-        let mut args = vec!["--files".to_string()];
-        let target = input
-            .path
-            .as_deref()
-            .map(|p| cwd::resolve_path(&ctx.working_dir, p).to_string_lossy().into_owned());
-        if let Some(t) = &target {
-            args.push(t.clone());
+        let base = match &input.path {
+            Some(p) => cwd::resolve_path(&ctx.working_dir, p),
+            None => ctx.working_dir.clone(),
+        };
+        let display = base.to_string_lossy().into_owned();
+        if !base.exists() {
+            return ToolResult::error(format!("Directory not found: {display}"));
         }
 
-        let out = match run_rg(args, ctx.working_dir.clone()).await {
-            Ok(o) => o,
-            Err(e) => return ToolResult::error(e),
-        };
+        // Gitignore-aware recursive walk on a blocking thread (the `ignore`
+        // walker is synchronous). Mirrors `rg --files`: respects .gitignore /
+        // .ignore, skips hidden files + the .git dir, and yields files only.
+        // Paths are relative to the listed directory for compact output.
+        let base_for_walk = base.clone();
+        let mut files = tokio::task::spawn_blocking(move || {
+            let mut out: Vec<String> = Vec::new();
+            for entry in WalkBuilder::new(&base_for_walk).hidden(true).build().flatten() {
+                if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    let rel = entry
+                        .path()
+                        .strip_prefix(&base_for_walk)
+                        .unwrap_or_else(|_| entry.path())
+                        .to_string_lossy()
+                        .into_owned();
+                    out.push(rel);
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default();
 
-        let mut files: Vec<&str> = out.lines().collect();
         files.sort_unstable();
         if files.is_empty() {
             return ToolResult::success("No files found.".to_string());
         }
-        let truncated = files.len() > LIMIT;
-        let shown: Vec<&str> = files.iter().take(LIMIT).copied().collect();
-        let mut body = format!("{} file(s):\n{}", files.len(), shown.join("\n"));
+        let total = files.len();
+        let truncated = total > LIMIT;
+        files.truncate(LIMIT);
+        let mut body = format!("{total} file(s):\n{}", files.join("\n"));
         if truncated {
             body.push_str(&format!("\n\n(Showing first {LIMIT}. Narrow with a subdirectory path.)"));
         }

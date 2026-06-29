@@ -13,10 +13,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use atlas_cersei::tools::list::ListTool;
 use atlas_cersei::tools::read::ReadTool;
-use atlas_cersei::tools::{grep::GrepTool, list::ListTool};
+use cersei::tools::grep_tool::GrepTool; // native in-process Grep (rg-free, 0.2.5)
 use cersei::tools::permissions::AllowAll;
-use cersei::tools::{CostTracker, Extensions, Tool, ToolContext, ToolResult};
+use cersei::tools::{CostTracker, Extensions, Tool, ToolContext};
 use serde_json::{json, Value};
 
 /// `CARGO_MANIFEST_DIR` is `<repo>/crates/atlas-cersei`; the repo root is two up.
@@ -136,25 +137,27 @@ async fn null_and_empty_args_give_actionable_error() {
     }
 }
 
-/// ripgrep-backed discovery (List/Grep) over the real repo. Skips gracefully
-/// when `rg` is not installed so the suite stays portable; when present, proves
-/// the tools surface real files and respect `.gitignore`.
+/// Discovery (List/Grep) over the real repo. Both are now fully in-process and
+/// rg-free (List via the `ignore` crate, Grep via the SDK's native 0.2.5 tool),
+/// so this runs on every machine with NO external ripgrep — which is the whole
+/// point of the fix. Proves they surface real files and respect `.gitignore`.
 #[tokio::test]
-async fn list_and_grep_discover_real_files_when_rg_present() {
+async fn list_and_grep_discover_real_files_without_ripgrep() {
     let root = repo_root();
     let context = ctx(&root);
 
     let listed = ListTool.execute(json!({ "path": "crates/atlas-cersei/src" }), &context).await;
-    if is_rg_missing(&listed) {
-        eprintln!("ripgrep not installed — skipping List/Grep discovery checks.");
-        return;
-    }
     assert!(!listed.is_error, "List failed: {}", listed.content);
     assert!(listed.content.contains("lib.rs"), "List should surface lib.rs");
+    assert!(
+        !listed.content.contains("ripgrep") && !listed.content.contains("`rg`"),
+        "List must not require an external ripgrep; got: {}",
+        listed.content
+    );
 
     let grepped = GrepTool
         .execute(
-            json!({ "pattern": "pub fn atlas_coding", "include": "*.rs" }),
+            json!({ "pattern": "pub fn atlas_coding", "glob": "*.rs" }),
             &context,
         )
         .await;
@@ -164,8 +167,4 @@ async fn list_and_grep_discover_real_files_when_rg_present() {
         "Grep should locate atlas_coding in tools/mod.rs; got: {}",
         grepped.content
     );
-}
-
-fn is_rg_missing(r: &ToolResult) -> bool {
-    r.is_error && r.content.contains("ripgrep")
 }

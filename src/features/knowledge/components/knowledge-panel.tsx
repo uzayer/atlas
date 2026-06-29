@@ -12,6 +12,7 @@ import {
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
+import { registerFlush } from "@/features/workspaces/lib/flush-registry";
 import {
   TiptapEditor,
   type TiptapEditorHandle,
@@ -179,8 +180,20 @@ export function KnowledgePanel() {
 
   const flushAndSave = useCallback(async () => {
     if (!currentProject || !editorRef.current) return;
+    // Capture the (workspace path, note id) this content belongs to BEFORE the
+    // async flush. The KB panel is resident across workspace switches, so a
+    // switch (or note change) can land mid-flush; binding the triple here and
+    // re-checking it after lets us abort rather than write one workspace's
+    // content into another's file (the cross-workspace data-loss bug).
+    const proj = currentProject.path;
+    const id = useKnowledgeStore.getState().activeEntryId;
+    if (!id) return;
     const md = await editorRef.current.flush();
     if (md === null) return;
+    // Workspace switched or the active note changed while flushing → abort.
+    const live = useProjectStore.getState().currentProject;
+    if (!live || live.path !== proj) return;
+    if (useKnowledgeStore.getState().activeEntryId !== id) return;
     // CONTENT-based dirty check, not the React `isDirty` flag. The flag is a
     // stale closure (set async via onDirty) — gating Cmd+S / navigation on it
     // is exactly how a draft got lost: a keystroke could race ahead of the
@@ -191,7 +204,7 @@ export function KnowledgePanel() {
       return;
     }
     setEditContent(md);
-    await saveEntry(currentProject.path);
+    await saveEntry(proj, id, md);
     setIsDirty(false);
     // Note bodies may have gained/lost [[wikilinks]] or @page: refs —
     // invalidate Rust's link graph so the inspector + footer reflect
@@ -210,6 +223,36 @@ export function KnowledgePanel() {
       void flushAndSave();
     }, 1200);
   }, [flushAndSave]);
+
+  // Coordinate with workspace switching: the switch awaits `flushAll()` BEFORE
+  // it snapshots/swaps the active workspace, so register a flush that writes the
+  // editor's current buffer to the OUTGOING workspace (`ctx.path`) — not the
+  // resident React `currentProject`, which may already have flipped. This is
+  // what guarantees a note saved in workspace A is persisted to A's file before
+  // we leave it, closing the window where a stale save could clobber it.
+  useEffect(() => {
+    return registerFlush("knowledge", async (ctx) => {
+      if (!ctx.path || !editorRef.current) return;
+      const id = useKnowledgeStore.getState().activeEntryId;
+      if (!id) return;
+      const md = await editorRef.current.flush();
+      if (md === null || md === useKnowledgeStore.getState().editContent) return;
+      await saveEntry(ctx.path, id, md);
+    });
+  }, [saveEntry]);
+
+  // On workspace change, drop any pending autosave from the PREVIOUS workspace
+  // so its 1.2s timer can't fire against the new one. The outgoing edits are
+  // already persisted by the awaited `flushAll()` above, so cancelling here is
+  // safe and prevents a cross-workspace write.
+  useEffect(() => {
+    return () => {
+      if (autosaveTimer.current) {
+        clearTimeout(autosaveTimer.current);
+        autosaveTimer.current = null;
+      }
+    };
+  }, [currentProject?.path]);
 
   // Flush on window blur (switching apps) and on unmount (tab close / switch
   // away from the KB tab) so unsaved edits are never stranded.

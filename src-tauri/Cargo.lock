@@ -449,6 +449,7 @@ dependencies = [
  "cersei-compression",
  "chrono",
  "dashmap",
+ "ignore",
  "parking_lot",
  "serde",
  "serde_json",
@@ -718,6 +719,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
 dependencies = [
  "memchr",
+ "regex-automata",
  "serde",
 ]
 
@@ -948,9 +950,9 @@ checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 
 [[package]]
 name = "cersei"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63ad2c347d5f015ba3b57eb211c9eb7da2db1f2d6e16000fb588240e7fa5c396"
+checksum = "20924ae94a0676f26a855650aa5a9285380b6f742d8470289180dd8a426075fb"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -981,9 +983,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-agent"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a02f8c7003cdea8ea299ceea6b38faacf6a5a6951607b1fa6b03ba99af291a6"
+checksum = "eca0c362fe33096c3cb6558eed907157ea11ad0b0fd22027839f9d7f20687223"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1009,9 +1011,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-compression"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26d2b5e2617667e299af2b448bb1b2cbfd22242c60dd3d7e27a3b23b3d06c9a1"
+checksum = "8e7ec48ee2b004f44b96e29d93e0ee1b5fa3a874c3fd2f4d72fc20e0a4324661"
 dependencies = [
  "anyhow",
  "once_cell",
@@ -1024,9 +1026,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-embeddings"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0576d7c9678e325cd3ad63e7028cd9adc68ef55a2a3084b87df3fd128772b20d"
+checksum = "d04f918d4886a0252feff23f72bef62245ed9c7047b9375ec2c4585c76e1d35c"
 dependencies = [
  "async-trait",
  "futures",
@@ -1041,9 +1043,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-hooks"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b28c43e534d9434a2e029250e371d95da2adef26e9d76e6542109077e6412a49"
+checksum = "aaadafe58a10d4bf68b3782903e0bf6a66e1b1f743cd84d77b23a1d8f09c49e1"
 dependencies = [
  "async-trait",
  "cersei-types",
@@ -1054,9 +1056,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-lsp"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52eb77380d762d2a5b393bd09bee73999aee87d465080f0b467268f87e33609d"
+checksum = "2c9d24d97a0191bb97db962dcd366fa692e4d776496d99f14dca9c244e0b094e"
 dependencies = [
  "dashmap",
  "serde",
@@ -1069,9 +1071,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-mcp"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca172ca7f986eaf996dc6b7955c3a30380312b3d5defa730632d80ba26b764ec"
+checksum = "440406f67144e46042b4fd8eff30e093724d60a0ecb0b5f28ca97fe1587d7dd7"
 dependencies = [
  "async-trait",
  "cersei-types",
@@ -1084,9 +1086,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-memory"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a323c13454c5035ab8dadc2f86f643d7a43272d4f5a2ff8b5a2b29e25675bc5"
+checksum = "c43cdb1e8d69a29f75cef52cd3c06441f4577b1034b8abbf93f77f4cd355f941"
 dependencies = [
  "async-trait",
  "cersei-types",
@@ -1104,9 +1106,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-provider"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3051a7e3eb5780cc2649b1e70d610efe7f118a8ddcdad6ec519001c0979837d6"
+checksum = "59817d13d110e4a81a228637aaaa4dcd434a87163d89aab029171cd73300dff3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1125,9 +1127,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-tools"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8784b75cc54b28d92dc7e92f2067fd822b611fcacc1130f0615654ae972eaf13"
+checksum = "d51a7313a6ae3f54bb27ce8d0d0cb52c69f25f53d109b5c2408a6d98dfc41277"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1140,7 +1142,9 @@ dependencies = [
  "dashmap",
  "dirs 5.0.1",
  "glob",
+ "grep",
  "html2text",
+ "ignore",
  "nix 0.29.0",
  "notify 7.0.0",
  "once_cell",
@@ -1168,9 +1172,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-tools-derive"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2382b6e8c20988f1016d8c486bc34335829b11681524301f13fa2d40d215a055"
+checksum = "4fccdb83ea0df824ea68a22cf6ef93d3038a3a9e923f097b41ae47f4dc76cd27"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1179,9 +1183,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-types"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "912e45b00d88e95d19c4142ce022efad97147e22e3f0e3d3ebcff430a23d981e"
+checksum = "3a214eac8b042917b313a22dac2a789af64e5e6af6c7a087645d08fef9274599"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1195,9 +1199,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-vms"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11441a60f6ce63e8d36d37595ae4a24797cb9853c3c10393f8fe3be6a082c64c"
+checksum = "952bb65dea2b86ee0baa48c49520b98f53fdd9c299a941c8833e6784d14f446b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2143,6 +2147,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "encoding_rs_io"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1cc3c5651fb62ab8aa3103998dade57efdd028544bd300516baa31840c252a83"
+dependencies = [
+ "encoding_rs",
 ]
 
 [[package]]
@@ -3256,6 +3269,85 @@ dependencies = [
 ]
 
 [[package]]
+name = "grep"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "309217bc53e2c691c314389c7fa91f9cd1a998cda19e25544ea47d94103880c3"
+dependencies = [
+ "grep-cli",
+ "grep-matcher",
+ "grep-printer",
+ "grep-regex",
+ "grep-searcher",
+]
+
+[[package]]
+name = "grep-cli"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf32d263c5d5cc2a23ce587097f5ddafdb188492ba2e6fb638eaccdc22453631"
+dependencies = [
+ "bstr",
+ "globset",
+ "libc",
+ "log",
+ "termcolor",
+ "winapi-util",
+]
+
+[[package]]
+name = "grep-matcher"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36d7b71093325ab22d780b40d7df3066ae4aebb518ba719d38c697a8228a8023"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "grep-printer"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd76035e87871f51c1ee5b793e32122b3ccf9c692662d9622ef1686ff5321acb"
+dependencies = [
+ "bstr",
+ "grep-matcher",
+ "grep-searcher",
+ "log",
+ "serde",
+ "serde_json",
+ "termcolor",
+]
+
+[[package]]
+name = "grep-regex"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce0c256c3ad82bcc07b812c15a45ec1d398122e8e15124f96695234db7112ef"
+dependencies = [
+ "bstr",
+ "grep-matcher",
+ "log",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "grep-searcher"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac63295322dc48ebb20a25348147905d816318888e64f531bfc2a2bc0577dc34"
+dependencies = [
+ "bstr",
+ "encoding_rs",
+ "encoding_rs_io",
+ "grep-matcher",
+ "log",
+ "memchr",
+ "memmap2",
+]
+
+[[package]]
 name = "gtk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3792,9 +3884,9 @@ checksum = "cd62e6b5e86ea8eeeb8db1de02880a6abc01a397b2ebb64b5d74ac255318f5cb"
 
 [[package]]
 name = "ignore"
-version = "0.4.25"
+version = "0.4.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d782a365a015e0f5c04902246139249abf769125006fbe7649e2ee88169b4a"
+checksum = "b915661dd01db3f05050265b2477bcc6527b3792388e2749b41623cc592be67d"
 dependencies = [
  "crossbeam-deque",
  "globset",

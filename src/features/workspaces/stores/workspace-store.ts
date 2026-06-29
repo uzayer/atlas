@@ -272,8 +272,15 @@ export const useWorkspaceStore = createSelectors(
             useProjectStore.getState().currentProject?.path ?? null;
           if (activeWorkspaceId) {
             layout.commitWorkspaceView(activeWorkspaceId);
+            // Flush the OUTGOING workspace's pending writes (notably the KB
+            // editor's unsaved buffer) to disk BEFORE snapshotting and swapping.
+            // Awaited — not fire-and-forget — so a note edited/saved in this
+            // workspace can never be stranded or overwritten by the switch race.
+            // The snapshot is then taken AFTER the flush so it reflects the
+            // just-saved state. `flushAll` swallows per-store errors, so a bad
+            // flush can't block the switch.
+            await flushAll({ workspaceId: activeWorkspaceId, path: outgoingPath });
             captureSnapshot(activeWorkspaceId);
-            void flushAll({ workspaceId: activeWorkspaceId, path: outgoingPath });
           }
 
           // 2) Make the switch authoritative.

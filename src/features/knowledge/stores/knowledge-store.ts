@@ -30,7 +30,10 @@ interface KnowledgeState {
     /** Panel clears the pending request after handling it. */
     consumePendingOpen: () => void;
     setEditContent: (content: string) => void;
-    saveEntry: (projectPath: string) => Promise<void>;
+    /** Save an explicit (workspace path, note id, content) triple. The caller
+     *  captures all three atomically so a workspace switch can never cross the
+     *  content of one workspace into another's file. */
+    saveEntry: (projectPath: string, id: string, content: string) => Promise<void>;
     createEntry: (projectPath: string) => Promise<void>;
     deleteEntry: (projectPath: string, id: string) => Promise<void>;
     createDir: (projectPath: string, dirName: string) => Promise<void>;
@@ -88,20 +91,22 @@ export const useKnowledgeStore = createSelectors(
       requestOpen: (id) => set({ pendingOpenId: id }),
       consumePendingOpen: () => set({ pendingOpenId: null }),
       setEditContent: (content) => set({ editContent: content }),
-      saveEntry: async (projectPath) => {
-        const { activeEntryId, editContent } = get();
-        if (!activeEntryId) return;
+      saveEntry: async (projectPath, id, content) => {
+        if (!id || !projectPath) return;
         try {
           await invoke("save_knowledge_note", {
             projectPath,
-            id: activeEntryId,
-            content: editContent,
+            id,
+            content,
           });
-          // Update the entry's content in-place without a full reload
-          const title = editContent.split("\n")[0]?.replace(/^#+\s*/, "").slice(0, 60) || "note";
+          // Update the entry's content in-place without a full reload. Match on
+          // the saved `id` only — if the store has since been swapped to another
+          // workspace (different `entries`), this is a harmless no-op rather
+          // than a cross-workspace mutation.
+          const title = content.split("\n")[0]?.replace(/^#+\s*/, "").slice(0, 60) || "note";
           set({
             entries: get().entries.map((e) =>
-              e.id === activeEntryId ? { ...e, content: editContent, title, updated_at: new Date().toISOString() } : e
+              e.id === id ? { ...e, content, title, updated_at: new Date().toISOString() } : e
             ),
           });
           invoke("log_interaction", {
@@ -114,7 +119,7 @@ export const useKnowledgeStore = createSelectors(
             kind: "note-save",
             summary: title,
             projectPath,
-            payload: { id: activeEntryId },
+            payload: { id },
           });
         } catch {
           // silent

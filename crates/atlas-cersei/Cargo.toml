@@ -11,16 +11,20 @@ name = "atlas_cersei"
 # Cersei agent SDK — the in-process agentic loop (provider builders, tools,
 # permission policies, streaming events). Same pin as atlas-review so the two
 # Cersei consumers share one resolved version.
-cersei = "0.2.4"
+cersei = "0.2.5"
 # The agent crate directly, for the built-in `DelegateTool` + delegate batch
 # runner (parallel in-process sub-agents) — not re-exported by the `cersei`
 # facade. Same pin so Cargo unifies one build.
-cersei-agent = "0.2.4"
+cersei-agent = "0.2.5"
 # RTK (Rust Token Killer) tool-output compression — `CompressionLevel`, not
 # re-exported by the `cersei` facade. User-toggleable per session.
-cersei-compression = "0.2.4"
+cersei-compression = "0.2.5"
 # Cooperative cancellation of an in-flight turn (mirrors atlas-review).
 tokio-util = "0.7"
+# Gitignore-aware recursive walker (ripgrep's own crate) backing the native
+# `List` tool — no external `rg`/`grep` binary. Unifies with cersei-tools'
+# transitive `ignore` (0.4.26 in the lockfile), so no extra build.
+ignore = "0.4"
 # Shared identifiers + the EventSink / AcpEvent contract. The native runtime
 # adapts Cersei's event stream into the SAME AcpEvent shape the ACP driver
 # emits, so atlas-agents' dispatch/state/UI path is reused unchanged.

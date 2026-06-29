@@ -13,60 +13,24 @@ pub mod coerce;
 pub mod cwd;
 pub mod edit;
 pub mod errors;
-pub mod glob;
-pub mod grep;
 pub mod list;
 pub mod read;
 pub mod replace;
 pub mod truncate;
 pub mod write;
 
-use std::path::PathBuf;
-
 use cersei::tools::Tool;
 
 use cwd::CwdTool;
 
-/// Hard-error returned when ripgrep is not available (no silent literal fallback —
-/// a degraded substring search would return *wrong* results for real regexes).
-pub(crate) const RG_MISSING: &str =
-    "ripgrep (`rg`) was not found on PATH. Grep/Glob/List require ripgrep; install it \
-     (e.g. `brew install ripgrep`) or ensure it is bundled with the app.";
-
-/// Run ripgrep with `args` inside `cwd` on a blocking thread. Returns stdout on
-/// success, or a hard error if `rg` is missing or fails. rg exit code 1 means
-/// "no matches" (success with empty output); exit code 2 is a real error.
-pub(crate) async fn run_rg(args: Vec<String>, cwd: PathBuf) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || {
-        match std::process::Command::new("rg")
-            .args(&args)
-            .current_dir(&cwd)
-            .output()
-        {
-            Ok(o) => {
-                if o.status.code() == Some(2) {
-                    return Err(format!(
-                        "ripgrep failed: {}",
-                        String::from_utf8_lossy(&o.stderr).trim()
-                    ));
-                }
-                Ok(String::from_utf8_lossy(&o.stdout).into_owned())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(RG_MISSING.to_string()),
-            Err(e) => Err(format!("failed to run ripgrep: {e}")),
-        }
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("ripgrep task panicked: {e}")))
-}
-
 /// The coding toolset handed to the Cersei agent (main turn + delegate factory).
 ///
-/// Atlas-owned: `Read / Write / Edit / Grep / Glob / List / Bash` resolve cwd
-/// internally, so they need no wrapper. Retained SDK tools cover the surface
-/// Atlas does not reimplement; `NotebookEdit` ignores `ctx.working_dir` and so
-/// stays `CwdTool`-wrapped (`ApplyPatch` already joins `working_dir`, so it is
-/// safe raw).
+/// Atlas-owned: `Read / Write / Edit / List / Bash` resolve cwd internally, so
+/// they need no wrapper. `Grep` + `Glob` are the SDK's native in-process tools
+/// (rg-free since 0.2.5); they honor `ctx.working_dir`, so they're also raw.
+/// Retained SDK tools cover the surface Atlas does not reimplement;
+/// `NotebookEdit` ignores `ctx.working_dir` and so stays `CwdTool`-wrapped
+/// (`ApplyPatch` already joins `working_dir`, so it is safe raw).
 pub fn atlas_coding() -> Vec<Box<dyn Tool>> {
     use cersei::tools as t;
     vec![
@@ -81,8 +45,16 @@ pub fn atlas_coding() -> Vec<Box<dyn Tool>> {
         // It resolves a bare `file_path` and ignores `ctx.working_dir`, so it
         // must stay cwd-wrapped (same as NotebookEdit).
         CwdTool::wrap(Box::new(cersei::tools::multi_edit::MultiEditTool)),
-        Box::new(grep::GrepTool),
-        Box::new(glob::GlobTool),
+        // Native cersei `Grep` + `Glob` (in-process since SDK 0.2.5 — ripgrep's
+        // `ignore`/`grep` library crates, no external `rg` binary). This is the
+        // fix for the recurring "model shells out to ripgrep and fails on stock
+        // machines" issue: the tools work identically everywhere, and Grep's
+        // own description steers the model to call it instead of running `rg` in
+        // Bash. Both honor `ctx.working_dir`, so no cwd wrapper is needed.
+        Box::new(t::grep_tool::GrepTool),
+        Box::new(t::glob_tool::GlobTool),
+        // `List` stays Atlas-owned (no SDK equivalent) but is now also rg-free —
+        // it walks via the `ignore` crate directly. cwd-aware internally.
         Box::new(list::ListTool),
         Box::new(bash::BashTool),
         // ── Retained SDK tools (not reimplemented) ───────────────────────

@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use atlas_cersei::tools::{
-    bash::BashTool, edit::EditTool, grep::GrepTool, list::ListTool, read::ReadTool, write::WriteTool,
+    bash::BashTool, edit::EditTool, list::ListTool, read::ReadTool, write::WriteTool,
 };
+use cersei::tools::grep_tool::GrepTool; // native in-process Grep (rg-free, 0.2.5)
 use cersei::tools::permissions::AllowAll;
 use cersei::tools::{CostTracker, Extensions, Tool, ToolContext, ToolResult};
 use serde_json::json;
@@ -89,8 +90,9 @@ async fn scripted_read_edit_grep_bash_task() {
         eprintln!("EDIT(drifted) failed: {} | file:\n{}", r.content, edited);
     }
 
-    // 3. GREP for the changed symbol — must find it in the edited file.
-    let r = run(&GrepTool, dir, json!({"pattern": "Hey", "include": "*.rs"})).await;
+    // 3. GREP for the changed symbol — must find it in the edited file. Uses
+    //    the SDK's native Grep (`glob` filter field; no external ripgrep).
+    let r = run(&GrepTool, dir, json!({"pattern": "Hey", "glob": "*.rs"})).await;
     if !r.is_error && r.content.contains("Hey") && r.content.contains("lib.rs") {
         score += 1;
     } else {
