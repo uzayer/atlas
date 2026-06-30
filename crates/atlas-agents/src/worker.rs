@@ -151,10 +151,25 @@ impl SessionWorker {
 
         // 3. Reflect terminal state.
         let (status, delta) = match result {
-            Ok(stop_reason) => (
-                SessionStatus::Idle,
-                SessionDelta::TurnFinished { stop_reason },
-            ),
+            Ok(stop_reason) => {
+                // Cross-task quiesce. For ACP agents, streamed content arrives
+                // as notifications on the driver task while this worker awaits
+                // the prompt response on its own task — the two aren't ordered,
+                // so the response can resolve a beat before the agent's final
+                // `agent_message_chunk` is dispatched, flipping the UI to idle
+                // while text is still landing. Wait for the inbound update
+                // stream to go quiet first. Skipped for the native backend
+                // (chunks are emitted inline before `send_prompt` returns) and
+                // on cancellation (Stop must feel instant; the driver gate is
+                // already dropping further updates anyway).
+                if self.backend.quiesce_turn_end() && stop_reason != "cancelled" {
+                    self.await_quiescence().await;
+                }
+                (
+                    SessionStatus::Idle,
+                    SessionDelta::TurnFinished { stop_reason },
+                )
+            }
             Err(e) => (SessionStatus::Error, SessionDelta::TurnFailed { error: e.to_string() }),
         };
         {
@@ -164,6 +179,37 @@ impl SessionWorker {
         }
         self.emit(delta);
         self.emit(SessionDelta::Status { status });
+    }
+
+    /// Wait until inbound agent updates for this session stop arriving, so the
+    /// turn-end signal is ordered after the last streamed chunk. Polls the
+    /// session's `activity_seq` (bumped by the manager on each applied update):
+    /// once it holds steady for `QUIET`, the stream is treated as drained.
+    /// Bounded by `MAX` so a still-streaming or misbehaving agent can't wedge
+    /// the turn indefinitely.
+    async fn await_quiescence(&self) {
+        use std::time::Duration;
+        const QUIET: Duration = Duration::from_millis(90);
+        const POLL: Duration = Duration::from_millis(15);
+        const MAX: Duration = Duration::from_millis(1500);
+
+        let mut last = self.state.lock().activity_seq;
+        let mut stable = Duration::ZERO;
+        let mut waited = Duration::ZERO;
+        while waited < MAX {
+            tokio::time::sleep(POLL).await;
+            waited += POLL;
+            let now = self.state.lock().activity_seq;
+            if now == last {
+                stable += POLL;
+                if stable >= QUIET {
+                    break;
+                }
+            } else {
+                last = now;
+                stable = Duration::ZERO;
+            }
+        }
     }
 
     fn emit(&self, delta: SessionDelta) {

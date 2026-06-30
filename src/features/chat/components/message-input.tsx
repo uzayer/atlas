@@ -43,6 +43,8 @@ import type {
 } from "./slash-command-picker";
 import { commandRequiresArgs } from "./slash-command-picker";
 import { CodexLoginDialog } from "./codex-login-dialog";
+import type { MentionFile } from "../lib/mentions";
+import { useComposerFileDrop } from "../hooks/use-composer-file-drop";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import type { MentionTrigger } from "../lib/cm-mention-extension";
@@ -708,6 +710,37 @@ export function MessageInput({
     []
   );
 
+  // ── Drag-and-drop OS files onto the composer → attach as mention chips ──
+  const composerRef = useRef<HTMLDivElement>(null);
+  const handleDropFiles = useCallback(
+    (paths: string[]) => {
+      const root =
+        projectPath && !projectPath.endsWith("/") ? `${projectPath}/` : projectPath;
+      for (const abs of paths) {
+        // Relative-to-project display name when the file lives inside the
+        // project; otherwise just the basename (dropped files can be anywhere).
+        const displayName =
+          root && abs.startsWith(root)
+            ? abs.slice(root.length)
+            : abs.split("/").pop() || abs;
+        const mention: MentionFile = {
+          kind: "file",
+          id: abs,
+          displayName,
+          absPath: abs,
+        };
+        inputRef.current?.insertMention(mention);
+      }
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [projectPath]
+  );
+  const { isDropTarget } = useComposerFileDrop({
+    targetRef: composerRef,
+    enabled: !disabled,
+    onDropFiles: handleDropFiles,
+  });
+
   const handleSlashSelect = useCallback(
     (cmd: SlashCommand) => {
       const t = slashTriggerRef.current;
@@ -987,8 +1020,10 @@ export function MessageInput({
         )}
 
         <div
+          ref={composerRef}
+          data-chat-composer
           className={cn(
-            "rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)]",
+            "relative rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)]",
             "shadow-[0_8px_24px_rgba(0,0,0,0.35)]",
             // Soft macOS-style "active field" glow on focus — a faint
             // accent ring on top of the border shift (the border alone is
@@ -996,6 +1031,9 @@ export function MessageInput({
             "transition-[border-color,box-shadow] duration-150",
             "focus-within:border-[var(--border-focus)]",
             "focus-within:ring-1 focus-within:ring-[var(--accent-primary)]/20",
+            // Drag-over highlight: a clear accent ring while OS files hover.
+            isDropTarget &&
+              "border-[var(--accent-primary)] ring-2 ring-[var(--accent-primary)]/40",
             // Hard-disable when Claude Code isn't ready. `pointer-events-none`
             // disables the textarea (no click-to-focus/type) and also blocks
             // the focus event so we never trigger the agent-bind listener
@@ -1006,6 +1044,13 @@ export function MessageInput({
           )}
           onFocusCapture={handleFocusCapture}
         >
+          {isDropTarget && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-[var(--accent-primary)]/8 backdrop-blur-[1px]">
+              <span className="rounded-full bg-[var(--bg-elevated)] px-3 py-1 text-[11px] font-medium text-[var(--text-secondary)] shadow">
+                Drop files to attach
+              </span>
+            </div>
+          )}
           {LazyChatInput ? (
             <LazyChatInput
               ref={inputRef}

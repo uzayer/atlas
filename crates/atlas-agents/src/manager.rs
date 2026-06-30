@@ -656,6 +656,14 @@ impl AgentManager {
         let Some(kind) = v.get("sessionUpdate").and_then(|s| s.as_str()) else {
             return;
         };
+        // Record inbound activity so the worker can wait for the agent's
+        // stream to quiesce before signalling turn-end (see worker's
+        // `await_quiescence`). Bumped for every recognised update kind — the
+        // goal is simply "the agent sent us something just now".
+        {
+            let mut st = handle.state.lock();
+            st.activity_seq = st.activity_seq.wrapping_add(1);
+        }
         match kind {
             "agent_message_chunk" => {
                 let Some(content) = v.get("content") else { return };

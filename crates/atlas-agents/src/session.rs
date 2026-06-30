@@ -144,6 +144,13 @@ pub struct SessionState {
     pub usage: Usage,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Monotonic counter bumped each time an inbound agent update is applied
+    /// (text/thinking chunk, tool call, plan, …). The worker samples it after
+    /// `send_prompt` returns to detect when the ACP notification stream has
+    /// gone quiet before flipping the turn to idle — closing the cross-task
+    /// race where the prompt response resolves a beat before the agent's final
+    /// streamed chunk lands. Not part of the serialised snapshot.
+    pub activity_seq: u64,
 }
 
 impl SessionState {
@@ -165,6 +172,7 @@ impl SessionState {
             usage: Usage::default(),
             created_at: now,
             updated_at: now,
+            activity_seq: 0,
         }
     }
 

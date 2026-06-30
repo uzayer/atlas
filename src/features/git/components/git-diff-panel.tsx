@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -13,8 +13,14 @@ import { openFile } from "@/lib/open-file";
 import { getLanguage } from "../lib/diff";
 import { highlightDiffLine } from "../lib/diff-highlight";
 import { gitDiffStructured, type DiffSide, type DiffRow } from "../lib/git-diff-api";
+import { ChangedFilesTree } from "./changed-files-tree";
+import { DiffMinimap } from "./diff-minimap";
 
+// Match the CodeMirror editor's metrics (editor-panel.tsx: 14px / 18px) so the
+// diff reads at the same scale as the code editor.
 const ROW_H = 18;
+const FONT_PX = 14;
+const CENTER_W = 12; // center gutter: change-direction chevron (tight)
 const RADIUS = 5;
 
 interface GitDiffPanelProps {
@@ -98,16 +104,15 @@ function SideCell({
   roundBot: boolean;
 }) {
   const bg = sideBg(side, isLeft);
-  const text = side?.segments.map((s) => s.text).join("") ?? "";
   return (
     <div className="flex min-w-0">
-      <span className="w-10 shrink-0 select-none pr-2 text-right font-mono text-[10px] leading-[18px] text-[var(--text-tertiary)]">
+      <span className="w-8 shrink-0 select-none border-r border-[var(--border-subtle)] pr-[3px] pl-[3px] text-right font-mono text-[10px] leading-[18px] text-[var(--text-tertiary)]">
         {side?.lineNo ?? ""}
       </span>
       <code
-        className="diff-syntax block flex-1 overflow-hidden whitespace-pre pl-2 pr-2 font-mono text-[11px] leading-[18px] text-[var(--text-secondary)]"
-        title={text}
+        className="diff-syntax block flex-1 overflow-hidden whitespace-pre pl-2 pr-2 font-mono leading-[18px] text-[var(--text-secondary)]"
         style={{
+          fontSize: FONT_PX,
           background: bg,
           borderTopLeftRadius: roundTop ? RADIUS : 0,
           borderTopRightRadius: roundTop ? RADIUS : 0,
@@ -127,10 +132,9 @@ function CenterMarker({ row }: { row: DiffRow }) {
   const lc = isLeftChange(row);
   const rc = isRightChange(row);
   let char = "";
-  let color = "transparent";
+  let color = "var(--text-tertiary)";
   if (lc && rc) {
     char = "›";
-    color = "var(--text-tertiary)";
   } else if (rc) {
     char = "»";
     color = "var(--status-success, #22c55e)";
@@ -140,13 +144,64 @@ function CenterMarker({ row }: { row: DiffRow }) {
   }
   return (
     <div
-      className="flex items-center justify-center font-mono text-[9px] leading-[18px] select-none"
+      className="flex items-center justify-center border-x border-[var(--border-subtle)] font-mono text-[11px] leading-[18px] select-none"
       style={{ color }}
     >
       {char}
     </div>
   );
 }
+
+/**
+ * One side-by-side diff row, wrapped in `memo`. This is THE scroll-performance
+ * lever: the virtualizer re-renders the whole list on every scroll frame, but
+ * its props here (`row`/`prev`/`next` are stable refs from the query data,
+ * `top`/`lang` are stable per index) don't change for a row that stays mounted,
+ * so memo skips re-running the (span-heavy) cell render. Only the handful of
+ * rows entering the window each frame do work — not all ~window rows.
+ */
+const DiffRow = memo(function DiffRow({
+  row,
+  prev,
+  next,
+  lang,
+  top,
+}: {
+  row: DiffRow;
+  prev?: DiffRow;
+  next?: DiffRow;
+  lang: string;
+  top: number;
+}) {
+  const lc = isLeftChange(row);
+  const rc = isRightChange(row);
+  return (
+    <div
+      className="absolute left-0 right-0 grid"
+      style={{
+        top,
+        height: ROW_H,
+        gridTemplateColumns: `1fr ${CENTER_W}px 1fr`,
+      }}
+    >
+      <SideCell
+        side={row.left}
+        lang={lang}
+        isLeft
+        roundTop={lc && !isLeftChange(prev)}
+        roundBot={lc && !isLeftChange(next)}
+      />
+      <CenterMarker row={row} />
+      <SideCell
+        side={row.right}
+        lang={lang}
+        isLeft={false}
+        roundTop={rc && !isRightChange(prev)}
+        roundBot={rc && !isRightChange(next)}
+      />
+    </div>
+  );
+});
 
 export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -175,7 +230,7 @@ export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_H,
-    overscan: 40,
+    overscan: 12,
   });
 
   const jump = (dir: 1 | -1) => {
@@ -190,7 +245,12 @@ export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
   const items = virtualizer.getVirtualItems();
 
   return (
-    <div className="flex h-full flex-col bg-[var(--bg-primary)]">
+    <div className="flex h-full bg-[var(--bg-primary)]">
+      {/* Left: compact tree of changed files to jump between diffs */}
+      <ChangedFilesTree repoPath={repoPath} staged={staged} currentFile={file} />
+
+      {/* Main column: toolbar + diff body */}
+      <div className="flex h-full min-w-0 flex-1 flex-col">
       {/* Toolbar */}
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[var(--border-default)] px-3">
         <FileCode2 size={12} className="shrink-0 text-[var(--text-tertiary)]" />
@@ -259,46 +319,26 @@ export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
           No changes.
         </div>
       ) : (
+        <div className="flex min-h-0 flex-1">
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto hide-scrollbar">
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-            {items.map((vr) => {
-              const idx = vr.index;
-              const row = rows[idx];
-              const prev = rows[idx - 1];
-              const next = rows[idx + 1];
-              const lc = isLeftChange(row);
-              const rc = isRightChange(row);
-              return (
-                <div
-                  key={idx}
-                  className="absolute left-0 right-0 grid"
-                  style={{
-                    top: vr.start,
-                    height: ROW_H,
-                    gridTemplateColumns: "1fr 14px 1fr",
-                  }}
-                >
-                  <SideCell
-                    side={row.left}
-                    lang={lang}
-                    isLeft
-                    roundTop={lc && !isLeftChange(prev)}
-                    roundBot={lc && !isLeftChange(next)}
-                  />
-                  <CenterMarker row={row} />
-                  <SideCell
-                    side={row.right}
-                    lang={lang}
-                    isLeft={false}
-                    roundTop={rc && !isRightChange(prev)}
-                    roundBot={rc && !isRightChange(next)}
-                  />
-                </div>
-              );
-            })}
+            {items.map((vr) => (
+              <DiffRow
+                key={vr.index}
+                row={rows[vr.index]}
+                prev={rows[vr.index - 1]}
+                next={rows[vr.index + 1]}
+                lang={lang}
+                top={vr.start}
+              />
+            ))}
           </div>
         </div>
+        {/* Right: change minimap synced to the diff scroll position */}
+        <DiffMinimap rows={rows} scrollRef={scrollRef} />
+        </div>
       )}
+      </div>
     </div>
   );
 }
