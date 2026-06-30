@@ -565,25 +565,6 @@ impl AgentManager {
                     });
                 }
             }
-            AcpEvent::TurnStopped {
-                session_id,
-                turn_id: _,
-                stop_reason,
-            } => {
-                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    let mut st = handle.state.lock();
-                    st.status = SessionStatus::Idle;
-                    let sid = st.session_id.clone();
-                    drop(st);
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: sid,
-                        delta: SessionDelta::TurnFinished {
-                            stop_reason: format!("{stop_reason:?}").to_ascii_lowercase(),
-                        },
-                    });
-                }
-            }
             AcpEvent::TurnFailed {
                 session_id,
                 turn_id: _,

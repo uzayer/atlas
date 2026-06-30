@@ -584,15 +584,6 @@ fn tool_has_entry(root: &Path, def: &ToolDef, scope: &str, safe_name: &str) -> b
         .is_ok()
 }
 
-/// Whether the entry is specifically a symlink.
-#[allow(dead_code)] // reserved for the reconcile-UI projection-mode probe
-fn tool_entry_is_symlink(root: &Path, def: &ToolDef, scope: &str, safe_name: &str) -> bool {
-    tool_link_path(root, def, scope, safe_name)
-        .symlink_metadata()
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-}
-
 /// Compute the relative symlink target from a tool's skills dir up to the
 /// canonical `<root>/.atlas/skills/<name>`. Used only for `<root>`-relative dirs
 /// (the common case). For env-relocated absolute dirs we fall back to an absolute

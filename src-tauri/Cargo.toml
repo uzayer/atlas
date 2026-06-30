@@ -138,7 +138,8 @@ atlas-embed = { path = "../crates/atlas-embed", features = ["metal"] }
 
 [profile.release]
 codegen-units = 1   # Single codegen unit → better cross-function inlining
-lto = "thin"        # ThinLTO: most of LTO's win at a fraction of link time
+lto = "fat"         # Fat LTO: maximum cross-crate dead-code elimination +
+                    # inlining (smaller binary; ~2× link time vs thin)
 strip = "symbols"   # Smaller .app bundle, faster dyld load
 panic = "abort"     # Smaller binary; we don't `catch_unwind` anywhere
 opt-level = 3       # Default for release, restated for clarity

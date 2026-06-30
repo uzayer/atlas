@@ -31,13 +31,6 @@ pub enum AcpEvent {
         tool_call: acp_schema::ToolCallUpdate,
         options: Vec<acp_schema::PermissionOption>,
     },
-    /// A prompt-turn finished. The corresponding `acp_send_prompt` call has
-    /// already returned, but the event is broadcast for any tab listening.
-    TurnStopped {
-        session_id: acp_schema::SessionId,
-        turn_id: Uuid,
-        stop_reason: acp_schema::StopReason,
-    },
     /// A prompt-turn failed before stop_reason (process died, protocol error).
     TurnFailed {
         session_id: acp_schema::SessionId,

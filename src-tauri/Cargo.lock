@@ -479,7 +479,6 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
- "serde",
  "serde_json",
  "tokenizers 0.23.1",
 ]
@@ -965,7 +964,6 @@ dependencies = [
  "cersei-tools",
  "cersei-tools-derive",
  "cersei-types",
- "cersei-vms",
  "chrono",
  "dirs 5.0.1",
  "futures",
@@ -1137,7 +1135,6 @@ dependencies = [
  "cersei-lsp",
  "cersei-mcp",
  "cersei-types",
- "cersei-vms",
  "chrono",
  "dashmap",
  "dirs 5.0.1",
@@ -1194,35 +1191,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "cersei-vms"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "952bb65dea2b86ee0baa48c49520b98f53fdd9c299a941c8833e6784d14f446b"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "cersei-types",
- "chrono",
- "dashmap",
- "dirs 5.0.1",
- "futures",
- "nix 0.29.0",
- "parking_lot",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -8509,16 +8477,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-serde"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
-dependencies = [
- "serde",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8528,15 +8486,12 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
- "serde",
- "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-serde",
 ]
 
 [[package]]

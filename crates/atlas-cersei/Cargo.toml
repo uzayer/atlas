@@ -11,7 +11,10 @@ name = "atlas_cersei"
 # Cersei agent SDK — the in-process agentic loop (provider builders, tools,
 # permission policies, streaming events). Same pin as atlas-review so the two
 # Cersei consumers share one resolved version.
-cersei = "0.2.5"
+# `default-features = false` drops the `vms` feature (cersei-vms ~4.5MB rlib +
+# its sub-crates) — Atlas does not use the VM tools. All cersei consumers must
+# agree (feature unification), so atlas-codeindex/atlas-review do the same.
+cersei = { version = "0.2.5", default-features = false }
 # The agent crate directly, for the built-in `DelegateTool` + delegate batch
 # runner (parallel in-process sub-agents) — not re-exported by the `cersei`
 # facade. Same pin so Cargo unifies one build.
