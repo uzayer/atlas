@@ -440,6 +440,7 @@ pub fn run() {
             commands::skills::pack_check_update,
             commands::skills::pack_project,
             commands::skills::pack_unproject,
+            commands::skills::pack_uninstall,
             commands::skills::pack_projections,
             commands::skills::pack_components_list,
         ])

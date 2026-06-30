@@ -158,6 +158,34 @@ pub struct PackComponent {
     /// Projection leaf name (the file or dir name placed in a tool home),
     /// e.g. `review` or `foo`.
     pub name: String,
+    /// Frontmatter `description` of the component's markdown (the SKILL.md for a
+    /// skill, the `.md` body for command/agent/rule). `None` for non-markdown
+    /// components or when no description is set. Lets the marketplace preview a
+    /// pack's contents — packs themselves usually carry no manifest description.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Read the frontmatter `description` of a component's markdown. For a skill the
+/// source is its directory (we read its `SKILL.md`); for other kinds it's the
+/// `.md` file itself. Returns `None` for non-markdown or empty descriptions.
+fn read_component_description(kind: ComponentKind, src: &Path) -> Option<String> {
+    let md = if kind == ComponentKind::Skill {
+        src.join("SKILL.md")
+    } else {
+        src.to_path_buf()
+    };
+    if md.extension().and_then(|e| e.to_str()) != Some("md") {
+        return None;
+    }
+    let raw = fs::read_to_string(&md).ok()?;
+    let desc = parse_frontmatter(&raw).0.description?;
+    let desc = desc.trim();
+    if desc.is_empty() {
+        None
+    } else {
+        Some(desc.to_string())
+    }
 }
 
 /// Parsed `.claude-plugin/plugin.json`. Every field is optional — the parser is
@@ -1995,7 +2023,8 @@ fn collect_kind(
                     pack_rel(pack_root, &dir),
                     dir.file_name().map(|s| s.to_string_lossy().to_string()),
                 ) {
-                    out.push(PackComponent { kind, rel_path: rel, name });
+                    let description = read_component_description(kind, &dir);
+                    out.push(PackComponent { kind, rel_path: rel, name, description });
                 }
             }
         }
@@ -2011,7 +2040,8 @@ fn collect_kind(
         if let (Some(rel), Some(name)) =
             (pack_rel(pack_root, &file), component_file_name(kind, &file))
         {
-            out.push(PackComponent { kind, rel_path: rel, name });
+            let description = read_component_description(kind, &file);
+            out.push(PackComponent { kind, rel_path: rel, name, description });
         }
     }
 }
@@ -2068,7 +2098,8 @@ fn collect_manifest_path(
             pack_rel(pack_root, &candidate),
             component_file_name(kind, &candidate),
         ) {
-            out.push(PackComponent { kind, rel_path, name });
+            let description = read_component_description(kind, &candidate);
+            out.push(PackComponent { kind, rel_path, name, description });
         }
     }
 }
@@ -3311,6 +3342,43 @@ pub async fn pack_unproject(
     tokio::task::spawn_blocking(move || unproject_pack(&root, &pack, &tool))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Fully remove an installed pack: unproject it from every tool it's recorded
+/// in (clears the tool homes), delete its store dir, and drop its lock entry.
+/// Idempotent — uninstalling a pack that isn't present is a no-op success.
+#[tauri::command]
+pub async fn pack_uninstall(
+    scope: String,
+    pack: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    let root = root_for(&scope, project_path.as_deref())?;
+    tokio::task::spawn_blocking(move || {
+        let safe = sanitize_name(&pack)?;
+        // 1. Unproject from every tool it's recorded in.
+        let tool_ids: Vec<String> = read_pack_proj(&root)
+            .projections
+            .get(&safe)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        for tool_id in tool_ids {
+            unproject_pack(&root, &pack, &tool_id)?;
+        }
+        // 2. Delete the canonical store dir.
+        let store = pack_store_dir(&root, &safe)?;
+        if store.exists() {
+            fs::remove_dir_all(&store)
+                .map_err(|e| format!("remove {}: {e}", store.display()))?;
+        }
+        // 3. Drop the lock entry.
+        let mut lock = read_pack_lock(&root);
+        lock.packs.remove(&safe);
+        write_pack_lock(&root, &lock)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Read-only projection ledger view for one pack.

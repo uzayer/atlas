@@ -421,12 +421,13 @@ async function searchSkills(
   for (const { meta, source } of lists.flat()) {
     const id = `${source.scope}:${meta.name}`;
     if (seen.has(id)) continue;
-    // Per-agent gating: only offer skills enabled for the active chat agent.
-    // `enabledAgents` reflects the on-disk symlink state, which the Packs/Skills
-    // per-agent toggle updates — so a disabled skill drops out of this agent's `#`.
-    if (ctx.agentId && !meta.enabledAgents.includes(ctx.agentId)) {
-      continue;
-    }
+    // NOTE: we intentionally do NOT gate by per-agent enablement here. Selecting
+    // a skill in the picker inlines its SKILL.md body into the prompt (see
+    // compose_prompt), which works for ANY agent regardless of whether the skill
+    // is symlinked into that agent's native skills dir. The old `enabledAgents`
+    // gate hid freshly installed skills (not yet projected to any agent →
+    // `enabledAgents` empty) — which read as "skills not indexed yet". Every
+    // installed skill in scope is a valid mention target, so we show them all.
     if (
       q &&
       !meta.name.toLowerCase().includes(q) &&

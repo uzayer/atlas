@@ -49,6 +49,9 @@ export interface PackComponent {
   kind: ComponentKind;
   relPath: string;
   name: string;
+  /** Frontmatter description of the component's markdown (SKILL.md for a skill).
+   *  Null for non-markdown components or when none is set. */
+  description?: string | null;
 }
 
 /** A parsed pack: name, root dir, optional manifest, and every component. */

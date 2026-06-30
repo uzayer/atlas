@@ -54,6 +54,7 @@ import {
   type MentionKind,
   type PastSessionRef,
 } from "@/features/chat/lib/mentions";
+import { SKILLS_CHANGED_EVENT } from "@/features/skills/lib/skills-events";
 import {
   useRecentFilesStore,
   type RecentFile,
@@ -285,6 +286,16 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       };
     }, [open]);
 
+    // Re-run the search when skills/packs change on disk (install, projection,
+    // adopt, …) so a freshly installed skill/component shows up without the
+    // user reopening the picker. Mirrors the file-index refresh above.
+    useEffect(() => {
+      if (!open) return;
+      const onChanged = () => setIndexNonce((n) => n + 1);
+      window.addEventListener(SKILLS_CHANGED_EVENT, onChanged);
+      return () => window.removeEventListener(SKILLS_CHANGED_EVENT, onChanged);
+    }, [open]);
+
     // Build the renderable row list. Order:
     //   no scope + empty query → Recents (header) → files → Categories header → categories
     //   no scope + query       → blended results sorted by rank
@@ -318,6 +329,15 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
         // to a single header (unchanged); the `#` rail (skills + pack components)
         // splits into Skills / Commands / Agents / Rules.
         const groupOf = (m: MentionData): { key: string; label: string } => {
+          // Skills can be installed globally or per-workspace — segment them so
+          // the user sees which scope a skill came from.
+          if (m.kind === "skill") {
+            const ws = m.scope === "project";
+            return {
+              key: `skill:${m.scope}`,
+              label: ws ? "Workspace Skills" : "Global Skills",
+            };
+          }
           if (m.kind === "component") {
             const label =
               m.componentKind === "command"

@@ -99,6 +99,9 @@ const PERSISTENT_TYPES: ReadonlySet<TabType> = new Set([
   // re-walking its tree/graph on every revisit.
   "chat",
   "knowledge",
+  // Keep settings mounted so its open section + sub-tab + form drafts survive a
+  // tab switch (it's a singleton tab; remounting reset all its local useState).
+  "settings",
 ]);
 
 /**
@@ -486,6 +489,8 @@ function TabContentContainer({
                 <KnowledgeGraph />
               ) : tab.type === "pdf" ? (
                 <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />
+              ) : tab.type === "settings" ? (
+                <SettingsPanel initialSection={tab.data.section as string | undefined} />
               ) : (
                 <TerminalPanel tabId={tab.id} />
               )}

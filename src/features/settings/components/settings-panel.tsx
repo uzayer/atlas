@@ -15,6 +15,8 @@ import {
   Zap,
   Plus,
   Minus,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import {
   clampScale,
@@ -50,28 +52,89 @@ const SECTIONS = [
   { id: "about", label: "About", icon: Info },
 ];
 
+const NAV_COLLAPSED_KEY = "atlas:settings:navCollapsed";
+
 export function SettingsPanel({ initialSection }: { initialSection?: string } = {}) {
   const [activeSection, setActiveSection] = useState(initialSection ?? "general");
+  const [navCollapsed, setNavCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(NAV_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleNav = () =>
+    setNavCollapsed((c) => {
+      const next = !c;
+      try {
+        localStorage.setItem(NAV_COLLAPSED_KEY, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
 
   return (
     <div className="h-full flex">
-      {/* Settings nav */}
-      <div className="w-[180px] shrink-0 border-r border-border-default bg-bg-primary py-2">
-        {SECTIONS.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => setActiveSection(s.id)}
+      {/* Settings nav — collapses to an icon rail (labels become tooltips). */}
+      <div
+        className={cn(
+          "shrink-0 overflow-hidden border-r border-border-default bg-bg-primary py-2 flex flex-col transition-[width] duration-150",
+          navCollapsed ? "w-[44px]" : "w-[180px]",
+        )}
+      >
+        <div className="flex-1">
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setActiveSection(s.id)}
+              title={navCollapsed ? s.label : undefined}
+              className={cn(
+                "w-full flex items-center h-[32px] overflow-hidden text-[11px] font-medium transition-colors border-l-2 cursor-pointer",
+                navCollapsed ? "justify-center px-0" : "gap-2 px-4",
+                activeSection === s.id
+                  ? "text-text-primary bg-bg-selected border-l-accent"
+                  : "text-text-secondary hover:bg-bg-hover border-l-transparent",
+              )}
+            >
+              <s.icon size={13} className="shrink-0" />
+              {/* Label fades + collapses its width so the longest label
+                  ("API Keys") never overflows the rail during the animation. */}
+              <span
+                className={cn(
+                  "overflow-hidden whitespace-nowrap transition-all duration-150",
+                  navCollapsed ? "max-w-0 opacity-0" : "max-w-[140px] opacity-100",
+                )}
+              >
+                {s.label}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {/* Hide / show toggle — divided from the section list. */}
+        <button
+          onClick={toggleNav}
+          title={navCollapsed ? "Show sidebar" : "Hide sidebar"}
+          className={cn(
+            "mt-1 flex items-center h-[30px] overflow-hidden border-t border-border-default pt-px text-[11px] font-medium text-text-tertiary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer",
+            navCollapsed ? "justify-center px-0" : "gap-2 px-4",
+          )}
+        >
+          {navCollapsed ? (
+            <ChevronRight size={14} className="shrink-0" />
+          ) : (
+            <ChevronLeft size={14} className="shrink-0" />
+          )}
+          <span
             className={cn(
-              "w-full flex items-center gap-2 px-4 h-[32px] text-[11px] font-medium transition-colors",
-              activeSection === s.id
-                ? "text-text-primary bg-bg-selected border-l-2 border-l-accent"
-                : "text-text-secondary hover:bg-bg-hover border-l-2 border-l-transparent"
+              "overflow-hidden whitespace-nowrap transition-all duration-150",
+              navCollapsed ? "max-w-0 opacity-0" : "max-w-[60px] opacity-100",
             )}
           >
-            <s.icon size={13} />
-            {s.label}
-          </button>
-        ))}
+            Hide
+          </span>
+        </button>
       </div>
 
       {/* Settings content. The providers ("API Keys") and skills sections are

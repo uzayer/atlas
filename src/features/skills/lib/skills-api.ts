@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { afterSkillMutation } from "./skills-events";
 import type {
   AgentTarget,
   PackComponentMeta,
@@ -45,20 +46,24 @@ export const skills = {
     enabled: boolean,
     projectPath?: string | null,
   ) =>
-    invoke<void>("skills_set_enabled", {
-      scope,
-      name,
-      agent,
-      enabled,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<void>("skills_set_enabled", {
+        scope,
+        name,
+        agent,
+        enabled,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 
   delete: (scope: Scope, name: string, projectPath?: string | null) =>
-    invoke<void>("skills_delete", {
-      scope,
-      name,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<void>("skills_delete", {
+        scope,
+        name,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 
   /**
    * "Make for all agents": copy an external/single-agent skill into the
@@ -66,11 +71,13 @@ export const skills = {
    * now-managed skill.
    */
   adopt: (scope: Scope, name: string, projectPath?: string | null) =>
-    invoke<SkillMeta>("skills_adopt", {
-      scope,
-      name,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<SkillMeta>("skills_adopt", {
+        scope,
+        name,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 
   path: (scope: Scope, name: string, projectPath?: string | null) =>
     invoke<string>("skills_path", {
@@ -112,13 +119,15 @@ export const skills = {
     force = false,
     projectPath?: string | null,
   ) =>
-    invoke<void>("skills_project", {
-      scope,
-      name,
-      tool,
-      force,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<void>("skills_project", {
+        scope,
+        name,
+        tool,
+        force,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 
   /** Remove a projection (symlink/copy) of a skill from one tool. */
   unproject: (
@@ -127,21 +136,25 @@ export const skills = {
     tool: string,
     projectPath?: string | null,
   ) =>
-    invoke<void>("skills_unproject", {
-      scope,
-      name,
-      tool,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<void>("skills_unproject", {
+        scope,
+        name,
+        tool,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 
   /** Promote a project skill to the global library + re-project at global scope. */
   promote: (name: string, projectPath: string) =>
-    invoke<SkillMeta>("skills_promote", { name, projectPath }),
+    afterSkillMutation(invoke<SkillMeta>("skills_promote", { name, projectPath })),
 
   /** Freeze every Atlas symlink projection into a real copy (uninstall safety). */
   freeze: (scope: Scope, projectPath?: string | null) =>
-    invoke<void>("skills_freeze", {
-      scope,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<void>("skills_freeze", {
+        scope,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 };

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { afterSkillMutation } from "@/features/skills/lib/skills-events";
 import type {
   InstalledPack,
   Pack,
@@ -45,12 +46,14 @@ export const packs = {
     force = false,
     projectPath?: string | null,
   ) =>
-    invoke<PackInstallResult>("pack_install_remote", {
-      scope,
-      source,
-      force,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<PackInstallResult>("pack_install_remote", {
+        scope,
+        source,
+        force,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 
   /** Installed packs in this scope (manifest + provenance). */
   list: (scope: Scope, projectPath?: string | null) =>
@@ -82,14 +85,27 @@ export const packs = {
     force = false,
     projectPath?: string | null,
   ) =>
-    invoke<PackProjectReport[]>("pack_project", {
-      scope,
-      pack,
-      tool,
-      kinds: kinds ?? null,
-      force,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<PackProjectReport[]>("pack_project", {
+        scope,
+        pack,
+        tool,
+        kinds: kinds ?? null,
+        force,
+        projectPath: projectPath ?? null,
+      }),
+    ),
+
+  /** Fully remove an installed pack — unproject from every tool, delete its
+   *  store dir, drop its lock entry. */
+  uninstall: (scope: Scope, pack: string, projectPath?: string | null) =>
+    afterSkillMutation(
+      invoke<void>("pack_uninstall", {
+        scope,
+        pack,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 
   /** Undo every projection of a pack into a tool. */
   unproject: (
@@ -98,12 +114,14 @@ export const packs = {
     tool: string,
     projectPath?: string | null,
   ) =>
-    invoke<void>("pack_unproject", {
-      scope,
-      pack,
-      tool,
-      projectPath: projectPath ?? null,
-    }),
+    afterSkillMutation(
+      invoke<void>("pack_unproject", {
+        scope,
+        pack,
+        tool,
+        projectPath: projectPath ?? null,
+      }),
+    ),
 
   /** Read-only projection ledger view for one pack (across tools). */
   projections: (scope: Scope, pack: string, projectPath?: string | null) =>

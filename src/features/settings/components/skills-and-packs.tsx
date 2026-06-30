@@ -7,106 +7,105 @@
 import { useState } from "react";
 
 import { cn } from "@/lib/utils";
-import { ScrollArea } from "@/ui/scroll-area";
+import { AtlasIcon } from "@/components/atlas-icon";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import type { Scope } from "@/features/skills/lib/types";
 
-import { SkillsSettings } from "./skills-settings";
-import { PacksSettings } from "@/features/packs/components/packs-settings";
+import { SkillsMarketplace } from "./marketplace/skills-marketplace";
+import { InstalledSkills } from "./marketplace/installed-skills";
 
-type SubTab = "skills" | "packs";
+type SubTab = "discover" | "installed";
 
 const TABS: { id: SubTab; label: string }[] = [
-  { id: "skills", label: "My Skills" },
-  { id: "packs", label: "Packs" },
+  { id: "discover", label: "Discover" },
+  { id: "installed", label: "My Skills" },
 ];
 
 export function SkillsAndPacks() {
-  const [tab, setTab] = useState<SubTab>("skills");
+  const [tab, setTab] = useState<SubTab>("discover");
   const [scope, setScope] = useState<Scope>("global");
-  const hasProject = useProjectStore.use.currentProject()?.path != null;
+  const projectPath = useProjectStore.use.currentProject()?.path ?? null;
+  const hasProject = projectPath != null;
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-border-default px-3">
+      {/* Header — Atlas logo + title, then underline/bottom-border tab switchers
+          (like the API Keys table) for Discover/My Skills and Global/Project.
+          Height matches the Source Control panel header (h-[29px]). */}
+      <div className="flex h-[29px] shrink-0 items-center gap-1 border-b border-border-default px-2">
+        <div className="flex items-center gap-1.5 px-1.5">
+          <AtlasIcon size={13} />
+          <span className="text-[12px] font-semibold text-text-primary">Skills</span>
+        </div>
+        <span className="mx-1 h-3.5 w-px bg-border-default" />
         {TABS.map((t) => (
-          <button
+          <UnderlineTab
             key={t.id}
-            type="button"
+            active={tab === t.id}
             onClick={() => setTab(t.id)}
-            className={cn(
-              "relative h-9 px-3 text-[12px] font-medium transition-colors",
-              tab === t.id
-                ? "text-text-primary"
-                : "text-text-secondary hover:text-text-primary",
-            )}
-          >
-            {t.label}
-            {tab === t.id && (
-              <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-accent" />
-            )}
-          </button>
+            label={t.label}
+          />
         ))}
 
-        {/* Shared scope control — drives Packs install/projection and the
-            default scope for new skills. */}
-        <div className="ml-auto py-1.5">
-          <ScopeSelect
-            scope={scope}
-            onChange={setScope}
-            hasProject={hasProject}
-          />
+        {/* Shared scope control — drives install/projection + default scope. */}
+        <div className="ml-auto flex items-center">
+          {(["global", "project"] as Scope[]).map((s) => {
+            const disabled = s === "project" && !hasProject;
+            return (
+              <UnderlineTab
+                key={s}
+                active={scope === s}
+                disabled={disabled}
+                title={disabled ? "Open a project to use project scope" : undefined}
+                onClick={() => setScope(s)}
+                label={s}
+              />
+            );
+          })}
         </div>
       </div>
 
       <div className="min-h-0 flex-1">
-        {tab === "skills" ? (
-          <SkillsSettings />
+        {tab === "discover" ? (
+          <SkillsMarketplace scope={scope} projectPath={projectPath} />
         ) : (
-          <ScrollArea className="h-full">
-            <PacksSettings scope={scope} />
-          </ScrollArea>
+          <InstalledSkills scope={scope} projectPath={projectPath} />
         )}
       </div>
     </div>
   );
 }
 
-/** Segmented global/project control (project disabled until a project is open). */
-function ScopeSelect({
-  scope,
-  onChange,
-  hasProject,
+/** One underline/bottom-border tab (mirrors the API Keys table tabs). The
+ *  active tab shows an accent bottom border flush with the header's border. */
+function UnderlineTab({
+  active,
+  onClick,
+  label,
+  disabled,
+  title,
 }: {
-  scope: Scope;
-  onChange: (s: Scope) => void;
-  hasProject: boolean;
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
-    <div className="flex items-center gap-0.5 rounded-md border border-border-default bg-bg-raised p-0.5">
-      {(["global", "project"] as Scope[]).map((s) => {
-        const disabled = s === "project" && !hasProject;
-        return (
-          <button
-            key={s}
-            type="button"
-            disabled={disabled}
-            onClick={() => onChange(s)}
-            title={
-              disabled ? "Open a project to use project scope" : undefined
-            }
-            className={cn(
-              "rounded px-2 py-0.5 text-[11px] font-medium capitalize transition-colors",
-              scope === s
-                ? "bg-bg-selected text-text-primary"
-                : "text-text-tertiary hover:text-text-primary",
-              disabled && "cursor-not-allowed opacity-40",
-            )}
-          >
-            {s}
-          </button>
-        );
-      })}
-    </div>
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "flex h-[29px] items-center gap-1.5 px-2.5 text-[11px] font-medium capitalize transition-colors border-b-2 -mb-px cursor-pointer",
+        active
+          ? "text-text-primary border-b-[var(--accent-primary)]"
+          : "text-text-secondary hover:text-text-primary border-b-transparent",
+        disabled && "cursor-not-allowed opacity-40 hover:text-text-secondary",
+      )}
+    >
+      {label}
+    </button>
   );
 }
