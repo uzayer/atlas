@@ -283,7 +283,7 @@ function TabColumn({
             !soloColumn && !isFocused && "opacity-45"
           )}
         >
-          <div className="flex items-center gap-0.5 px-1 border-r border-border-default shrink-0">
+          <div className="flex items-center justify-center gap-0.5 w-[44px] border-r border-border-default shrink-0">
             <button
               onClick={navigateTabBack}
               disabled={!canGoBack}
