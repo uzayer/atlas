@@ -9,12 +9,22 @@
 // default view is a cached "Popular" merge of a few seed queries, and detail is
 // fetched lazily on open.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Boxes, Check, Copy, Download, Github, Loader2, Search, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { toast } from "sonner";
 
 import { cn } from "@/lib/utils";
 import { packs as packsApi } from "@/features/packs/lib/packs-api";
+import { skills as skillsApi } from "@/features/skills/lib/skills-api";
+import { SKILLS_CHANGED_EVENT } from "@/features/skills/lib/skills-events";
 import {
   SkillModalShell,
   SkillDescriptions,
@@ -22,7 +32,6 @@ import {
 } from "./skill-modal";
 import type {
   ComponentKind,
-  InstalledPack,
   Pack,
   PackSearchHit,
   Scope,
@@ -38,6 +47,37 @@ let popularCache: PackSearchHit[] | null = null;
 // Cache `pack_remote_preview` results (a repo clone — slow) by source, so
 // re-opening a skill's detail modal is instant. Lives for the app session.
 const previewCache = new Map<string, Pack>();
+
+// In-flight installs, keyed by registry hit id ("source/skillId"). Lifted to
+// MODULE scope (not component state) so the spinner survives unmount — switching
+// settings sub-tabs / sections away mid-install no longer loses the loading
+// state; returning to Discover shows the install still running, then completes.
+const installingIds = new Set<string>();
+let installVersion = 0;
+const installSubs = new Set<() => void>();
+function notifyInstalling() {
+  installVersion++;
+  installSubs.forEach((f) => f());
+}
+async function runInstall(
+  hit: PackSearchHit,
+  scope: Scope,
+  projectPath: string | null,
+) {
+  if (installingIds.has(hit.id)) return;
+  installingIds.add(hit.id);
+  notifyInstalling();
+  try {
+    // Install just THIS skill (not the whole repo) — the registry is skill-level.
+    await packsApi.installSkill(scope, hit.source, hit.skillId || hit.name, projectPath);
+  } catch (e) {
+    toast.error(`Couldn't install ${hit.name}: ${String(e)}`);
+  } finally {
+    installingIds.delete(hit.id);
+    notifyInstalling();
+  }
+  // `installSkill` fires `atlas:skills-changed`; the component refetches installed.
+}
 
 function loadPopularCache(): PackSearchHit[] | null {
   if (popularCache) return popularCache;
@@ -95,25 +135,44 @@ export function SkillsMarketplace({
   const [popular, setPopular] = useState<PackSearchHit[]>(() => loadPopularCache() ?? []);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [installed, setInstalled] = useState<InstalledPack[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [selected, setSelected] = useState<PackSearchHit | null>(null);
-
-  const installedSources = useMemo(
-    () => new Set(installed.map((p) => p.source)),
-    [installed],
+  // Re-render whenever the module-level install registry changes.
+  useSyncExternalStore(
+    (cb) => {
+      installSubs.add(cb);
+      return () => installSubs.delete(cb);
+    },
+    () => installVersion,
   );
+  const [selected, setSelected] = useState<PackSearchHit | null>(null);
+  // The set of installed skill NAMES (each registry hit is one skill; `skillId`
+  // is its name). We check installed-state per skill, NOT per source repo — a
+  // repo holds many skills, so "is the repo installed" wrongly marks all of them.
+  const [installedSkills, setInstalledSkills] = useState<Set<string>>(new Set());
 
   const refreshInstalled = useCallback(async () => {
     try {
-      setInstalled(await packsApi.list(scope, effectiveProject));
+      const metas = await skillsApi.list(scope, effectiveProject);
+      setInstalledSkills(new Set(metas.map((m) => m.name)));
     } catch {
       /* installed badges just won't show */
     }
   }, [scope, effectiveProject]);
 
+  const isHitInstalled = useCallback(
+    (hit: PackSearchHit) => installedSkills.has(hit.skillId || hit.name),
+    [installedSkills],
+  );
+
   useEffect(() => {
     void refreshInstalled();
+  }, [refreshInstalled]);
+
+  // Refresh installed badges when a skill/pack mutation lands (incl. an install
+  // that completed while this component was unmounted).
+  useEffect(() => {
+    const onChanged = () => void refreshInstalled();
+    window.addEventListener(SKILLS_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(SKILLS_CHANGED_EVENT, onChanged);
   }, [refreshInstalled]);
 
   // Default "Popular" view — only fetched once (then cached). Merge a few broad
@@ -169,19 +228,8 @@ export function SkillsMarketplace({
   const rows = query.trim() ? results : popular;
 
   const install = useCallback(
-    async (source: string) => {
-      setBusy(`install:${source}`);
-      setError(null);
-      try {
-        await packsApi.install(scope, source, false, effectiveProject);
-        await refreshInstalled();
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setBusy(null);
-      }
-    },
-    [scope, effectiveProject, refreshInstalled],
+    (hit: PackSearchHit) => void runInstall(hit, scope, effectiveProject),
+    [scope, effectiveProject],
   );
 
   return (
@@ -237,8 +285,8 @@ export function SkillsMarketplace({
             </div>
           ) : (
             rows.map((hit, i) => {
-              const isInstalled = installedSources.has(hit.source);
-              const installing = busy === `install:${hit.source}`;
+              const isInstalled = isHitInstalled(hit);
+              const installing = installingIds.has(hit.id);
               return (
                 <div
                   key={hit.id}
@@ -283,7 +331,7 @@ export function SkillsMarketplace({
                       installing={installing}
                       onClick={(e) => {
                         e.stopPropagation();
-                        void install(hit.source);
+                        install(hit);
                       }}
                     />
                   </span>
@@ -296,9 +344,9 @@ export function SkillsMarketplace({
 
       <SkillDetailModal
         hit={selected}
-        installed={selected ? installedSources.has(selected.source) : false}
-        installing={selected ? busy === `install:${selected.source}` : false}
-        onInstall={() => selected && void install(selected.source)}
+        installed={selected ? isHitInstalled(selected) : false}
+        installing={selected ? installingIds.has(selected.id) : false}
+        onInstall={() => selected && install(selected)}
         onClose={() => setSelected(null)}
       />
     </div>

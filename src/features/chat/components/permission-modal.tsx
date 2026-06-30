@@ -203,17 +203,11 @@ export function PermissionModal({ tabId, onSendMessage }: PermissionModalProps) 
             </div>
             <div className="flex min-h-0 flex-1">
               <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-                <div className="border-b border-border-default bg-bg-base px-5 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
-                  Plan
-                </div>
                 <div className="min-h-0 min-w-0 flex-1 overflow-auto px-5 py-4">
                   <Markdown>{planMarkdown}</Markdown>
                 </div>
               </section>
               <aside className="flex w-[320px] shrink-0 flex-col border-l border-border-default">
-                <div className="border-b border-border-default bg-bg-base px-4 py-1.5 text-[11px] uppercase tracking-wide text-text-secondary">
-                  Choose
-                </div>
                 <div className="min-h-0 min-w-0 flex-1 overflow-auto px-4 py-3">{optionList}</div>
                 <div className="flex items-center justify-end gap-2 border-t border-border-default px-4 py-2.5">
                   <button

@@ -439,6 +439,11 @@ impl CerseiRuntime {
             t.push(Box::new(
                 DelegateTool::new(provider_factory, toolset_factory).with_model(model.clone()),
             ));
+            // Skills: the `Skill` tool surfaces only the skills the user toggled ON
+            // for the Atlas agent (read from `.atlas/agent-skills`). Its presence
+            // makes `build_system_prompt` add the skills guidance automatically.
+            // Main turn only (not the delegate toolset) so sub-agents stay focused.
+            t.push(Box::new(crate::tools::skill::AtlasSkillTool));
             // Grounding: expose Atlas's indexed memory as a tool when the Tauri
             // layer has registered a retrieval backend.
             if memory::memory_search_available() {
@@ -1243,6 +1248,7 @@ mod tests {
                 result: "2 items".into(),
                 is_error: false,
                 duration: Duration::from_secs(0),
+                compression: None,
             },
             &s,
             AgentId::new(),
@@ -1262,6 +1268,7 @@ mod tests {
             result: "file contents".into(),
             is_error: false,
             duration: Duration::from_secs(0),
+            compression: None,
         });
         let v = update_json(&c, 0);
         assert_eq!(v["sessionUpdate"], "tool_call_update");
@@ -1277,6 +1284,7 @@ mod tests {
             result: "boom".into(),
             is_error: true,
             duration: Duration::from_secs(0),
+            compression: None,
         });
         assert_eq!(update_json(&c, 0)["status"], "failed");
     }
@@ -1394,6 +1402,7 @@ mod tests {
                 result: "body".into(),
                 is_error: false,
                 duration: Duration::from_secs(0),
+                compression: None,
             },
             E::TextDelta("Done.".into()),
             E::TurnComplete {

@@ -1061,9 +1061,11 @@ export function MessageInput({
               onMentionTrigger={setTrigger}
               onSlashTrigger={setSlashTrigger}
               keyInterceptor={keyInterceptor}
-              // The Cersei (Atlas) agent has no skill integration, so the `#`
-              // skill picker is hidden for it; other agents keep it.
-              allowSkillMention={agentType !== "cersei"}
+              // All agents (incl. the native Atlas/cersei agent) support skills
+              // now — the `#` rail inlines a skill body via compose_prompt, and the
+              // native agent additionally loads Atlas-enabled skills via its Skill
+              // tool. (`agentType` retained for other per-agent gating above.)
+              allowSkillMention={true}
             />
           ) : (
             // Same-height empty slot so the panel layout doesn't reflow when

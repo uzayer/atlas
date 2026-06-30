@@ -263,9 +263,15 @@ fn render_block(m: &MentionSpec) -> Option<String> {
                 Some(b) if !b.is_empty() => b.to_string(),
                 _ => read_skill_body(file_path),
             };
+            // Lead with the frontmatter `description:` — the rich "what/when to
+            // use" text Claude Code / Codex read natively from the SKILL.md
+            // header. The inline body alone drops it, and some skills ship only a
+            // thin discovery stub as their body, so without this the agent has
+            // nothing to act on but "go find the skill".
             Some(format!(
-                "## {sf}\n\n{body}",
+                "## {sf}\n\n{lead}{body}",
                 sf = m.short_form(),
+                lead = describe_lead(file_path),
                 body = clip_body(&body),
             ))
         }
@@ -281,8 +287,9 @@ fn render_block(m: &MentionSpec) -> Option<String> {
                 _ => read_skill_body(file_path),
             };
             Some(format!(
-                "## {sf}\n\n{body}",
+                "## {sf}\n\n{lead}{body}",
                 sf = m.short_form(),
+                lead = describe_lead(file_path),
                 body = clip_body(&body),
             ))
         }
@@ -337,6 +344,38 @@ fn read_skill_body(path: &str) -> String {
         return "(unable to read skill)".to_string();
     };
     strip_frontmatter(&raw)
+}
+
+/// Build the optional one-line lead (the skill/component `description:`, in
+/// italics) prepended to an inlined body, or empty when there's no description.
+fn describe_lead(file_path: &str) -> String {
+    match std::fs::read_to_string(file_path) {
+        Ok(raw) => match frontmatter_description(&raw) {
+            d if d.is_empty() => String::new(),
+            d => format!("_{}_\n\n", clip_body(&d)),
+        },
+        Err(_) => String::new(),
+    }
+}
+
+/// Extract the single-line `description:` frontmatter field (quotes trimmed).
+/// Empty when there's no frontmatter or no such field. Mirrors the minimal
+/// handling in `strip_frontmatter` without depending on `commands::skills`.
+fn frontmatter_description(raw: &str) -> String {
+    let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let mut lines = trimmed.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return String::new();
+    }
+    for line in lines {
+        if line.trim_end() == "---" {
+            break;
+        }
+        if let Some(v) = line.trim_start().strip_prefix("description:") {
+            return v.trim().trim_matches(['"', '\'']).to_string();
+        }
+    }
+    String::new()
 }
 
 fn strip_frontmatter(raw: &str) -> String {
@@ -418,10 +457,45 @@ mod tests {
         };
         assert_eq!(m.short_form(), "#skill:review-rust-diff");
         let block = render_block(&m).expect("skill renders a block");
+        // No readable file → no description lead, block is body-only.
         assert_eq!(
             block,
             "## #skill:review-rust-diff\n\nReview the diff the way I like."
         );
+    }
+
+    #[test]
+    fn frontmatter_description_reads_single_line_field() {
+        let raw = "---\nname: x\ndescription: \"Does a thing\"\n---\n\nbody";
+        assert_eq!(frontmatter_description(raw), "Does a thing");
+        assert_eq!(frontmatter_description("no frontmatter here"), "");
+        assert_eq!(frontmatter_description("---\nname: x\n---\nbody"), "");
+    }
+
+    #[test]
+    fn skill_block_leads_with_description_when_file_has_one() {
+        // A stub-bodied skill (like agent-browser): the useful "what/when" text
+        // lives in the frontmatter description, which must reach the agent.
+        let dir = std::env::temp_dir().join(format!("atlas-skill-lead-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: stubby\ndescription: Use for X and Y\n---\n\nThis is a discovery stub.",
+        )
+        .unwrap();
+        let m = MentionSpec::Skill {
+            id: "global:stubby".into(),
+            display_name: "stubby".into(),
+            file_path: path.to_string_lossy().into_owned(),
+            inline_body: Some("This is a discovery stub.".into()),
+        };
+        let block = render_block(&m).expect("skill renders a block");
+        assert_eq!(
+            block,
+            "## #skill:stubby\n\n_Use for X and Y_\n\nThis is a discovery stub."
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

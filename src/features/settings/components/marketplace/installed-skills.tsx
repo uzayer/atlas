@@ -42,6 +42,20 @@ const COL = {
 } as const;
 const TABLE_MIN_W = 200 + 180 + 150 + 28;
 
+/** Apply the per-tool optimistic overrides (toolId → on) on top of a projected
+ *  set, so a pack toggle reflects instantly before the disk reconcile lands. */
+function mergeOptimistic(
+  base: Set<string>,
+  optimistic: Record<string, boolean>,
+): Set<string> {
+  const next = new Set(base);
+  for (const [toolId, on] of Object.entries(optimistic)) {
+    if (on) next.add(toolId);
+    else next.delete(toolId);
+  }
+  return next;
+}
+
 const KIND_LABEL: Record<ComponentKind, string> = {
   skill: "skills",
   agent: "agents",
@@ -93,6 +107,10 @@ export function InstalledSkills({
   const [target, setTarget] = useState<ModalTarget>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Optimistic per-tool override (toolId → on) for the open modal, so a toggle
+  // flips instantly instead of waiting for the disk-reconcile round-trip. Keyed
+  // by toolId only (one modal open at a time); cleared once refresh lands.
+  const [optimistic, setOptimistic] = useState<Record<string, boolean>>({});
 
   const refresh = useCallback(async () => {
     if (projectMissing) {
@@ -138,9 +156,25 @@ export function InstalledSkills({
   }, [refresh]);
 
   const tools = view?.tools ?? [];
+  // List every installed skill by its REAL name (authored + pack-provided), so
+  // the user sees skill names — not the repo/pack name. A pack-provided skill's
+  // row routes to its pack's manage modal (the pack is the install/uninstall
+  // unit). Packs that ship NO skills (commands/agents/rules only) still appear
+  // as their own rows so they don't vanish.
   const skills = useMemo(
-    () => (view?.skills ?? []).filter((s) => !s.pack),
+    () => [...(view?.skills ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
     [view],
+  );
+  const packsNoSkills = useMemo(
+    () =>
+      packList.filter(
+        (p) => !(view?.skills ?? []).some((s) => s.pack === p.pack.name),
+      ),
+    [packList, view],
+  );
+  const packByName = useMemo(
+    () => new Map(packList.map((p) => [p.pack.name, p])),
+    [packList],
   );
 
   const detectedFor = (t: ToolInfo) =>
@@ -150,6 +184,7 @@ export function InstalledSkills({
   const togglePackTool = useCallback(
     async (packName: string, toolId: string, on: boolean) => {
       setBusy(`pack:${packName}:${toolId}`);
+      setOptimistic((o) => ({ ...o, [toolId]: on }));
       setError(null);
       try {
         if (on)
@@ -160,6 +195,11 @@ export function InstalledSkills({
         setError(String(e));
       } finally {
         setBusy(null);
+        setOptimistic((o) => {
+          const next = { ...o };
+          delete next[toolId];
+          return next;
+        });
       }
     },
     [scope, effectiveProject, refresh],
@@ -169,6 +209,7 @@ export function InstalledSkills({
   const toggleSkillTool = useCallback(
     async (name: string, toolId: string, status: ProjectionStatus) => {
       setBusy(`skill:${name}:${toolId}`);
+      setOptimistic((o) => ({ ...o, [toolId]: status !== "synced" }));
       setError(null);
       try {
         if (status === "synced")
@@ -179,6 +220,11 @@ export function InstalledSkills({
         setError(String(e));
       } finally {
         setBusy(null);
+        setOptimistic((o) => {
+          const next = { ...o };
+          delete next[toolId];
+          return next;
+        });
       }
     },
     [scope, effectiveProject, refresh],
@@ -278,8 +324,8 @@ export function InstalledSkills({
             </div>
           ) : (
             <>
-              {/* Packs */}
-              {packList.map((p) => {
+              {/* Packs that ship no skills (commands/agents/rules only). */}
+              {packsNoSkills.map((p) => {
                 const proj = packProjected[p.pack.name] ?? new Set<string>();
                 return (
                   <button
@@ -308,29 +354,40 @@ export function InstalledSkills({
                 );
               })}
 
-              {/* Authored skills */}
+              {/* Every installed skill, by its real name. */}
               {skills.map((s) => {
                 const onCount = s.cells.filter(
                   (c) => c.scope === scope && c.status === "synced",
                 ).length;
+                const origin = s.pack
+                  ? s.pack
+                  : s.managed
+                    ? "library"
+                    : "external";
+                const onClick = () => {
+                  // Pack-provided skill → manage its pack (the install unit).
+                  const pack = s.pack ? packByName.get(s.pack) : undefined;
+                  if (pack) setTarget({ kind: "pack", pack });
+                  else setTarget({ kind: "skill", skill: s });
+                };
                 return (
                   <button
-                    key={`skill:${s.name}`}
-                    onClick={() => setTarget({ kind: "skill", skill: s })}
-                    className="flex w-full items-center h-[40px] border-b border-border-subtle px-3 text-left transition-colors hover:bg-bg-hover"
+                    key={`skill:${s.pack ?? ""}:${s.name}`}
+                    onClick={onClick}
+                    className="flex w-full items-center min-h-[44px] py-2 border-b border-border-subtle px-3 text-left transition-colors hover:bg-bg-hover"
                   >
-                    <span className={cn(COL.name, "min-w-0")}>
+                    <span className={cn(COL.name, "min-w-0 pr-6")}>
                       <span className="block truncate text-[12px] text-text-primary">
                         {s.name}
                       </span>
                       {s.description && (
-                        <span className="block truncate text-[10px] text-text-tertiary">
+                        <span className="mt-0.5 text-[10px] leading-snug text-text-tertiary line-clamp-2">
                           {s.description}
                         </span>
                       )}
                     </span>
-                    <span className={cn(COL.origin, "text-[11px] text-text-tertiary")}>
-                      {s.managed ? "library" : "external"}
+                    <span className={cn(COL.origin, "truncate text-[11px] text-text-tertiary")}>
+                      {origin}
                     </span>
                     <span className={cn(COL.tools, "text-[11px] text-text-secondary tabular-nums")}>
                       {onCount > 0 ? `${onCount} on` : "off"}
@@ -346,13 +403,18 @@ export function InstalledSkills({
         </div>
       </div>
 
-      {/* Unified manage modal */}
+      {/* Unified manage modal — re-derive the live skill/pack from current state
+          on every render so per-tool toggles reflect a mutation immediately (the
+          captured `target` object is a stale snapshot from click time). */}
       {target?.kind === "pack" && (
         <PackManageModal
-          pack={target.pack}
+          pack={packByName.get(target.pack.pack.name) ?? target.pack}
           packSkills={(view?.skills ?? []).filter((s) => s.pack === target.pack.pack.name)}
           tools={tools}
-          projected={packProjected[target.pack.pack.name] ?? new Set<string>()}
+          projected={mergeOptimistic(
+            packProjected[target.pack.pack.name] ?? new Set<string>(),
+            optimistic,
+          )}
           detectedFor={detectedFor}
           busy={busy}
           scope={scope}
@@ -360,21 +422,31 @@ export function InstalledSkills({
           onToggle={(toolId, on) => void togglePackTool(target.pack.pack.name, toolId, on)}
           onUpdated={() => void refresh()}
           onUninstall={() => void uninstallPack(target.pack.pack.name)}
-          onClose={() => setTarget(null)}
+          onClose={() => {
+            setTarget(null);
+            setOptimistic({});
+          }}
         />
       )}
       {target?.kind === "skill" && (
         <SkillManageModal
-          skill={target.skill}
+          skill={
+            (view?.skills ?? []).find((s) => s.name === target.skill.name) ??
+            target.skill
+          }
           tools={tools}
           scope={scope}
           detectedFor={detectedFor}
           busy={busy}
+          optimistic={optimistic}
           onToggle={(toolId, status) => void toggleSkillTool(target.skill.name, toolId, status)}
           onOpen={() => void openSkill(target.skill.name)}
           onPromote={() => void promoteSkill(target.skill.name)}
           onUninstall={() => void uninstallSkill(target.skill.name)}
-          onClose={() => setTarget(null)}
+          onClose={() => {
+            setTarget(null);
+            setOptimistic({});
+          }}
         />
       )}
     </div>
@@ -404,16 +476,9 @@ function OnOff({
             on === v
               ? "bg-bg-selected text-text-primary"
               : "text-text-tertiary hover:text-text-secondary",
-            busy && "opacity-50",
           )}
         >
-          {busy && on === v ? (
-            <Loader2 size={9} className="animate-spin" />
-          ) : v ? (
-            "On"
-          ) : (
-            "Off"
-          )}
+          {v ? "On" : "Off"}
         </button>
       ))}
     </div>
@@ -564,6 +629,7 @@ function SkillManageModal({
   scope,
   detectedFor,
   busy,
+  optimistic,
   onToggle,
   onOpen,
   onPromote,
@@ -575,14 +641,21 @@ function SkillManageModal({
   scope: Scope;
   detectedFor: (t: ToolInfo) => boolean;
   busy: string | null;
+  optimistic: Record<string, boolean>;
   onToggle: (toolId: string, status: ProjectionStatus) => void;
   onOpen: () => void;
   onPromote: () => void;
   onUninstall: () => void;
   onClose: () => void;
 }) {
-  const statusFor = (t: ToolInfo): ProjectionStatus =>
-    skill.cells.find((c) => c.tool === t.id && c.scope === scope)?.status ?? "absent";
+  const statusFor = (t: ToolInfo): ProjectionStatus => {
+    const ov = optimistic[t.id];
+    if (ov !== undefined) return ov ? "synced" : "absent";
+    return (
+      skill.cells.find((c) => c.tool === t.id && c.scope === scope)?.status ??
+      "absent"
+    );
+  };
 
   return (
     <SkillModalShell

@@ -949,9 +949,9 @@ checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 
 [[package]]
 name = "cersei"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20924ae94a0676f26a855650aa5a9285380b6f742d8470289180dd8a426075fb"
+checksum = "be504297b0a222a8b27137036e9d4aac676a817cce62ed2f24c57fbaa36ee291"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -981,9 +981,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-agent"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eca0c362fe33096c3cb6558eed907157ea11ad0b0fd22027839f9d7f20687223"
+checksum = "e5b11413f2e360c43f5eb49a1fee95a9f8746d9a4ed50bd9a72b4a17ed3d3a3b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1009,9 +1009,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-compression"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e7ec48ee2b004f44b96e29d93e0ee1b5fa3a874c3fd2f4d72fc20e0a4324661"
+checksum = "0c3a8f5ee544c61112ef4408c5f2dcbaa8d4fa509a59deec525948c8b8830e1e"
 dependencies = [
  "anyhow",
  "once_cell",
@@ -1024,9 +1024,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-embeddings"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d04f918d4886a0252feff23f72bef62245ed9c7047b9375ec2c4585c76e1d35c"
+checksum = "b2d333863af80ce2b4ffc38bfa4859b86f1a7c5375e1a8d6061a4fbb725a8e84"
 dependencies = [
  "async-trait",
  "futures",
@@ -1041,9 +1041,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-hooks"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaadafe58a10d4bf68b3782903e0bf6a66e1b1f743cd84d77b23a1d8f09c49e1"
+checksum = "bd76a44c63575450b34b69efcea0c159f24d301123d974f63e94ec3ced1ff4c1"
 dependencies = [
  "async-trait",
  "cersei-types",
@@ -1054,9 +1054,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-lsp"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c9d24d97a0191bb97db962dcd366fa692e4d776496d99f14dca9c244e0b094e"
+checksum = "05ecc3e83adde1dbefa31debb67254aeb43c681c0b1385a082dcad459ee68731"
 dependencies = [
  "dashmap",
  "serde",
@@ -1069,9 +1069,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-mcp"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "440406f67144e46042b4fd8eff30e093724d60a0ecb0b5f28ca97fe1587d7dd7"
+checksum = "fc95feb2b885b7dc1786fdbc7a376dcd86d474bfcd52b122602659e5feccdd1b"
 dependencies = [
  "async-trait",
  "cersei-types",
@@ -1084,9 +1084,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-memory"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c43cdb1e8d69a29f75cef52cd3c06441f4577b1034b8abbf93f77f4cd355f941"
+checksum = "87ffed894839883c6750d859dda5868f49cae4d5d523da6488773e5e6a8984bd"
 dependencies = [
  "async-trait",
  "cersei-types",
@@ -1104,9 +1104,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-provider"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59817d13d110e4a81a228637aaaa4dcd434a87163d89aab029171cd73300dff3"
+checksum = "1984b757c0f0ec8465d2b85638464cffd0b3efd4e2bffe85dde2aea571ef6bcd"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1125,9 +1125,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-tools"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d51a7313a6ae3f54bb27ce8d0d0cb52c69f25f53d109b5c2408a6d98dfc41277"
+checksum = "fdf81aa554546c40fb05f39a7c88f11bca02367842df8b75718ba137a8407414"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1169,9 +1169,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-tools-derive"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fccdb83ea0df824ea68a22cf6ef93d3038a3a9e923f097b41ae47f4dc76cd27"
+checksum = "0aac698cb3684b8d80af2ee0c3897042b1f2470f9aeba7a36c0d79cfb208029a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1180,9 +1180,9 @@ dependencies = [
 
 [[package]]
 name = "cersei-types"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a214eac8b042917b313a22dac2a789af64e5e6af6c7a087645d08fef9274599"
+checksum = "21e8767bc500acd6968d50f31493c2704d0aa2bef5815eeb882d7a35ba194253"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

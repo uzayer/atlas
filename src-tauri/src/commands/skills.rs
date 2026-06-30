@@ -379,6 +379,23 @@ const TOOL_REGISTRY: &[ToolDef] = &[
             },
         ],
     },
+    ToolDef {
+        id: "atlas",
+        display_name: "Atlas",
+        // The native in-process "Atlas" (cersei) agent. Enabled skills are
+        // symlinked into a DEDICATED dir that only the in-process `AtlasSkillTool`
+        // reads — kept separate from `.atlas/skills` (the canonical store) so this
+        // toggle is the exclusive gate (no `~/.claude`/bundled-skill leakage). Same
+        // path at both scopes (`~/.atlas/agent-skills`, `<root>/.atlas/agent-skills`).
+        global_skills_dir: ".atlas/agent-skills",
+        project_skills_dir: ".atlas/agent-skills",
+        config_dir: ".atlas",
+        supports_symlink: true,
+        delivery: "native-dir",
+        env_override: None,
+        // The native agent only consumes skills — no agent/command/rule/hook homes.
+        homes: &[],
+    },
 ];
 
 fn tool_def(id: &str) -> Option<&'static ToolDef> {
@@ -568,6 +585,11 @@ fn atomic_write(path: &Path, payload: &str) -> Result<(), String> {
 
 /// True if `<root>/<tool.config_dir>` exists.
 fn tool_detected(root: &Path, def: &ToolDef) -> bool {
+    // The native "Atlas" agent is in-process — always available, regardless of
+    // whether any `.atlas` dir exists yet at this scope.
+    if def.id == "atlas" {
+        return true;
+    }
     root.join(def.config_dir).is_dir()
 }
 
@@ -1937,6 +1959,20 @@ fn pack_name(dir: &Path, manifest: Option<&PluginManifest>) -> Result<String, St
     sanitize_name(&base)
 }
 
+/// The repo segment of an install `source` (`owner/repo`, possibly a `.git` URL),
+/// used as the pack-name fallback when the manifest has no `name`. e.g.
+/// `"vercel-labs/agent-skills"` → `"agent-skills"`.
+fn repo_name_from_source(source: &str) -> String {
+    source
+        .trim()
+        .trim_end_matches('/')
+        .rsplit(|c| c == '/' || c == ':')
+        .next()
+        .unwrap_or(source)
+        .trim_end_matches(".git")
+        .to_string()
+}
+
 /// Relative path of `path` under `pack_root`, with `/` separators. Rejects any
 /// `..` escape (defense in depth — entries come from `read_dir`, but never trust).
 fn pack_rel(pack_root: &Path, path: &Path) -> Option<String> {
@@ -2424,7 +2460,19 @@ fn install_pack_from_dir(
     force: bool,
 ) -> Result<PackInstallResult, String> {
     let parsed_src = pack_parse(src)?;
-    let safe = sanitize_name(&parsed_src.name)?;
+    // `pack_name` falls back to the source DIR basename when the manifest has no
+    // `name` — but at install time `src` is a throwaway clone dir
+    // (`atlas-pack-clone-<pid>-<ts>`), which would become the pack's name. Prefer
+    // the manifest name, else the source repo name (`owner/repo` → `repo`).
+    let name = parsed_src
+        .manifest
+        .as_ref()
+        .and_then(|m| m.name.as_deref())
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| repo_name_from_source(source));
+    let safe = sanitize_name(&name)?;
     let store = pack_store_dir(root, &safe)?;
     let new_hash = hash_skill_dir(src);
 
@@ -2566,6 +2614,70 @@ pub async fn pack_install_remote(
         let result = install_pack_from_dir(&root, &tmp, &source, &commit, force);
         let _ = fs::remove_dir_all(&tmp);
         result
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Install ONE skill from a cloned repo into the canonical store — the granular
+/// counterpart to `install_pack_from_dir`. The skills.sh registry lists
+/// individual skills (one `source` repo holds many), so installing a Discover row
+/// should add just THAT skill as a managed skill (individually projectable +
+/// uninstallable), not the whole repo. Network-free → unit-testable.
+fn install_skill_from_dir(
+    root: &Path,
+    scope: &str,
+    repo: &Path,
+    skill_id: &str,
+) -> Result<SkillMeta, String> {
+    let parsed = pack_parse(repo)?;
+    let comp = parsed
+        .components
+        .iter()
+        .find(|c| c.kind == ComponentKind::Skill && c.name == skill_id)
+        .ok_or_else(|| format!("skill '{skill_id}' not found in this repo"))?;
+    let src_dir = repo.join(&comp.rel_path);
+    if !src_dir.join("SKILL.md").is_file() {
+        return Err(format!("skill '{skill_id}' has no SKILL.md"));
+    }
+
+    let safe = sanitize_name(skill_id)?;
+    let dst = canonical_skill_dir(&skills_base(root), &safe)?;
+    if dst.exists() {
+        fs::remove_dir_all(&dst).map_err(|e| e.to_string())?;
+    }
+    copy_dir_all(&src_dir, &dst)?;
+
+    let raw = fs::read_to_string(dst.join("SKILL.md")).map_err(|e| e.to_string())?;
+    let (fm, _b) = parse_frontmatter(&raw);
+    Ok(SkillMeta {
+        name: fm.name.unwrap_or_else(|| safe.clone()),
+        description: fm.description.unwrap_or_default(),
+        scope: scope.to_string(),
+        enabled_agents: Vec::new(), // not projected yet — user toggles per agent
+        path: dst.join("SKILL.md").to_string_lossy().to_string(),
+        delivery: "native-dir".to_string(),
+        managed: true,
+        pack: None,
+    })
+}
+
+/// Install a single skill (`skill_id`) from a GitHub `source` repo as a managed
+/// skill. Granular alternative to `pack_install_remote`.
+#[tauri::command]
+pub async fn pack_install_skill(
+    scope: String,
+    source: String,
+    skill_id: String,
+    project_path: Option<String>,
+) -> Result<SkillMeta, String> {
+    let root = root_for(&scope, project_path.as_deref())?;
+    tokio::task::spawn_blocking(move || {
+        let (owner, repo) = parse_owner_repo(&source)?;
+        let (tmp, _commit) = fetch_repo_to_temp(&owner, &repo)?;
+        let res = install_skill_from_dir(&root, &scope, &tmp, &skill_id);
+        let _ = fs::remove_dir_all(&tmp);
+        res
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3555,9 +3667,11 @@ mod tests {
         // Registry is claude-code + codex. tmp_root creates .claude and .codex,
         // so both are detected.
         let targets = list_targets(&root, "global");
-        assert_eq!(targets.len(), 2);
+        assert_eq!(targets.len(), 3); // claude-code, codex, atlas
         assert!(targets.iter().any(|t| t.id == "claude-code" && t.detected));
         assert!(targets.iter().any(|t| t.id == "codex" && t.detected));
+        // The native Atlas agent is in-process → always detected.
+        assert!(targets.iter().any(|t| t.id == "atlas" && t.detected));
 
         // Remove codex's config dir → not detected.
         fs::remove_dir_all(root.join(".codex")).unwrap();
@@ -3608,7 +3722,7 @@ mod tests {
         plant_external(&root, ".agents/skills", "wild", "External wild");
 
         let view = reconcile(&root, "project", &root).unwrap();
-        assert_eq!(view.tools.len(), 2);
+        assert_eq!(view.tools.len(), 3); // claude-code, codex, atlas
 
         let owned = view.skills.iter().find(|s| s.name == "owned").unwrap();
         assert!(owned.managed);
@@ -3733,9 +3847,15 @@ mod tests {
         let meta = adopt_skill(&root, "global", "foo").unwrap();
         assert!(meta.managed);
         assert_eq!(meta.description, "External foo");
+        // "Make for all agents" now includes the always-present native Atlas agent
+        // (enabled_agents is sorted alphabetically).
         assert_eq!(
             meta.enabled_agents,
-            vec!["claude-code".to_string(), "codex".to_string()]
+            vec![
+                "atlas".to_string(),
+                "claude-code".to_string(),
+                "codex".to_string()
+            ]
         );
 
         // Canonical copy now exists.
@@ -3763,7 +3883,11 @@ mod tests {
         assert!(post[0].managed);
         assert_eq!(
             post[0].enabled_agents,
-            vec!["claude-code".to_string(), "codex".to_string()]
+            vec![
+                "claude-code".to_string(),
+                "codex".to_string(),
+                "atlas".to_string()
+            ]
         );
         fs::remove_dir_all(&root).ok();
     }

@@ -436,6 +436,7 @@ pub fn run() {
             commands::skills::pack_search,
             commands::skills::pack_remote_preview,
             commands::skills::pack_install_remote,
+            commands::skills::pack_install_skill,
             commands::skills::pack_list,
             commands::skills::pack_check_update,
             commands::skills::pack_project,

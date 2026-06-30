@@ -12,7 +12,7 @@ name = "atlas_review"
 # builders, agentic loop, streaming events. Pinned to the published 0.1.9.
 # default-features=false drops the `vms` feature (see atlas-cersei) — all cersei
 # consumers must agree due to feature unification.
-cersei = { version = "0.2.5", default-features = false }
+cersei = { version = "0.2.6", default-features = false }
 # CancellationToken for cooperative cancel of an in-flight review. Same TLS /
 # tokio stack as the host app, so the dependency trees unify.
 tokio-util = "0.7"

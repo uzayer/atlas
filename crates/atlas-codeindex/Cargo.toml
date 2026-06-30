@@ -13,7 +13,7 @@ name = "atlas_codeindex"
 # Already compiled for the host via atlas-review, so no new grammar build.
 # default-features=false drops the `vms` feature (see atlas-cersei) — all cersei
 # consumers must agree due to feature unification.
-cersei = { version = "0.2.5", default-features = false }
+cersei = { version = "0.2.6", default-features = false }
 # gitignore-respecting project walk (same crate the file index uses).
 ignore = "0.4"
 # Content fingerprints for incremental rebuilds.

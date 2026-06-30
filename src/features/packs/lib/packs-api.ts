@@ -55,6 +55,27 @@ export const packs = {
       }),
     ),
 
+  /**
+   * Install ONE skill (`skillId`) from a `source` repo as a managed skill — the
+   * granular alternative to `install` (which pulls the whole repo as a pack). The
+   * skills.sh registry lists individual skills, so a Discover "Install" adds just
+   * that skill. Returns void to the caller (the marketplace refetches).
+   */
+  installSkill: (
+    scope: Scope,
+    source: string,
+    skillId: string,
+    projectPath?: string | null,
+  ) =>
+    afterSkillMutation(
+      invoke<unknown>("pack_install_skill", {
+        scope,
+        source,
+        skillId,
+        projectPath: projectPath ?? null,
+      }),
+    ),
+
   /** Installed packs in this scope (manifest + provenance). */
   list: (scope: Scope, projectPath?: string | null) =>
     invoke<InstalledPack[]>("pack_list", {
