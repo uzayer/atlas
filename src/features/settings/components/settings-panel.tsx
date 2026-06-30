@@ -79,7 +79,7 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
       {/* Settings nav — collapses to an icon rail (labels become tooltips). */}
       <div
         className={cn(
-          "shrink-0 overflow-hidden border-r border-border-default bg-bg-primary py-2 flex flex-col transition-[width] duration-150",
+          "shrink-0 border-r border-border-default bg-bg-primary py-2 flex flex-col",
           navCollapsed ? "w-[44px]" : "w-[180px]",
         )}
       >
@@ -90,7 +90,7 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
               onClick={() => setActiveSection(s.id)}
               title={navCollapsed ? s.label : undefined}
               className={cn(
-                "w-full flex items-center h-[32px] overflow-hidden text-[11px] font-medium transition-colors border-l-2 cursor-pointer",
+                "w-full flex items-center h-[32px] whitespace-nowrap text-[11px] font-medium transition-colors border-l-2 cursor-pointer",
                 navCollapsed ? "justify-center px-0" : "gap-2 px-4",
                 activeSection === s.id
                   ? "text-text-primary bg-bg-selected border-l-accent"
@@ -98,16 +98,7 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
               )}
             >
               <s.icon size={13} className="shrink-0" />
-              {/* Label fades + collapses its width so the longest label
-                  ("API Keys") never overflows the rail during the animation. */}
-              <span
-                className={cn(
-                  "overflow-hidden whitespace-nowrap transition-all duration-150",
-                  navCollapsed ? "max-w-0 opacity-0" : "max-w-[140px] opacity-100",
-                )}
-              >
-                {s.label}
-              </span>
+              {!navCollapsed && s.label}
             </button>
           ))}
         </div>
@@ -117,23 +108,18 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
           onClick={toggleNav}
           title={navCollapsed ? "Show sidebar" : "Hide sidebar"}
           className={cn(
-            "mt-1 flex items-center h-[30px] overflow-hidden border-t border-border-default pt-px text-[11px] font-medium text-text-tertiary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer",
+            "mt-1 flex items-center h-[30px] whitespace-nowrap border-t border-border-default pt-px text-[11px] font-medium text-text-tertiary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer",
             navCollapsed ? "justify-center px-0" : "gap-2 px-4",
           )}
         >
           {navCollapsed ? (
             <ChevronRight size={14} className="shrink-0" />
           ) : (
-            <ChevronLeft size={14} className="shrink-0" />
+            <>
+              <ChevronLeft size={14} className="shrink-0" />
+              <span>Hide</span>
+            </>
           )}
-          <span
-            className={cn(
-              "overflow-hidden whitespace-nowrap transition-all duration-150",
-              navCollapsed ? "max-w-0 opacity-0" : "max-w-[60px] opacity-100",
-            )}
-          >
-            Hide
-          </span>
         </button>
       </div>
 
