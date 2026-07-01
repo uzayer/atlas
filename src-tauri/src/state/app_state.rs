@@ -172,10 +172,32 @@ pub struct AppSettings {
     /// See `crate::telemetry`.
     #[serde(default = "default_true")]
     pub share_telemetry: bool,
+    /// Selected on-device **embedding** model id (== its dir name under
+    /// `app_data/models/`). Drives `memory_graph::model_dir` and every embedding
+    /// consumer via the shared provider. Switching it wipes + rebuilds the
+    /// per-project memory index (different model = different vector space).
+    /// See `crate::commands::models`.
+    #[serde(default = "default_embedding_model")]
+    pub embedding_model_id: String,
+    /// Selected on-device **LLM** model id (== its dir name). Drives
+    /// `memory_chat::chat_model_dir` (RAG chat generation + code-index summaries).
+    #[serde(default = "default_llm_model")]
+    pub llm_model_id: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Default embedding model — the historical `all-MiniLM-L6-v2` dir, so existing
+/// installs keep using their already-downloaded model with no migration.
+pub fn default_embedding_model() -> String {
+    "all-MiniLM-L6-v2".to_string()
+}
+
+/// Default local LLM — the historical `qwen3-0.6b` dir.
+pub fn default_llm_model() -> String {
+    "qwen3-0.6b".to_string()
 }
 
 fn default_ui_scale() -> f32 {
@@ -190,6 +212,8 @@ impl Default for AppSettings {
             show_hidden_files: true,
             ui_scale: default_ui_scale(),
             share_telemetry: true,
+            embedding_model_id: default_embedding_model(),
+            llm_model_id: default_llm_model(),
         }
     }
 }

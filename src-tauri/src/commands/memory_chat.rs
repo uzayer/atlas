@@ -21,21 +21,16 @@ use atlas_embed::chat::{build_qwen_prompt, QuantizedChatModel};
 use atlas_embed::{BruteForce, VectorStore};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use super::agent_memory::collect_corpus;
 use super::memory_graph::{load_doc_vectors, model_dir, MODEL_FILES};
 use super::memory_indexer::MemoryRegistry;
 
-/// Local generative model — Qwen3-0.6B (Q4) runs on the Apple-Silicon GPU via
-/// candle's Metal backend, small + modern, ample for summarizing retrieved memory.
-const CHAT_MODEL_DIR: &str = "qwen3-0.6b";
-const GGUF_FILE: &str = "Qwen3-0.6B-Q4_K_M.gguf";
-const TOKENIZER_FILE: &str = "tokenizer.json";
-// Q4_K_M (~470 MB) via the unsloth mirror — the official Qwen3-0.6B-GGUF repo
-// only ships Q8_0. Tokenizer comes from the official base repo.
-const GGUF_URL: &str = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf";
-const TOKENIZER_URL: &str = "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/tokenizer.json";
+// The local generative model is now user-selectable (Qwen3-family GGUF) via the
+// Local Model Manager; paths + downloads resolve through `super::models` keyed on
+// the selected `llm_model_id`. All Qwen3 quants run on the Apple-Silicon GPU via
+// candle's Metal backend.
 
 /// How many memory docs to retrieve as context, and how much of each to keep.
 const TOP_K: usize = 10;
@@ -71,18 +66,18 @@ impl MemoryChatState {
     pub(crate) fn chat_model(&self) -> Arc<Mutex<Option<QuantizedChatModel>>> {
         self.chat.clone()
     }
+
+    /// Drop the cached local LLM so the next generation reloads. Called when the
+    /// user selects a different local LLM.
+    pub(crate) fn clear_chat(&self) {
+        *self.chat.lock() = None;
+    }
 }
 
-/// Resolve the downloaded local model's gguf + tokenizer paths, erroring if the
+/// Resolve the **selected** local LLM's gguf + tokenizer paths, erroring if the
 /// model isn't present. Shared with the codebase indexer.
 pub(crate) fn local_model_paths(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
-    let dir = chat_model_dir(app)?;
-    let gguf = dir.join(GGUF_FILE);
-    let tok = dir.join(TOKENIZER_FILE);
-    if !gguf.exists() || !tok.exists() {
-        return Err("Local chat model is not downloaded.".into());
-    }
-    Ok((gguf, tok))
+    super::models::selected_llm_paths(app)
 }
 
 impl Default for MemoryChatState {
@@ -91,15 +86,9 @@ impl Default for MemoryChatState {
     }
 }
 
+/// Dir of the selected local LLM (`app_data/models/<llm_model_id>`).
 fn chat_model_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("no app data dir: {e}"))?
-        .join("models")
-        .join(CHAT_MODEL_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create chat model dir: {e}"))?;
-    Ok(dir)
+    super::models::model_dir_for(app, &super::models::selected_llm_id(app))
 }
 
 // ── Model download / status ──────────────────────────────────────────────────
@@ -113,22 +102,11 @@ pub struct ChatModelStatus {
 
 #[tauri::command]
 pub async fn memory_chat_model_status(app: AppHandle) -> Result<ChatModelStatus, String> {
-    let dir = chat_model_dir(&app)?;
-    let downloaded = dir.join(GGUF_FILE).exists() && dir.join(TOKENIZER_FILE).exists();
+    let id = super::models::selected_llm_id(&app);
     Ok(ChatModelStatus {
-        downloaded,
-        model: CHAT_MODEL_DIR.to_string(),
+        downloaded: super::models::is_downloaded(&app, &id),
+        model: id,
     })
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct DownloadProgress {
-    file: String,
-    file_index: usize,
-    file_count: usize,
-    received: u64,
-    total: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -138,13 +116,24 @@ struct DownloadDone {
     error: Option<String>,
 }
 
-/// Kick off the GGUF + tokenizer download in the background. The frontend listens
-/// on `atlas:memory-chat-model:progress` / `:done`. Mirrors `memory_embed_download`.
+/// Download the **selected** local LLM in the background. The frontend listens on
+/// `atlas:memory-chat-model:progress` / `:done`. The Local Model Manager uses the
+/// generic `models::model_download` instead.
 #[tauri::command]
 pub async fn memory_chat_model_download(app: AppHandle) -> Result<(), String> {
+    let id = super::models::selected_llm_id(&app);
+    let entry =
+        super::models::find_entry(&id).ok_or_else(|| format!("unknown LLM model '{id}'"))?;
     let dir = chat_model_dir(&app)?;
     tokio::spawn(async move {
-        let result = download_chat_model(&app, &dir).await;
+        let result = super::models::download_files(
+            &app,
+            &id,
+            &dir,
+            &entry.files,
+            "atlas:memory-chat-model:progress",
+        )
+        .await;
         let _ = app.emit(
             "atlas:memory-chat-model:done",
             DownloadDone {
@@ -152,77 +141,8 @@ pub async fn memory_chat_model_download(app: AppHandle) -> Result<(), String> {
                 error: result.err(),
             },
         );
+        let _ = app.emit("atlas:models-changed", ());
     });
-    Ok(())
-}
-
-async fn download_chat_model(app: &AppHandle, dir: &std::path::Path) -> Result<(), String> {
-    use futures::StreamExt;
-    use tokio::io::AsyncWriteExt;
-
-    let client = reqwest::Client::builder()
-        .user_agent("Atlas-IDE")
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-
-    let files = [(GGUF_URL, GGUF_FILE), (TOKENIZER_URL, TOKENIZER_FILE)];
-    for (idx, (url, fname)) in files.iter().enumerate() {
-        if dir.join(fname).exists() {
-            continue;
-        }
-        let resp = client
-            .get(*url)
-            .send()
-            .await
-            .map_err(|e| format!("GET {fname}: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("GET {fname}: {e}"))?;
-        let total = resp.content_length().unwrap_or(0);
-
-        let tmp = dir.join(format!("{fname}.part"));
-        let mut file = tokio::fs::File::create(&tmp)
-            .await
-            .map_err(|e| format!("create {fname}: {e}"))?;
-
-        let mut received: u64 = 0;
-        let mut last_emit: u64 = 0;
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("download {fname}: {e}"))?;
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| format!("write {fname}: {e}"))?;
-            received += chunk.len() as u64;
-            if received - last_emit >= 2_097_152 {
-                last_emit = received;
-                let _ = app.emit(
-                    "atlas:memory-chat-model:progress",
-                    DownloadProgress {
-                        file: fname.to_string(),
-                        file_index: idx,
-                        file_count: files.len(),
-                        received,
-                        total,
-                    },
-                );
-            }
-        }
-        file.flush().await.map_err(|e| format!("flush {fname}: {e}"))?;
-        drop(file);
-        tokio::fs::rename(&tmp, dir.join(fname))
-            .await
-            .map_err(|e| format!("finalize {fname}: {e}"))?;
-        let _ = app.emit(
-            "atlas:memory-chat-model:progress",
-            DownloadProgress {
-                file: fname.to_string(),
-                file_index: idx,
-                file_count: files.len(),
-                received,
-                total: total.max(received),
-            },
-        );
-    }
     Ok(())
 }
 
@@ -234,12 +154,7 @@ pub async fn memory_chat_model_load(
     app: AppHandle,
     state: State<'_, MemoryChatState>,
 ) -> Result<(), String> {
-    let cm_dir = chat_model_dir(&app)?;
-    let gguf_path = cm_dir.join(GGUF_FILE);
-    let tok_path = cm_dir.join(TOKENIZER_FILE);
-    if !gguf_path.exists() || !tok_path.exists() {
-        return Err("Local chat model is not downloaded.".into());
-    }
+    let (gguf_path, tok_path) = local_model_paths(&app)?;
     let chat_arc = state.chat.clone();
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let mut guard = chat_arc.lock();
@@ -378,15 +293,15 @@ pub async fn memory_chat_send(
         });
         return Ok(());
     }
-    let cm_dir = chat_model_dir(&app)?;
-    let gguf_path = cm_dir.join(GGUF_FILE);
-    let tok_path = cm_dir.join(TOKENIZER_FILE);
-    if !gguf_path.exists() || !tok_path.exists() {
-        emit(&app, &stream_id, ChatEvent::Error {
-            message: "Download the local chat model first.".into(),
-        });
-        return Ok(());
-    }
+    let (gguf_path, tok_path) = match local_model_paths(&app) {
+        Ok(p) => p,
+        Err(_) => {
+            emit(&app, &stream_id, ChatEvent::Error {
+                message: "Download the local chat model first.".into(),
+            });
+            return Ok(());
+        }
+    };
 
     let vmap = load_doc_vectors(&pp);
     if vmap.is_empty() {

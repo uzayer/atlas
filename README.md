@@ -345,3 +345,43 @@ For UI work you can sometimes get away with `npm run dev` (Vite-only, no Tauri c
 - MCP server integration for tool-call extensibility.
 - Theme system / additional color palettes.
 
+---
+
+- let's ignore these for posthog client side
+[Error] Can't perform a React state update on a component that hasn't mounted yet. This indicates that you have a side-effect in your render function that asynchronously tries to update the component. Move this work to useEffect instead.
+	(anonymous function) (react-dom_client.js:13363)
+	runWithFiberInDEV (react-dom_client.js:999)
+	warnAboutUpdateOnNotYetMountedFiberInDEV (react-dom_client.js:13362)
+	getRootForUpdatedFiber (react-dom_client.js:3534:108)
+	dispatchSetStateInternal (react-dom_client.js:6832)
+	dispatchSetState (react-dom_client.js:6803)
+[Error] ReferenceError: Can't find variable: document (chunk-R4H7GNML.js, line 61)
+
+because these issues are common and undiagnosed for every atlas app and will be reported again and again to posthog which will trigger the price hike
+
+- local model manager
+  - already claude code is working on this
+- posthog is not working for production apps
+  - I think this is because we need to allow API hits to posthog via info.plist or some sort of macos app configuration
+- kb notes is still broken
+  - the auto save doesn't work and we want to get rid of this
+  - cmd+s doesn't work all the time, sometimes after switching to a different file or navigating tabs it's back to it's original content
+    - I right now created a new file called Trial, it saved the note title/header but the content was not saved, doesn't matter what I put it goes back to Untitled
+- spaces
+  - rename spaces to diagrams
+  - for the notes
+    - add an option to render an emoji as the icon for the notes instead of using the note icon for cards all the time
+    - currently i can not draw lines or connectors from one note to another note which needs to be fixed and also we need to be able to draw connectors from all 4 sides (top, bottom, left, right)
+    - we need more capable drawing tool and features
+      - we need a set of drawing tools like miro app; see - @file:/Users/adib/Desktop/atlas/miro.png 
+        - we need a button to create the note
+        - we need a button to create a free text
+        - we need a button to insert images or videos inside the canvas
+      - we need to update the layout, currently we have a fixed header where we can add and focus zoom in to the notes but we need a much more free and modular layout like miro; see - @file:/Users/adib/Desktop/atlas/mirol.png  
+        - instead of having a header that is fixed; see - @file:/Users/adib/Desktop/atlas/h.png let’s add a floating header like in the miro screenshot that is fixed on the top left with options and menus
+        - our right panel needs to slide right in to edit it’s content, currently we it’s a very plain title and markdown body editor but we need to add more beautification to it
+          - slide the panel in and out
+          - the editor can be similar to our knowledge base editor, the header can be the title for the note and the body can be the whole body editor like our kb editor
+          - an example of right side slide in or out animation is our notification panel and we can also add blur to the editor to make it seem more immersive
+    - access to the reference system
+      - in the kb like editor notes system we can refer things, like kb notes or cloned repos and stuff like them, they are basically free flowing notes that can be connected to each other to form mind maps

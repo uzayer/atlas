@@ -153,13 +153,17 @@ impl MemoryEngine {
         // Steps 7/9a populate it, so losing persistence here is non-fatal.
         let graph = open_graph(&memory_dir);
 
+        // Open the store at the dim the manifest recorded — a project rebuilt with
+        // a 768-d model reopens at 768, a legacy/fresh project at the 384 default.
+        // A model switch is reconciled later by `index_params_match` + `reset_index`.
+        let store_dim = manifest.dim;
         let store = if hnsw_path.exists() {
-            HnswStore::load(&hnsw_path, DIM).unwrap_or_else(|e| {
+            HnswStore::load(&hnsw_path, store_dim).unwrap_or_else(|e| {
                 tracing::warn!("failed to load HNSW index ({e}); starting empty");
-                HnswStore::open(DIM).expect("usearch index create")
+                HnswStore::open(store_dim).expect("usearch index create")
             })
         } else {
-            HnswStore::open(DIM).expect("usearch index create")
+            HnswStore::open(store_dim).expect("usearch index create")
         };
 
         let mut engine = Self {
@@ -223,6 +227,32 @@ impl MemoryEngine {
         &mut self.manifest
     }
 
+    /// Whether this project's index was built with `provider`'s exact model + dim.
+    /// The indexer calls this before each pass; a `false` means the user switched
+    /// embedding models (or it's a fresh project whose default tag doesn't match),
+    /// so the index must be wiped and rebuilt via [`reset_index`](Self::reset_index).
+    pub fn index_params_match(&self, provider: &MiniLmProvider) -> bool {
+        self.manifest.provider_name == provider.name() && self.manifest.dim == provider.dimensions()
+    }
+
+    /// Wipe the embedding index (HNSW + manifest + docstore) and reopen it empty at
+    /// `dim`, tagged with `provider_name`. Used when the selected embedding model
+    /// changes: a different model produces vectors in a different space (and often a
+    /// different dimension), so old vectors are invalid and must be re-embedded. The
+    /// graph memory (model-independent text facts) is intentionally left untouched.
+    /// The caller re-indexes afterward to repopulate.
+    pub fn reset_index(&mut self, provider_name: &str, dim: usize) -> anyhow::Result<()> {
+        self.store = HnswStore::open(dim)?;
+        self.manifest = Manifest::new(provider_name, dim);
+        self.docstore = DocStore::new();
+        // Drop the stale on-disk index so a crash before the first re-index can't
+        // reload vectors from the old model; persist the fresh empty state.
+        let _ = std::fs::remove_file(self.memory_dir.join("hnsw.usearch"));
+        self.persist()?;
+        tracing::info!(provider_name, dim, "reset memory index for new embedding model");
+        Ok(())
+    }
+
     /// Persist HNSW + manifest together under the memory dir, creating it lazily.
     /// The manifest write is atomic (temp + rename); usearch save writes whole.
     pub fn persist(&self) -> anyhow::Result<()> {
@@ -251,6 +281,17 @@ impl MemoryEngine {
         provider: &MiniLmProvider,
     ) -> anyhow::Result<IndexStats> {
         use std::collections::HashMap;
+
+        // Safety net: the indexer resets the index when the model changes, so this
+        // should already hold. Bail rather than corrupt the index if a caller feeds
+        // a provider whose dim disagrees with the store.
+        if provider.dimensions() != self.manifest.dim {
+            anyhow::bail!(
+                "embedding dim {} != index dim {} (embedding model changed; reset_index required)",
+                provider.dimensions(),
+                self.manifest.dim
+            );
+        }
 
         let current: Vec<(String, String)> = docs
             .iter()
@@ -458,7 +499,7 @@ mod index_corpus_tests {
             return;
         };
         let embedder = atlas_embed::Embedder::load(&model).expect("load MiniLM");
-        let provider = MiniLmProvider::new(std::sync::Arc::new(embedder));
+        let provider = MiniLmProvider::new(std::sync::Arc::new(embedder), "all-MiniLM-L6-v2");
         let rt = tokio::runtime::Runtime::new().unwrap();
 
         let root = tmp_root("e2e");

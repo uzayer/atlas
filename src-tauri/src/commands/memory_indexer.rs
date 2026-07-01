@@ -105,6 +105,13 @@ impl MemoryRegistry {
         Some(loaded)
     }
 
+    /// Drop the cached embedding provider so the next [`provider`](Self::provider)
+    /// call reloads from disk. Called when the user selects a different embedding
+    /// model (its dir / dim / vector space changed).
+    pub async fn invalidate_provider(&self) {
+        *self.provider.lock().await = None;
+    }
+
     /// Test hook: a registry with a custom debounce window.
     #[cfg(test)]
     fn with_window(job_tx: mpsc::Sender<Job>, window: Duration) -> Self {
@@ -339,6 +346,14 @@ async fn index_one(
 
     let engine = registry.engine_for(cwd);
     let mut guard = engine.write().await;
+    // If the selected embedding model changed since this project was last indexed
+    // (different model id or dim), wipe + rebuild — old vectors live in a different
+    // space and can't be mixed with the new model's.
+    if !guard.index_params_match(provider) {
+        guard
+            .reset_index(provider.provider_name(), provider.dim())
+            .map_err(|e| e.to_string())?;
+    }
     let stats = guard
         .index_corpus(&docs, provider)
         .await
@@ -518,13 +533,16 @@ async fn load_provider(app: &AppHandle) -> Option<Arc<MiniLmProvider>> {
     if !MODEL_FILES.iter().all(|f| dir.join(f).exists()) {
         return None;
     }
+    // Tag the provider with the selected model id so the manifest can detect a
+    // model switch (and rebuild the index).
+    let model_id = super::models::selected_embedding_id(app);
     // Embedder::load is blocking candle work — keep it off the async runtime.
     let embedder = tokio::task::spawn_blocking(move || atlas_embed::Embedder::load(&dir))
         .await
         .ok()?
         .map_err(|e| tracing::warn!(target: "atlas::memory_indexer", "embedder load failed: {e}"))
         .ok()?;
-    Some(Arc::new(MiniLmProvider::new(Arc::new(embedder))))
+    Some(Arc::new(MiniLmProvider::new(Arc::new(embedder), model_id)))
 }
 
 /// Force a full (re)index of `cwd`'s memory corpus off the hot path. Replaces the

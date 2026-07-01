@@ -25,6 +25,35 @@ let started = false; // posthog.init() called (a key resolved)
 let enabled = false; // live opt-in gate
 
 /**
+ * Known-benign client errors we never report. These are common, undiagnosed,
+ * and non-actionable across every Atlas build — sending them to PostHog just
+ * burns event quota (they'd recur endlessly). Matched as substrings against the
+ * error message + stack.
+ *
+ *  1. React's dev-only "state update on a not-yet-mounted component" warning —
+ *     noise from async setState landing during mount; harmless, dev-only.
+ *  2. `document`-not-defined ReferenceError from a bundled dependency that
+ *     touches `document` off the main document context (e.g. a worker chunk).
+ */
+const IGNORED_ERROR_PATTERNS: string[] = [
+  "state update on a component that hasn't mounted yet",
+  "Can't find variable: document",
+  "document is not defined",
+];
+
+function isIgnoredError(error: unknown): boolean {
+  let text = "";
+  if (error instanceof Error) {
+    text = `${error.message}\n${error.stack ?? ""}`;
+  } else if (typeof error === "string") {
+    text = error;
+  } else {
+    text = safeString(error);
+  }
+  return IGNORED_ERROR_PATTERNS.some((p) => text.includes(p));
+}
+
+/**
  * Bootstrap from Rust once at startup. Initializes `posthog-js` with capturing
  * OFF, then opts in only if the user has enabled telemetry. Never throws.
  */
@@ -80,6 +109,8 @@ export function captureClientError(
   context: Record<string, unknown> = {},
 ): void {
   if (!started || !enabled) return;
+  // Drop known-benign, non-actionable noise before it hits PostHog quota.
+  if (isIgnoredError(error)) return;
   try {
     const err = error instanceof Error ? error : new Error(safeString(error));
     posthog.captureException(err, { $lib: "atlas-js", ...context });

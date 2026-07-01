@@ -12,24 +12,42 @@ use async_trait::async_trait;
 use atlas_embed::Embedder;
 use cersei_embeddings::{EmbeddingError, EmbeddingProvider};
 
-/// Provider identifier recorded in the manifest. A change here (e.g. switching to
-/// a BYOK 1536-d provider) forces a full re-embed via `Manifest::provider_name`.
+/// Default provider identifier recorded in a *fresh* manifest before the first
+/// index pass reconciles it to the actually-selected model. A mismatch between
+/// the manifest's `provider_name` and the loaded provider's [`name`](EmbeddingProvider::name)
+/// forces a full re-embed (see `MemoryEngine::index_params_match`).
 pub const PROVIDER_NAME: &str = "atlas-minilm-384";
-/// `all-MiniLM-L6-v2` output dimensionality.
+/// Default embedding dimensionality (`all-MiniLM-L6-v2`). The live provider
+/// reports the loaded model's actual dim via [`dimensions`](EmbeddingProvider::dimensions),
+/// which may differ (e.g. 768 for BGE/GTE-base).
 pub const DIM: usize = 384;
 
-/// On-device MiniLM provider. Wraps a shared [`Embedder`] (the model is loaded
-/// once, then cloned cheaply via `Arc` into each blocking task).
+/// On-device embedding provider. Wraps a shared [`Embedder`] (the model is loaded
+/// once, then cloned cheaply via `Arc` into each blocking task). The provider is
+/// tagged with the selected model's id + its actual output dim so the memory
+/// index can detect a model switch and rebuild.
 pub struct MiniLmProvider {
     embedder: Arc<Embedder>,
+    /// Stable manifest tag: `<model_id>-<dim>`. Switching models (or a dim change)
+    /// changes this, which triggers a full re-embed of the project index.
+    name: String,
+    /// The loaded model's output dimensionality (read from the embedder).
+    dim: usize,
 }
 
 impl MiniLmProvider {
-    /// Wrap an already-loaded embedder. Loading the model from disk is the
-    /// caller's responsibility ([`Embedder::load`]) so the provider stays cheap
-    /// to construct and testable without a model.
-    pub fn new(embedder: Arc<Embedder>) -> Self {
-        Self { embedder }
+    /// Wrap an already-loaded embedder, tagged with the selected `model_id`.
+    /// The dimensionality is read from the embedder; the manifest tag embeds both
+    /// the model id and dim so a switch is always detected. Loading the model from
+    /// disk is the caller's responsibility ([`Embedder::load`]).
+    pub fn new(embedder: Arc<Embedder>, model_id: impl Into<String>) -> Self {
+        let dim = embedder.dim();
+        let name = format!("{}-{dim}", model_id.into());
+        Self {
+            embedder,
+            name,
+            dim,
+        }
     }
 
     /// The wrapped on-device embedder, for callers that need synchronous
@@ -40,16 +58,27 @@ impl MiniLmProvider {
     pub fn embedder(&self) -> Arc<Embedder> {
         self.embedder.clone()
     }
+
+    /// The manifest tag for the loaded model (`<model_id>-<dim>`). Inherent accessor
+    /// so callers don't need the `EmbeddingProvider` trait in scope.
+    pub fn provider_name(&self) -> &str {
+        &self.name
+    }
+
+    /// The loaded model's output dimensionality (inherent accessor).
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
 }
 
 #[async_trait]
 impl EmbeddingProvider for MiniLmProvider {
     fn name(&self) -> &str {
-        PROVIDER_NAME
+        &self.name
     }
 
     fn dimensions(&self) -> usize {
-        DIM
+        self.dim
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
@@ -92,16 +121,15 @@ mod tests {
 
     #[test]
     fn name_and_dimensions_are_stable() {
-        // No model needed: name()/dimensions() are constants on the type.
-        // Build a provider only if a model is present; otherwise assert the
-        // constants directly (the trait values mirror them).
+        // Defaults are unchanged (fresh-manifest tag + MiniLM dim).
         assert_eq!(PROVIDER_NAME, "atlas-minilm-384");
         assert_eq!(DIM, 384);
 
         if let Some(dir) = find_model_dir() {
             let embedder = Embedder::load(&dir).expect("load MiniLM model");
-            let provider = MiniLmProvider::new(Arc::new(embedder));
-            assert_eq!(provider.name(), "atlas-minilm-384");
+            let provider = MiniLmProvider::new(Arc::new(embedder), "all-MiniLM-L6-v2");
+            // Name embeds the model id + actual dim; MiniLM is 384-d.
+            assert_eq!(provider.name(), "all-MiniLM-L6-v2-384");
             assert_eq!(provider.dimensions(), 384);
         }
     }
@@ -113,7 +141,7 @@ mod tests {
             return;
         };
         let embedder = Embedder::load(&dir).expect("load MiniLM model");
-        let provider = MiniLmProvider::new(Arc::new(embedder));
+        let provider = MiniLmProvider::new(Arc::new(embedder), "all-MiniLM-L6-v2");
         let rt = tokio::runtime::Runtime::new().expect("tokio rt");
         let vecs = rt
             .block_on(provider.embed_batch(&["hello world".to_string()]))
