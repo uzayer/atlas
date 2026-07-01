@@ -372,6 +372,8 @@ pub fn run() {
             commands::knowledge_graph_layout::knowledge_graph_layout_save,
             commands::canvas::load_canvas,
             commands::canvas::save_canvas,
+            commands::canvas::canvas_media_upload,
+            commands::canvas::canvas_media_data_url,
             commands::log::load_pinned_log,
             commands::log::append_pinned_log,
             commands::log::clear_pinned_log,

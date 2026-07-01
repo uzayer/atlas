@@ -4,13 +4,46 @@ import { createSelectors } from "@/lib/create-selectors";
 import { logEvent } from "@/features/log/lib/log";
 import { loadCanvas, saveCanvas } from "../lib/canvas-api";
 
+/** What a canvas node is. `note` = rich card (title/body/icon), `text` = chrome-
+ *  less free text, `media` = image, `shape` = geometric flowchart shape with a
+ *  centered text label. Defaults to `note` for legacy files. */
+export type CanvasNodeKind = "note" | "text" | "media" | "shape";
+export type MediaKind = "image" | "video";
+
+/** Flowchart shape geometries. */
+export type ShapeType = "rectangle" | "rounded" | "ellipse" | "diamond";
+
+/** Active canvas tool. Create-tools drop a node on the next pane click, then
+ *  revert to `select`. `connector` is a hint; connections are made by dragging
+ *  between node handles (Loose mode). `shape:*` drops that geometry. */
+export type CanvasTool =
+  | "select"
+  | "note"
+  | "text"
+  | "media"
+  | "connector"
+  | `shape:${ShapeType}`;
+
 export interface CanvasNode {
   id: string;
+  kind: CanvasNodeKind;
   x: number;
   y: number;
   width?: number;
+  height?: number;
+  // note fields
   title: string;
   body: string;
+  /** Emoji shown on the note card (falls back to the sticky-note glyph). */
+  icon?: string;
+  // text field (also the centered label for `shape` nodes)
+  text?: string;
+  // shape field
+  shapeType?: ShapeType;
+  // media fields
+  /** Relative path under `.atlas/canvas-media/` (served via canvas_media_data_url). */
+  src?: string;
+  mediaKind?: MediaKind;
   createdAt: string;
   updatedAt: string;
 }
@@ -19,6 +52,9 @@ export interface CanvasEdge {
   id: string;
   source: string;
   target: string;
+  /** Which side of each node the connector attaches to (t/r/b/l). */
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
 }
 
 export interface CanvasViewport {
@@ -27,8 +63,9 @@ export interface CanvasViewport {
   zoom: number;
 }
 
+/** Persisted file schema. v2 adds node `kind`/`icon`/media + edge handle sides. */
 interface CanvasFile {
-  version: 1;
+  version: 2;
   viewport: CanvasViewport;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
@@ -42,21 +79,41 @@ interface CanvasState {
   viewport: CanvasViewport;
   selectedId: string | null;
   fullscreen: boolean;
+  activeTool: CanvasTool;
 }
+
+type NodePatch = Partial<
+  Pick<
+    CanvasNode,
+    "title" | "body" | "width" | "height" | "icon" | "text" | "src" | "mediaKind" | "shapeType"
+  >
+>;
 
 interface CanvasActions {
   actions: {
     loadProject: (path: string) => Promise<void>;
     addNote: (at?: { x: number; y: number }) => string;
-    updateNote: (id: string, patch: Partial<Pick<CanvasNode, "title" | "body" | "width">>) => void;
+    addText: (at?: { x: number; y: number }) => string;
+    addMedia: (
+      opts: { src: string; mediaKind: MediaKind; width?: number; height?: number },
+      at?: { x: number; y: number },
+    ) => string;
+    addShape: (shapeType: ShapeType, at?: { x: number; y: number }) => string;
+    updateNote: (id: string, patch: NodePatch) => void;
     deleteNote: (id: string) => void;
     moveNote: (id: string, x: number, y: number) => void;
-    addEdge: (source: string, target: string) => void;
+    addEdge: (
+      source: string,
+      target: string,
+      sourceHandle?: string | null,
+      targetHandle?: string | null,
+    ) => void;
     deleteEdge: (id: string) => void;
     setSelected: (id: string | null) => void;
     setViewport: (vp: CanvasViewport) => void;
     setFullscreen: (open: boolean) => void;
     toggleFullscreen: () => void;
+    setTool: (tool: CanvasTool) => void;
   };
 }
 
@@ -81,7 +138,7 @@ function scheduleSave() {
     const s = useCanvasStore.getState();
     if (!s.projectPath || !s.loaded) return;
     const payload: CanvasFile = {
-      version: 1,
+      version: 2,
       viewport: s.viewport,
       nodes: s.nodes,
       edges: s.edges,
@@ -99,14 +156,21 @@ function scheduleSave() {
 function parseFile(raw: string): CanvasFile {
   try {
     const parsed = JSON.parse(raw) as Partial<CanvasFile>;
+    // Migrate v1 → v2: legacy nodes had no `kind`; they were all notes.
+    const nodes = (Array.isArray(parsed.nodes) ? parsed.nodes : []).map((n) => ({
+      ...(n as CanvasNode),
+      kind: (n as CanvasNode).kind ?? "note",
+      title: (n as CanvasNode).title ?? "",
+      body: (n as CanvasNode).body ?? "",
+    }));
     return {
-      version: 1,
+      version: 2,
       viewport: parsed.viewport ?? emptyViewport,
-      nodes: Array.isArray(parsed.nodes) ? (parsed.nodes as CanvasNode[]) : [],
+      nodes,
       edges: Array.isArray(parsed.edges) ? (parsed.edges as CanvasEdge[]) : [],
     };
   } catch {
-    return { version: 1, viewport: emptyViewport, nodes: [], edges: [] };
+    return { version: 2, viewport: emptyViewport, nodes: [], edges: [] };
   }
 }
 
@@ -120,6 +184,7 @@ export const useCanvasStore = createSelectors(
       viewport: emptyViewport,
       selectedId: null,
       fullscreen: false,
+      activeTool: "select",
       actions: {
         loadProject: async (path) => {
           if (saveTimer) {
@@ -159,6 +224,7 @@ export const useCanvasStore = createSelectors(
           set((s) => {
             s.nodes.push({
               id,
+              kind: "note",
               x,
               y,
               width: 320,
@@ -173,6 +239,78 @@ export const useCanvasStore = createSelectors(
           logEvent({ source: "canvas", kind: "note-add", summary: "New note", payload: { id } });
           return id;
         },
+        addText: (at) => {
+          const id = genId("n");
+          const stamp = nowIso();
+          set((s) => {
+            s.nodes.push({
+              id,
+              kind: "text",
+              x: at?.x ?? 0,
+              y: at?.y ?? 0,
+              width: 200,
+              title: "",
+              body: "",
+              text: "Text",
+              createdAt: stamp,
+              updatedAt: stamp,
+            });
+            s.selectedId = id;
+          });
+          scheduleSave();
+          logEvent({ source: "canvas", kind: "text-add", summary: "New text", payload: { id } });
+          return id;
+        },
+        addShape: (shapeType, at) => {
+          const id = genId("n");
+          const stamp = nowIso();
+          // Ellipse/diamond read best square-ish; rectangles a touch wider.
+          const [w, h] = shapeType === "ellipse" || shapeType === "diamond" ? [130, 130] : [160, 90];
+          set((s) => {
+            s.nodes.push({
+              id,
+              kind: "shape",
+              shapeType,
+              x: at?.x ?? 0,
+              y: at?.y ?? 0,
+              width: w,
+              height: h,
+              title: "",
+              body: "",
+              text: "",
+              createdAt: stamp,
+              updatedAt: stamp,
+            });
+            s.selectedId = id;
+          });
+          scheduleSave();
+          logEvent({ source: "canvas", kind: "shape-add", summary: shapeType, payload: { id } });
+          return id;
+        },
+        addMedia: ({ src, mediaKind, width, height }, at) => {
+          const id = genId("n");
+          const stamp = nowIso();
+          set((s) => {
+            s.nodes.push({
+              id,
+              kind: "media",
+              x: at?.x ?? 0,
+              y: at?.y ?? 0,
+              width: width ?? 320,
+              height,
+              title: "",
+              body: "",
+              src,
+              mediaKind,
+              createdAt: stamp,
+              updatedAt: stamp,
+            });
+            s.selectedId = id;
+          });
+          scheduleSave();
+          logEvent({ source: "canvas", kind: "media-add", summary: mediaKind, payload: { id } });
+          return id;
+        },
         updateNote: (id, patch) =>
           set((s) => {
             const n = s.nodes.find((n) => n.id === id);
@@ -180,6 +318,11 @@ export const useCanvasStore = createSelectors(
             if (patch.title !== undefined) n.title = patch.title;
             if (patch.body !== undefined) n.body = patch.body;
             if (patch.width !== undefined) n.width = patch.width;
+            if (patch.height !== undefined) n.height = patch.height;
+            if (patch.icon !== undefined) n.icon = patch.icon;
+            if (patch.text !== undefined) n.text = patch.text;
+            if (patch.src !== undefined) n.src = patch.src;
+            if (patch.mediaKind !== undefined) n.mediaKind = patch.mediaKind;
             n.updatedAt = nowIso();
             scheduleSave();
           }),
@@ -208,7 +351,7 @@ export const useCanvasStore = createSelectors(
             n.y = y;
             scheduleSave();
           }),
-        addEdge: (source, target) => {
+        addEdge: (source, target, sourceHandle, targetHandle) => {
           if (source === target) return;
           const exists = get().edges.some(
             (e) =>
@@ -217,7 +360,7 @@ export const useCanvasStore = createSelectors(
           );
           if (exists) return;
           set((s) => {
-            s.edges.push({ id: genId("e"), source, target });
+            s.edges.push({ id: genId("e"), source, target, sourceHandle, targetHandle });
             scheduleSave();
           });
           logEvent({
@@ -250,6 +393,10 @@ export const useCanvasStore = createSelectors(
         toggleFullscreen: () =>
           set((s) => {
             s.fullscreen = !s.fullscreen;
+          }),
+        setTool: (tool) =>
+          set((s) => {
+            s.activeTool = tool;
           }),
       },
     }))

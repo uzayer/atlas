@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   ReactFlowProvider,
   Background,
   BackgroundVariant,
+  ConnectionMode,
   useReactFlow,
   type Node,
   type Edge,
@@ -13,13 +14,20 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Plus, Maximize2, Minimize2, Crosshair, StickyNote } from "lucide-react";
+import { StickyNote } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
-import { useCanvasStore, type CanvasNode } from "../stores/canvas-store";
-import { NoteNode, type NoteNodeData } from "./note-node";
-import { NoteInspector } from "./note-inspector";
+import { useCanvasStore, type CanvasNode, type ShapeType } from "../stores/canvas-store";
+import { canvasMediaUpload } from "../lib/canvas-api";
+import { NoteNode } from "./note-node";
+import { TextNode } from "./text-node";
+import { MediaNode } from "./media-node";
+import { ShapeNode } from "./shape-node";
+import { CanvasToolbar } from "./canvas-toolbar";
+import { CanvasHeader } from "./canvas-header";
+import { NoteEditorPanel } from "./note-editor-panel";
 
-const nodeTypes = { note: NoteNode };
+const nodeTypes = { note: NoteNode, text: TextNode, media: MediaNode, shape: ShapeNode };
 
 export function CanvasPanel() {
   const fullscreen = useCanvasStore.use.fullscreen();
@@ -71,16 +79,25 @@ function CanvasSurface({
   const edges = useCanvasStore.use.edges();
   const selectedId = useCanvasStore.use.selectedId();
   const loaded = useCanvasStore.use.loaded();
+  const activeTool = useCanvasStore.use.activeTool();
   const {
     loadProject,
     addNote,
+    addText,
+    addMedia,
+    addShape,
     moveNote,
     deleteNote,
     addEdge,
     deleteEdge,
     setSelected,
     setViewport,
+    setTool,
   } = useCanvasStore.use.actions();
+
+  // Which note is open in the slide-in editor (null = closed). Notes open on
+  // double-click; text edits inline; media has no editor.
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   // Load when the project changes.
   useEffect(() => {
@@ -93,23 +110,35 @@ function CanvasSurface({
   const rf = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
 
-  // Project store data → xyflow shape.
-  const rfNodes = useMemo<Node<NoteNodeData>[]>(
+  // Project store data → xyflow shape. Node `type` = kind so xyflow routes to the
+  // right renderer; `data` carries only what that renderer needs.
+  const rfNodes = useMemo<Node[]>(
     () =>
       nodes.map((n) => ({
         id: n.id,
-        type: "note",
+        type: n.kind,
         position: { x: n.x, y: n.y },
         selected: n.id === selectedId,
-        data: {
-          title: n.title,
-          body: n.body,
-          updatedAt: n.updatedAt,
-        },
-        // We disable connections-from-everywhere; handles on the node provide them.
+        data:
+          n.kind === "note"
+            ? { title: n.title, body: n.body, updatedAt: n.updatedAt, icon: n.icon }
+            : n.kind === "text"
+              ? { text: n.text ?? "" }
+              : n.kind === "shape"
+                ? {
+                    shapeType: n.shapeType ?? "rectangle",
+                    text: n.text ?? "",
+                    width: n.width,
+                    height: n.height,
+                  }
+                : {
+                    src: n.src ?? "",
+                    projectPath: projectPath ?? "",
+                    width: n.width,
+                  },
         draggable: true,
       })),
-    [nodes, selectedId]
+    [nodes, selectedId, projectPath]
   );
   const rfEdges = useMemo<Edge[]>(
     () =>
@@ -117,6 +146,8 @@ function CanvasSurface({
         id: e.id,
         source: e.source,
         target: e.target,
+        sourceHandle: e.sourceHandle ?? undefined,
+        targetHandle: e.targetHandle ?? undefined,
         type: "smoothstep",
         style: { stroke: "rgba(255,255,255,0.25)", strokeWidth: 1.5 },
       })),
@@ -150,25 +181,64 @@ function CanvasSurface({
 
   const onConnect = useCallback(
     (c: Connection) => {
-      if (c.source && c.target) addEdge(c.source, c.target);
+      if (c.source && c.target) addEdge(c.source, c.target, c.sourceHandle, c.targetHandle);
     },
     [addEdge]
   );
 
-  const handleAddNote = useCallback(() => {
-    // Drop new notes near the current viewport center so they're visible.
-    const wrap = wrapperRef.current;
-    if (!wrap) {
-      addNote();
-      return;
-    }
-    const rect = wrap.getBoundingClientRect();
-    const center = rf.screenToFlowPosition({
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2,
+  const viewportCenter = useCallback(
+    (dx = 0, dy = 0) => {
+      const wrap = wrapperRef.current;
+      if (!wrap) return undefined;
+      const rect = wrap.getBoundingClientRect();
+      const c = rf.screenToFlowPosition({
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      });
+      return { x: c.x + dx, y: c.y + dy };
+    },
+    [rf]
+  );
+
+  // Click a create-tool, then click the canvas to drop it there; then revert to
+  // Select. `connector`/`select` just clear selection on an empty-canvas click.
+  const onPaneClick = useCallback(
+    (e: React.MouseEvent) => {
+      const tool = useCanvasStore.getState().activeTool;
+      if (tool === "note" || tool === "text") {
+        const p = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+        if (tool === "note") addNote({ x: p.x - 130, y: p.y - 40 });
+        else addText({ x: p.x, y: p.y });
+        setTool("select");
+      } else if (tool.startsWith("shape:")) {
+        const p = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+        addShape(tool.slice(6) as ShapeType, { x: p.x - 65, y: p.y - 45 });
+        setTool("select");
+      } else {
+        setSelected(null);
+      }
+    },
+    [rf, addNote, addText, addShape, setTool, setSelected]
+  );
+
+  const handleInsertMedia = useCallback(async () => {
+    if (!projectPath) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const sel = await open({
+      multiple: false,
+      filters: [
+        { name: "Image", extensions: ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg"] },
+      ],
     });
-    addNote({ x: center.x - 160, y: center.y - 60 });
-  }, [rf, addNote]);
+    if (!sel || Array.isArray(sel)) return;
+    const path = sel as string;
+    try {
+      const rel = await canvasMediaUpload(projectPath, path);
+      addMedia({ src: rel, mediaKind: "image" }, viewportCenter(-160, -90));
+    } catch {
+      /* silent — the dialog can be retried */
+    }
+  }, [projectPath, addMedia, viewportCenter]);
 
   const handleFit = useCallback(() => {
     if (nodes.length === 0) return;
@@ -191,6 +261,12 @@ function CanvasSurface({
     [rf]
   );
 
+  // Open the slide-in editor on a note double-click (text/media aren't notes).
+  const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
+    const n = useCanvasStore.getState().nodes.find((x) => x.id === node.id);
+    if (n?.kind === "note") setEditingId(node.id);
+  }, []);
+
   if (!projectPath) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-[12px] text-text-tertiary gap-2 px-6 text-center">
@@ -201,77 +277,66 @@ function CanvasSurface({
     );
   }
 
+  const armed = activeTool === "note" || activeTool === "text" || activeTool.startsWith("shape:");
+
   return (
-    <div className="h-full flex flex-col bg-bg-base">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 px-3 h-[32px] shrink-0 border-b border-border-default">
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-text-secondary font-medium">Spaces</span>
-          <span className="text-[10px] text-text-tertiary">· {nodes.length} notes</span>
+    <div ref={wrapperRef} className="h-full min-h-0 relative bg-bg-base">
+      {!loaded && (
+        <div className="absolute inset-0 flex items-center justify-center text-[11px] text-text-tertiary z-30">
+          Loading…
         </div>
-        <div className="flex items-center gap-0.5">
-          <button
-            onClick={handleAddNote}
-            className="flex items-center gap-1.5 px-2 h-6 rounded text-[11px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
-            title="Add note"
-          >
-            <Plus size={11} />
-            Note
-          </button>
-          <button
-            onClick={handleFit}
-            className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-primary transition-colors cursor-pointer"
-            title="Fit to view"
-          >
-            <Crosshair size={11} />
-          </button>
-          <button
-            onClick={onToggleFullscreen}
-            className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-primary transition-colors cursor-pointer"
-            title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
-          >
-            {fullscreen ? <Minimize2 size={11} /> : <Maximize2 size={11} />}
-          </button>
-        </div>
-      </div>
+      )}
 
-      {/* Canvas + inspector */}
-      <div ref={wrapperRef} className="flex-1 min-h-0 relative">
-        {!loaded && (
-          <div className="absolute inset-0 flex items-center justify-center text-[11px] text-text-tertiary">
-            Loading…
-          </div>
-        )}
+      <ReactFlow
+        className={cn(armed && "[&_.react-flow__pane]:!cursor-crosshair")}
+        nodes={rfNodes}
+        edges={rfEdges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onConnect={onConnect}
+        onNodeDoubleClick={onNodeDoubleClick}
+        onPaneClick={onPaneClick}
+        onMoveEnd={onMoveEnd}
+        nodeTypes={nodeTypes}
+        connectionMode={ConnectionMode.Loose}
+        connectionRadius={40}
+        minZoom={0.2}
+        maxZoom={2}
+        fitView={false}
+        defaultViewport={useCanvasStore.getState().viewport}
+        deleteKeyCode={["Backspace", "Delete"]}
+        proOptions={{ hideAttribution: true }}
+        panOnScroll
+      >
+        <Background
+          variant={BackgroundVariant.Dots}
+          gap={20}
+          size={1.2}
+          color="rgba(255,255,255,0.18)"
+        />
+      </ReactFlow>
 
-        <ReactFlow
-          nodes={rfNodes}
-          edges={rfEdges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          onPaneClick={() => setSelected(null)}
-          onMoveEnd={onMoveEnd}
-          nodeTypes={nodeTypes}
-          minZoom={0.2}
-          maxZoom={2}
-          fitView={false}
-          defaultViewport={useCanvasStore.getState().viewport}
-          deleteKeyCode={["Backspace", "Delete"]}
-          proOptions={{ hideAttribution: true }}
-          panOnScroll
-        >
-          <Background
-            variant={BackgroundVariant.Dots}
-            gap={20}
-            size={1.2}
-            color="rgba(255,255,255,0.18)"
-          />
-        </ReactFlow>
+      {/* Floating overlays (Miro-style) */}
+      <CanvasHeader
+        noteCount={nodes.length}
+        fullscreen={fullscreen}
+        onFit={handleFit}
+        onToggleFullscreen={onToggleFullscreen}
+      />
+      <CanvasToolbar activeTool={activeTool} onTool={setTool} onInsertMedia={handleInsertMedia} />
 
-        {selectedId && (
-          <NoteInspector onClose={() => setSelected(null)} onJumpToNode={jumpToNode} />
-        )}
-      </div>
+      {editingId && (
+        <NoteEditorPanel
+          key={editingId}
+          noteId={editingId}
+          projectPath={projectPath}
+          onClose={() => setEditingId(null)}
+          onJumpToNode={(id) => {
+            setEditingId(id);
+            jumpToNode(id);
+          }}
+        />
+      )}
     </div>
   );
 }
