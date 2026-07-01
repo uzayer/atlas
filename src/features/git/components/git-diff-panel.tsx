@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -22,6 +22,38 @@ const ROW_H = 18;
 const FONT_PX = 14;
 const CENTER_W = 12; // center gutter: change-direction chevron (tight)
 const RADIUS = 5;
+const LINE_NO_W = 32; // `w-8` line-number gutter inside each SideCell
+const CODE_PAD = 16; // `pl-2 pr-2` on the code cell
+
+/** Width of one monospace character at `FONT_PX`, measured once. Nudged +2%
+ *  so the computed column always errs slightly WIDE (a hair of trailing scroll)
+ *  rather than narrow (which would clip the longest line). */
+let cachedCharW = 0;
+function monoCharWidth(): number {
+  if (cachedCharW) return cachedCharW;
+  let w = FONT_PX * 0.6;
+  try {
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (ctx) {
+      // Mirror the diff's `font-mono` stack at FONT_PX.
+      ctx.font = `${FONT_PX}px ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Code", monospace`;
+      const m = ctx.measureText("MMMMMMMMMMMMMMMMMMMM").width / 20;
+      if (m > 0) w = m;
+    }
+  } catch {
+    /* headless / no canvas — fall back to the ratio */
+  }
+  cachedCharW = w * 1.02;
+  return cachedCharW;
+}
+
+/** Character length of a diff side's rendered line (sum of its segments). */
+function sideLen(side: DiffSide | null): number {
+  if (!side) return 0;
+  let n = 0;
+  for (const s of side.segments) n += s.text.length;
+  return n;
+}
 
 interface GitDiffPanelProps {
   repoPath: string;
@@ -110,7 +142,7 @@ function SideCell({
         {side?.lineNo ?? ""}
       </span>
       <code
-        className="diff-syntax block flex-1 whitespace-pre pl-2 pr-2 font-mono leading-[18px] text-[var(--text-secondary)]"
+        className="diff-syntax block flex-1 overflow-hidden whitespace-pre pl-2 pr-2 font-mono leading-[18px] text-[var(--text-secondary)]"
         style={{
           fontSize: FONT_PX,
           background: bg,
@@ -120,7 +152,20 @@ function SideCell({
           borderBottomRightRadius: roundBot ? RADIUS : 0,
         }}
       >
-        {side ? <CellContent side={side} lang={lang} isLeft={isLeft} /> : null}
+        {side ? (
+          // Panned horizontally by the shared `--diff-sx` (set on the scroll
+          // container). `inline-block` sizes to the line so long content can
+          // slide left/right inside the fixed, clipped cell.
+          <span
+            className="inline-block"
+            style={{
+              transform: "translateX(calc(var(--diff-sx, 0px) * -1))",
+              willChange: "transform",
+            }}
+          >
+            <CellContent side={side} lang={lang} isLeft={isLeft} />
+          </span>
+        ) : null}
       </code>
     </div>
   );
@@ -177,15 +222,14 @@ const DiffRow = memo(function DiffRow({
   const rc = isRightChange(row);
   return (
     <div
-      className="absolute left-0 grid"
+      className="absolute left-0 right-0 grid"
       style={{
         top,
         height: ROW_H,
-        // `max-content` + `minWidth: 100%` lets long lines grow past the
-        // viewport so the outer container scrolls horizontally (both panes
-        // move together), while short rows still fill the width 50/50.
-        minWidth: "100%",
-        width: "max-content",
+        // Panes are FIXED 50/50 with the marker between. Long lines don't widen
+        // the panes; instead each cell clips (`overflow-hidden`) and its content
+        // is panned by the shared `--diff-sx` offset (set on the scroll
+        // container), so both panes scroll horizontally together.
         gridTemplateColumns: `1fr ${CENTER_W}px 1fr`,
       }}
     >
@@ -248,6 +292,50 @@ export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
   const stats = data?.stats;
   const diffCount = changeBlocks.length;
   const items = virtualizer.getVirtualItems();
+
+  // Longest line (in chars) across each pane — used to clamp the shared
+  // horizontal pan (`--diff-sx`). Monospace, so no DOM measurement needed.
+  const maxLineLen = useMemo(() => {
+    let n = 0;
+    for (const r of rows) {
+      n = Math.max(n, sideLen(r.left), sideLen(r.right));
+    }
+    return n;
+  }, [rows]);
+
+  // Shared horizontal pan offset (px). Applied via the `--diff-sx` CSS var on
+  // the scroll container so every row's content slides together without a
+  // React re-render. Horizontal wheel / trackpad (or shift+wheel) drives it;
+  // vertical passes through to the native scroller.
+  const scrollXRef = useRef(0);
+  useEffect(() => {
+    // Reset the pan when the file / its content changes.
+    scrollXRef.current = 0;
+    scrollRef.current?.style.setProperty("--diff-sx", "0px");
+  }, [file, staged, rows]);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      let dx = 0;
+      if (e.shiftKey) dx = e.deltaY || e.deltaX;
+      else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) dx = e.deltaX;
+      else return; // vertical intent → let the native scroller handle it
+      const paneInner = (el.clientWidth - CENTER_W) / 2 - LINE_NO_W - CODE_PAD;
+      const maxSx = Math.max(0, Math.ceil(maxLineLen * monoCharWidth() - paneInner));
+      if (maxSx <= 0) return;
+      e.preventDefault();
+      const next = Math.min(maxSx, Math.max(0, scrollXRef.current + dx));
+      if (next !== scrollXRef.current) {
+        scrollXRef.current = next;
+        el.style.setProperty("--diff-sx", `${next}px`);
+      }
+    };
+    // Non-passive so `preventDefault` actually suppresses the browser's
+    // horizontal overscroll / back-nav gesture.
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [maxLineLen]);
 
   return (
     <div className="flex h-full bg-[var(--bg-primary)]">
