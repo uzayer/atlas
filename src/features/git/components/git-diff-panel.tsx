@@ -110,7 +110,7 @@ function SideCell({
         {side?.lineNo ?? ""}
       </span>
       <code
-        className="diff-syntax block flex-1 overflow-hidden whitespace-pre pl-2 pr-2 font-mono leading-[18px] text-[var(--text-secondary)]"
+        className="diff-syntax block flex-1 whitespace-pre pl-2 pr-2 font-mono leading-[18px] text-[var(--text-secondary)]"
         style={{
           fontSize: FONT_PX,
           background: bg,
@@ -177,10 +177,15 @@ const DiffRow = memo(function DiffRow({
   const rc = isRightChange(row);
   return (
     <div
-      className="absolute left-0 right-0 grid"
+      className="absolute left-0 grid"
       style={{
         top,
         height: ROW_H,
+        // `max-content` + `minWidth: 100%` lets long lines grow past the
+        // viewport so the outer container scrolls horizontally (both panes
+        // move together), while short rows still fill the width 50/50.
+        minWidth: "100%",
+        width: "max-content",
         gridTemplateColumns: `1fr ${CENTER_W}px 1fr`,
       }}
     >

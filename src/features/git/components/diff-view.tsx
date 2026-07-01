@@ -235,7 +235,10 @@ export function DiffView({
               return (
                 <div
                   key={vr.index}
-                  style={base}
+                  // `max-content` + `minWidth: 100%` lets long lines grow past the
+                  // viewport (one horizontal scrollbar on the outer container)
+                  // while short lines still fill the width.
+                  style={{ ...base, width: "max-content", minWidth: "100%" }}
                   className={cn(
                     "flex text-[11px] font-mono leading-[20px] select-text border-x border-border-default",
                     line.type === "add" && "bg-[#0d2211]",
@@ -277,13 +280,13 @@ function DiffCode({ content, language }: { content: string; language: string }) 
   const tokens = highlightDiffLine(language, content);
   if (!tokens) {
     return (
-      <span className="flex-1 min-w-0 whitespace-pre pr-3 text-text-secondary overflow-hidden">
+      <span className="flex-1 whitespace-pre pr-3 text-text-secondary">
         {content}
       </span>
     );
   }
   return (
-    <span className="diff-syntax flex-1 min-w-0 whitespace-pre pr-3 text-text-secondary overflow-hidden">
+    <span className="diff-syntax flex-1 whitespace-pre pr-3 text-text-secondary">
       {tokens.map((t, i) => (
         <span key={i} className={t.cls ?? undefined}>
           {t.text}

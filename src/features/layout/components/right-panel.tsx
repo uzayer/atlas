@@ -1,9 +1,8 @@
 import { lazy, Suspense } from "react";
 import { cn } from "@/lib/utils";
 import { useLayoutStore } from "../stores/layout-store";
-import { ScrollArea } from "@/ui/scroll-area";
 import { PanelSkeleton } from "@/components/panel-skeleton";
-import { BarChart3, Sparkles, GitCompare, Github, CheckCheck } from "lucide-react";
+import { Network, GitCompare, Github, CheckCheck } from "lucide-react";
 
 // All four right-panel sub-panels are lazy so they don't run their first
 // invokes / vendor parses during the boot-cascade window. The user lands
@@ -17,14 +16,10 @@ const GitManagerPanel = lazy(() =>
     default: m.GitManagerPanel,
   }))
 );
-const AnalysisPanel = lazy(() =>
-  import("@/features/analysis/components/analysis-panel").then((m) => ({
-    default: m.AnalysisPanel,
-  }))
-);
-const ExplorePanel = lazy(() =>
-  import("@/features/analysis/components/explore-panel").then((m) => ({
-    default: m.ExplorePanel,
+// xyflow + the layout pass are heavy; load only when the user opens the tab.
+const GitGraphPanel = lazy(() =>
+  import("@/features/git/components/git-graph-panel").then((m) => ({
+    default: m.GitGraphPanel,
   }))
 );
 const GithubPanel = lazy(() =>
@@ -41,8 +36,7 @@ const ReviewAgentsPanel = lazy(() =>
 const sections = [
   { id: "review-agents" as const, label: "Review", icon: CheckCheck },
   { id: "changes" as const, label: "Source Control", icon: GitCompare },
-  { id: "analysis" as const, label: "Analysis", icon: BarChart3 },
-  { id: "explore" as const, label: "Explore", icon: Sparkles },
+  { id: "git-graph" as const, label: "Git Graph", icon: Network },
   { id: "github" as const, label: "GitHub", icon: Github },
 ];
 
@@ -70,30 +64,23 @@ export function RightPanel() {
         ))}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto hide-scrollbar">
+      <div
+        className={cn(
+          "flex-1 min-h-0",
+          // Git Graph owns its own scrolling (via ReactFlow); other panels scroll vertically.
+          activeSection === "git-graph" ? "overflow-hidden" : "overflow-auto hide-scrollbar",
+        )}
+      >
         <Suspense
           fallback={
             <PanelSkeleton
-              label={
-                activeSection === "changes"
-                  ? "Loading changes…"
-                  : activeSection === "analysis"
-                    ? "Loading analysis…"
-                    : activeSection === "explore"
-                      ? "Loading explore…"
-                      : "Loading…"
-              }
+              label={activeSection === "changes" ? "Loading changes…" : "Loading…"}
             />
           }
         >
           {activeSection === "review-agents" && <ReviewAgentsPanel />}
           {activeSection === "changes" && <GitManagerPanel />}
-          {activeSection === "explore" && (
-            <ScrollArea className="h-full p-2">
-              <ExplorePanel />
-            </ScrollArea>
-          )}
-          {activeSection === "analysis" && <AnalysisPanel />}
+          {activeSection === "git-graph" && <GitGraphPanel />}
           {activeSection === "github" && <GithubPanel />}
         </Suspense>
       </div>
