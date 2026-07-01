@@ -31,6 +31,15 @@ impl MiniLmProvider {
     pub fn new(embedder: Arc<Embedder>) -> Self {
         Self { embedder }
     }
+
+    /// The wrapped on-device embedder, for callers that need synchronous
+    /// `embed_one` / `embed` inside their own `spawn_blocking` (memory graph,
+    /// index query, policy distillation, memory-chat). A cheap `Arc` clone — the
+    /// underlying MiniLM model is loaded once (via [`MemoryRegistry::provider`])
+    /// and shared everywhere, so no call site ever re-loads it from disk.
+    pub fn embedder(&self) -> Arc<Embedder> {
+        self.embedder.clone()
+    }
 }
 
 #[async_trait]

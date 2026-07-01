@@ -9,13 +9,15 @@
 //! global app-data dir; the per-project vector index lives in `.atlas/`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use atlas_embed::{BruteForce, Embedder, VectorStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::agent_memory::{collect_corpus, MemoryDoc};
+use super::memory_indexer::MemoryRegistry;
 
 const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 const HF_BASE: &str =
@@ -268,7 +270,11 @@ pub struct MemoryGraph {
 /// and return the similarity graph. Errors with `"model-not-downloaded"` if the
 /// embedding model isn't present yet (the frontend gates on that).
 #[tauri::command]
-pub async fn memory_index_build(app: AppHandle, project_path: String) -> Result<MemoryGraph, String> {
+pub async fn memory_index_build(
+    app: AppHandle,
+    project_path: String,
+    registry: State<'_, Arc<MemoryRegistry>>,
+) -> Result<MemoryGraph, String> {
     let dir = model_dir(&app)?;
     let model_ready = MODEL_FILES.iter().all(|f| dir.join(f).exists());
     if !model_ready {
@@ -295,16 +301,24 @@ pub async fn memory_index_build(app: AppHandle, project_path: String) -> Result<
         });
     }
 
+    // Shared, load-once MiniLM (reused by the indexer, retrieve, query, policy and
+    // memory-chat) instead of loading a fresh ~90 MB model per graph build.
+    let embedder = registry
+        .provider(&app)
+        .await
+        .ok_or("model-not-downloaded")?
+        .embedder();
+
     let cache = load_index(&project_path);
     let pp = project_path.clone();
 
-    tokio::task::spawn_blocking(move || build_graph_blocking(dir, pp, docs, cache))
+    tokio::task::spawn_blocking(move || build_graph_blocking(embedder, pp, docs, cache))
         .await
         .map_err(|e| format!("index task: {e}"))?
 }
 
 fn build_graph_blocking(
-    model_dir: PathBuf,
+    embedder: Arc<Embedder>,
     project_path: String,
     docs: Vec<MemoryDoc>,
     cache: StoredIndex,
@@ -316,13 +330,6 @@ fn build_graph_blocking(
         cache.docs.into_iter().map(|d| (d.hash, d.vector)).collect();
 
     let hashes: Vec<String> = docs.iter().map(|d| hash_text(&embed_text(d))).collect();
-    let need_embed = hashes.iter().any(|h| !cached.contains_key(h));
-
-    let embedder = if need_embed {
-        Some(Embedder::load(&model_dir).map_err(|e| format!("load model: {e}"))?)
-    } else {
-        None
-    };
 
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(docs.len());
     let mut dim = cache.dim;
@@ -332,8 +339,6 @@ fn build_graph_blocking(
             vectors.push(v.clone());
         } else {
             let v = embedder
-                .as_ref()
-                .unwrap()
                 .embed_one(&embed_text(doc))
                 .map_err(|e| format!("embed: {e}"))?;
             dim = v.len();
@@ -472,6 +477,7 @@ pub async fn memory_index_query(
     project_path: String,
     query: String,
     top_k: Option<usize>,
+    registry: State<'_, Arc<MemoryRegistry>>,
 ) -> Result<Vec<QueryHit>, String> {
     let dir = model_dir(&app)?;
     if !MODEL_FILES.iter().all(|f| dir.join(f).exists()) {
@@ -487,8 +493,15 @@ pub async fn memory_index_query(
     }
     let k = top_k.unwrap_or(10);
 
+    // Shared, load-once MiniLM — no per-query model reload (this is the interactive
+    // search hot path).
+    let embedder = registry
+        .provider(&app)
+        .await
+        .ok_or("model-not-downloaded")?
+        .embedder();
+
     tokio::task::spawn_blocking(move || -> Result<Vec<QueryHit>, String> {
-        let embedder = Embedder::load(&dir).map_err(|e| format!("load model: {e}"))?;
         let qv = embedder.embed_one(&q).map_err(|e| format!("embed query: {e}"))?;
         let ids: Vec<String> = index.docs.iter().map(|d| d.id.clone()).collect();
         let vectors: Vec<Vec<f32>> = index.docs.into_iter().map(|d| d.vector).collect();

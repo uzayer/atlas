@@ -18,13 +18,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use atlas_embed::chat::{build_qwen_prompt, QuantizedChatModel};
-use atlas_embed::{BruteForce, Embedder, VectorStore};
+use atlas_embed::{BruteForce, VectorStore};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use super::agent_memory::collect_corpus;
 use super::memory_graph::{load_doc_vectors, model_dir, MODEL_FILES};
+use super::memory_indexer::MemoryRegistry;
 
 /// Local generative model — Qwen3-0.6B (Q4) runs on the Apple-Silicon GPU via
 /// candle's Metal backend, small + modern, ample for summarizing retrieved memory.
@@ -48,11 +49,12 @@ const GIT_CONTEXT_MAX_CHARS: usize = 2600;
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-/// Caches the loaded models (loading a GGUF / BERT each message would add a
-/// multi-second stall) and tracks per-stream cancellation flags.
+/// Caches the loaded local chat model (loading a GGUF each message would add a
+/// multi-second stall) and tracks per-stream cancellation flags. The embedder is
+/// NOT cached here — retrieval borrows the single app-wide MiniLM held by
+/// [`MemoryRegistry::provider`], so the model is only ever loaded once.
 pub struct MemoryChatState {
     chat: Arc<Mutex<Option<QuantizedChatModel>>>,
-    embedder: Arc<Mutex<Option<Embedder>>>,
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
@@ -60,7 +62,6 @@ impl MemoryChatState {
     pub fn new() -> Self {
         Self {
             chat: Arc::new(Mutex::new(None)),
-            embedder: Arc::new(Mutex::new(None)),
             cancels: Mutex::new(HashMap::new()),
         }
     }
@@ -69,12 +70,6 @@ impl MemoryChatState {
     /// reuse it for Tier-2 file summaries instead of loading its own.
     pub(crate) fn chat_model(&self) -> Arc<Mutex<Option<QuantizedChatModel>>> {
         self.chat.clone()
-    }
-
-    /// Shared handle to the cached embedder, so the v3 retrieval-augmented push
-    /// (`super::memory_retrieve`) reuses the loaded MiniLM instead of its own.
-    pub(crate) fn embedder(&self) -> Arc<Mutex<Option<Embedder>>> {
-        self.embedder.clone()
     }
 }
 
@@ -361,6 +356,7 @@ pub async fn memory_chat_send(
     project_path: String,
     messages: Vec<WireMsg>,
     state: State<'_, MemoryChatState>,
+    registry: State<'_, Arc<MemoryRegistry>>,
 ) -> Result<(), String> {
     let pp = project_path.trim_end_matches('/').to_string();
 
@@ -420,8 +416,16 @@ pub async fn memory_chat_send(
     let cancel = Arc::new(AtomicBool::new(false));
     state.cancels.lock().insert(stream_id.clone(), cancel.clone());
 
+    // Shared, load-once MiniLM (same instance the indexer / graph / retrieve use).
+    let Some(provider) = registry.provider(&app).await else {
+        emit(&app, &stream_id, ChatEvent::Error {
+            message: "Download the embedding model first (Memory ▸ Graph).".into(),
+        });
+        return Ok(());
+    };
+    let embedder = provider.embedder();
+
     let chat_arc = state.chat.clone();
-    let embedder_arc = state.embedder.clone();
     let turns: Vec<(String, String)> = messages
         .into_iter()
         .filter(|m| m.role == "user" || m.role == "assistant")
@@ -431,24 +435,12 @@ pub async fn memory_chat_send(
     let app_bg = app.clone();
     let sid = stream_id.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        // 1. Embed the query (lazy-load + cache MiniLM).
-        let qv = {
-            let mut guard = embedder_arc.lock();
-            if guard.is_none() {
-                match Embedder::load(&embed_dir) {
-                    Ok(e) => *guard = Some(e),
-                    Err(e) => {
-                        emit(&app_bg, &sid, ChatEvent::Error { message: format!("load embedder: {e}") });
-                        return;
-                    }
-                }
-            }
-            match guard.as_ref().unwrap().embed_one(&query) {
-                Ok(v) => v,
-                Err(e) => {
-                    emit(&app_bg, &sid, ChatEvent::Error { message: format!("embed query: {e}") });
-                    return;
-                }
+        // 1. Embed the query on the shared MiniLM.
+        let qv = match embedder.embed_one(&query) {
+            Ok(v) => v,
+            Err(e) => {
+                emit(&app_bg, &sid, ChatEvent::Error { message: format!("embed query: {e}") });
+                return;
             }
         };
 
@@ -547,17 +539,19 @@ pub async fn memory_chat_retrieve(
     app: AppHandle,
     project_path: String,
     query: String,
-    state: State<'_, MemoryChatState>,
+    registry: State<'_, Arc<MemoryRegistry>>,
 ) -> Result<RetrieveResult, String> {
     let pp = project_path.trim_end_matches('/').to_string();
     if query.trim().is_empty() {
         return Err("empty query".into());
     }
 
-    let embed_dir = model_dir(&app)?;
-    if !MODEL_FILES.iter().all(|f| embed_dir.join(f).exists()) {
-        return Err("Download the embedding model first (Memory ▸ Graph).".into());
-    }
+    // Shared, load-once MiniLM (also gates on the model being downloaded).
+    let embedder = registry
+        .provider(&app)
+        .await
+        .ok_or("Download the embedding model first (Memory ▸ Graph).")?
+        .embedder();
     let vmap = load_doc_vectors(&pp);
     if vmap.is_empty() {
         return Err("No memory index yet — build it in Memory ▸ Graph first.".into());
@@ -578,22 +572,12 @@ pub async fn memory_chat_retrieve(
     }
     let git_ctx = git_context(&pp);
 
-    let embedder_arc = state.embedder.clone();
     let q = query.clone();
     let (context, sources) = tokio::task::spawn_blocking(
         move || -> Result<(String, Vec<SourceRef>), String> {
-            let qv = {
-                let mut guard = embedder_arc.lock();
-                if guard.is_none() {
-                    let e = Embedder::load(&embed_dir).map_err(|e| format!("load embedder: {e}"))?;
-                    *guard = Some(e);
-                }
-                guard
-                    .as_ref()
-                    .unwrap()
-                    .embed_one(&q)
-                    .map_err(|e| format!("embed query: {e}"))?
-            };
+            let qv = embedder
+                .embed_one(&q)
+                .map_err(|e| format!("embed query: {e}"))?;
             let mut ids: Vec<String> = Vec::with_capacity(vmap.len());
             let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(vmap.len());
             for (id, v) in vmap {
