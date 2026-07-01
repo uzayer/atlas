@@ -89,6 +89,9 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Estimated cumulative cost in USD (native agent; 0 when unknown).
+    #[serde(default)]
+    pub cost: f64,
 }
 
 /// One ACP-advertised session mode (e.g. Codex's read-only / auto / full-access).
@@ -112,6 +115,10 @@ pub struct SessionSnapshot {
     /// The full set of modes the agent advertised for this session. Empty for
     /// agents that don't expose modes; drives the composer's mode picker.
     pub available_modes: Vec<SessionModeInfo>,
+    /// Models the agent advertised (ACP `session/new` `models` blob, reused
+    /// shape: id/name/description). Empty when the agent exposes no model
+    /// selection; drives the composer's model picker for Claude Code / Codex.
+    pub available_models: Vec<SessionModeInfo>,
     pub available_commands: Vec<serde_json::Value>,
     pub plan: Vec<PlanEntry>,
     pub messages: Vec<Message>,
@@ -130,12 +137,32 @@ pub struct SessionState {
     pub current_mode: Option<String>,
     pub current_model: Option<String>,
     pub available_modes: Vec<SessionModeInfo>,
+    pub available_models: Vec<SessionModeInfo>,
     pub available_commands: Vec<serde_json::Value>,
     pub plan: Vec<PlanEntry>,
     pub messages: Vec<Message>,
     pub usage: Usage,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Monotonic counter bumped each time an inbound agent update is applied
+    /// (text/thinking chunk, tool call, plan, …). The worker samples it after
+    /// `send_prompt` returns to detect when the ACP notification stream has
+    /// gone quiet before flipping the turn to idle — closing the cross-task
+    /// race where the prompt response resolves a beat before the agent's final
+    /// streamed chunk lands. Not part of the serialised snapshot.
+    pub activity_seq: u64,
+    /// Monotonic turn identity, bumped at the START of every turn (worker's
+    /// `handle_send`). Stamped onto every emitted delta so the frontend can
+    /// reject a stale terminal (idle/error) delta belonging to a turn that has
+    /// already been superseded by a newer send — the real safety net against
+    /// premature-idle under parallel / queued / wake-timing races. Not
+    /// serialised into the snapshot.
+    pub turn_seq: u64,
+    /// Set by the manager's ACP dispatch when the agent reports a turn failure
+    /// out-of-band (an `AcpEvent::TurnFailed` that isn't already surfaced as the
+    /// `send_prompt` `Err`). The worker drains it when emitting terminal state
+    /// so terminal status has a single writer (the worker). Not serialised.
+    pub pending_turn_error: Option<String>,
 }
 
 impl SessionState {
@@ -150,12 +177,16 @@ impl SessionState {
             current_mode: None,
             current_model: None,
             available_modes: Vec::new(),
+            available_models: Vec::new(),
             available_commands: Vec::new(),
             plan: Vec::new(),
             messages: Vec::new(),
             usage: Usage::default(),
             created_at: now,
             updated_at: now,
+            activity_seq: 0,
+            turn_seq: 0,
+            pending_turn_error: None,
         }
     }
 
@@ -169,6 +200,7 @@ impl SessionState {
             current_mode: self.current_mode.clone(),
             current_model: self.current_model.clone(),
             available_modes: self.available_modes.clone(),
+            available_models: self.available_models.clone(),
             available_commands: self.available_commands.clone(),
             plan: self.plan.clone(),
             messages: self.messages.clone(),

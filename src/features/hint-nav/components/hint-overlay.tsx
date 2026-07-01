@@ -178,13 +178,24 @@ export function HintOverlay() {
         return (
           <span
             key={i}
-            className="absolute inline-flex items-center rounded-[3px] border border-[var(--border-default)] px-1 font-mono text-[10px] font-bold uppercase leading-[15px] tracking-wide shadow-[0_1px_2px_rgba(0,0,0,0.6)]"
+            className="absolute inline-flex items-center rounded-full px-1.5 font-sans text-[10px] font-semibold uppercase leading-[16px] tracking-wide"
             style={{
               left: Math.max(0, t.rect.left),
               top: Math.max(0, t.rect.top),
               transform: "translate(-2px, -2px)",
-              background: "var(--text-primary)",
-              color: "var(--bg-base)",
+              // macOS-native keycap: fully-rounded, dark frosted-glass pill —
+              // a darker translucent gradient over a heavy backdrop blur, a
+              // hairline border so it reads over any surface, a faint top
+              // highlight + bottom shade for the raised feel, and a soft drop
+              // shadow lifting it off the page.
+              color: "rgba(255,255,255,0.95)",
+              background:
+                "linear-gradient(180deg, rgba(18,18,21,0.86) 0%, rgba(8,8,10,0.9) 100%)",
+              backdropFilter: "blur(14px) saturate(160%)",
+              WebkitBackdropFilter: "blur(14px) saturate(160%)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              boxShadow:
+                "inset 0 1px 0 rgba(255,255,255,0.12), inset 0 -1px 0 rgba(0,0,0,0.4), 0 1px 3px rgba(0,0,0,0.6)",
             }}
           >
             {typed && (
@@ -195,9 +206,23 @@ export function HintOverlay() {
         );
       })}
 
-      {/* Bottom HUD bar */}
+      {/* Bottom HUD bar — native macOS frosted-glass dock */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2">
-        <div className="flex items-center gap-3 rounded-lg border border-[var(--border-default)] bg-[var(--bg-elevated)] px-3 py-2 shadow-[var(--shadow-overlay)]">
+        <div
+          className="flex items-center gap-3 rounded-2xl px-3.5 py-2.5"
+          style={{
+            // Matches the hint keycaps: dark translucent gradient over a heavy
+            // backdrop blur, hairline border, faint top highlight + soft drop
+            // shadow for the floating native-HUD feel.
+            background:
+              "linear-gradient(180deg, rgba(18,18,21,0.86) 0%, rgba(8,8,10,0.9) 100%)",
+            backdropFilter: "blur(22px) saturate(170%)",
+            WebkitBackdropFilter: "blur(22px) saturate(170%)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            boxShadow:
+              "inset 0 1px 0 rgba(255,255,255,0.1), 0 8px 28px rgba(0,0,0,0.55)",
+          }}
+        >
           <span className="font-mono text-[12px] text-[var(--text-primary)]">
             {typed ? (
               <span className="tracking-widest">{typed.toUpperCase()}</span>

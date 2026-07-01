@@ -151,10 +151,14 @@ pub async fn memory_policies(app: AppHandle, project_path: String) -> Result<Vec
         return Err("model-not-downloaded".into());
     }
 
+    // Preferences live in memory files (MEMORY.md / CLAUDE.md / AGENTS.md / shared
+    // memory), NEVER in source files — so drop the codebase index (source
+    // "codebase", added in 0.1.18). It otherwise made "Distilling preferences…"
+    // embed hundreds of irrelevant file docs on the CPU embedder every cold run.
     let docs = collect_corpus(&project_path)
         .await
         .into_iter()
-        .filter(|d| d.file_path.is_some())
+        .filter(|d| d.file_path.is_some() && d.source != "codebase")
         .collect::<Vec<_>>();
     if docs.is_empty() {
         return Ok(vec![]);

@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::backend::{AcpBackend, AgentBackend, CerseiBackend};
 use crate::error::{Error, Result};
 use crate::events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
 use crate::plugin::{PluginSpec, TranscriptKind, builtin_plugins, find_plugin};
@@ -46,18 +47,25 @@ pub struct AgentManager {
 
 struct ManagerInner {
     acp: AgentRegistry,
+    cersei: atlas_cersei::CerseiRuntime,
     sessions: DashMap<SessionKey, Arc<SessionHandle>>,
     agent_plugins: DashMap<AgentId, String>,
+    /// Per-agent backend (ACP subprocess vs in-process Cersei), chosen at spawn.
+    agent_backends: DashMap<AgentId, Arc<dyn AgentBackend>>,
     sink: Arc<dyn DeltaSink>,
 }
 
 impl AgentManager {
-    pub fn new(sink: Arc<dyn DeltaSink>) -> Self {
+    /// `config_dir` is the app config dir (holds `byok-keys.json` +
+    /// `cersei-sessions/`); the native agent reads keys + persists sessions there.
+    pub fn new(sink: Arc<dyn DeltaSink>, config_dir: std::path::PathBuf) -> Self {
         Self {
             inner: Arc::new(ManagerInner {
                 acp: AgentRegistry::new(),
+                cersei: atlas_cersei::CerseiRuntime::new(config_dir),
                 sessions: DashMap::new(),
                 agent_plugins: DashMap::new(),
+                agent_backends: DashMap::new(),
                 sink,
             }),
         }
@@ -71,15 +79,34 @@ impl AgentManager {
         self.inner.acp.list()
     }
 
-    /// Spawn a plugin's process and register the resulting agent.
+    /// Spawn a plugin and register the resulting agent. ACP plugins launch a
+    /// subprocess; the native `cersei` plugin is registered in-process.
     pub async fn spawn(&self, plugin_id: &str) -> Result<AgentInfo> {
         let plugin = find_plugin(plugin_id).ok_or_else(|| Error::UnknownPlugin(plugin_id.into()))?;
         let event_sink: Arc<dyn EventSink> = Arc::new(self.clone());
-        let info = self.inner.acp.spawn(&plugin.plugin_id, event_sink).await?;
+
+        let (info, backend): (AgentInfo, Arc<dyn AgentBackend>) =
+            if plugin.plugin_id == atlas_cersei::CERSEI_PLUGIN_ID {
+                let info = self.inner.cersei.spawn(event_sink);
+                (info, Arc::new(CerseiBackend(self.inner.cersei.clone())))
+            } else {
+                let info = self.inner.acp.spawn(&plugin.plugin_id, event_sink).await?;
+                (info, Arc::new(AcpBackend(self.inner.acp.clone())))
+            };
+
         self.inner
             .agent_plugins
             .insert(info.agent_id, plugin.plugin_id);
+        self.inner.agent_backends.insert(info.agent_id, backend);
         Ok(info)
+    }
+
+    fn backend_for(&self, agent_id: AgentId) -> Result<Arc<dyn AgentBackend>> {
+        self.inner
+            .agent_backends
+            .get(&agent_id)
+            .map(|e| e.value().clone())
+            .ok_or(Error::Acp(atlas_acp::AcpError::UnknownAgent))
     }
 
     /// Auth methods the agent advertised during `initialize` — surfaced
@@ -87,14 +114,14 @@ impl AgentManager {
     /// adapter actually supports (Claude Subscription, Anthropic Console,
     /// SSO, etc.) without hard-coding labels.
     pub fn auth_methods(&self, agent_id: AgentId) -> Result<Vec<AuthMethodWire>> {
-        Ok(self.inner.acp.auth_methods(agent_id)?)
+        Ok(self.backend_for(agent_id)?.auth_methods(agent_id)?)
     }
 
     /// Run the agent's ACP `authenticate` flow for `method_id` (e.g. Codex's
     /// "chatgpt" browser OAuth). Used by agents whose auth methods don't ship a
     /// terminal command (so the terminal-subprocess path doesn't apply).
     pub async fn authenticate(&self, agent_id: AgentId, method_id: String) -> Result<()> {
-        self.inner.acp.authenticate(agent_id, method_id).await?;
+        self.backend_for(agent_id)?.authenticate(agent_id, method_id).await?;
         Ok(())
     }
 
@@ -112,7 +139,9 @@ impl AgentManager {
             self.inner.sessions.remove(&key);
         }
         self.inner.agent_plugins.remove(&agent_id);
-        self.inner.acp.kill(agent_id)?;
+        let backend = self.backend_for(agent_id)?;
+        self.inner.agent_backends.remove(&agent_id);
+        backend.kill(agent_id)?;
         Ok(())
     }
 
@@ -120,7 +149,7 @@ impl AgentManager {
     pub async fn new_session(&self, agent_id: AgentId, cwd: PathBuf) -> Result<SessionKey> {
         let cwd_str = cwd.to_string_lossy().into_owned();
         let plugin_id = self.plugin_id_for(agent_id)?;
-        let resp: NewSessionInfo = self.inner.acp.new_session(agent_id, cwd).await?;
+        let resp: NewSessionInfo = self.backend_for(agent_id)?.new_session(agent_id, cwd).await?;
         let session_id_str = serde_json::to_value(&resp.session_id)
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -136,6 +165,7 @@ impl AgentManager {
             plugin_id,
             Vec::new(),
             resp.modes,
+            resp.models,
         );
         Ok(key)
     }
@@ -174,6 +204,24 @@ impl AgentManager {
         let plugin_id = self.plugin_id_for(agent_id)?;
         let plugin = find_plugin(&plugin_id).ok_or_else(|| Error::UnknownPlugin(plugin_id.clone()))?;
 
+        if plugin.transcript == TranscriptKind::CerseiJson {
+            // Native agent: the runtime persists its own JSON transcript. Build
+            // the UI seed messages from it, restore the runtime's history (so a
+            // follow-up turn keeps context), then install.
+            let seeds = cersei_replay_to_messages(
+                self.inner.cersei.replay_session(&cwd_str, &session_id_str),
+            );
+            let modes = self
+                .backend_for(agent_id)?
+                .load_session(agent_id, session_id.clone(), cwd)
+                .await?;
+            if self.inner.sessions.contains_key(&key) {
+                return Ok(key);
+            }
+            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes, None);
+            return Ok(key);
+        }
+
         if plugin.transcript == TranscriptKind::None {
             // Transcript-less plugins (Codex) have no on-disk format Atlas can
             // parse. Instead the agent REPLAYS the conversation to us via
@@ -188,8 +236,9 @@ impl AgentManager {
                 plugin_id,
                 Vec::new(),
                 None,
+                None,
             );
-            match self.inner.acp.load_session(agent_id, session_id, cwd).await {
+            match self.backend_for(agent_id)?.load_session(agent_id, session_id, cwd).await {
                 Ok(modes) => {
                     self.seed_modes(&key, modes);
                     Ok(key)
@@ -207,7 +256,10 @@ impl AgentManager {
             // worker is ready for a follow-up `send_prompt`; the resumed
             // session's advertised modes come back here.
             let seeds = transcript::replay(plugin.transcript, &cwd_str, &session_id_str).await?;
-            let modes = self.inner.acp.load_session(agent_id, session_id.clone(), cwd).await?;
+            let modes = self
+                .backend_for(agent_id)?
+                .load_session(agent_id, session_id.clone(), cwd)
+                .await?;
 
             // Re-check after the awaits — another concurrent caller may have
             // installed the same session while we were doing I/O.
@@ -215,7 +267,7 @@ impl AgentManager {
                 return Ok(key);
             }
 
-            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes);
+            self.install_session(key.clone(), session_id, cwd_str, plugin_id, seeds, modes, None);
             Ok(key)
         }
     }
@@ -235,6 +287,42 @@ impl AgentManager {
         if !available.is_empty() {
             st.available_modes = available;
         }
+    }
+
+    /// Stored native-agent sessions for a project (chat session sidebar).
+    ///
+    /// The stored first-user message carries Atlas-injected context (memory
+    /// blocks, mention bodies). Strip that scaffolding from the preview/title
+    /// here — on the FULL text — then truncate, so the sidebar shows the user's
+    /// actual question instead of a "New session" fallback.
+    pub fn cersei_list_sessions(&self, cwd: &str) -> Vec<atlas_cersei::SessionMeta> {
+        let mut metas = self.inner.cersei.list_sessions(cwd);
+        for m in &mut metas {
+            let cleaned = crate::transcript::strip_injected_context(&m.preview);
+            let cleaned = cleaned.trim();
+            if !cleaned.is_empty() {
+                m.preview = cleaned.chars().take(80).collect();
+            } else {
+                // Nothing but injected scaffolding — keep a sane truncation of
+                // the raw text rather than an empty title.
+                m.preview = m.preview.chars().take(80).collect();
+            }
+        }
+        metas
+    }
+
+    /// UI-neutral transcript for a stored native-agent session (Memory tab).
+    pub fn cersei_session_transcript(&self, cwd: &str, session_id: &str) -> Vec<atlas_cersei::ReplayItem> {
+        self.inner.cersei.replay_session(cwd, session_id)
+    }
+
+    /// Delete a stored native-agent session's transcript (sidebar delete).
+    pub fn cersei_delete_session(
+        &self,
+        cwd: &str,
+        session_id: &str,
+    ) -> std::result::Result<(), String> {
+        self.inner.cersei.delete_session(cwd, session_id)
     }
 
     pub fn snapshot(&self, key: &SessionKey) -> Result<SessionSnapshot> {
@@ -264,8 +352,7 @@ impl AgentManager {
     /// delta the same way it does for any clean turn end.
     pub fn cancel(&self, key: &SessionKey) -> Result<()> {
         let handle = self.handle_for(key)?;
-        self.inner
-            .acp
+        self.backend_for(handle.agent_id)?
             .cancel_turn(handle.agent_id, handle.acp_session_id.clone())?;
         Ok(())
     }
@@ -276,6 +363,14 @@ impl AgentManager {
 
     pub fn set_model(&self, key: &SessionKey, model_id: String) -> Result<()> {
         self.handle_for(key)?.send(SessionCommand::SetModel(model_id))
+    }
+
+    pub fn set_effort(&self, key: &SessionKey, effort: String) -> Result<()> {
+        self.handle_for(key)?.send(SessionCommand::SetEffort(effort))
+    }
+
+    pub fn set_compress(&self, key: &SessionKey, on: bool) -> Result<()> {
+        self.handle_for(key)?.send(SessionCommand::SetCompress(on))
     }
 
     /// Resolve a pending permission request.
@@ -307,15 +402,32 @@ impl AgentManager {
             session_id: session_id.to_string(),
         };
         let handle = self.handle_for(&key)?;
-        self.inner
-            .acp
+        self.backend_for(agent_id)?
             .respond_permission(agent_id, request_id, decision)?;
-        let envelope = SessionDeltaEnvelope {
+        let sid = handle.acp_session_id.to_string();
+        self.inner.sink.emit(SessionDeltaEnvelope {
             agent_id: handle.agent_id,
-            session_id: handle.acp_session_id.to_string(),
+            session_id: sid.clone(),
             delta: SessionDelta::PermissionResolved { request_id },
+        });
+        // The turn resumes now that the user answered — flip `Waiting` back to
+        // `Running` so the UI shows work again. (A terminal from the worker will
+        // supersede this if the answer actually ended the turn.)
+        let turn_seq = {
+            let mut st = handle.state.lock();
+            if st.status == SessionStatus::Waiting {
+                st.status = SessionStatus::Running;
+            }
+            st.turn_seq
         };
-        self.inner.sink.emit(envelope);
+        self.inner.sink.emit(SessionDeltaEnvelope {
+            agent_id: handle.agent_id,
+            session_id: sid,
+            delta: SessionDelta::Status {
+                status: SessionStatus::Running,
+                turn_seq,
+            },
+        });
         Ok(())
     }
 
@@ -345,6 +457,7 @@ impl AgentManager {
         plugin_id: String,
         seed_messages: Vec<Message>,
         modes: Option<serde_json::Value>,
+        models: Option<serde_json::Value>,
     ) {
         let mut state = SessionState::new(
             key.agent_id,
@@ -365,15 +478,34 @@ impl AgentManager {
                 state.available_modes = available;
             }
         }
+        // Seed the advertised models + current model from the `session/new`
+        // `models` blob (Claude Code / Codex model picking, ACP first-party).
+        if let Some(models) = &models {
+            let (current, available) = parse_session_models(models);
+            if let Some(c) = current {
+                state.current_model = Some(c);
+            }
+            if !available.is_empty() {
+                state.available_models = available;
+            }
+        }
         let state = Arc::new(Mutex::new(state));
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+
+        // Backend was registered at spawn(); fall back to ACP defensively.
+        let backend: Arc<dyn AgentBackend> = self
+            .inner
+            .agent_backends
+            .get(&key.agent_id)
+            .map(|e| e.value().clone())
+            .unwrap_or_else(|| Arc::new(AcpBackend(self.inner.acp.clone())));
 
         let worker = SessionWorker {
             state: state.clone(),
             agent_id: key.agent_id,
             acp_session_id: acp_session_id.clone(),
-            registry: self.inner.acp.clone(),
+            backend,
             sink: self.inner.sink.clone(),
             rx: cmd_rx,
         };
@@ -439,33 +571,29 @@ impl AgentManager {
                 options,
             } => {
                 if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    let st = handle.state.lock();
+                    // The turn is paused waiting on the user (e.g. a plan / tool
+                    // approval). Surface a distinct `Waiting` status so the UI
+                    // keeps an active affordance instead of looking idle/"done".
+                    let (sid, turn_seq) = {
+                        let mut st = handle.state.lock();
+                        st.status = SessionStatus::Waiting;
+                        (st.session_id.clone(), st.turn_seq)
+                    };
                     self.emit(SessionDeltaEnvelope {
                         agent_id,
-                        session_id: st.session_id.clone(),
+                        session_id: sid.clone(),
+                        delta: SessionDelta::Status {
+                            status: SessionStatus::Waiting,
+                            turn_seq,
+                        },
+                    });
+                    self.emit(SessionDeltaEnvelope {
+                        agent_id,
+                        session_id: sid,
                         delta: SessionDelta::PermissionRequest {
                             request_id,
                             tool_call: serde_json::to_value(&tool_call).unwrap_or_default(),
                             options: serde_json::to_value(&options).unwrap_or_default(),
-                        },
-                    });
-                }
-            }
-            AcpEvent::TurnStopped {
-                session_id,
-                turn_id: _,
-                stop_reason,
-            } => {
-                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    let mut st = handle.state.lock();
-                    st.status = SessionStatus::Idle;
-                    let sid = st.session_id.clone();
-                    drop(st);
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: sid,
-                        delta: SessionDelta::TurnFinished {
-                            stop_reason: format!("{stop_reason:?}").to_ascii_lowercase(),
                         },
                     });
                 }
@@ -475,15 +603,54 @@ impl AgentManager {
                 turn_id: _,
                 error,
             } => {
+                // Single terminal-status writer = the worker. Rather than
+                // mutating status + emitting a terminal delta here (which raced
+                // the worker's own terminal emit and carried no turn identity),
+                // record the error so the worker reports it when `send_prompt`
+                // returns. In practice ACP failures already surface as the
+                // `send_prompt` `Err`, so this is a belt-and-suspenders path.
+                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
+                    handle.state.lock().pending_turn_error = Some(error);
+                }
+            }
+            AcpEvent::Usage {
+                session_id,
+                input_tokens,
+                output_tokens,
+                cost,
+            } => {
                 if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
                     let mut st = handle.state.lock();
-                    st.status = SessionStatus::Error;
+                    st.usage.input_tokens = input_tokens;
+                    st.usage.output_tokens = output_tokens;
+                    st.usage.cost = cost;
+                    let usage = st.usage.clone();
                     let sid = st.session_id.clone();
                     drop(st);
                     self.emit(SessionDeltaEnvelope {
                         agent_id,
                         session_id: sid,
-                        delta: SessionDelta::TurnFailed { error },
+                        delta: SessionDelta::UsageUpdated { usage },
+                    });
+                }
+            }
+            AcpEvent::Compaction { session_id, active } => {
+                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
+                    let sid = handle.state.lock().session_id.clone();
+                    self.emit(SessionDeltaEnvelope {
+                        agent_id,
+                        session_id: sid,
+                        delta: SessionDelta::Compaction { active },
+                    });
+                }
+            }
+            AcpEvent::CompressionSaved { session_id, saved_tokens } => {
+                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
+                    let sid = handle.state.lock().session_id.clone();
+                    self.emit(SessionDeltaEnvelope {
+                        agent_id,
+                        session_id: sid,
+                        delta: SessionDelta::CompressionSaved { saved_tokens },
                     });
                 }
             }
@@ -501,6 +668,14 @@ impl AgentManager {
         let Some(kind) = v.get("sessionUpdate").and_then(|s| s.as_str()) else {
             return;
         };
+        // Record inbound activity so the worker can wait for the agent's
+        // stream to quiesce before signalling turn-end (see worker's
+        // `await_quiescence`). Bumped for every recognised update kind — the
+        // goal is simply "the agent sent us something just now".
+        {
+            let mut st = handle.state.lock();
+            st.activity_seq = st.activity_seq.wrapping_add(1);
+        }
         match kind {
             "agent_message_chunk" => {
                 let Some(content) = v.get("content") else { return };
@@ -782,6 +957,40 @@ impl EventSink for AgentManager {
     }
 }
 
+/// Convert the native agent's UI-neutral replay items into `Message`s for the
+/// resumed session's transcript (mirrors what the ACP replay paths produce).
+fn cersei_replay_to_messages(items: Vec<atlas_cersei::ReplayItem>) -> Vec<Message> {
+    use atlas_cersei::ReplayItem;
+    items
+        .into_iter()
+        .map(|it| match it {
+            ReplayItem::User { text } => crate::session::new_user_message(text),
+            ReplayItem::Assistant { text } => new_assistant_text(text),
+            ReplayItem::Thinking { text } => new_assistant_thinking(text),
+            ReplayItem::Tool {
+                id,
+                name,
+                input,
+                result,
+                is_error,
+            } => new_assistant_tool(ToolCall {
+                id,
+                tool_name: name.clone(),
+                title: Some(name),
+                kind: None,
+                status: if is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                },
+                arguments: input,
+                result,
+                locations: Vec::new(),
+            }),
+        })
+        .collect()
+}
+
 /// Parse the ACP `SessionModeState` blob (from `session/new` | `session/load`)
 /// into `(current_mode_id, available_modes)`. The schema serialises camelCase
 /// (`currentModeId`, `availableModes`), each mode as `{id, name, description}`.
@@ -797,6 +1006,43 @@ fn parse_session_modes(modes: &serde_json::Value) -> (Option<String>, Vec<Sessio
             list.iter()
                 .filter_map(|m| {
                     let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+                    let name = m
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&id)
+                        .to_string();
+                    let description = m
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    Some(SessionModeInfo {
+                        id,
+                        name,
+                        description,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (current, available)
+}
+
+/// Parse the ACP `SessionModelState` blob (from `session/new`) into
+/// `(current_model_id, available_models)`. The schema serialises camelCase
+/// (`currentModelId`, `availableModels`), each model as `{modelId, name,
+/// description}`. Reuses `SessionModeInfo` (identical id/name/description shape).
+fn parse_session_models(models: &serde_json::Value) -> (Option<String>, Vec<SessionModeInfo>) {
+    let current = models
+        .get("currentModelId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let available = models
+        .get("availableModels")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|m| {
+                    let id = m.get("modelId").and_then(|v| v.as_str())?.to_string();
                     let name = m
                         .get("name")
                         .and_then(|v| v.as_str())

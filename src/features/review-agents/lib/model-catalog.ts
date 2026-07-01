@@ -116,6 +116,17 @@ export function curateModels(provider: string, liveIds: string[]): string[] {
   return out.slice(0, MAX_MODELS);
 }
 
+/** Best-first preferred (coding-friendly) models for `provider`. These are the
+ *  ones pinned + starred at the top of a model picker. */
+export function preferredModels(provider: string): string[] {
+  return PREFERRED[provider] ?? [];
+}
+
+/** Whether `id` is one of `provider`'s preferred coding-friendly models. */
+export function isPreferredModel(provider: string, id: string): boolean {
+  return (PREFERRED[provider] ?? []).includes(id);
+}
+
 /** The default model to select for a provider given its curated list. */
 export function defaultModelFor(provider: string, curated: string[]): string | null {
   const preferred = PREFERRED[provider] ?? [];

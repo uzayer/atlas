@@ -20,6 +20,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useGitStore } from "@/features/git/stores/git-store";
+import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { CommitRowView } from "./commit-node";
 import {
   ROW_HEIGHT,
@@ -88,7 +89,12 @@ export function GitGraphPanel() {
   }, [path, queryClient]);
 
   const onSelect = useCallback((sha: string) => {
-    setSelectedSha((cur) => (cur === sha ? null : sha));
+    setSelectedSha(sha);
+    // Jump to Source Control → History and open this commit's detail view.
+    const layout = useLayoutStore.getState();
+    layout.actions.setRightSection("changes");
+    if (!layout.rightPanel.visible) layout.actions.toggleRightPanel();
+    void useGitStore.getState().actions.loadCommit(sha);
   }, []);
 
   if (!path || !isRepo) {
@@ -211,14 +217,11 @@ function GraphView({
   return (
     <div className="h-full flex flex-col bg-bg-sidebar">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 h-[28px] shrink-0 border-b border-border-subtle">
+      <div className="flex items-center justify-between px-3 h-[32px] shrink-0 border-b border-border-subtle">
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wide">
-            Git Graph
-          </span>
           {rows.length > 0 && (
-            <span className="text-[10px] text-text-tertiary">
-              · {rows.length} commits
+            <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wide">
+              {rows.length} commits
             </span>
           )}
         </div>

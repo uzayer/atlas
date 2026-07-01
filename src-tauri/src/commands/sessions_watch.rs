@@ -122,6 +122,11 @@ pub async fn sessions_watch_open(
             .watch(&folder_for_task, RecursiveMode::NonRecursive)
             .map_err(|e| format!("failed to watch {}: {e}", folder_for_log.display()))?;
 
+        // Codex and Cersei stores are NOT watched here: Codex's `~/.codex`
+        // SQLite WAL/SHM sidecars churn constantly (stormed the debouncer), and
+        // both lists now self-refresh via a short `refetchInterval` poll on the
+        // frontend. Only the Claude JSONL dir (the primary watch above) is
+        // event-driven.
         Ok(debouncer)
     })
     .await

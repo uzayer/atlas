@@ -1,7 +1,7 @@
 import type { TabType } from "@/lib/constants";
 
-type LeftSection = "files" | "knowledge" | "git-graph";
-type RightSection = "review-agents" | "changes" | "analysis" | "explore" | "github";
+type LeftSection = "files" | "knowledge" | "analysis" | "explore";
+type RightSection = "review-agents" | "changes" | "github" | "git-graph";
 
 /** A predefined panel/split/tab arrangement applied via the layout switcher
  *  (⌘⌥L) or Settings → Layouts. Applied to the ACTIVE workspace. */

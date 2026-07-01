@@ -19,6 +19,11 @@ use crate::session::{Message, PlanEntry, SessionStatus, ToolCall, Usage};
 pub enum SessionDelta {
     Status {
         status: SessionStatus,
+        /// Turn identity this status belongs to (see `SessionState::turn_seq`).
+        /// Lets the frontend drop a stale terminal `idle`/`error` that belongs
+        /// to a turn already superseded by a newer send. 0 = untracked/current.
+        #[serde(default)]
+        turn_seq: u64,
     },
     /// A fresh message was appended to the tail of `messages`. UI should push
     /// it onto its local mirror.
@@ -56,6 +61,14 @@ pub enum SessionDelta {
     UsageUpdated {
         usage: Usage,
     },
+    /// Context compaction is running (`active = true`) or just finished.
+    Compaction {
+        active: bool,
+    },
+    /// Approx tokens RTK compression saved on this turn (native agent).
+    CompressionSaved {
+        saved_tokens: u64,
+    },
     /// Agent requested permission for a tool call. The UI's permission inbox
     /// owns this — `respond_permission` resolves it back through atlas-acp.
     PermissionRequest {
@@ -69,9 +82,15 @@ pub enum SessionDelta {
     },
     TurnFinished {
         stop_reason: String,
+        /// Turn identity (see `SessionState::turn_seq`); frontend rejects a
+        /// terminal for a superseded turn. 0 = untracked/current.
+        #[serde(default)]
+        turn_seq: u64,
     },
     TurnFailed {
         error: String,
+        #[serde(default)]
+        turn_seq: u64,
     },
     /// Underlying ACP agent process died.
     AgentDisconnected {

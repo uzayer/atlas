@@ -2,11 +2,12 @@ import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/time-ago";
 import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
+import { AtlasIcon } from "@/components/atlas-icon";
 
 export interface PanelItem {
-  id: string; // memory doc id ("claude:…" / "codex:…")
+  id: string; // memory doc id ("claude:…" / "codex:…" / "cersei:…")
   title: string;
-  source: string; // "claude" | "codex"
+  source: string; // "claude" | "codex" | "cersei"
   note: string; // e.g. "affected a1b2c3 on main" / "matched · impacts 3 commits"
   ts_ms: number;
   score?: number; // search relevance, 0..1
@@ -68,11 +69,13 @@ export function MemoryTimelinePanel({
                 key={it.id + it.note}
                 onClick={() => onActivate(it.id)}
                 className="w-full text-left px-3 py-2.5 border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)] transition-colors flex flex-col gap-0.5"
-                title="Open in its Claude/Codex tab"
+                title="Open in its source agent tab"
               >
                 <div className="flex items-center gap-1.5 min-w-0">
                   {it.source === "codex" ? (
                     <CodexIcon className="size-3 shrink-0 opacity-70" />
+                  ) : it.source === "cersei" ? (
+                    <AtlasIcon size={12} className="shrink-0 opacity-70" />
                   ) : (
                     <ClaudeIcon className="size-3 shrink-0 opacity-70" />
                   )}

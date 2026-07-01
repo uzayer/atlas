@@ -24,13 +24,31 @@ use tokenizers::{Tokenizer, TruncationDirection, TruncationParams, TruncationStr
 /// BERT position embeddings cap; MiniLM/BERT support up to 512 tokens.
 const MAX_TOKENS: usize = 512;
 
-/// A loaded sentence-embedding model. CPU-only — embedding a few hundred short
-/// memory documents is sub-second and avoids Metal/Accelerate setup cost.
+/// A loaded sentence-embedding model. Runs on the Apple-Silicon GPU via Metal
+/// when the `metal` feature is compiled in (falling back to CPU on init
+/// failure); CPU otherwise.
 pub struct Embedder {
     model: BertModel,
     tokenizer: Tokenizer,
     device: Device,
     dim: usize,
+}
+
+/// Pick the fastest available device: the Apple-Silicon GPU via Metal when the
+/// `metal` feature is compiled in, else CPU. Metal init failures (e.g. headless
+/// CI) fall back to CPU rather than erroring. Mirrors `chat::best_device`.
+fn best_device() -> Device {
+    #[cfg(feature = "metal")]
+    {
+        match Device::new_metal(0) {
+            Ok(d) => {
+                eprintln!("atlas-embed: embedder using Metal device");
+                return d;
+            }
+            Err(e) => eprintln!("atlas-embed: Metal init failed ({e}); using CPU"),
+        }
+    }
+    Device::Cpu
 }
 
 impl Embedder {
@@ -59,7 +77,7 @@ impl Embedder {
             }))
             .map_err(|e| anyhow!("set truncation: {e}"))?;
 
-        let device = Device::Cpu;
+        let device = best_device();
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path.clone()], DTYPE, &device)
                 .with_context(|| format!("mmap {}", weights_path.display()))?

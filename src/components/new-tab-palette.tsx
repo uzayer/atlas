@@ -14,9 +14,11 @@ import {
   Settings,
   Search,
   Timer,
+  GitCompare,
   type LucideProps,
 } from "lucide-react";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
+import { openNewAgentChat } from "@/features/chat/lib/open-agent-session";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { cn } from "@/lib/utils";
 import { KbdCombo } from "@/ui/kbd";
@@ -45,6 +47,7 @@ const MODULES: ModuleEntry[] = [
   { id: "memory", type: "memory", label: "Memory", icon: BrainCircuit },
   { id: "research", type: "research", label: "Research", icon: BookOpen },
   { id: "canvas", type: "canvas", label: "Spaces", icon: Map },
+  { id: "diff", type: "diff", label: "Git Diff", icon: GitCompare },
   { id: "browser", type: "browser", label: "Browser", icon: Globe },
   { id: "editor", type: "editor", label: "Untitled Editor", icon: Code, shortcut: "⌘N" },
   { id: "log", type: "log", label: "Log", icon: ScrollText },
@@ -98,14 +101,9 @@ export function NewTabPalette({
   const commit = (item: ModuleEntry) => {
     const ts = Date.now();
     if (item.type === "chat") {
-      addTab({
-        id: `chat-${ts}`,
-        type: "chat",
-        title: "Agents",
-        closable: true,
-        dirty: false,
-        data: {},
-      });
+      // Singleton agent chat — focus the existing chat tab (resetting it to a
+      // fresh session) instead of opening a second one.
+      openNewAgentChat();
     } else if (item.type === "model-chat") {
       addTab({
         id: `model-chat-${ts}`,

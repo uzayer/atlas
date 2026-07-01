@@ -11,6 +11,7 @@ import {
   UnfoldVertical,
   RefreshCw,
   MoreHorizontal,
+  GitCompare,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { parseDiff, buildRows, type DiffFile } from "../lib/diff";
@@ -29,6 +30,7 @@ type SortMode = "default" | "most-changes";
 export function DiffView({
   diff,
   onOpenFile,
+  onOpenDiff,
   onRefresh,
   filters = false,
   emptyLabel = "No changes",
@@ -36,6 +38,8 @@ export function DiffView({
 }: {
   diff: string;
   onOpenFile?: (path: string) => void;
+  /** Open this file in the dedicated side-by-side diff tab. */
+  onOpenDiff?: (path: string) => void;
   onRefresh?: () => void;
   filters?: boolean;
   emptyLabel?: string;
@@ -185,6 +189,18 @@ export function DiffView({
                     <span className="text-[11px] text-text-secondary font-mono truncate flex-1 select-text">
                       {file.path}
                     </span>
+                    {onOpenDiff && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenDiff(file.path);
+                        }}
+                        className="opacity-0 group-hover:opacity-100 p-0.5 text-text-tertiary hover:text-text-primary"
+                        title="Open in diff view"
+                      >
+                        <GitCompare size={10} />
+                      </button>
+                    )}
                     {onOpenFile && (
                       <button
                         onClick={(e) => {
@@ -192,7 +208,7 @@ export function DiffView({
                           onOpenFile(file.path);
                         }}
                         className="opacity-0 group-hover:opacity-100 p-0.5 text-text-tertiary hover:text-text-primary"
-                        title="Open file"
+                        title="Open in code editor"
                       >
                         <ExternalLink size={9} />
                       </button>
@@ -219,7 +235,10 @@ export function DiffView({
               return (
                 <div
                   key={vr.index}
-                  style={base}
+                  // `max-content` + `minWidth: 100%` lets long lines grow past the
+                  // viewport (one horizontal scrollbar on the outer container)
+                  // while short lines still fill the width.
+                  style={{ ...base, width: "max-content", minWidth: "100%" }}
                   className={cn(
                     "flex text-[11px] font-mono leading-[20px] select-text border-x border-border-default",
                     line.type === "add" && "bg-[#0d2211]",
@@ -261,13 +280,13 @@ function DiffCode({ content, language }: { content: string; language: string }) 
   const tokens = highlightDiffLine(language, content);
   if (!tokens) {
     return (
-      <span className="flex-1 min-w-0 whitespace-pre pr-3 text-text-secondary overflow-hidden">
+      <span className="flex-1 whitespace-pre pr-3 text-text-secondary">
         {content}
       </span>
     );
   }
   return (
-    <span className="diff-syntax flex-1 min-w-0 whitespace-pre pr-3 text-text-secondary overflow-hidden">
+    <span className="diff-syntax flex-1 whitespace-pre pr-3 text-text-secondary">
       {tokens.map((t, i) => (
         <span key={i} className={t.cls ?? undefined}>
           {t.text}

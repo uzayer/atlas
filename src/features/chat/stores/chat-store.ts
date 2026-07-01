@@ -7,6 +7,7 @@ import type {
   AgentStatus,
   MessageRole,
   ClaudePermissionMode,
+  SwitchableAgent,
 } from "@/types/agent";
 import { CLAUDE_PERMISSION_MODES } from "@/types/agent";
 import type { PendingPermission } from "@/types/acp";
@@ -17,6 +18,8 @@ import type {
 } from "@/types/agents";
 import { splitAtlasContext } from "../lib/atlas-context";
 import { loadCachedAcpModes, saveCachedAcpModes } from "../lib/acp-modes-cache";
+import { loadCachedAcpModels, saveCachedAcpModels } from "../lib/acp-models-cache";
+import { saveCerseiModelPref, saveCerseiEffort, saveCerseiCompress } from "../lib/cersei-model-pref";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
 
@@ -48,6 +51,58 @@ function pushAcpModeToAgent(state: ChatState, sessionId: string): void {
     key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
     modeId: session.acpCurrentMode,
   }).catch((err) => console.warn("agents_set_mode failed:", err));
+}
+
+/** Push an ACP agent's model selection (Claude Code / Codex) to its bound
+ *  agent via `agents_set_model` (ACP `session/set_model`). Plain model id (no
+ *  `provider/` prefix — that's the native Cersei form). No-op until bound. */
+function pushAcpModelToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId || !session.acpCurrentModel) return;
+  void invoke("agents_set_model", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    modelId: session.acpCurrentModel,
+  }).catch((err) => console.warn("agents_set_model failed:", err));
+}
+
+/** Push the native Cersei agent's `provider/model` selection to its bound
+ *  agent via `agents_set_model`. The backend's `set_model` parses the
+ *  `provider/model` form (see `atlas_cersei::CerseiRuntime::set_model`).
+ *  No-op until the session is bound and both provider + model are chosen. */
+function pushCerseiModelToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId) return;
+  if (session.agentType !== "cersei") return;
+  const provider = session.cerseiProvider;
+  const model = session.acpCurrentModel;
+  if (!provider || !model) return;
+  void invoke("agents_set_model", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    modelId: `${provider}/${model}`,
+  }).catch((err) => console.warn("agents_set_model failed:", err));
+}
+
+/** Push the native agent's reasoning-effort level to its bound agent via
+ *  `agents_set_effort`. No-op until bound / for non-cersei sessions. */
+function pushCerseiEffortToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId) return;
+  if (session.agentType !== "cersei") return;
+  void invoke("agents_set_effort", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    effort: session.cerseiEffort ?? "",
+  }).catch((err) => console.warn("agents_set_effort failed:", err));
+}
+
+/** Push the native agent's RTK compression toggle via `agents_set_compress`. */
+function pushCerseiCompressToAgent(state: ChatState, sessionId: string): void {
+  const session = state.sessions[sessionId];
+  if (!session?.acpAgentId || !session.acpSessionId) return;
+  if (session.agentType !== "cersei") return;
+  void invoke("agents_set_compress", {
+    key: { agent_id: session.acpAgentId, session_id: session.acpSessionId },
+    on: session.cerseiCompress ?? true,
+  }).catch((err) => console.warn("agents_set_compress failed:", err));
 }
 
 /** Convert an atlas-agents wire ToolCall into the in-store ChatMessage shape. */
@@ -97,10 +152,16 @@ interface ChatState {
 
 interface ChatActions {
   actions: {
-    createSession: (tabId: string, agentType?: "claude-code" | "codex") => void;
+    createSession: (tabId: string, agentType?: SwitchableAgent) => void;
     /** Re-bind a fresh (message-less) chat to a different agent. Clears the ACP
      *  binding so the chat panel re-creates a session with the new agent. */
-    switchChatAgent: (tabId: string, agentType: "claude-code" | "codex") => void;
+    switchChatAgent: (tabId: string, agentType: SwitchableAgent) => void;
+    /** Sync the composer's agent label to an ALREADY-bound session's real
+     *  agent (e.g. resuming a history session whose agent differs from the
+     *  tab's current selection). Unlike `switchChatAgent` this does NOT clear
+     *  the ACP binding — the session stays attached to its live agent process,
+     *  so it never spawns a fresh chat. */
+    setSessionAgentType: (tabId: string, agentType: SwitchableAgent) => void;
     setActiveSession: (id: string | null) => void;
     addMessage: (
       sessionId: string,
@@ -144,6 +205,25 @@ interface ChatActions {
      *  session boot resolves (modes confirmed, or bind failed) so the composer's
      *  picker never hangs on its loading spinner. */
     setAcpModesPending: (sessionId: string, pending: boolean) => void;
+    /** Seed the ACP model list (Claude Code / Codex) + current model from a
+     *  session snapshot's `available_models`. Caches per agentType. */
+    setAcpModels: (
+      sessionId: string,
+      currentModel: string | null,
+      availableModels: SessionModeInfo[]
+    ) => void;
+    /** Pick an ACP model and push it to the bound agent (`session/set_model`). */
+    setAcpModel: (sessionId: string, modelId: string) => void;
+    /** Native Cersei agent: pick the BYOK provider. Clears the model so the
+     *  composer re-selects a default for the new provider before pushing. */
+    setCerseiProvider: (sessionId: string, provider: string) => void;
+    /** Native Cersei agent: pick the model and push `provider/model` to the
+     *  bound agent via `agents_set_model`. No-op until the session is bound. */
+    setCerseiModel: (sessionId: string, model: string) => void;
+    /** Native Cersei agent: set the reasoning-effort level and push it. */
+    setCerseiEffort: (sessionId: string, effort: string) => void;
+    /** Native Cersei agent: toggle RTK tool-output compression and push it. */
+    setCerseiCompress: (sessionId: string, on: boolean) => void;
     replaceMessages: (
       sessionId: string,
       messages: Array<{
@@ -154,6 +234,7 @@ interface ChatActions {
           toolName: string;
           kind?: string | null;
           arguments: Record<string, unknown>;
+          result?: string | null;
         }>;
       }>
     ) => void;
@@ -388,6 +469,14 @@ export const useChatStore = createSelectors(
                     };
                   })()
                 : {}),
+              // Models apply to BOTH Claude Code and Codex (ACP `session/new`
+              // model picking). Pre-fill from cache; empty for the native agent.
+              ...(() => {
+                const m = loadCachedAcpModels(agentType);
+                return m
+                  ? { acpAvailableModels: m.availableModels, acpCurrentModel: m.currentModel ?? undefined }
+                  : {};
+              })(),
             };
             s.activeSessionId = tabId;
           }),
@@ -395,15 +484,23 @@ export const useChatStore = createSelectors(
           set((s) => {
             const sess = s.sessions[tabId];
             if (!sess) return;
+            // Drop any pending permissions that belonged to the old binding so a
+            // stale request from the previous agent can't render under the new
+            // one (agents are pooled per plugin, so the process keeps running —
+            // we only clear THIS session's queue, not the agent).
+            if (sess.acpSessionId) delete s.pendingPermissions[sess.acpSessionId];
             sess.agentType = agentType;
             sess.claudePermissionMode =
               agentType === "claude-code" ? "default" : undefined;
             // Drop the old ACP binding so the chat panel's mount effect re-binds
-            // to the newly chosen agent (its deps watch acpSessionId).
+            // to the newly chosen agent (deps watch acpSessionId + agentType).
             sess.acpAgentId = undefined;
             sess.acpSessionId = undefined;
             sess.acpCurrentMode = undefined;
             sess.acpCurrentModel = undefined;
+            // The provider only applies to the native agent; clear it so the
+            // composer re-defaults from BYOK keys if cersei is chosen.
+            sess.cerseiProvider = undefined;
             if (agentType === "claude-code") {
               // Claude has no ACP modes — clear the old agent's so no stale pill.
               sess.acpAvailableModes = [];
@@ -417,6 +514,31 @@ export const useChatStore = createSelectors(
               sess.acpCurrentMode = cached?.currentMode ?? undefined;
               sess.acpModesPending = true;
             }
+            // Models apply to both agents — seed from cache (empty for cersei).
+            const cachedModels = loadCachedAcpModels(agentType);
+            sess.acpAvailableModels = cachedModels?.availableModels ?? [];
+            sess.acpCurrentModel = cachedModels?.currentModel ?? undefined;
+          }),
+        setSessionAgentType: (tabId, agentType) =>
+          set((s) => {
+            const sess = s.sessions[tabId];
+            if (!sess || sess.agentType === agentType) return;
+            sess.agentType = agentType;
+            sess.claudePermissionMode =
+              agentType === "claude-code"
+                ? (sess.claudePermissionMode ?? "default")
+                : undefined;
+            if (agentType === "claude-code") {
+              // Claude has no ACP modes — clear any stale picker state left by
+              // the previously-selected agent so no ghost mode pill shows.
+              sess.acpAvailableModes = [];
+              sess.acpModesPending = false;
+              sess.acpCurrentMode = undefined;
+            }
+            // For codex/cersei the resume flow calls `setAcpModes` immediately
+            // after with the session's real advertised modes, so no cache
+            // seeding is needed here. Crucially the ACP binding
+            // (acpAgentId/acpSessionId) is left intact — this only relabels.
           }),
         setActiveSession: (id) =>
           set((s) => {
@@ -564,6 +686,68 @@ export const useChatStore = createSelectors(
           });
           pushAcpModeToAgent(get(), sessionId);
         },
+        setAcpModels: (sessionId, currentModel, availableModels) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (!session) return;
+            session.acpAvailableModels = availableModels;
+            // Only seed the current model from the snapshot when it carries one;
+            // never clobber a user-driven selection the store already reflects.
+            if (currentModel && !session.acpCurrentModel) {
+              session.acpCurrentModel = currentModel;
+            }
+          });
+          // Persist for instant pre-fill on the next switch/resume (ACP
+          // `session/load` doesn't re-advertise models).
+          const at = get().sessions[sessionId]?.agentType;
+          if (availableModels.length > 0 && at) {
+            saveCachedAcpModels(at, { currentModel: currentModel ?? null, availableModels });
+          }
+        },
+        setAcpModel: (sessionId, modelId) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.acpCurrentModel = modelId;
+          });
+          pushAcpModelToAgent(get(), sessionId);
+        },
+        setCerseiProvider: (sessionId, provider) =>
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (!session || session.cerseiProvider === provider) return;
+            session.cerseiProvider = provider;
+            // New provider → the prior model id is meaningless; let the composer
+            // pick this provider's default before anything is pushed.
+            session.acpCurrentModel = undefined;
+          }),
+        setCerseiModel: (sessionId, model) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.acpCurrentModel = model;
+          });
+          // Remember the full selection so the next new chat seeds from it.
+          const sess = get().sessions[sessionId];
+          if (sess?.cerseiProvider && model) {
+            saveCerseiModelPref({ provider: sess.cerseiProvider, model });
+          }
+          pushCerseiModelToAgent(get(), sessionId);
+        },
+        setCerseiEffort: (sessionId, effort) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.cerseiEffort = effort;
+          });
+          saveCerseiEffort(effort);
+          pushCerseiEffortToAgent(get(), sessionId);
+        },
+        setCerseiCompress: (sessionId, on) => {
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.cerseiCompress = on;
+          });
+          saveCerseiCompress(on);
+          pushCerseiCompressToAgent(get(), sessionId);
+        },
         replaceMessages: (sessionId, messages) =>
           set((s) => {
             const session = s.sessions[sessionId];
@@ -579,7 +763,7 @@ export const useChatStore = createSelectors(
                   toolName: tc.toolName,
                   kind: tc.kind ?? null,
                   arguments: tc.arguments,
-                  result: null,
+                  result: tc.result ?? null,
                   status: "completed" as const,
                   duration: null,
                 })),
@@ -831,23 +1015,39 @@ function appendThoughtToDraft(s: ChatDraft, acpSessionId: string, text: string):
   session.messages.push(makeAssistantThinkingMessage(text));
 }
 
+/** A terminal (idle/error) delta carries the `turn_seq` of the turn it ends.
+ *  Reject one whose turn is older than the session's current turn — a newer
+ *  send already superseded it (the parallel / queued / wake premature-"done"
+ *  class). A missing or 0 `turn_seq` (native cersei agent) is treated as
+ *  current, so nothing regresses there. */
+function isStaleTurn(session: ChatSession, turnSeq: number | undefined): boolean {
+  if (!turnSeq) return false;
+  return turnSeq < (session.currentTurnSeq ?? 0);
+}
+
 function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
   const tid = findTabByAcpSession(s.sessions, env.session_id);
   if (!tid) return;
   const session = s.sessions[tid];
   switch (env.kind) {
     case "status": {
-      session.status =
-        env.status === "idle"
-          ? "idle"
-          : env.status === "running"
-            ? "running"
-            : env.status === "waiting"
-              ? "waiting"
-              : "error";
+      const seq = env.turn_seq;
+      if (env.status === "running" || env.status === "waiting") {
+        // Turn start / paused-for-user (plan / permission): adopt the turn
+        // identity and stay in an active (busy) state.
+        if (seq && seq > (session.currentTurnSeq ?? 0)) session.currentTurnSeq = seq;
+        session.status = env.status;
+        return;
+      }
+      // idle / error are terminal — drop one for an already-superseded turn.
+      if (isStaleTurn(session, seq)) return;
+      session.status = env.status === "idle" ? "idle" : "error";
       return;
     }
     case "turn_finished": {
+      // Reject a terminal for a turn already superseded by a newer send —
+      // don't flip to idle or inject an empty-turn placeholder for stale turns.
+      if (isStaleTurn(session, env.turn_seq)) return;
                 // Empty-turn detection: if no assistant content arrived
                 // between the last user message and turn-end, insert a
                 // placeholder so the UI doesn't show a vanishing spinner.
@@ -893,9 +1093,37 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
         env.stop_reason === "cancelled"
           ? "idle"
           : "error";
+      // Per-turn usage footer (native agent): derive this turn's tokens/cost as
+      // the delta from the previous turn's cumulative snapshot, and attach it to
+      // the trailing assistant message so it renders at the end of the turn.
+      if (session.usage && session.agentType === "cersei") {
+        const cum = {
+          input: session.usage.input_tokens ?? 0,
+          output: session.usage.output_tokens ?? 0,
+          cost: session.usage.cost ?? 0,
+        };
+        const prev = session.lastUsageSnapshot ?? { input: 0, output: 0, cost: 0 };
+        const turn = {
+          input: Math.max(0, cum.input - prev.input),
+          output: Math.max(0, cum.output - prev.output),
+          cost: Math.max(0, cum.cost - prev.cost),
+          saved: session.pendingSavedTokens ?? 0,
+        };
+        session.lastUsageSnapshot = cum;
+        session.pendingSavedTokens = undefined;
+        if (turn.input + turn.output > 0) {
+          for (let i = session.messages.length - 1; i >= 0; i--) {
+            if (session.messages[i].role === "assistant") {
+              session.messages[i].usage = turn;
+              break;
+            }
+          }
+        }
+      }
       return;
     }
     case "turn_failed": {
+      if (isStaleTurn(session, env.turn_seq)) return;
       session.messages.push(
         makeAssistantTextMessage(`ACP error: ${env.error}`)
       );
@@ -903,30 +1131,15 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       return;
     }
     case "text_chunk": {
-      // Rust pre-decides "new message vs append" — every text_chunk
-      // refers to the trailing text-mode assistant message. We just
-      // append; MessageAppended events handle the "new message" case
-      // ahead of this.
-      const last = session.messages[session.messages.length - 1];
-      if (
-        last &&
-        last.role === "assistant" &&
-        (last.mode === "text" || last.mode === undefined) &&
-        last.toolCalls.length === 0
-      ) {
-        last.content += env.delta;
-      } else {
-        session.messages.push(makeAssistantTextMessage(env.delta));
-      }
+      // Delegate to the shared helper so text chunks routed through the
+      // delta stream get the SAME "find last renderable message" logic the
+      // narration bucket used — skipping empty placeholder/thinking markers
+      // so one continuous narration never splits into broken fragments.
+      appendTextToDraft(s, env.session_id, env.delta);
       return;
     }
     case "thinking_chunk": {
-      const last = session.messages[session.messages.length - 1];
-      if (last && last.role === "assistant" && last.mode === "thinking") {
-        last.thinking = (last.thinking ?? "") + env.delta;
-      } else {
-        session.messages.push(makeAssistantThinkingMessage(env.delta));
-      }
+      appendThoughtToDraft(s, env.session_id, env.delta);
       return;
     }
     case "message_appended": {
@@ -1022,8 +1235,26 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       }
       return;
     }
+    case "usage_updated": {
+      session.usage = env.usage;
+      return;
+    }
+    case "compaction": {
+      session.compacting = env.active;
+      return;
+    }
+    case "compression_saved": {
+      // Stashed until turn_finished folds it into the message's usage footer.
+      session.pendingSavedTokens = env.saved_tokens;
+      return;
+    }
     case "model_changed": {
-      session.acpCurrentModel = env.model_id;
+      // The native Cersei agent's model is UI-driven and stored as a BARE id
+      // (its provider lives in `cerseiProvider`). The worker echoes back the
+      // full "provider/model" we pushed, so applying it here would re-prefix
+      // the value every cycle ("google/google/google/…") via the composer's
+      // re-push. Ignore the echo for cersei — the UI is the source of truth.
+      if (session.agentType !== "cersei") session.acpCurrentModel = env.model_id;
       return;
     }
     default:

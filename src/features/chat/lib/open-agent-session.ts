@@ -1,21 +1,34 @@
 import { toast } from "sonner";
-import type { SessionMessage } from "@/types/agents";
+import { emit } from "@tauri-apps/api/event";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
+import { useProjectStore } from "@/features/project/stores/project-store";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import { agents, ensureDefaultAgent, getDefaultAgentSync } from "./agents-api";
+import { invalidateLoad } from "./load-tokens";
+import { snapshotMessageToWire } from "./snapshot-message";
 
-/** Map an atlas-agents `SessionMessage` onto the chat-store wire shape. */
-function snapshotMessageToWire(m: SessionMessage) {
-  return {
-    role: m.role === "system" ? ("system" as const) : m.role,
-    content: m.content,
-    timestamp: m.timestamp,
-    toolCalls: m.tool_calls.map((tc) => ({
-      toolName: tc.tool_name,
-      kind: tc.kind ?? null,
-      arguments: (tc.arguments ?? {}) as Record<string, unknown>,
-    })),
-  };
+/** Active project root, preferring the legacy `currentProject` but falling back
+ *  to the active workspace path (mirrors the sidebar's `cwd` resolution). */
+function activeCwd(): string {
+  const project = useProjectStore.getState().currentProject;
+  const ws = useWorkspaceStore.getState();
+  return (
+    project?.path ??
+    ws.workspaces.find((w) => w.id === ws.activeWorkspaceId)?.path ??
+    ""
+  );
+}
+
+/** Nudge the history sidebar to refetch all three agent session lists. The
+ *  sidebar listens for the Tauri `atlas:sessions-changed` event (gated on cwd),
+ *  so re-emit it from the frontend after a local mutation (e.g. abandoning a
+ *  chat via New Chat) — Codex/Cersei have no file watcher and Claude's is async,
+ *  so the just-abandoned conversation would otherwise not re-list immediately. */
+function refreshSessionLists(): void {
+  const cwd = activeCwd();
+  if (!cwd) return;
+  void emit("atlas:sessions-changed", { cwd });
 }
 
 interface OpenOpts {
@@ -53,10 +66,15 @@ export async function openAgentSession({ acpSessionId, title, cwd }: OpenOpts): 
     replaceMessages,
   } = chat.actions;
 
-  // 1. Already open in some tab → focus it (covers re-clicks + running chats).
+  // 1. Already open in a LIVE tab → focus it (covers re-clicks + running chats).
+  //    Closing a chat tab leaves its chat-store session behind (orphan), so we
+  //    must skip sessions whose tab no longer exists — otherwise `setActiveTab`
+  //    can't find the dead tab and bounces to tab[0], "jumping" to an unrelated
+  //    chat instead of loading the clicked session.
   if (acpSessionId) {
+    const openTabIds = new Set(layout.tabs.map((t) => t.id));
     for (const [tid, s] of Object.entries(chat.sessions)) {
-      if (s.acpSessionId === acpSessionId) {
+      if (s.acpSessionId === acpSessionId && openTabIds.has(tid)) {
         setActiveTab(tid);
         return;
       }
@@ -89,8 +107,19 @@ export async function openAgentSession({ acpSessionId, title, cwd }: OpenOpts): 
   // No session to restore (a never-messaged chat) → leave the empty tab.
   if (!acpSessionId) return;
 
+  // If we're reusing the current tab in place and it held a real (messaged)
+  // chat, that chat loses its live sidebar row on clear — refresh the disk
+  // lists so it re-lists from history immediately (Cersei/Codex have no watcher).
+  const abandoningCurrent =
+    reuse &&
+    targetTabId === activeId &&
+    !!activeSession &&
+    ((activeSession.userMessageCount ?? 0) > 0 ||
+      activeSession.messages.length > 0);
+
   // Optimistic bind + spinner, then hydrate from the (cached) Rust session.
   clearSession(targetTabId);
+  if (abandoningCurrent) refreshSessionLists();
   setSessionTitle(targetTabId, title.slice(0, 40));
   const cached = getDefaultAgentSync();
   if (cached) setAcpBinding(targetTabId, cached.agent_id, acpSessionId, cwd);
@@ -108,4 +137,67 @@ export async function openAgentSession({ acpSessionId, title, cwd }: OpenOpts): 
       `Couldn't open session: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+/**
+ * Open / focus the SINGLE agent chat tab and start a fresh chat in it.
+ *
+ * The agent chat is a singleton tab — "New chat" never spawns a second tab
+ * (the user switches between past chats via the session-history sidebar). If a
+ * chat tab is already open we focus it and reset its session in place (a brand
+ * new session in the SAME tab); the previous conversation, if any, is already
+ * persisted to disk per-turn, so it stays reachable from the history sidebar.
+ * The fresh session is NOT added to history until the user actually submits
+ * (the sidebar filters on `userMessageCount > 0`).
+ *
+ * New chat ALWAYS resets the current tab in place — even mid-stream — because
+ * jumping to a new tab breaks the flow and scrambles the thread. Nothing is
+ * lost: the Rust SessionWorker keeps running independently of this frontend
+ * reset and persists the turn's transcript to disk, so the abandoned chat
+ * reappears in the history sidebar. We DO cancel that in-flight turn first so a
+ * chat the user walked away from doesn't keep burning tokens invisibly.
+ */
+export function openNewAgentChat(): void {
+  const layout = useLayoutStore.getState();
+  const chat = useChatStore.getState();
+  const { addTab, setActiveTab } = layout.actions;
+  const { clearSession, createSession } = chat.actions;
+
+  const focus = (id: string) =>
+    window.dispatchEvent(new CustomEvent("atlas:chat-focus", { detail: { tabId: id } }));
+
+  // Prefer the ACTIVE chat tab; fall back to the first chat tab. Multiple chat
+  // tabs can coexist (handleOpenAgent spawns a new one when the current chat is
+  // running), so `tabs.find(type==="chat")` alone could reset a tab the user
+  // isn't even looking at.
+  const activeChatTab = layout.activeTabId
+    ? layout.tabs.find((t) => t.id === layout.activeTabId && t.type === "chat")
+    : undefined;
+  const existing = activeChatTab ?? layout.tabs.find((t) => t.type === "chat");
+  if (existing) {
+    setActiveTab(existing.id);
+    const s = chat.sessions[existing.id];
+    // Stop an in-flight turn before resetting so it doesn't keep streaming into
+    // an orphaned (hidden) session. Its transcript still persists → history.
+    if (s?.status === "running" && s.acpAgentId && s.acpSessionId) {
+      agents.cancel({ agent_id: s.acpAgentId, session_id: s.acpSessionId }).catch(() => {});
+    }
+    // Cancel any in-flight history load targeting this tab BEFORE clearing, so a
+    // resolving `loadSession → replaceMessages` chain can't repaint the freshly
+    // cleared blank session with the old transcript.
+    invalidateLoad(existing.id);
+    clearSession(existing.id);
+    focus(existing.id);
+    // The abandoned conversation persists to disk per-turn, but its live row was
+    // the sidebar's only handle on it until a disk refetch. Re-list now so it
+    // stays in history instead of vanishing.
+    refreshSessionLists();
+    return;
+  }
+
+  // No chat tab open yet → create the one and only one.
+  const id = `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  addTab({ id, type: "chat", title: "Agents", closable: true, dirty: false, data: {} });
+  createSession(id);
+  setActiveTab(id);
 }

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use atlas_review::{
     run_report, CancellationToken, FileVerdict, ReviewEvent, ReviewOptions, ReviewReport,
@@ -341,6 +341,11 @@ pub async fn review_start(
                 save_record(&project_for_save, &record_for_save)
             })
             .await;
+            app.state::<std::sync::Arc<crate::telemetry::TelemetryClient>>()
+                .capture(
+                    "code_review_completed",
+                    serde_json::json!({ "provider": &record.provider, "model": &record.model }),
+                );
             emit(&app, &id, ReviewEvt::Complete { record });
             Ok(())
         }

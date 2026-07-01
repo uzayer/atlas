@@ -30,12 +30,15 @@ pub enum TranscriptKind {
     None,
     /// Canonical Claude Code JSONL at `~/.claude/projects/<encoded-cwd>/<id>.jsonl`.
     ClaudeJsonl,
+    /// Native Cersei agent — JSON transcript under the app config dir, replayed
+    /// via `CerseiRuntime::replay_session`.
+    CerseiJson,
 }
 
 /// Built-in plugin catalog. Add new entries here to make them selectable in
 /// the UI; ensure the matching `atlas_acp::AgentSpec` exists too.
 pub fn builtin_plugins() -> Vec<PluginSpec> {
-    atlas_acp::AgentRegistry::known_specs()
+    let mut plugins: Vec<PluginSpec> = atlas_acp::AgentRegistry::known_specs()
         .into_iter()
         .map(|s| PluginSpec {
             plugin_id: s.spec_id.clone(),
@@ -45,7 +48,17 @@ pub fn builtin_plugins() -> Vec<PluginSpec> {
             supports_modes: true,
             supports_models: true,
         })
-        .collect()
+        .collect();
+    // The native in-process agent (no subprocess command).
+    plugins.push(PluginSpec {
+        plugin_id: atlas_cersei::CERSEI_PLUGIN_ID.to_string(),
+        display_name: atlas_cersei::CERSEI_DISPLAY_NAME.to_string(),
+        command: "in-process".to_string(),
+        transcript: TranscriptKind::CerseiJson,
+        supports_modes: true,
+        supports_models: true,
+    });
+    plugins
 }
 
 pub fn find_plugin(plugin_id: &str) -> Option<PluginSpec> {

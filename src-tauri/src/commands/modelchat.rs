@@ -18,7 +18,7 @@ use futures::StreamExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use rig_core::agent::{MultiTurnStreamItem, StreamingResult};
 use rig_core::client::completion::CompletionClient;
@@ -281,6 +281,17 @@ pub async fn modelchat_stream(
                 // going forward; old sessions have no token data).
                 persist_byok_usage(&app, &provider, &model, input_tokens, output_tokens);
             }
+            // Telemetry: provider/model + token counts only (no message text).
+            app.state::<std::sync::Arc<crate::telemetry::TelemetryClient>>()
+                .capture(
+                    "model_chat_sent",
+                    serde_json::json!({
+                        "provider": &provider,
+                        "model": &model,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                    }),
+                );
             emit(&app, &stream_id, ModelChatEvent::Done);
             Ok(())
         }

@@ -37,6 +37,17 @@ function useTauriWindow() {
 
 export function Titlebar() {
   const currentProject = useProjectStore.use.currentProject();
+  // The label name is read from the WORKSPACE store (matched by path), not from
+  // `currentProject.name`. `currentProject` only re-syncs after a slow Rust
+  // AppState round-trip, so a workspace rename took ~3-4s to show here; the
+  // workspace store mutates synchronously on rename, so this updates instantly.
+  const workspaces = useWorkspaceStore.use.workspaces();
+  const displayName =
+    (currentProject
+      ? workspaces.find((w) => w.path === currentProject.path)?.name
+      : undefined) ??
+    currentProject?.name ??
+    "Atlas";
   const { windowRef, isFullscreen } = useTauriWindow();
   // When the workspace sidebar is open it owns the top-left corner (its own
   // traffic-light spacer), so the titlebar must NOT also reserve 72px for the
@@ -89,20 +100,79 @@ export function Titlebar() {
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
         <WorkspaceToggle />
         {currentProject && <LeftPanelToggle />}
-        {/* Static project label — the recent-projects picker moved to the
-         *  workspace sidebar's "+" menu. */}
-        <span
-          className="truncate text-[12px] font-medium text-[#ccc] max-w-[260px] px-1"
-          title={currentProject?.path}
-        >
-          {currentProject ? currentProject.name : "Atlas"}
-        </span>
+        {/* Project label — click to copy the workspace path. */}
+        <ProjectLabel name={displayName} path={currentProject?.path} />
       </div>
 
       {currentProject && (
         <div className="flex items-center gap-1.5">
           <NotificationButton />
           <RightPanelToggle />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The titlebar project label. Click copies the workspace's full path to the
+ * clipboard; hovering shows a custom tooltip with that path, and on copy the
+ * tooltip text animates over to a "Copied" confirmation before reverting.
+ * It's a <button> (not a span) so the titlebar's drag/double-click-zoom
+ * handlers skip it — see `isTitlebarSurface`.
+ */
+function ProjectLabel({ name, path }: { name: string; path?: string }) {
+  const [hovered, setHovered] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  const copy = () => {
+    if (!path) return;
+    void navigator.clipboard
+      ?.writeText(path)
+      .then(() => {
+        setCopied(true);
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {});
+  };
+
+  const showTip = !!path && (hovered || copied);
+
+  return (
+    <div
+      className="relative min-w-0"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <button
+        onClick={copy}
+        className="block max-w-[260px] cursor-pointer truncate px-1 text-[12px] font-medium text-[#ccc] transition-colors hover:text-white"
+      >
+        {name}
+      </button>
+      {showTip && (
+        <div className="pointer-events-none absolute left-1 top-full z-[var(--z-max)] mt-1.5 origin-top-left animate-scale-in">
+          {/* `w-max` sizes the box to the path's intrinsic width (capped by
+              max-w) — without it the absolutely-positioned box has no width to
+              resolve against and `break-all` collapses it to one char per line. */}
+          <div className="w-max max-w-[70vw] rounded-md border border-black/10 bg-white px-2 py-1 shadow-[var(--shadow-overlay)]">
+            {/* Re-keying on `copied` remounts the span, re-triggering the
+                fade-in so the text visibly animates over on copy. White-on-
+                black titlebar made the old black tooltip nearly invisible. */}
+            <span
+              key={copied ? "copied" : "path"}
+              className={cn(
+                "block animate-fade-in whitespace-nowrap font-mono text-[10px] leading-snug",
+                copied ? "text-[var(--status-success)]" : "text-black/80",
+              )}
+            >
+              {copied ? `Copied · ${path}` : path}
+            </span>
+          </div>
         </div>
       )}
     </div>

@@ -50,6 +50,13 @@ import {
 } from "../lib/cm-slash-extension";
 import type { MentionData } from "../lib/mentions";
 import { markInputActivity } from "@/lib/input-activity";
+import { invoke } from "@tauri-apps/api/core";
+
+/** Wrap a path in double quotes if it contains whitespace, so the agent reads
+ *  it as a single token. */
+function quotePath(p: string): string {
+  return /\s/.test(p) ? `"${p}"` : p;
+}
 
 export interface ChatInputHandle {
   focus(): void;
@@ -92,6 +99,10 @@ interface ChatInputProps {
    * picker is open and routes accordingly.
    */
   keyInterceptor?: MentionKeyInterceptor | null;
+  /** When false, the `#` skill mention picker is disabled (the active agent
+   *  has no skill integration). Read live so switching agents takes effect
+   *  without remounting the view. Defaults to true. */
+  allowSkillMention?: boolean;
   /** Slot for future extensions. */
   extraExtensions?: Extension[];
   /** Min height in pixels (matches old textarea: 44). */
@@ -110,6 +121,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
       onMentionTrigger,
       onSlashTrigger,
       keyInterceptor,
+      allowSkillMention = true,
       extraExtensions,
       minHeight = 44,
       maxHeight = 200,
@@ -134,6 +146,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
       MentionKeyInterceptor | SlashKeyInterceptor | null | undefined
     >(keyInterceptor);
     keyInterceptorRef.current = keyInterceptor;
+    const allowSkillRef = useRef(allowSkillMention);
+    allowSkillRef.current = allowSkillMention;
 
     // Build the theme once — sized to the container, transparent
     // background so the parent's chip rounding shows through.
@@ -286,9 +300,43 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
                 markInputActivity();
                 return false;
               },
+              // Paste a Finder-copied file as its absolute path. The web paste
+              // event can't expose the path (sandbox), so when the clipboard
+              // carries file references we ask Rust to read the native
+              // pasteboard's file URLs and insert them at the cursor. Plain
+              // text/markdown pastes (no files) fall through to CodeMirror.
+              paste: (event, view) => {
+                const dt = event.clipboardData;
+                const hasFiles =
+                  !!dt &&
+                  (Array.from(dt.types).includes("Files") ||
+                    (dt.files && dt.files.length > 0));
+                if (!hasFiles) return false;
+                event.preventDefault();
+                void (async () => {
+                  try {
+                    const paths = await invoke<string[]>("clipboard_file_paths");
+                    if (!paths || paths.length === 0) return;
+                    const text = paths.map(quotePath).join(" ") + " ";
+                    const head = view.state.selection.main.head;
+                    view.dispatch({
+                      changes: { from: head, insert: text },
+                      selection: { anchor: head + text.length },
+                    });
+                    markInputActivity();
+                    view.focus();
+                  } catch (err) {
+                    console.warn("clipboard file paste failed:", err);
+                  }
+                })();
+                return true;
+              },
             }),
             ...mentionExtension,
-            mentionTriggerPlugin((t) => onMentionTriggerRef.current?.(t)),
+            mentionTriggerPlugin(
+              (t) => onMentionTriggerRef.current?.(t),
+              () => allowSkillRef.current,
+            ),
             slashTriggerPlugin((t) => onSlashTriggerRef.current?.(t)),
             // Prec.highest puts the picker keymap above lang-markdown's
             // Enter binding (which would otherwise continue a bullet) and

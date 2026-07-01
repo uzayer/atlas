@@ -20,6 +20,7 @@ use atlas_agents::{
 };
 
 use super::memory_chat::MemoryChatState;
+use super::memory_indexer::MemoryRegistry;
 use super::memory_inject;
 use super::memory_pack;
 use super::memory_retrieve;
@@ -48,32 +49,166 @@ impl DeltaSink for TauriDeltaSink {
         if let Err(e) = self.app.emit("atlas:agents", &envelope) {
             tracing::error!(target: "atlas_agents::emit", "failed to emit atlas:agents event: {e}");
         }
-        // Shared Cross-Agent Memory (v2): capture this delta into the shared
-        // event log. Best-effort; a delta for an unregistered session (i.e.
-        // before its first `agents_send`) is a silent no-op.
-        let store = self.app.state::<SharedMemoryStore>();
-        super::memory_delta::ingest(&envelope, store.inner());
 
-        // On turn completion, distill the reply's prose into typed
-        // decision/fact/failure/architecture events (off the hot path; no-op
-        // unless the project's summarizer is set to a BYOK provider).
-        if matches!(envelope.delta, SessionDelta::TurnFinished { .. }) {
+        // Opt-in telemetry (metadata only — no message text, no paths). The
+        // sink is the one place that sees every agent's turn end, so usage /
+        // finish / failure are captured here. No-op unless the user opted in.
+        {
+            let tel = self
+                .app
+                .state::<Arc<crate::telemetry::TelemetryClient>>();
+            match &envelope.delta {
+                SessionDelta::UsageUpdated { usage } => {
+                    // Cumulative numeric counters only; stamped onto the next
+                    // `agent_turn_finished` for this session.
+                    tel.note_usage(
+                        &envelope.session_id,
+                        serde_json::to_value(usage).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                SessionDelta::TurnFinished { stop_reason, .. } => {
+                    let usage = tel.take_usage(&envelope.session_id);
+                    tel.capture(
+                        "agent_turn_finished",
+                        serde_json::json!({
+                            "agent_kind": envelope.agent_id.0.to_string(),
+                            "stop_reason": stop_reason,
+                            "usage": usage,
+                        }),
+                    );
+                }
+                SessionDelta::TurnFailed { error, .. } => {
+                    tel.capture(
+                        "agent_turn_failed",
+                        serde_json::json!({
+                            "agent_kind": envelope.agent_id.0.to_string(),
+                            "error_summary": crate::telemetry::redact_message(error, 160),
+                        }),
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // Resolve this session's project cwd once via the in-memory session map
+        // (cheap; no disk I/O). A delta before the session's first `agents_send`
+        // has no meta yet → every memory action below is a silent no-op.
+        let store = self.app.state::<SharedMemoryStore>();
+        let cwd = store.session_meta(&envelope.session_id).map(|m| m.cwd);
+
+        let is_turn_finished = matches!(envelope.delta, SessionDelta::TurnFinished { .. });
+        let agent_id = envelope.agent_id.clone();
+        let session_id = envelope.session_id.clone();
+
+        // Site A — Shared Cross-Agent Memory (v2) capture (write-side parity for
+        // all three agents). `classify` is pure/in-memory, but `append_event`
+        // does a small disk append (events.jsonl + an atomic state write), so we
+        // run the whole `ingest` OFF the `emit` thread on the blocking pool — the
+        // streaming-delta hot path must never block on disk. This feeds ONLY the
+        // shared event log; the semantic vector index is now (re)built by the
+        // background `MemoryIndexer` (Step 4), never synchronously on a delta.
+        {
             let app = self.app.clone();
-            let agent_id = envelope.agent_id.clone();
-            let session_id = envelope.session_id.clone();
-            tauri::async_runtime::spawn(async move {
-                super::memory_compile::compile_finished_turn(&app, agent_id, session_id).await;
+            tauri::async_runtime::spawn_blocking(move || {
+                let store = app.state::<SharedMemoryStore>();
+                super::memory_delta::ingest(&envelope, store.inner());
             });
         }
+
+        if is_turn_finished {
+            // Site B — A/B gate (Step 7). `ATLAS_NATIVE_EXTRACTION` (default OFF)
+            // selects between:
+            //  - ON  → native gated extraction in the background indexer for ALL
+            //          three agents (`Job::ExtractSession`), SKIPPING the legacy
+            //          per-turn BYOK distill. `memory_compile` is only deleted in
+            //          Step 8 once this path is validated.
+            //  - OFF → the current behaviour: spawn `compile_finished_turn` (the
+            //          legacy prose→events distill, itself a no-op unless the
+            //          project's summarizer is a BYOK provider).
+            if native_extraction_enabled() {
+                if let Some(cwd) = cwd.clone() {
+                    let registry = self.app.state::<Arc<MemoryRegistry>>();
+                    let _ = registry.enqueue(super::memory_indexer::Job::ExtractSession {
+                        cwd,
+                        agent: agent_id.0.to_string(),
+                        session: session_id.clone(),
+                    });
+                }
+            } else {
+                let app = self.app.clone();
+                // TODO(step8): remove after ATLAS_NATIVE_EXTRACTION validated
+                tauri::async_runtime::spawn(async move {
+                    super::memory_compile::compile_finished_turn(&app, agent_id, session_id).await;
+                });
+            }
+
+            // Background reindex nudge: the FS watcher only watches `*.md`/docs.json,
+            // not session transcripts, so a finished turn needs an explicit nudge to
+            // make chat-derived corpus searchable. Fire-and-forget — `enqueue_index`
+            // `try_send`s and drops on a full queue, so `emit` never blocks here.
+            // (Fires in BOTH modes; the native path additionally enqueues its own
+            // reindex after writing `extracted/*.md`.)
+            if let Some(cwd) = cwd {
+                let registry = self.app.state::<Arc<MemoryRegistry>>();
+                registry.enqueue_index(&cwd);
+            }
+        }
     }
+}
+
+/// A/B flag for Step 7's native session extraction. **Default OFF** so the
+/// legacy `memory_compile` distill keeps running until the new path is validated
+/// on real sessions (Step 8 then removes `memory_compile`).
+///
+/// Set `ATLAS_NATIVE_EXTRACTION` to `1`/`true`/`on`/`yes` (case-insensitive) to
+/// route `TurnFinished` through the background `Job::ExtractSession` path for all
+/// three agents instead.
+fn native_extraction_enabled() -> bool {
+    matches!(
+        std::env::var("ATLAS_NATIVE_EXTRACTION")
+            .ok()
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "on" | "yes")
+    )
 }
 
 /// Initialise the `AgentManager` once the Tauri app is up so the sink has a
 /// real `AppHandle` to emit through. Called from `setup`.
 pub fn install_manager(app: &AppHandle) {
     let sink: Arc<dyn DeltaSink> = Arc::new(TauriDeltaSink::new(app.clone()));
-    let manager = AgentManager::new(sink);
+    // App config dir holds `byok-keys.json` (BYOK keys the native agent reads)
+    // and `cersei-sessions/` (its persisted transcripts). Best-effort: fall
+    // back to a temp dir if the platform path is unavailable.
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    // Let the memory corpus reader find native-agent transcripts (Chat/Graph).
+    super::agent_memory::set_cersei_config_dir(config_dir.clone());
+    let manager = AgentManager::new(sink, config_dir);
     app.manage(manager);
+
+    // Wire the native agent's `search_memory` tool to Atlas's on-device memory
+    // retrieval. The closure resolves `MemoryChatState` lazily (it's managed
+    // after this call) and maps the retrieved docs into the agent's shape.
+    let app_for_search = app.clone();
+    atlas_agents::register_memory_search(std::sync::Arc::new(move |cwd, query, k| {
+        let app = app_for_search.clone();
+        Box::pin(async move {
+            let state = app.state::<crate::commands::memory_chat::MemoryChatState>();
+            crate::commands::memory_retrieve::retrieve(&app, state.inner(), &cwd, &query, k)
+                .await
+                .into_iter()
+                .map(|d| atlas_agents::MemDoc {
+                    title: d.title,
+                    source: d.source,
+                    text: d.text,
+                })
+                .collect()
+        })
+    }));
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -178,6 +313,13 @@ pub async fn agents_send(
     sharing: State<'_, MemorySharingState>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Telemetry: a turn was initiated (metadata only). Fires for every send,
+    // including bare sends below. No-op unless the user opted in.
+    app.state::<Arc<crate::telemetry::TelemetryClient>>().capture(
+        "agent_turn_started",
+        serde_json::json!({ "agent_kind": key.agent_id.0.to_string() }),
+    );
+
     // Resolve the project cwd. Unknown session → just send as-is (don't fail
     // the turn on a snapshot miss).
     let Ok(snapshot) = manager.snapshot(&key) else {
@@ -202,11 +344,16 @@ pub async fn agents_send(
     let shared_block = memory_inject::build_shared_block(store.inner(), &cwd, clock);
     sharing.advance_clock(&key, store.last_seq(&cwd));
 
-    // v3 Tier 2 — retrieval-augmented push: RAG the project's memory index by
-    // the user's message, keep only docs not already injected this session, and
-    // compose a budgeted `--- RELEVANT PROJECT MEMORY ---` block. `retrieve` is
-    // best-effort + time-bounded; a missing embedding model / unbuilt index
-    // yields nothing, so this is a no-op until the index exists.
+    // Site C (Step 5: kept, NOT removed) — retrieval-augmented push: RAG the
+    // project's memory index by the user's message, keep only docs not already
+    // injected this session, and compose a budgeted `--- RELEVANT PROJECT MEMORY
+    // ---` block. This is a read-only PUSH that grounds Claude Code / Codex,
+    // which have no `search_memory` pull tool — removing it would regress their
+    // RAG. It performs NO indexing (read-only). Step 6 rewires the underlying
+    // `memory_retrieve::retrieve` onto the fresh `MemoryEngine`; the call here is
+    // unchanged. `retrieve` is best-effort + time-bounded; a missing embedding
+    // model / unbuilt index yields nothing, so this is a no-op until the index
+    // exists.
     const INDEX_TOP_K: usize = 3;
     let chat_state = app.state::<MemoryChatState>();
     let mut index_docs =
@@ -325,6 +472,24 @@ pub fn agents_set_model(
     manager: State<'_, AgentManager>,
 ) -> Result<(), String> {
     manager.set_model(&key, model_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn agents_set_effort(
+    key: SessionKey,
+    effort: String,
+    manager: State<'_, AgentManager>,
+) -> Result<(), String> {
+    manager.set_effort(&key, effort).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn agents_set_compress(
+    key: SessionKey,
+    on: bool,
+    manager: State<'_, AgentManager>,
+) -> Result<(), String> {
+    manager.set_compress(&key, on).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

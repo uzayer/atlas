@@ -2,6 +2,7 @@ mod commands;
 mod logging;
 mod menu;
 mod state;
+mod telemetry;
 
 use std::sync::Arc;
 
@@ -26,6 +27,12 @@ pub fn run() {
     // Install a tracing subscriber that prints `tracing::info!` etc. to
     // stderr. Verbosity is controlled by `RUST_LOG`; see `logging.rs`.
     logging::init();
+
+    // Load a `.env` from the current dir (if any) so source / fork builds can
+    // point telemetry at their own PostHog OSS project via POSTHOG_KEY /
+    // POSTHOG_HOST without a rebuild. No-op when absent. Must run before the
+    // telemetry client resolves its key in `setup()`.
+    let _ = dotenvy::dotenv();
 
     // Strip CLAUDECODE so child ACP agents (canonical claude-code-acp) don't
     // refuse to start when Atlas was launched from a parent Claude Code shell.
@@ -94,9 +101,83 @@ pub fn run() {
             // Pre-load the Rust-owned `AppState` (currentProject + recents)
             // before the webview starts loading — paid in parallel with the
             // WebView framework init, ~1ms on warm cache.
-            let app_state: AppStateHandle = Arc::new(Mutex::new(AppState::load(&app.handle())));
+            let mut loaded = AppState::load(&app.handle());
+            // Ensure a stable anonymous telemetry id exists, persisting it on the
+            // very first launch so it survives even if the user never changes a
+            // setting (which is what would otherwise trigger a save). No PII.
+            let first_launch = loaded.telemetry_anon_id.is_none();
+            if first_launch {
+                loaded.telemetry_anon_id = Some(uuid::Uuid::new_v4().to_string());
+                let _ = AppState::save(&app.handle(), &loaded);
+            }
+            let anon_id = loaded.telemetry_anon_id.clone().unwrap_or_default();
+            let telemetry_enabled = loaded.settings.share_telemetry;
+            let app_state: AppStateHandle = Arc::new(Mutex::new(loaded));
             app.manage(app_state);
+
+            // Opt-in product telemetry. Inert unless the user has enabled it AND
+            // a PostHog key resolves (env / telemetry.json / build-time default).
+            let (telemetry, flush_rx) =
+                telemetry::TelemetryClient::new(&app.handle(), anon_id, telemetry_enabled);
+            app.manage(telemetry.clone());
+            if let Some(rx) = flush_rx {
+                let tclient = telemetry.clone();
+                tauri::async_runtime::spawn(async move {
+                    telemetry::run_flush_loop(tclient, rx).await;
+                });
+            }
+            // Crash capture: best-effort synchronous POST from the panic hook
+            // (the build is `panic = "abort"`, so the async flush task can't be
+            // relied on). Chains to the previously-installed hook. `location` is
+            // Atlas's own `file:line`; `message` is redacted of path/URL tokens.
+            {
+                let tclient = telemetry.clone();
+                let prev = std::panic::take_hook();
+                std::panic::set_hook(Box::new(move |info| {
+                    let location = info
+                        .location()
+                        .map(|l| format!("{}:{}", l.file(), l.line()))
+                        .unwrap_or_default();
+                    let msg = info
+                        .payload()
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+                        .unwrap_or("panic");
+                    tclient.capture_panic_blocking(serde_json::json!({
+                        "location": location,
+                        "message": telemetry::redact_message(msg, 160),
+                    }));
+                    prev(info);
+                }));
+            }
+            // Launch / active-user signal.
+            telemetry.capture(
+                "app_started",
+                serde_json::json!({ "is_first_launch": first_launch }),
+            );
+
             commands::agents::install_manager(&app.handle());
+            // Silent background refresh of model pricing from models.dev — first
+            // launch populates the cache; later launches update only on change.
+            commands::models_pricing::refresh_in_background(&app.handle());
+
+            // Background memory indexer (Step 4): a single owned Tokio task drains
+            // a bounded queue and indexes each open project's corpus into its
+            // per-project `atlas_memory::MemoryEngine`, off the chat hot path. The
+            // `MemoryRegistry` is the cwd-keyed owner of every engine, shared by
+            // the indexer (write lock) and — later — the retrieve closure (read
+            // lock). Wired here so the queue + registry outlive every window.
+            let (job_tx, job_rx) = tokio::sync::mpsc::channel::<commands::memory_indexer::Job>(
+                commands::memory_indexer::QUEUE_CAPACITY,
+            );
+            let registry =
+                Arc::new(commands::memory_indexer::MemoryRegistry::new(job_tx));
+            app.manage(registry.clone());
+            let indexer_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::memory_indexer::MemoryIndexer::run(indexer_app, registry, job_rx).await;
+            });
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -133,6 +214,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::window::window_zoom,
+            commands::clipboard::clipboard_file_paths,
             commands::window::set_window_title,
             commands::browser::browser_open_window,
             commands::browser::browser_embed_create,
@@ -243,6 +325,9 @@ pub fn run() {
             // Legacy Claude-CLI subprocess commands (claude_run/stream/stop/check/version)
             // were replaced by ACP. Session-history readers below are still in use.
             commands::claude::list_claude_sessions,
+            commands::gitdiff::git_diff_structured,
+            commands::gitdiff::git_commit_changed_files,
+            commands::gitdiff::git_diff_line_status,
             commands::claude::delete_claude_session,
             commands::claude::read_claude_session,
             commands::claude::claude_session_stats,
@@ -257,6 +342,7 @@ pub fn run() {
             commands::research::load_project_session,
             commands::knowledge::list_knowledge,
             commands::knowledge::save_knowledge_note,
+            commands::knowledge::import_into_knowledge,
             commands::knowledge::delete_knowledge_note,
             commands::knowledge::create_knowledge_dir,
             commands::knowledge::log_interaction,
@@ -295,6 +381,9 @@ pub fn run() {
             commands::log::clear_project_log,
             commands::app_state::bootstrap_app_state,
             commands::app_state::save_app_state,
+            commands::telemetry::telemetry_config,
+            commands::telemetry::telemetry_set_enabled,
+            commands::telemetry::telemetry_capture,
             commands::compose_prompt::compose_prompt,
             commands::cli::cli_status,
             commands::cli::cli_install_helper,
@@ -314,11 +403,20 @@ pub fn run() {
             commands::agents::agents_cancel,
             commands::agents::agents_set_mode,
             commands::agents::agents_set_model,
+            commands::agents::agents_set_effort,
+            commands::agents::agents_set_compress,
+            commands::mcp::mcp_list,
+            commands::mcp::mcp_save,
+            commands::models_pricing::models_pricing_get,
+            commands::models_pricing::models_pricing_refresh,
             commands::agents::agents_respond_permission,
             commands::agents::agents_list_auth_methods,
             commands::agents::agents_run_auth_method,
             commands::agents::agents_authenticate,
             commands::agents::codex_status,
+            commands::cersei::cersei_list_sessions,
+            commands::cersei::cersei_session_transcript,
+            commands::cersei::cersei_delete_session,
             commands::byok::byok_list,
             commands::byok::byok_set,
             commands::byok::byok_delete,
@@ -351,6 +449,7 @@ pub fn run() {
             commands::plans::plans_append,
             commands::agent_memory::agent_memory_read,
             commands::agent_memory::list_codex_sessions,
+            commands::agent_memory::codex_delete_session,
             commands::memory_graph::memory_embed_status,
             commands::memory_graph::memory_embed_download,
             commands::memory_graph::memory_index_build,
@@ -376,6 +475,7 @@ pub fn run() {
             commands::memory_chat::memory_chat_send,
             commands::memory_chat::memory_chat_cancel,
             commands::memory_chat::memory_chat_retrieve,
+            commands::memory_indexer::force_reindex,
             commands::codebase_index::codebase_index_status,
             commands::codebase_index::codebase_index_build,
             commands::memory_chat_sessions::memory_chat_sessions_list,
@@ -384,6 +484,31 @@ pub fn run() {
             commands::memory_chat_sessions::memory_chat_session_delete,
             commands::pdf_annotations::pdf_annotations_load,
             commands::pdf_annotations::pdf_annotations_save,
+            commands::skills::skills_list,
+            commands::skills::skills_read,
+            commands::skills::skills_set_enabled,
+            commands::skills::skills_delete,
+            commands::skills::skills_path,
+            commands::skills::skills_adopt,
+            commands::skills::agents_list_skill_targets,
+            commands::skills::tools_list,
+            commands::skills::skills_reconcile,
+            commands::skills::skills_project,
+            commands::skills::skills_unproject,
+            commands::skills::skills_promote,
+            commands::skills::skills_freeze,
+            commands::skills::pack_inspect,
+            commands::skills::pack_search,
+            commands::skills::pack_remote_preview,
+            commands::skills::pack_install_remote,
+            commands::skills::pack_install_skill,
+            commands::skills::pack_list,
+            commands::skills::pack_check_update,
+            commands::skills::pack_project,
+            commands::skills::pack_unproject,
+            commands::skills::pack_uninstall,
+            commands::skills::pack_projections,
+            commands::skills::pack_components_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Atlas");

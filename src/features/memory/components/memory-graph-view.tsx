@@ -277,10 +277,17 @@ function GraphReady({
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedId, onSelect]);
 
-  // Jump from the detail card to the source memory: Claude file or Codex thread.
+  // Jump from the detail card to the source memory: Claude file, Codex thread,
+  // or native Atlas (cersei) session.
   const openSource = () => {
     if (!selected) return;
-    navigateToMemory(selected.source === "codex" ? "codex" : "claude", selected.id);
+    const sub =
+      selected.source === "codex"
+        ? "codex"
+        : selected.source === "cersei"
+          ? "cersei"
+          : "claude";
+    navigateToMemory(sub, selected.id);
   };
 
   // Animate the cutoff from oldest → newest, then reveal everything.

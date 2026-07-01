@@ -68,6 +68,10 @@ interface WorkspaceState {
    *  persisted). Lives in the store so it survives the virtualized row
    *  remounting and so a freshly-created group can open straight into rename. */
   editingGroupId: string | null;
+  /** Workspace whose name is currently in inline-rename mode (transient, not
+   *  persisted). Lives in the store — like `editingGroupId` — so it survives
+   *  the virtualized row remounting. */
+  editingWorkspaceId: string | null;
   /** Guards re-entrant switches while a flush/restore is in flight. */
   switching: boolean;
   actions: {
@@ -88,6 +92,10 @@ interface WorkspaceState {
     unpin: (id: string) => void;
     setColor: (id: string, color: string | null) => void;
     rename: (id: string, name: string) => void;
+    /** Enter inline-rename for a workspace row. */
+    beginRenameWorkspace: (id: string) => void;
+    /** Leave workspace inline-rename (commit or cancel). */
+    endRenameWorkspace: () => void;
     /** Move a workspace into a group (or ungroup with `null`). */
     setGroup: (id: string, groupId: string | null) => void;
     reorder: (orderedIds: string[]) => void;
@@ -153,6 +161,7 @@ export const useWorkspaceStore = createSelectors(
     sidebarOpen: false,
     switching: false,
     editingGroupId: null,
+    editingWorkspaceId: null,
     actions: {
       addWorkspace: async (path: string) => {
         const existing = get().workspaces.find((w) => w.path === path);
@@ -263,8 +272,15 @@ export const useWorkspaceStore = createSelectors(
             useProjectStore.getState().currentProject?.path ?? null;
           if (activeWorkspaceId) {
             layout.commitWorkspaceView(activeWorkspaceId);
+            // Flush the OUTGOING workspace's pending writes (notably the KB
+            // editor's unsaved buffer) to disk BEFORE snapshotting and swapping.
+            // Awaited — not fire-and-forget — so a note edited/saved in this
+            // workspace can never be stranded or overwritten by the switch race.
+            // The snapshot is then taken AFTER the flush so it reflects the
+            // just-saved state. `flushAll` swallows per-store errors, so a bad
+            // flush can't block the switch.
+            await flushAll({ workspaceId: activeWorkspaceId, path: outgoingPath });
             captureSnapshot(activeWorkspaceId);
-            void flushAll({ workspaceId: activeWorkspaceId, path: outgoingPath });
           }
 
           // 2) Make the switch authoritative.
@@ -374,6 +390,8 @@ export const useWorkspaceStore = createSelectors(
         }));
         scheduleAppStateSave();
       },
+      beginRenameWorkspace: (id) => set({ editingWorkspaceId: id }),
+      endRenameWorkspace: () => set({ editingWorkspaceId: null }),
       setGroup: (id, groupId) => {
         set((s) => ({
           workspaces: s.workspaces.map((w) =>

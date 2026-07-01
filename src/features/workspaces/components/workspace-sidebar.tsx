@@ -11,6 +11,7 @@ import {
   X,
   ScrollText,
   Settings,
+  Zap,
   Pin,
   PinOff,
   ChevronRight,
@@ -27,9 +28,11 @@ import {
   type Workspace,
   type WorkspaceGroup,
 } from "../stores/workspace-store";
+import { useSettingsNav } from "@/features/settings/stores/settings-nav-store";
 import { pickAndAddWorkspace } from "../lib/pick-workspace";
 import { useRunningChatKeys } from "../lib/agent-activity";
 import { openAgentSession } from "@/features/chat/lib/open-agent-session";
+import { stripInjectedContext } from "@/features/chat/lib/atlas-context";
 import { AtlasLoader } from "@/components/atlas-loader";
 import { AgentIcons } from "@/components/agent-icons";
 import { useRecentChatsStore, type RecentChat } from "../stores/recent-chats-store";
@@ -93,14 +96,45 @@ function WorkspaceRow({
   groups: WorkspaceGroup[];
   indented?: boolean;
 }) {
-  const { switchTo, closeWorkspace, pin, unpin, setGroup, addGroup } = useWorkspaceStore.use.actions();
+  const { switchTo, closeWorkspace, pin, unpin, setGroup, addGroup, rename, beginRenameWorkspace, endRenameWorkspace } = useWorkspaceStore.use.actions();
+  // Inline-rename lives in the store (like group rename) so it survives the
+  // virtualized row remounting. The name shown is the user-chosen workspace
+  // label (defaults to the directory name) — renaming only relabels the row,
+  // it never touches the on-disk path.
+  const editing = useWorkspaceStore.use.editingWorkspaceId() === ws.id;
+  const [nameDraft, setNameDraft] = useState(ws.name);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  // Seed the field AND focus it whenever we enter edit mode. `autoFocus` alone
+  // is swallowed when the rename is triggered from the `…` menu: the input
+  // mounts while Radix's dropdown is still tearing down its focus scope, which
+  // eats the focus. Focusing explicitly on the next frame runs after that
+  // teardown settles, so both the menu path and the double-click path land the
+  // cursor in the field. (The group rename "just works" because its trigger is
+  // a plain button, not inside a closing Radix layer.)
+  useEffect(() => {
+    if (!editing) return;
+    setNameDraft(ws.name);
+    const id = requestAnimationFrame(() => {
+      const el = nameInputRef.current;
+      if (el) {
+        el.focus();
+        el.select();
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [editing, ws.name]);
+  const commitRename = () => {
+    const n = nameDraft.trim();
+    if (n) rename(ws.id, n);
+    endRenameWorkspace();
+  };
   const branchLine = summary?.isRepo
     ? `${summary.branch || "—"}${summary.headSubject ? `  ${summary.headSubject}` : ""}`
     : "no source control";
   return (
     <div
       data-hint
-      onClick={() => void switchTo(ws.id)}
+      onClick={editing ? undefined : () => void switchTo(ws.id)}
       style={{ height: WS_CARD, paddingLeft: indented ? 16 : 6 }}
       className={cn(
         // `transform-gpu` keeps the row on a stable composited layer so the
@@ -114,14 +148,31 @@ function WorkspaceRow({
     >
       <GitDot summary={summary} />
       <div className="flex-1 min-w-0">
-        <span
-          className={cn(
-            "block truncate text-[12px] leading-tight pr-16",
-            active ? "text-[var(--text-primary)] font-medium" : "text-[var(--text-secondary)]",
-          )}
-        >
-          {ws.name}
-        </span>
+        {editing ? (
+          <input
+            ref={nameInputRef}
+            value={nameDraft}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") commitRename();
+              if (e.key === "Escape") endRenameWorkspace();
+            }}
+            className="block w-full pr-16 bg-transparent outline-none text-[12px] leading-tight font-medium text-[var(--text-primary)]"
+          />
+        ) : (
+          <span
+            onDoubleClick={(e) => { e.stopPropagation(); beginRenameWorkspace(ws.id); }}
+            className={cn(
+              "block truncate text-[12px] leading-tight pr-16",
+              active ? "text-[var(--text-primary)] font-medium" : "text-[var(--text-secondary)]",
+            )}
+          >
+            {ws.name}
+          </span>
+        )}
         <div className="flex items-center gap-1 mt-1 text-[10px] text-[var(--text-tertiary)] leading-tight">
           {summary?.isRepo && <GitBranch size={9} className="shrink-0" />}
           <span className="truncate font-mono pr-12">{branchLine}</span>
@@ -157,7 +208,19 @@ function WorkspaceRow({
         </DropdownMenu.Trigger>
         <DropdownMenu.Portal>
           <DropdownMenu.Content align="end" sideOffset={4} onClick={(e) => e.stopPropagation()}
+            // On close Radix restores focus to the trigger button. When the
+            // close is caused by selecting "Rename", that focus-return lands
+            // AFTER the rename input has mounted+autofocused, blurring it
+            // instantly → commitRename → edit mode exits. Suppressing the
+            // close auto-focus lets the input keep focus.
+            onCloseAutoFocus={(e) => e.preventDefault()}
             className="z-[var(--z-max)] min-w-[148px] rounded-md border border-[var(--border-default)] bg-black py-0.5 shadow-[var(--shadow-overlay)] text-[11px] text-[var(--text-secondary)]">
+            <DropdownMenu.Item
+              onSelect={() => beginRenameWorkspace(ws.id)}
+              className="px-2.5 h-6 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
+              <Pencil size={11} /> Rename
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator className="my-0.5 h-px bg-[var(--border-default)]" />
             <DropdownMenu.Sub>
               <DropdownMenu.SubTrigger className="flex items-center justify-between px-2.5 h-6 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
                 Move to group <ChevronRight size={11} />
@@ -314,7 +377,7 @@ function ChatRow({ chat, running, onOpen }: { chat: RecentChat; running: boolean
           running ? "text-[var(--text-primary)]" : "text-[var(--text-secondary)]",
         )}
       >
-        {chat.title}
+        {stripInjectedContext(chat.title) || chat.projectName}
       </div>
       {/* Timestamp — bottom-left, aligned with the title start (past the icon). */}
       <span className="absolute bottom-1 left-7 text-[9px] font-mono text-[var(--text-tertiary)] tabular-nums">
@@ -503,6 +566,14 @@ export function WorkspaceSidebar() {
       <div className="px-1.5 pb-1 shrink-0 space-y-0.5">
         <HeaderButton icon={<AtlasIcon size={14} className="rounded-[3px]" />} label="Console" onClick={() => openTabSingleton("mission-control", "Console")} />
         <HeaderButton icon={<ScrollText size={13} />} label="See Logs" onClick={() => openTabSingleton("log", "Log")} />
+        <HeaderButton
+          icon={<Zap size={13} />}
+          label="Skills"
+          onClick={() => {
+            useSettingsNav.getState().goTo("skills");
+            openTabSingleton("settings", "Settings");
+          }}
+        />
         <HeaderButton icon={<Settings size={13} />} label="Settings" onClick={() => openTabSingleton("settings", "Settings")} />
       </div>
 

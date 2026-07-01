@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { cn } from "@/lib/utils";
 import { logEvent } from "@/features/log/lib/log";
 import {
@@ -10,6 +11,11 @@ import {
   Network,
   Trash2,
   UnfoldVertical,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  FileText,
+  Folder,
 } from "lucide-react";
 import { KnowledgeTree, type KnowledgeTreeHandle } from "./knowledge-tree";
 
@@ -19,11 +25,17 @@ interface KnowledgeSidebarProps {
   activeEntryId: string | null;
   activeRepoName: string | null;
   recentIds: string[];
+  /** Clear the "Recently opened" list. */
+  onClearRecents: () => void;
   /** Click a note */
   onSelectEntry: (id: string) => void;
   onDeleteEntry: (id: string) => void;
   onNewFolder: () => void;
   onNewNote: () => void;
+  /** Import external `.md` files into the KB. */
+  onImportFiles: () => void;
+  /** Import a folder (e.g. an Obsidian vault) into the KB. */
+  onImportFolder: () => void;
   onOpenGraph: () => void;
   onSelectRepo: (name: string) => void;
   /** True while the inline folder-name input is open. Rendered just
@@ -43,10 +55,13 @@ export function KnowledgeSidebar({
   activeEntryId,
   activeRepoName,
   recentIds,
+  onClearRecents,
   onSelectEntry,
   onDeleteEntry,
   onNewFolder,
   onNewNote,
+  onImportFiles,
+  onImportFolder,
   onOpenGraph,
   onSelectRepo,
   folderInputOpen,
@@ -65,6 +80,7 @@ export function KnowledgeSidebar({
   // into the sidebar (matches the explorer's collapseAll pattern).
   const treeRef = useRef<KnowledgeTreeHandle>(null);
   const [treeExpandedCount, setTreeExpandedCount] = useState(0);
+  const [recentsCollapsed, setRecentsCollapsed] = useState(false);
 
   const loadRepos = useCallback(() => {
     invoke<Array<{ name: string; display_name: string; path: string; has_readme: boolean }>>(
@@ -172,6 +188,37 @@ export function KnowledgeSidebar({
         >
           <FilePlus size={12} />
         </button>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            <button
+              className="p-1 rounded text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors cursor-pointer outline-none"
+              title="Import notes / folder"
+              style={{ width: 22, height: 22 }}
+            >
+              <Download size={12} />
+            </button>
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Portal>
+            <DropdownMenu.Content
+              align="end"
+              sideOffset={4}
+              className="z-[9999] min-w-[180px] rounded-md border border-border-default bg-bg-elevated py-1 shadow-[var(--shadow-overlay)]"
+            >
+              <DropdownMenu.Item
+                onSelect={onImportFiles}
+                className="flex items-center gap-2 px-2.5 h-[28px] text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer outline-none"
+              >
+                <FileText size={13} /> Import .md files…
+              </DropdownMenu.Item>
+              <DropdownMenu.Item
+                onSelect={onImportFolder}
+                className="flex items-center gap-2 px-2.5 h-[28px] text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary cursor-pointer outline-none"
+              >
+                <Folder size={13} /> Import folder…
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Portal>
+        </DropdownMenu.Root>
       </div>
 
       {/* Inline new-folder input — sits between the header and the
@@ -211,21 +258,42 @@ export function KnowledgeSidebar({
         {/* Recently opened */}
         {recents.length > 0 && (
           <div className="px-1.5 pb-2 shrink-0">
-            <div className="px-2 pt-3 pb-1 text-[10px] font-semibold text-text-tertiary uppercase tracking-wider">
-              Recently opened
+            <div className="group flex items-center gap-1 px-2 pt-3 pb-1">
+              <button
+                onClick={() => setRecentsCollapsed((v) => !v)}
+                className="flex items-center gap-1 text-[10px] font-semibold text-text-tertiary uppercase tracking-wider hover:text-text-secondary transition-colors"
+                title={recentsCollapsed ? "Expand" : "Collapse"}
+              >
+                {recentsCollapsed ? (
+                  <ChevronRight size={11} className="shrink-0" />
+                ) : (
+                  <ChevronDown size={11} className="shrink-0" />
+                )}
+                Recently opened
+              </button>
+              <span className="flex-1" />
+              <button
+                onClick={onClearRecents}
+                className="flex h-4 w-4 items-center justify-center rounded text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-status-error transition-all cursor-pointer"
+                title="Clear recently opened"
+              >
+                <Trash2 size={11} />
+              </button>
             </div>
-            <div className="flex flex-col gap-px max-h-[160px] overflow-y-auto hide-scrollbar">
-              {recents.map((r) => (
-                <button
-                  key={r.id}
-                  onClick={() => onSelectEntry(r.id)}
-                  className="flex items-center gap-1.5 w-full px-2 py-1 rounded-md text-left text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors"
-                  style={{ fontSize: 12 }}
-                >
-                  <span className="truncate flex-1">{r.title}</span>
-                </button>
-              ))}
-            </div>
+            {!recentsCollapsed && (
+              <div className="flex flex-col gap-px max-h-[160px] overflow-y-auto hide-scrollbar">
+                {recents.map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => onSelectEntry(r.id)}
+                    className="flex items-center gap-1.5 w-full px-2 py-1 rounded-md text-left text-text-tertiary hover:bg-bg-hover hover:text-text-secondary transition-colors"
+                    style={{ fontSize: 12 }}
+                  >
+                    <span className="truncate flex-1">{r.title}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

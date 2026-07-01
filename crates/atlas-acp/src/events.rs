@@ -31,18 +31,30 @@ pub enum AcpEvent {
         tool_call: acp_schema::ToolCallUpdate,
         options: Vec<acp_schema::PermissionOption>,
     },
-    /// A prompt-turn finished. The corresponding `acp_send_prompt` call has
-    /// already returned, but the event is broadcast for any tab listening.
-    TurnStopped {
-        session_id: acp_schema::SessionId,
-        turn_id: Uuid,
-        stop_reason: acp_schema::StopReason,
-    },
     /// A prompt-turn failed before stop_reason (process died, protocol error).
     TurnFailed {
         session_id: acp_schema::SessionId,
         turn_id: Uuid,
         error: String,
+    },
+    /// Cumulative token usage + estimated cost for the session. Emitted by the
+    /// in-process native agent (ACP agents surface usage via their own updates).
+    Usage {
+        session_id: acp_schema::SessionId,
+        input_tokens: u64,
+        output_tokens: u64,
+        cost: f64,
+    },
+    /// Context compaction started (`active = true`) or finished (`false`).
+    /// Native-agent only.
+    Compaction {
+        session_id: acp_schema::SessionId,
+        active: bool,
+    },
+    /// Approx tokens saved by RTK tool-output compression this turn. Native-only.
+    CompressionSaved {
+        session_id: acp_schema::SessionId,
+        saved_tokens: u64,
     },
 }
 

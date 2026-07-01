@@ -21,6 +21,7 @@ const BrowserPanel = lazy(() => import("@/features/browser/components/browser-pa
 const MediaViewer = lazy(() => import("@/features/media/components/media-viewer").then(m => ({ default: m.MediaViewer })));
 const SvgViewer = lazy(() => import("@/features/svg/components/svg-viewer").then(m => ({ default: m.SvgViewer })));
 const PdfViewer = lazy(() => import("@/features/pdf/components/pdf-viewer").then(m => ({ default: m.PdfViewer })));
+const GitDiffPanel = lazy(() => import("@/features/git/components/git-diff-panel").then(m => ({ default: m.GitDiffPanel })));
 const CanvasPanel = lazy(() => import("@/features/canvas/components/canvas-panel").then(m => ({ default: m.CanvasPanel })));
 const KnowledgePanel = lazy(() => import("@/features/knowledge/components/knowledge-panel").then(m => ({ default: m.KnowledgePanel })));
 const KnowledgeGraph = lazy(() => import("@/features/knowledge/components/knowledge-graph").then(m => ({ default: m.KnowledgeGraph })));
@@ -98,6 +99,9 @@ const PERSISTENT_TYPES: ReadonlySet<TabType> = new Set([
   // re-walking its tree/graph on every revisit.
   "chat",
   "knowledge",
+  // Keep settings mounted so its open section + sub-tab + form drafts survive a
+  // tab switch (it's a singleton tab; remounting reset all its local useState).
+  "settings",
 ]);
 
 /**
@@ -279,7 +283,7 @@ function TabColumn({
             !soloColumn && !isFocused && "opacity-45"
           )}
         >
-          <div className="flex items-center gap-0.5 px-1 border-r border-border-default shrink-0">
+          <div className="flex items-center justify-center gap-0.5 w-[44px] border-r border-border-default shrink-0">
             <button
               onClick={navigateTabBack}
               disabled={!canGoBack}
@@ -485,6 +489,8 @@ function TabContentContainer({
                 <KnowledgeGraph />
               ) : tab.type === "pdf" ? (
                 <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />
+              ) : tab.type === "settings" ? (
+                <SettingsPanel initialSection={tab.data.section as string | undefined} />
               ) : (
                 <TerminalPanel tabId={tab.id} />
               )}
@@ -536,6 +542,15 @@ function TabContent({ tab }: { tab: Tab }) {
       return <SvgViewer filePath={tab.data.filePath as string} />;
     case "pdf":
       return <PdfViewer filePath={tab.data.filePath as string} tabId={tab.id} />;
+    case "diff":
+      return (
+        <GitDiffPanel
+          repoPath={tab.data.repoPath as string}
+          file={tab.data.file as string}
+          staged={!!tab.data.staged}
+          commit={(tab.data.commit as string | null | undefined) ?? null}
+        />
+      );
     case "unsupported":
       return <UnsupportedView filePath={tab.data.filePath as string} />;
     default:
@@ -564,6 +579,7 @@ const NEW_TAB_OPTIONS: Array<{ type: TabType; label: string; icon: React.Element
   { type: "chat", label: "Agents", icon: AtlasIcon },
   { type: "model-chat", label: "Chat", icon: MessageSquare },
   { type: "terminal", label: "Terminal", icon: Terminal },
+  { type: "diff", label: "Git Diff", icon: GitCompare },
   { type: "canvas", label: "Spaces", icon: Map },
   { type: "browser", label: "Browser", icon: Globe },
   { type: "research", label: "Research", icon: BookOpen },

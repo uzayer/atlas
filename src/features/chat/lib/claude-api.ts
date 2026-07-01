@@ -15,6 +15,9 @@ export interface ClaudeSessionMeta {
   last_modified: string | null;
   message_count: number;
   preview: string;
+  /** Cumulative tokens processed across the session (native Atlas agent only;
+   *  Claude/Codex disk rows omit it → undefined). */
+  total_tokens?: number;
 }
 
 export interface ToolCallDump {
@@ -43,12 +46,40 @@ export function listCodexSessions(cwd: string): Promise<ClaudeSessionMeta[]> {
   return invoke<ClaudeSessionMeta[]>("list_codex_sessions", { cwd });
 }
 
+/**
+ * Native Atlas (Cersei) agent sessions for `cwd`, shaped like
+ * {@link ClaudeSessionMeta} (Rust `atlas_cersei::SessionMeta`) so the sidebar
+ * merges all three agents. `id` is the resume key; `file_path` points at the
+ * persisted JSON transcript under the app config dir.
+ */
+export function listCerseiSessions(cwd: string): Promise<ClaudeSessionMeta[]> {
+  return invoke<ClaudeSessionMeta[]>("cersei_list_sessions", { projectPath: cwd });
+}
+
 export function readClaudeSession(filePath: string): Promise<ChatMessageDump[]> {
   return invoke<ChatMessageDump[]>("read_claude_session", { filePath });
 }
 
 export function deleteClaudeSession(filePath: string): Promise<void> {
   return invoke<void>("delete_claude_session", { filePath });
+}
+
+/**
+ * Delete a native Atlas (Cersei) session by id. Cersei transcripts live under
+ * the app config dir (not `~/.claude/projects`), so they need their own command
+ * — `delete_claude_session` rejects any path outside the Claude projects dir.
+ */
+export function cerseiDeleteSession(cwd: string, sessionId: string): Promise<void> {
+  return invoke<void>("cersei_delete_session", { projectPath: cwd, sessionId });
+}
+
+/**
+ * Archive (soft-delete) a Codex session by thread id. Codex keeps threads in
+ * `~/.codex/state_<n>.sqlite` with no per-session file, so the backend sets
+ * `archived = 1` (the flag the listing filters on) rather than removing a row.
+ */
+export function codexDeleteSession(sessionId: string): Promise<void> {
+  return invoke<void>("codex_delete_session", { sessionId });
 }
 
 export interface ClaudeSessionStats {

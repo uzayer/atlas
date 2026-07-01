@@ -19,6 +19,7 @@ import {
 } from "@/features/chat/lib/agents-api";
 import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta } from "@/types/agents";
+import { SWITCHABLE_AGENTS } from "@/types/agent";
 import { FilePicker } from "@/features/file-picker/components/file-picker";
 import { HintOverlay } from "@/features/hint-nav/components/hint-overlay";
 import { BrowserOverlayWatcher } from "@/features/browser/components/browser-overlay-watcher";
@@ -37,6 +38,9 @@ import {
   type RecentFile,
 } from "@/features/chat/stores/recent-files-store";
 import { useRecentChatsStore } from "@/features/workspaces/stores/recent-chats-store";
+import { stripInjectedContext } from "@/features/chat/lib/atlas-context";
+import { openNewAgentChat } from "@/features/chat/lib/open-agent-session";
+import { refreshCachedAcpModels } from "@/features/chat/lib/warm-acp-models";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useNodeSetupStore } from "@/features/node-setup/stores/node-setup-store";
 import {
@@ -290,6 +294,18 @@ export function App() {
   };
   const currentProject = useProjectStore.use.currentProject();
 
+  // Silent startup refresh of cached ACP model lists (Claude Code / Codex) so
+  // the model picker stays fresh — optimistic UI: the cache drives the picker
+  // immediately, this updates it in the background. Only re-warms agents already
+  // cached (i.e. used before), so we never spawn an agent the user never touches.
+  // Deferred so it never competes with launch.
+  useEffect(() => {
+    const cwd = currentProject?.path;
+    if (!cwd) return;
+    const t = setTimeout(() => refreshCachedAcpModels(cwd), 4000);
+    return () => clearTimeout(t);
+  }, [currentProject?.path]);
+
   // Global agent event bus. One listener routes atlas-agents SessionDelta
   // events into the chat-store, queues permission requests for the
   // PermissionModal, and resets the lazy agent handle on disconnect.
@@ -313,8 +329,15 @@ export function App() {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
 
-    const pendingText = new Map<string, string>(); // session_id → buffered narration
-    const pendingThought = new Map<string, string>(); // session_id → buffered thinking
+    // All deltas — text/thinking chunks INCLUDED — buffer here in strict wire
+    // order. Consecutive same-session text (or thinking) chunks coalesce into
+    // the trailing entry, but a `message_appended`/tool delta between two text
+    // runs breaks the run so ordering is preserved. (Previously text was
+    // bucketed separately and applied BEFORE other deltas, which reordered the
+    // anchoring `message_appended` after its text — invisible for ACP agents
+    // whose IPC latency spread deltas across frames, but the in-process Cersei
+    // agent emits a whole turn in one frame and the text shattered into
+    // mis-ordered fragments.)
     const pendingDeltas: AgentDelta[] = [];
     const toolDeltaPos = new Map<string, number>(); // dedup key → index in pendingDeltas
     let rafId: number | null = null;
@@ -453,25 +476,54 @@ export function App() {
 
     const flush = () => {
       rafId = null;
-      if (
-        pendingText.size === 0 &&
-        pendingThought.size === 0 &&
-        pendingDeltas.length === 0
-      ) {
-        return;
-      }
-      const texts = Array.from(pendingText, ([sessionId, text]) => ({ sessionId, text }));
-      const thoughts = Array.from(pendingThought, ([sessionId, text]) => ({ sessionId, text }));
+      if (pendingDeltas.length === 0) return;
       const deltas = pendingDeltas.slice();
-      pendingText.clear();
-      pendingThought.clear();
       pendingDeltas.length = 0;
       toolDeltaPos.clear();
-      useChatStore.getState().actions.applyAgentBatch({ texts, thoughts, deltas });
+      useChatStore.getState().actions.applyAgentBatch({ texts: [], thoughts: [], deltas });
+    };
+    // Coalesce a streaming text/thinking chunk into the trailing pendingDeltas
+    // entry when it's the same kind + session; otherwise append in order. Keeps
+    // the per-frame coalescing win without divorcing text from its wire order.
+    const bufferChunk = (env: AgentDelta) => {
+      const last = pendingDeltas[pendingDeltas.length - 1];
+      if (
+        last &&
+        (last.kind === "text_chunk" || last.kind === "thinking_chunk") &&
+        last.kind === env.kind &&
+        last.session_id === env.session_id
+      ) {
+        pendingDeltas[pendingDeltas.length - 1] = {
+          ...last,
+          delta: last.delta + (env as typeof last).delta,
+        };
+      } else {
+        pendingDeltas.push(env);
+      }
     };
     const schedule = () => {
       if (rafId !== null) return;
       rafId = requestAnimationFrame(flush);
+    };
+
+    // When the webview is hidden/throttled, requestAnimationFrame is paused, so
+    // buffered deltas (incl. a turn's terminal + the next turn's "running") sit
+    // unapplied until the next frame. Flush immediately on wake so status
+    // ordering is applied promptly and a stale "done" can't visibly linger.
+    const flushOnWake = () => flush();
+    window.addEventListener("atlas:window-active", flushOnWake);
+
+    // A turn_finished / turn_failed for a turn already superseded by a newer
+    // send (parallel / queued / wake timing) must not fire a "done"
+    // notification or a memory reindex — mirror the chat-store's stale-turn
+    // guard here so side effects don't run for a turn the store will ignore.
+    const isStaleAgentTurn = (sessionId: string, turnSeq?: number): boolean => {
+      if (!turnSeq) return false;
+      for (const sess of Object.values(useChatStore.getState().sessions)) {
+        if (sess.acpSessionId === sessionId)
+          return turnSeq < (sess.currentTurnSeq ?? 0);
+      }
+      return false;
     };
 
     const bufferDelta = (env: AgentDelta) => {
@@ -500,6 +552,40 @@ export function App() {
     };
     const notify = () => useNotificationsStore.getState().actions;
 
+    // After a native-agent turn that may have changed files, refresh the
+    // project's codebase index (incremental + structural — cheap, no LLM) so
+    // `search_memory` and the Memory tab stay current. Debounced per project so
+    // a burst of turns triggers one rebuild.
+    const indexTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const autoIndexAfterTurn = (acpSessionId: string) => {
+      const sessions = useChatStore.getState().sessions;
+      const sess = Object.values(sessions).find((s) => s.acpSessionId === acpSessionId);
+      if (sess?.agentType !== "cersei") return;
+      const path = sess.workingDirectory;
+      if (!path) return;
+      const existing = indexTimers.get(path);
+      if (existing) clearTimeout(existing);
+      indexTimers.set(
+        path,
+        setTimeout(() => {
+          indexTimers.delete(path);
+          // Broadcast index activity so the composer's memory pill can show
+          // "Indexing…" then refresh its status.
+          const emit = (active: boolean) =>
+            window.dispatchEvent(
+              new CustomEvent("atlas:cersei-index", { detail: { path, active } }),
+            );
+          emit(true);
+          void invoke("codebase_index_build", {
+            projectPath: path,
+            opts: { mode: "incremental", backend: "structural" },
+          })
+            .catch((err) => console.warn("auto codebase index failed:", err))
+            .finally(() => emit(false));
+        }, 4000),
+      );
+    };
+
     // Record a chat into the sidebar "Chats" (recently-invoked) list whenever a
     // session sees meaningful activity. Resolves project + title from the chat
     // session that owns this acpSessionId.
@@ -513,7 +599,9 @@ export function App() {
           tabId,
           projectPath: path,
           projectName: path.split("/").pop() || path,
-          title: s.title || "Chat",
+          // Strip any Atlas-injected memory scaffolding the title may carry
+          // (resumed sessions); a dirty fragment cleans to "" → fall back.
+          title: stripInjectedContext(s.title) || "Chat",
           status: s.status,
           agentType: s.agentType,
           acpSessionId: s.acpSessionId,
@@ -535,17 +623,11 @@ export function App() {
       const actions = useChatStore.getState().actions;
       switch (env.kind) {
         case "text_chunk":
-          pendingText.set(
-            env.session_id,
-            (pendingText.get(env.session_id) ?? "") + env.delta
-          );
+          bufferChunk(env);
           schedule();
           return;
         case "thinking_chunk":
-          pendingThought.set(
-            env.session_id,
-            (pendingThought.get(env.session_id) ?? "") + env.delta
-          );
+          bufferChunk(env);
           schedule();
           return;
         case "permission_request": {
@@ -609,6 +691,11 @@ export function App() {
           // flips back to "idle" (see chat-store.ts:591).
           bufferDelta(env);
           schedule();
+          // Superseded by a newer send → the store ignores the idle flip; skip
+          // the "done" notification, memory reindex, and log too.
+          if (isStaleAgentTurn(env.session_id, env.turn_seq)) return;
+          // Keep the native agent's project memory fresh (debounced, cheap).
+          if (env.stop_reason !== "cancelled") autoIndexAfterTurn(env.session_id);
           logEvent({
             source: "atlas",
             kind: "agent-turn-finished",
@@ -639,6 +726,7 @@ export function App() {
         case "turn_failed": {
           bufferDelta(env);
           schedule();
+          if (isStaleAgentTurn(env.session_id, env.turn_seq)) return;
           const info = agentSessionInfo(env.session_id);
           notify().add({
             kind: "agent-failed",
@@ -671,12 +759,14 @@ export function App() {
     return () => {
       cancelled = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener("atlas:window-active", flushOnWake);
       unlistenFocus?.();
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("pointerdown", onUserActivity);
       window.removeEventListener("keydown", onUserActivity);
       window.removeEventListener("wheel", onUserActivity);
       window.clearInterval(keepWarm);
+      indexTimers.forEach((t) => clearTimeout(t));
       unlisten?.();
     };
   }, []);
@@ -962,9 +1052,9 @@ export function App() {
       },
     },
     {
-      // ⌥/ — switch coding agent (Claude Code ⇄ Codex). A session is paired to
-      // one agent: an empty chat flips in place; a started chat opens a NEW
-      // chat bound to the other agent (per the agent-pairing rule).
+      // ⌥/ — cycle the coding agent (Claude Code → Codex → Atlas → …). A
+      // session is paired to one agent: an empty chat flips in place; a started
+      // chat opens a NEW chat bound to the next agent (per the pairing rule).
       combo: { key: "/", alt: true },
       action: () => {
         const layout = useLayoutStore.getState();
@@ -972,28 +1062,30 @@ export function App() {
         if (!tab || tab.type !== "chat") return;
         const chat = useChatStore.getState();
         const sess = chat.sessions[tab.id];
-        const cur = sess?.agentType === "codex" ? "codex" : "claude-code";
-        const next: "claude-code" | "codex" = cur === "codex" ? "claude-code" : "codex";
+        const curIdx = SWITCHABLE_AGENTS.indexOf(
+          (sess?.agentType ?? "claude-code") as (typeof SWITCHABLE_AGENTS)[number]
+        );
+        const next = SWITCHABLE_AGENTS[(Math.max(curIdx, 0) + 1) % SWITCHABLE_AGENTS.length];
+        // Empty chat flips agent in place. A started chat always starts a fresh
+        // session in the SAME tab bound to the next agent (singleton model —
+        // never a new tab, even mid-stream; the abandoned turn persists to the
+        // history sidebar).
         if ((sess?.messages.length ?? 0) === 0) {
           chat.actions.switchChatAgent(tab.id, next);
         } else {
-          const id = `chat-${Date.now()}`;
-          chat.actions.createSession(id, next);
-          addTab({ id, type: "chat", title: "New Chat", closable: true, dirty: false, data: {} });
+          chat.actions.clearSession(tab.id);
+          chat.actions.switchChatAgent(tab.id, next);
+          window.dispatchEvent(
+            new CustomEvent("atlas:chat-focus", { detail: { tabId: tab.id } }),
+          );
         }
       },
     },
     {
+      // ⌘T — new agent chat. Singleton: focuses the existing chat tab and resets
+      // it to a fresh session rather than opening a second chat tab.
       combo: { key: "t", meta: true },
-      action: () =>
-        addTab({
-          id: `chat-${Date.now()}`,
-          type: "chat",
-          title: "New Chat",
-          closable: true,
-          dirty: false,
-          data: {},
-        }),
+      action: () => openNewAgentChat(),
     },
     {
       // ⌘N — new untitled editor. The synthetic `untitled:<ts>` path

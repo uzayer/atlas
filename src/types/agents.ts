@@ -58,6 +58,8 @@ export interface Usage {
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  /** Estimated cumulative cost in USD (native agent; 0 when unknown). */
+  cost?: number;
 }
 
 /** One ACP-advertised session mode (e.g. Codex's read-only / auto / full-access). */
@@ -76,6 +78,9 @@ export interface SessionSnapshot {
   current_mode: string | null;
   current_model: string | null;
   available_modes: SessionModeInfo[];
+  /** Models the agent advertised (ACP `session/new` `models`). Drives the
+   *  Claude Code / Codex model picker; empty when unsupported. */
+  available_models: SessionModeInfo[];
   available_commands: unknown[];
   plan: PlanEntry[];
   messages: SessionMessage[];
@@ -89,7 +94,7 @@ export interface SessionSnapshot {
  * `kind` discriminates; `agent_id` + `session_id` route to the right tab.
  */
 export type AgentDelta =
-  | { kind: "status"; agent_id: AgentId; session_id: AcpSessionId; status: SessionStatus }
+  | { kind: "status"; agent_id: AgentId; session_id: AcpSessionId; status: SessionStatus; turn_seq?: number }
   | { kind: "message_appended"; agent_id: AgentId; session_id: AcpSessionId; message: SessionMessage }
   | { kind: "text_chunk"; agent_id: AgentId; session_id: AcpSessionId; message_id: string; delta: string }
   | { kind: "thinking_chunk"; agent_id: AgentId; session_id: AcpSessionId; message_id: string; delta: string }
@@ -99,6 +104,8 @@ export type AgentDelta =
   | { kind: "model_changed"; agent_id: AgentId; session_id: AcpSessionId; model_id: string }
   | { kind: "available_commands"; agent_id: AgentId; session_id: AcpSessionId; commands: unknown[] }
   | { kind: "usage_updated"; agent_id: AgentId; session_id: AcpSessionId; usage: Usage }
+  | { kind: "compaction"; agent_id: AgentId; session_id: AcpSessionId; active: boolean }
+  | { kind: "compression_saved"; agent_id: AgentId; session_id: AcpSessionId; saved_tokens: number }
   | {
       kind: "permission_request";
       agent_id: AgentId;
@@ -108,6 +115,6 @@ export type AgentDelta =
       options: unknown;
     }
   | { kind: "permission_resolved"; agent_id: AgentId; session_id: AcpSessionId; request_id: string }
-  | { kind: "turn_finished"; agent_id: AgentId; session_id: AcpSessionId; stop_reason: string }
-  | { kind: "turn_failed"; agent_id: AgentId; session_id: AcpSessionId; error: string }
+  | { kind: "turn_finished"; agent_id: AgentId; session_id: AcpSessionId; stop_reason: string; turn_seq?: number }
+  | { kind: "turn_failed"; agent_id: AgentId; session_id: AcpSessionId; error: string; turn_seq?: number }
   | { kind: "agent_disconnected"; agent_id: AgentId; session_id: AcpSessionId; reason: string };

@@ -1,28 +1,42 @@
 import type { SessionModeInfo } from "./agents";
 
-export type AgentType = "claude-code" | "codex" | "custom";
+export type AgentType = "claude-code" | "codex" | "cersei" | "custom";
 
-/** Map a high-level agent type to the spawnable ACP plugin id (registry.rs). */
-export const AGENT_PLUGIN_ID: Record<"claude-code" | "codex", string> = {
+/** Switchable (Atlas-shipped) agents — excludes the catch-all "custom". */
+export type SwitchableAgent = "claude-code" | "codex" | "cersei";
+
+/** Map a high-level agent type to the spawnable plugin id (registry.rs /
+ *  atlas-cersei). "cersei" is Atlas's native in-process agent. */
+export const AGENT_PLUGIN_ID: Record<SwitchableAgent, string> = {
   "claude-code": "claude-code-ts",
   codex: "codex",
+  cersei: "cersei",
 };
 
-/** The two coding agents Atlas ships, in switch order (for option+/). */
-export const SWITCHABLE_AGENTS: ("claude-code" | "codex")[] = ["claude-code", "codex"];
+/** The coding agents Atlas ships, in switch order (for option+/). */
+export const SWITCHABLE_AGENTS: SwitchableAgent[] = ["claude-code", "codex", "cersei"];
 
-export const AGENT_LABEL: Record<"claude-code" | "codex", string> = {
+export const AGENT_LABEL: Record<SwitchableAgent, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
+  cersei: "Atlas",
 };
 
 /** Derive the display agent type from a spawnable plugin id. */
 export function agentTypeFromPluginId(pluginId: string): AgentType {
   if (pluginId === "codex") return "codex";
+  if (pluginId === "cersei") return "cersei";
   if (pluginId.startsWith("claude")) return "claude-code";
   return "custom";
 }
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
+
+/** True when the agent is actively working OR paused waiting on the user (a
+ *  permission / plan approval). Both must keep the "busy" affordance so the
+ *  spinner / composer never look "done" while a turn is still in progress. */
+export function isBusyAgentStatus(status: string | undefined): boolean {
+  return status === "running" || status === "waiting";
+}
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 export type ClaudePermissionMode =
   | "default"
@@ -51,6 +65,12 @@ export interface ChatSession {
   agentType: AgentType;
   model: string;
   status: AgentStatus;
+  /** Turn identity of this session's current/most-recent turn, taken from the
+   *  Rust `turn_seq` on status/terminal deltas. Used to reject a stale terminal
+   *  (idle/error) belonging to a turn already superseded by a newer send —
+   *  the guard against premature "done" under parallel / queued / wake timing.
+   *  Absent (or 0) for the native cersei agent, which is treated as current. */
+  currentTurnSeq?: number;
   workingDirectory: string;
   tasks: AgentTask[];
   createdAt: string;
@@ -77,8 +97,33 @@ export interface ChatSession {
    *  the picker in a loading state, optimistically pre-filled from the persisted
    *  per-agent modes cache so switching feels instant. Cleared by `setAcpModes`. */
   acpModesPending?: boolean;
-  /** Currently selected ACP model id (default / sonnet / haiku / …). */
+  /** Currently selected ACP model id (default / sonnet / haiku / …). For the
+   *  native Cersei agent this is the bare model id; the provider lives in
+   *  `cerseiProvider` and the two are pushed to the backend as `provider/model`. */
   acpCurrentModel?: string;
+  /** Models the ACP agent advertised (Claude Code / Codex) — drives the
+   *  composer's model picker. Seeded from the snapshot's `available_models`;
+   *  empty for agents (or the native one) that don't expose ACP model lists. */
+  acpAvailableModels?: SessionModeInfo[];
+  /** BYOK provider id backing the native Cersei agent's model selection
+   *  (e.g. "anthropic", "openai"). Unused by the ACP agents. */
+  cerseiProvider?: string;
+  /** Cumulative token/cost usage for the session (native agent surfaces it via
+   *  `usage_updated` deltas; drives the composer's token/cost pill). */
+  usage?: import("./agents").Usage;
+  /** True while the native agent is compacting its context window. */
+  compacting?: boolean;
+  /** Reasoning-effort level for the native agent ("" / low / medium / high /
+   *  max). Only meaningful for Anthropic models (maps to a thinking budget). */
+  cerseiEffort?: string;
+  /** RTK tool-output compression for the native agent (default on). */
+  cerseiCompress?: boolean;
+  /** Cumulative usage snapshot at the end of the previous turn — used to derive
+   *  per-turn usage for the message footer. */
+  lastUsageSnapshot?: { input: number; output: number; cost: number };
+  /** Tokens RTK compression saved on the in-flight turn, captured from the
+   *  `compression_saved` delta and folded into the usage footer at turn end. */
+  pendingSavedTokens?: number;
   /** Available slash commands as reported by the agent for this session. */
   availableCommands?: unknown[];
   /**
@@ -130,6 +175,10 @@ export interface ChatMessage {
   atlasProse?: string;
   atlasContext?: string;
   atlasContextBlockCount?: number;
+  /** Per-turn token usage + cost for the native agent, attached when the turn
+   *  finishes. Drives the end-of-message usage footer. `saved` = approx tokens
+   *  RTK compression shaved off this turn (0 when compression was off). */
+  usage?: { input: number; output: number; cost: number; saved?: number };
 }
 
 export interface ToolCallDisplay {

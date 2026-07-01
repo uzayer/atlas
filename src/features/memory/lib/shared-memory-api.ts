@@ -14,7 +14,8 @@ export type EventKind =
   | "session_start"
   | "session_end"
   | "todo_added"
-  | "todo_done";
+  | "todo_done"
+  | "skill_used";
 
 export interface MemoryEvent {
   seq: number;

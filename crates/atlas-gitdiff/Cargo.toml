@@ -1,0 +1,15 @@
+[package]
+name = "atlas-gitdiff"
+version = "0.1.0"
+edition = "2021"
+description = "Structured side-by-side git diff engine for Atlas: parses unified diffs and computes word-level intra-line change spans (word-diff algorithm vendored from dandavison/delta, MIT)."
+
+[lib]
+name = "atlas_gitdiff"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# Word-diff tokenization + the vendored delta `edits`/`align` modules.
+regex = "1"
+unicode-segmentation = "1"
+unicode-width = "0.2"

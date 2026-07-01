@@ -2,11 +2,12 @@ import { lazy, Suspense } from "react";
 import { cn } from "@/lib/utils";
 import { useLayoutStore } from "../stores/layout-store";
 import { FileTree } from "@/features/explorer/components/file-tree";
+import { ScrollArea } from "@/ui/scroll-area";
 import { PanelSkeleton } from "@/components/panel-skeleton";
 import {
   Files,
   Brain,
-  Network,
+  Sparkles,
   BarChart3,
   ChevronDown,
   RefreshCw,
@@ -22,10 +23,16 @@ const UsagePanel = lazy(() =>
   }))
 );
 
-// xyflow + the layout pass are heavy; load only when the user opens the tab.
-const GitGraphPanel = lazy(() =>
-  import("@/features/git/components/git-graph-panel").then((m) => ({
-    default: m.GitGraphPanel,
+// Project analysis + explore panels — lazy so their first invokes / parses
+// don't run during the boot cascade.
+const AnalysisPanel = lazy(() =>
+  import("@/features/analysis/components/analysis-panel").then((m) => ({
+    default: m.AnalysisPanel,
+  }))
+);
+const ExplorePanel = lazy(() =>
+  import("@/features/analysis/components/explore-panel").then((m) => ({
+    default: m.ExplorePanel,
   }))
 );
 // `KnowledgeList` only mounts when the user clicks the Knowledge section
@@ -40,7 +47,8 @@ const KnowledgeList = lazy(() =>
 const sections = [
   { id: "files" as const, icon: Files, label: "Files" },
   { id: "knowledge" as const, icon: Brain, label: "Knowledge" },
-  { id: "git-graph" as const, icon: Network, label: "Git Graph" },
+  { id: "analysis" as const, icon: BarChart3, label: "Analysis" },
+  { id: "explore" as const, icon: Sparkles, label: "Explore" },
 ];
 
 export function LeftPanel() {
@@ -73,35 +81,31 @@ export function LeftPanel() {
       </div>
 
       {/* Section content */}
-      <div
-        className={cn(
-          "flex-1 min-h-0",
-          // Git graph panel takes over its own scrolling (via ReactFlow); other panels scroll vertically.
-          activeSection === "git-graph" ? "overflow-hidden" : "overflow-auto hide-scrollbar"
-        )}
-      >
+      <div className="flex-1 min-h-0 overflow-auto hide-scrollbar">
         {activeSection === "files" && <FileTree />}
         {activeSection === "knowledge" && (
           <Suspense fallback={<PanelSkeleton label="Loading knowledge…" rows={5} />}>
             <KnowledgeList />
           </Suspense>
         )}
-        {activeSection === "git-graph" && (
-          <Suspense
-            fallback={
-              <div className="h-full flex items-center justify-center text-[11px] text-text-tertiary">
-                Loading graph…
-              </div>
-            }
-          >
-            <GitGraphPanel />
+        {activeSection === "analysis" && (
+          <Suspense fallback={<PanelSkeleton label="Loading analysis…" rows={5} />}>
+            <AnalysisPanel />
+          </Suspense>
+        )}
+        {activeSection === "explore" && (
+          <Suspense fallback={<PanelSkeleton label="Loading explore…" rows={5} />}>
+            <ScrollArea className="h-full p-2">
+              <ExplorePanel />
+            </ScrollArea>
           </Suspense>
         )}
       </div>
 
-      {/* Project usage report — collapsible accordion at the bottom
-          (hidden on the Git Graph tab which owns its own scroll). */}
-      {activeSection !== "git-graph" && (
+      {/* Project usage report — collapsible accordion at the bottom. Shown only
+          under Files/Knowledge; the data panels (Analysis/Explore) take the
+          full height. */}
+      {(activeSection === "files" || activeSection === "knowledge") && (
         <div
           className={cn(
             "border-t border-border-default flex flex-col shrink-0",

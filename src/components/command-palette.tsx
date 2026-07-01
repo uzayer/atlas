@@ -20,6 +20,7 @@ import {
   Columns2,
   Maximize2,
   Activity,
+  Sparkles,
   Network,
   BrainCircuit,
   ScrollText,
@@ -106,11 +107,11 @@ export function CommandPalette({
     });
 
   // Reveal the sidebar (toggle it on if hidden) then switch its active section.
-  const showLeft = (section: "files" | "knowledge" | "git-graph") => {
+  const showLeft = (section: "files" | "knowledge" | "analysis" | "explore") => {
     if (!useLayoutStore.getState().leftPanel.visible) toggleLeftPanel();
     setLeftSection(section);
   };
-  const showRight = (section: "changes" | "analysis" | "explore" | "github") => {
+  const showRight = (section: "changes" | "github" | "git-graph") => {
     if (!useLayoutStore.getState().rightPanel.visible) toggleRightPanel();
     setRightSection(section);
   };
@@ -154,9 +155,10 @@ export function CommandPalette({
       // ── Views (reveal the panel, then switch its section) ──
       { id: "view-files", label: "Show File Explorer", icon: PanelLeft, category: "View", action: () => showLeft("files") },
       { id: "view-knowledge", label: "Show Knowledge Sidebar", icon: Brain, category: "View", action: () => showLeft("knowledge") },
-      { id: "view-git-graph", label: "Show Git Graph", icon: GitBranch, category: "View", action: () => showLeft("git-graph") },
+      { id: "view-analysis", label: "Show Analysis", icon: Activity, category: "View", action: () => showLeft("analysis") },
+      { id: "view-explore", label: "Show Explore", icon: Sparkles, category: "View", action: () => showLeft("explore") },
       { id: "view-changes", label: "Show Source Control", icon: PanelRight, category: "View", action: () => showRight("changes") },
-      { id: "view-analysis", label: "Show Analysis", icon: Activity, category: "View", action: () => showRight("analysis") },
+      { id: "view-git-graph", label: "Show Git Graph", icon: GitBranch, category: "View", action: () => showRight("git-graph") },
 
       // ── App ──
       { id: "settings", label: "Open Settings", shortcut: "⌘,", icon: Settings, category: "App", action: () => openTab("settings", "Settings") },

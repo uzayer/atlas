@@ -61,6 +61,10 @@ export const agents = {
     invoke<void>("agents_set_mode", { key, modeId }),
   setModel: (key: SessionKey, modelId: string) =>
     invoke<void>("agents_set_model", { key, modelId }),
+  setEffort: (key: SessionKey, effort: string) =>
+    invoke<void>("agents_set_effort", { key, effort }),
+  setCompress: (key: SessionKey, on: boolean) =>
+    invoke<void>("agents_set_compress", { key, on }),
 
   respondPermission: (
     agentId: AgentId,
@@ -107,9 +111,11 @@ export const listenAgents = (
 // first prompt doesn't pay npx/node cold-start (10–30s); a chat bound to a
 // different agent (e.g. Codex) spawns that agent the first time it's used.
 
-/** The two coding agents Atlas ships. claude is the default for new chats. */
+/** The coding agents Atlas ships. claude is the default for new chats. */
 export const DEFAULT_PLUGIN_ID = "claude-code-ts";
 export const CODEX_PLUGIN_ID = "codex";
+/** Atlas's native in-process agent (atlas-cersei). */
+export const CERSEI_PLUGIN_ID = "cersei";
 
 const agentPromises = new Map<string, Promise<AgentInfo>>();
 const cachedAgents = new Map<string, AgentInfo>();

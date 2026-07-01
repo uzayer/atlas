@@ -43,7 +43,7 @@ interface LayoutState {
   leftPanel: {
     visible: boolean;
     width: number;
-    activeSection: "files" | "knowledge" | "git-graph";
+    activeSection: "files" | "knowledge" | "analysis" | "explore";
     usagePanelHeight: number;
     /** Show the project "Usage" report accordion below the file tree.
      *  Toggled by the chevron in its header. */
@@ -52,7 +52,7 @@ interface LayoutState {
   rightPanel: {
     visible: boolean;
     width: number;
-    activeSection: "review-agents" | "changes" | "analysis" | "explore" | "github";
+    activeSection: "review-agents" | "changes" | "github" | "git-graph";
   };
   /** Per-app KB tab layout — survives tab switches (each KB tab gets the
    *  same panel layout, matching the global-left/right model). */
@@ -876,11 +876,21 @@ export const useLayoutStore = createSelectors(
         // default shallow merge would replace whole slices).
         merge: (persisted, current) => {
           const p = (persisted ?? {}) as Partial<LayoutState>;
+          const leftPanel = { ...current.leftPanel, ...(p.leftPanel ?? {}) };
+          const rightPanel = { ...current.rightPanel, ...(p.rightPanel ?? {}) };
+          // Coerce section ids that no longer belong to this panel (e.g. a
+          // pre-move `state.json` with "git-graph" on the left or "analysis"
+          // on the right) back to a valid default so the panel isn't blank.
+          const LEFT = ["files", "knowledge", "analysis", "explore"];
+          const RIGHT = ["review-agents", "changes", "github", "git-graph"];
+          if (!LEFT.includes(leftPanel.activeSection)) leftPanel.activeSection = "files";
+          if (!RIGHT.includes(rightPanel.activeSection))
+            rightPanel.activeSection = "review-agents";
           return {
             ...current,
             ...p,
-            leftPanel: { ...current.leftPanel, ...(p.leftPanel ?? {}) },
-            rightPanel: { ...current.rightPanel, ...(p.rightPanel ?? {}) },
+            leftPanel,
+            rightPanel,
             knowledgePanel: { ...current.knowledgePanel, ...(p.knowledgePanel ?? {}) },
             bottomPanel: { ...current.bottomPanel, ...(p.bottomPanel ?? {}) },
             chatSidebar: { ...current.chatSidebar, ...(p.chatSidebar ?? {}) },

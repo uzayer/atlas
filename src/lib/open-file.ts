@@ -10,13 +10,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { classifyFile, type FileKind } from "@/lib/file-types";
 
-export async function openFile(path: string): Promise<void> {
+/** Resolve the file kind, sniffing the bytes for unrecognized extensions:
+ *  extension classification is an allowlist, so unknown names fall to
+ *  "unsupported" — but if the bytes are UTF-8/ASCII text we treat it as text. */
+export async function resolveFileKind(path: string): Promise<FileKind> {
   let kind = classifyFile(path);
-  // Extension-based classification is an allowlist, so files with unrecognized
-  // names fall through to "unsupported". Before giving up, sniff the bytes: if
-  // they're UTF-8/ASCII text, open in the editor anyway. This is the only async
-  // branch — known kinds resolve synchronously above, so the tab still opens in
-  // the same tick for them.
   if (kind === "unsupported") {
     try {
       if (await invoke<boolean>("is_text_file", { path })) kind = "text";
@@ -24,6 +22,10 @@ export async function openFile(path: string): Promise<void> {
       /* keep "unsupported" if the sniff fails */
     }
   }
+  return kind;
+}
+
+function openWithKind(path: string, kind: FileKind): void {
   const tabType = tabTypeFor(kind);
   const title = path.split("/").pop() ?? path;
   // `id` is stable per path + tabType so reopening the same file restores
@@ -37,6 +39,27 @@ export async function openFile(path: string): Promise<void> {
     dirty: false,
     data: { filePath: path, fileKind: kind },
   });
+}
+
+export async function openFile(path: string): Promise<void> {
+  openWithKind(path, await resolveFileKind(path));
+}
+
+/** Open a file in Atlas when it's a kind Atlas can render; otherwise reveal it
+ *  in the OS file manager (Finder on macOS). Used by terminal link clicks — the
+ *  user wants compatible files in-app and everything else handed to the OS. */
+export async function openFileOrReveal(path: string): Promise<void> {
+  const kind = await resolveFileKind(path);
+  if (kind === "unsupported") {
+    try {
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(path);
+    } catch {
+      /* nothing more we can do */
+    }
+    return;
+  }
+  openWithKind(path, kind);
 }
 
 function tabTypeFor(kind: FileKind): "editor" | "media" | "svg" | "pdf" | "unsupported" {

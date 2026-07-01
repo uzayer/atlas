@@ -13,6 +13,8 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use atlas_agents::AgentManager;
+
 use super::agent_memory::{collect_codex_sessions, collect_corpus};
 use super::claude::{list_claude_sessions, ClaudeSessionIndex};
 use super::git::git_refs_compute;
@@ -40,7 +42,7 @@ pub struct TimelineCommit {
 pub struct TimelineSession {
     id: String,
     title: String,
-    agent: String, // "codex" | "claude"
+    agent: String, // "codex" | "claude" | "cersei"
     branch: Option<String>,
     sha: Option<String>,
     ts_ms: i64,
@@ -70,6 +72,7 @@ pub struct MemoryTimeline {
 pub async fn memory_timeline(
     project_path: String,
     claude_index: State<'_, ClaudeSessionIndex>,
+    manager: State<'_, AgentManager>,
 ) -> Result<MemoryTimeline, String> {
     let pp = project_path.trim_end_matches('/').to_string();
 
@@ -113,6 +116,27 @@ pub async fn memory_timeline(
             ts_ms: ts,
             end_ms: end,
             detail: format!("{} msgs", s.message_count),
+        });
+    }
+    // Native Atlas (cersei) sessions — time-only, like Claude. The preview is
+    // already injected-context-stripped by `cersei_list_sessions`.
+    for s in manager.cersei_list_sessions(&pp) {
+        let ts = parse_iso_ms(s.started_at.as_deref().or(s.last_modified.as_deref()));
+        let end = parse_iso_ms(s.last_modified.as_deref()).max(ts);
+        let detail = if s.total_tokens > 0 {
+            format!("{} msgs · {} tok", s.message_count, s.total_tokens)
+        } else {
+            format!("{} msgs", s.message_count)
+        };
+        sessions.push(TimelineSession {
+            id: s.id,
+            title: collapse(&s.preview),
+            agent: "cersei".into(),
+            branch: None,
+            sha: None,
+            ts_ms: ts,
+            end_ms: end,
+            detail,
         });
     }
     sessions.retain(|s| s.ts_ms > 0);

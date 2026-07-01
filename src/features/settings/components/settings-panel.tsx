@@ -12,8 +12,11 @@ import {
   FlaskConical,
   KeyRound,
   LayoutTemplate,
+  Zap,
   Plus,
   Minus,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import {
   clampScale,
@@ -25,9 +28,13 @@ import {
 import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
+import { SkillsAndPacks } from "./skills-and-packs";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
+import { useModelPricingStore } from "../stores/model-pricing-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { setEnabled as setTelemetryEnabled } from "@/features/telemetry/posthog-client";
+import { useSettingsNav } from "../stores/settings-nav-store";
 import { isDev } from "@/lib/env";
 
 // Developer section is dev-build only — production users never see the
@@ -39,6 +46,7 @@ const SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "layouts", label: "Layouts", icon: LayoutTemplate },
   { id: "providers", label: "API Keys", icon: KeyRound },
+  { id: "skills", label: "Skills", icon: Zap },
   { id: "keybindings", label: "Keybindings", icon: Keyboard },
   ...(isDev
     ? [{ id: "developer", label: "Developer", icon: FlaskConical }]
@@ -46,36 +54,100 @@ const SECTIONS = [
   { id: "about", label: "About", icon: Info },
 ];
 
+const NAV_COLLAPSED_KEY = "atlas:settings:navCollapsed";
+
 export function SettingsPanel({ initialSection }: { initialSection?: string } = {}) {
   const [activeSection, setActiveSection] = useState(initialSection ?? "general");
 
+  // Honor cross-component "open Settings → <section>" requests (e.g. the
+  // sidebar's Skills button), whether this panel is fresh or already mounted.
+  const navSection = useSettingsNav((s) => s.section);
+  const clearNav = useSettingsNav((s) => s.clear);
+  useEffect(() => {
+    if (navSection) {
+      setActiveSection(navSection);
+      clearNav();
+    }
+  }, [navSection, clearNav]);
+  const [navCollapsed, setNavCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(NAV_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleNav = () =>
+    setNavCollapsed((c) => {
+      const next = !c;
+      try {
+        localStorage.setItem(NAV_COLLAPSED_KEY, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+
   return (
     <div className="h-full flex">
-      {/* Settings nav */}
-      <div className="w-[180px] shrink-0 border-r border-border-default bg-bg-primary py-2">
-        {SECTIONS.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => setActiveSection(s.id)}
-            className={cn(
-              "w-full flex items-center gap-2 px-4 h-[32px] text-[11px] font-medium transition-colors",
-              activeSection === s.id
-                ? "text-text-primary bg-bg-selected border-l-2 border-l-accent"
-                : "text-text-secondary hover:bg-bg-hover border-l-2 border-l-transparent"
-            )}
-          >
-            <s.icon size={13} />
-            {s.label}
-          </button>
-        ))}
+      {/* Settings nav — collapses to an icon rail (labels become tooltips). */}
+      <div
+        className={cn(
+          "shrink-0 border-r border-border-default bg-bg-primary py-2 flex flex-col",
+          navCollapsed ? "w-[44px]" : "w-[180px]",
+        )}
+      >
+        <div className="flex-1">
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setActiveSection(s.id)}
+              title={navCollapsed ? s.label : undefined}
+              className={cn(
+                "w-full flex items-center h-[32px] whitespace-nowrap text-[11px] font-medium transition-colors border-l-2 cursor-pointer",
+                navCollapsed ? "justify-center px-0" : "gap-2 px-4",
+                activeSection === s.id
+                  ? "text-text-primary bg-bg-selected border-l-accent"
+                  : "text-text-secondary hover:bg-bg-hover border-l-transparent",
+              )}
+            >
+              <s.icon size={13} className="shrink-0" />
+              {!navCollapsed && s.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Hide / show toggle — divided from the section list. */}
+        <button
+          onClick={toggleNav}
+          title={navCollapsed ? "Show sidebar" : "Hide sidebar"}
+          className={cn(
+            "mt-1 flex items-center h-[30px] whitespace-nowrap border-t border-border-default text-[11px] font-medium text-text-tertiary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer",
+            navCollapsed ? "justify-center px-0" : "gap-2 px-4",
+          )}
+        >
+          {navCollapsed ? (
+            <ChevronRight size={14} className="shrink-0" />
+          ) : (
+            <>
+              <ChevronLeft size={14} className="shrink-0" />
+              <span>Hide</span>
+            </>
+          )}
+        </button>
       </div>
 
-      {/* Settings content. The providers ("API Keys") section is full-bleed —
-          it owns its own toolbar + scrolling table and fills the area edge to
-          edge, so it's rendered outside the padded/max-width wrapper. */}
+      {/* Settings content. The providers ("API Keys") and skills sections are
+          full-bleed — each owns its own toolbar + scrolling layout and fills
+          the area edge to edge, so they render outside the padded/max-width
+          wrapper. (Skills uses a list + right-hand detail pane that needs the
+          room.) */}
       {activeSection === "providers" ? (
         <div className="flex-1 min-w-0 min-h-0">
           <ProvidersSettings />
+        </div>
+      ) : activeSection === "skills" ? (
+        <div className="flex-1 min-w-0 min-h-0">
+          <SkillsAndPacks />
         </div>
       ) : (
         <ScrollArea className="flex-1 p-6">
@@ -105,6 +177,22 @@ function GeneralSettings() {
   const { updateSettings } = useProjectStore.use.actions();
   const [cli, setCli] = useState<CliStatus | null>(null);
   const [installing, setInstalling] = useState(false);
+
+  // Model pricing (models.dev) — manual refresh + count for the picker.
+  const pricingPrices = useModelPricingStore.use.prices();
+  const pricingLoading = useModelPricingStore.use.loading();
+  const { load: loadPricing, refresh: refreshPricing } = useModelPricingStore.use.actions();
+  useEffect(() => {
+    void loadPricing();
+  }, [loadPricing]);
+  const pricedModelCount = Object.keys(pricingPrices).filter((k) => k.includes("/")).length;
+  const updatePricing = async () => {
+    await refreshPricing();
+    const n = Object.keys(useModelPricingStore.getState().prices).filter((k) =>
+      k.includes("/"),
+    ).length;
+    toast.success(`Model pricing updated — ${n} models`);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -174,7 +262,22 @@ function GeneralSettings() {
         />
       </SettingRow>
       <SettingRow
-        label="atlas terminal helper"
+        label="Share anonymous usage data"
+        description="Anonymous, privacy-preserving usage data (app launches, agents/skills used, token counts, crashes) to help improve Atlas. Never your prompts, code, paths, or keys. See TELEMETRY.md."
+      >
+        <Toggle
+          checked={settings.shareTelemetry}
+          onChange={(next) => {
+            updateSettings({ shareTelemetry: next });
+            setTelemetryEnabled(next);
+            void invoke("telemetry_set_enabled", { enabled: next }).catch(
+              () => {},
+            );
+          }}
+        />
+      </SettingRow>
+      <SettingRow
+        label="Atlas CLI"
         description={`Adds an \`atlas\` command to your shell — type \`atlas .\` in any terminal to open the current folder as a project. Refreshed automatically on every launch so an older copy never lingers. ${cliInstalledLine}.`}
       >
         <button
@@ -188,6 +291,23 @@ function GeneralSettings() {
           )}
         >
           {installing ? "Installing…" : cli?.installed ? "Reinstall" : "Install"}
+        </button>
+      </SettingRow>
+      <SettingRow
+        label="Model pricing"
+        description={`Per-model prices (USD / 1M tokens) from models.dev, shown in the model picker. Refreshed automatically on launch and updated only when prices change. ${pricedModelCount > 0 ? `${pricedModelCount} models priced.` : "Not yet fetched."}`}
+      >
+        <button
+          type="button"
+          onClick={() => void updatePricing()}
+          disabled={pricingLoading}
+          className={cn(
+            "h-7 rounded-md px-2.5 text-[11px] font-medium border border-border-default bg-bg-elevated",
+            "text-text-primary hover:bg-bg-hover transition-colors",
+            "disabled:opacity-50 disabled:cursor-not-allowed",
+          )}
+        >
+          {pricingLoading ? "Updating…" : "Update pricing"}
         </button>
       </SettingRow>
     </div>
@@ -392,7 +512,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.17 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.18 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">

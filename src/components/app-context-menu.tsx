@@ -1,6 +1,7 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { openNewAgentChat } from "@/features/chat/lib/open-agent-session";
 import {
   MessageSquare,
   Terminal,
@@ -31,7 +32,7 @@ export function AppContextMenu({ children }: { children: React.ReactNode }) {
                 icon={<MessageSquare size={12} />}
                 label="New Chat"
                 shortcut="⌘T"
-                onClick={() => addTab({ id: `chat-${Date.now()}`, type: "chat", title: "New Chat", closable: true, dirty: false, data: {} })}
+                onClick={() => openNewAgentChat()}
               />
               <MenuItem
                 icon={<Terminal size={12} />}

@@ -9,8 +9,11 @@ import { useEditorStore } from "../stores/editor-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ChevronRight } from "lucide-react";
 import { logEvent } from "@/features/log/lib/log";
+import { diffGutter, applyDiffStatus } from "../lib/diff-gutter";
+import { gitDiffLineStatus } from "@/features/git/lib/git-diff-api";
 
 const TOOLBAR_HEIGHT = 32;
 const DIRTY_CHECK_DEBOUNCE = 300; // ms — only check dirty state, not sync content
@@ -183,6 +186,7 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onSaveRef = useRef<() => void>(() => {});
+  const refreshGutterRef = useRef<() => void>(() => {});
   const dirtyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load file content from disk — unless this is an untitled scratch
@@ -264,12 +268,45 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
           void git.actions.loadDiff();
         }
       });
+      // Repaint this editor's diff gutter against the just-saved content.
+      refreshGutterRef.current();
     } catch (err) {
       console.error("Save failed:", err);
     }
   }, [path, markSaved, isUntitled, projectPath, openBuffer, layoutActions, tabId]);
 
   onSaveRef.current = handleSave;
+
+  // Fetch this file's git diff vs HEAD and paint the gutter (added/changed/
+  // deleted bars). No-op for untitled scratch buffers or files outside the repo.
+  const refreshDiffGutter = useCallback(() => {
+    const view = viewRef.current;
+    if (!view || isUntitled || !projectPath) return;
+    if (!path.startsWith(projectPath + "/")) return;
+    const rel = path.slice(projectPath.length + 1);
+    void gitDiffLineStatus(projectPath, rel, false)
+      .then((status) => {
+        if (viewRef.current) applyDiffStatus(viewRef.current, status);
+      })
+      .catch(() => {});
+  }, [path, projectPath, isUntitled]);
+  refreshGutterRef.current = refreshDiffGutter;
+
+  // Repaint the gutter when the working tree changes elsewhere (commits,
+  // stage/unstage, external edits) — same event the git store listens to.
+  useEffect(() => {
+    const un = listen("atlas:git-changed", () => refreshDiffGutter());
+    return () => {
+      un.then((u) => u());
+    };
+  }, [refreshDiffGutter]);
+
+  // Re-paint when inputs settle (e.g. the project path resolves AFTER the view
+  // was created, or the buffer swaps). The in-view-creation call covers the
+  // common case; this covers the late-projectPath race.
+  useEffect(() => {
+    refreshDiffGutter();
+  }, [refreshDiffGutter, buffer]);
 
   // Create/destroy CodeMirror view
   useEffect(() => {
@@ -289,6 +326,7 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
           syntaxHighlighting(atlasHighlightStyle),
           langExt,
           lineNumbers(),
+          diffGutter(),
           highlightActiveLine(),
           drawSelection(),
           bracketMatching(),
@@ -325,6 +363,7 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       }
 
       viewRef.current = view;
+      refreshDiffGutter();
     })();
 
     return () => {

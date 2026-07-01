@@ -58,6 +58,10 @@ pub enum EventKind {
     SessionEnd,
     TodoAdded,
     TodoDone,
+    /// A `#skill:<name>` was applied in a sent message. Recorded so cross-agent
+    /// memory reflects "this session used skill X", but intentionally invisible
+    /// — no view projection (it's a lightweight audit breadcrumb, not state).
+    SkillUsed,
 }
 
 /// A new event as handed to [`SharedMemoryStore::append_event`]. `seq`/`ts` are
@@ -270,7 +274,10 @@ impl SharedState {
                 self.session_agents
                     .insert(ev.session_id.clone(), ev.agent.clone());
             }
-            EventKind::SessionEnd | EventKind::TodoAdded | EventKind::TodoDone => {
+            EventKind::SessionEnd
+            | EventKind::TodoAdded
+            | EventKind::TodoDone
+            | EventKind::SkillUsed => {
                 // Recorded in the log for audit; no view projection in MVP.
             }
         }
@@ -657,6 +664,22 @@ mod tests {
             key: key.into(),
             payload,
         }
+    }
+
+    #[test]
+    fn skill_used_is_recorded_but_not_projected() {
+        // Invisible by design: the seq advances (it's in the log) but it never
+        // surfaces in any compiled view.
+        let s = fold_events(vec![ev(
+            1,
+            EventKind::SkillUsed,
+            "",
+            serde_json::json!({ "skills": ["review-rust-diff"] }),
+        )]);
+        assert_eq!(s.last_seq, 1);
+        assert!(s.active_plan.is_none());
+        assert!(s.decisions.is_empty());
+        assert!(s.recent_changes.is_empty());
     }
 
     #[test]
