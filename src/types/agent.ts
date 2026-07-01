@@ -30,6 +30,13 @@ export function agentTypeFromPluginId(pluginId: string): AgentType {
   return "custom";
 }
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
+
+/** True when the agent is actively working OR paused waiting on the user (a
+ *  permission / plan approval). Both must keep the "busy" affordance so the
+ *  spinner / composer never look "done" while a turn is still in progress. */
+export function isBusyAgentStatus(status: string | undefined): boolean {
+  return status === "running" || status === "waiting";
+}
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 export type ClaudePermissionMode =
   | "default"
@@ -58,6 +65,12 @@ export interface ChatSession {
   agentType: AgentType;
   model: string;
   status: AgentStatus;
+  /** Turn identity of this session's current/most-recent turn, taken from the
+   *  Rust `turn_seq` on status/terminal deltas. Used to reject a stale terminal
+   *  (idle/error) belonging to a turn already superseded by a newer send —
+   *  the guard against premature "done" under parallel / queued / wake timing.
+   *  Absent (or 0) for the native cersei agent, which is treated as current. */
+  currentTurnSeq?: number;
   workingDirectory: string;
   tasks: AgentTask[];
   createdAt: string;

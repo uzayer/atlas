@@ -4,6 +4,7 @@ import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_
 import { loadCachedAcpModes } from "../lib/acp-modes-cache";
 import { warmAcpModels, otherAcpAgent } from "../lib/warm-acp-models";
 import type { SessionKey } from "@/types/agents";
+import { isBusyAgentStatus } from "@/types/agent";
 import {
   composePrompt,
   type MentionData,
@@ -655,7 +656,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             tabId={tabId}
             onSend={handleSend}
             onStop={handleStop}
-            running={session.status === "running"}
+            running={isBusyAgentStatus(session.status)}
             showJumpToBottom={showJumpToBottom}
             jumpCount={jumpCount}
             onScrollToBottom={() => messagesListRef.current?.scrollToBottom()}

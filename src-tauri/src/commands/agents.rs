@@ -66,7 +66,7 @@ impl DeltaSink for TauriDeltaSink {
                         serde_json::to_value(usage).unwrap_or(serde_json::Value::Null),
                     );
                 }
-                SessionDelta::TurnFinished { stop_reason } => {
+                SessionDelta::TurnFinished { stop_reason, .. } => {
                     let usage = tel.take_usage(&envelope.session_id);
                     tel.capture(
                         "agent_turn_finished",
@@ -77,7 +77,7 @@ impl DeltaSink for TauriDeltaSink {
                         }),
                     );
                 }
-                SessionDelta::TurnFailed { error } => {
+                SessionDelta::TurnFailed { error, .. } => {
                     tel.capture(
                         "agent_turn_failed",
                         serde_json::json!({

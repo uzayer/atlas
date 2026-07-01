@@ -404,12 +404,30 @@ impl AgentManager {
         let handle = self.handle_for(&key)?;
         self.backend_for(agent_id)?
             .respond_permission(agent_id, request_id, decision)?;
-        let envelope = SessionDeltaEnvelope {
+        let sid = handle.acp_session_id.to_string();
+        self.inner.sink.emit(SessionDeltaEnvelope {
             agent_id: handle.agent_id,
-            session_id: handle.acp_session_id.to_string(),
+            session_id: sid.clone(),
             delta: SessionDelta::PermissionResolved { request_id },
+        });
+        // The turn resumes now that the user answered — flip `Waiting` back to
+        // `Running` so the UI shows work again. (A terminal from the worker will
+        // supersede this if the answer actually ended the turn.)
+        let turn_seq = {
+            let mut st = handle.state.lock();
+            if st.status == SessionStatus::Waiting {
+                st.status = SessionStatus::Running;
+            }
+            st.turn_seq
         };
-        self.inner.sink.emit(envelope);
+        self.inner.sink.emit(SessionDeltaEnvelope {
+            agent_id: handle.agent_id,
+            session_id: sid,
+            delta: SessionDelta::Status {
+                status: SessionStatus::Running,
+                turn_seq,
+            },
+        });
         Ok(())
     }
 
@@ -553,10 +571,25 @@ impl AgentManager {
                 options,
             } => {
                 if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    let st = handle.state.lock();
+                    // The turn is paused waiting on the user (e.g. a plan / tool
+                    // approval). Surface a distinct `Waiting` status so the UI
+                    // keeps an active affordance instead of looking idle/"done".
+                    let (sid, turn_seq) = {
+                        let mut st = handle.state.lock();
+                        st.status = SessionStatus::Waiting;
+                        (st.session_id.clone(), st.turn_seq)
+                    };
                     self.emit(SessionDeltaEnvelope {
                         agent_id,
-                        session_id: st.session_id.clone(),
+                        session_id: sid.clone(),
+                        delta: SessionDelta::Status {
+                            status: SessionStatus::Waiting,
+                            turn_seq,
+                        },
+                    });
+                    self.emit(SessionDeltaEnvelope {
+                        agent_id,
+                        session_id: sid,
                         delta: SessionDelta::PermissionRequest {
                             request_id,
                             tool_call: serde_json::to_value(&tool_call).unwrap_or_default(),
@@ -570,16 +603,14 @@ impl AgentManager {
                 turn_id: _,
                 error,
             } => {
+                // Single terminal-status writer = the worker. Rather than
+                // mutating status + emitting a terminal delta here (which raced
+                // the worker's own terminal emit and carried no turn identity),
+                // record the error so the worker reports it when `send_prompt`
+                // returns. In practice ACP failures already surface as the
+                // `send_prompt` `Err`, so this is a belt-and-suspenders path.
                 if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    let mut st = handle.state.lock();
-                    st.status = SessionStatus::Error;
-                    let sid = st.session_id.clone();
-                    drop(st);
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: sid,
-                        delta: SessionDelta::TurnFailed { error },
-                    });
+                    handle.state.lock().pending_turn_error = Some(error);
                 }
             }
             AcpEvent::Usage {

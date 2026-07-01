@@ -94,7 +94,7 @@ export interface SessionSnapshot {
  * `kind` discriminates; `agent_id` + `session_id` route to the right tab.
  */
 export type AgentDelta =
-  | { kind: "status"; agent_id: AgentId; session_id: AcpSessionId; status: SessionStatus }
+  | { kind: "status"; agent_id: AgentId; session_id: AcpSessionId; status: SessionStatus; turn_seq?: number }
   | { kind: "message_appended"; agent_id: AgentId; session_id: AcpSessionId; message: SessionMessage }
   | { kind: "text_chunk"; agent_id: AgentId; session_id: AcpSessionId; message_id: string; delta: string }
   | { kind: "thinking_chunk"; agent_id: AgentId; session_id: AcpSessionId; message_id: string; delta: string }
@@ -115,6 +115,6 @@ export type AgentDelta =
       options: unknown;
     }
   | { kind: "permission_resolved"; agent_id: AgentId; session_id: AcpSessionId; request_id: string }
-  | { kind: "turn_finished"; agent_id: AgentId; session_id: AcpSessionId; stop_reason: string }
-  | { kind: "turn_failed"; agent_id: AgentId; session_id: AcpSessionId; error: string }
+  | { kind: "turn_finished"; agent_id: AgentId; session_id: AcpSessionId; stop_reason: string; turn_seq?: number }
+  | { kind: "turn_failed"; agent_id: AgentId; session_id: AcpSessionId; error: string; turn_seq?: number }
   | { kind: "agent_disconnected"; agent_id: AgentId; session_id: AcpSessionId; reason: string };

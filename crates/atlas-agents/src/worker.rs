@@ -118,14 +118,20 @@ impl SessionWorker {
         // thread. The Status delta below is still emitted so the UI
         // can flip the spinner / disable send.
         let user_msg = new_user_message(text.clone());
-        {
+        let turn_seq = {
             let mut st = self.state.lock();
             st.messages.push(user_msg);
+            // New turn identity — stamped on this turn's status/terminal deltas
+            // so the frontend can reject a stale terminal from a superseded turn.
+            st.turn_seq = st.turn_seq.wrapping_add(1);
+            st.pending_turn_error = None;
             st.status = SessionStatus::Running;
             st.touch();
-        }
+            st.turn_seq
+        };
         self.emit(SessionDelta::Status {
             status: SessionStatus::Running,
+            turn_seq,
         });
 
         // 2. Re-arm the session's lifecycle guard. If the previous turn
@@ -165,12 +171,25 @@ impl SessionWorker {
                 if self.backend.quiesce_turn_end() && stop_reason != "cancelled" {
                     self.await_quiescence().await;
                 }
-                (
-                    SessionStatus::Idle,
-                    SessionDelta::TurnFinished { stop_reason },
-                )
+                // Single terminal-status writer: an out-of-band agent failure
+                // recorded by the manager dispatch (`pending_turn_error`) wins
+                // over a nominal success so the worker still emits exactly one
+                // terminal delta for the turn.
+                match self.state.lock().pending_turn_error.take() {
+                    Some(error) => (
+                        SessionStatus::Error,
+                        SessionDelta::TurnFailed { error, turn_seq },
+                    ),
+                    None => (
+                        SessionStatus::Idle,
+                        SessionDelta::TurnFinished { stop_reason, turn_seq },
+                    ),
+                }
             }
-            Err(e) => (SessionStatus::Error, SessionDelta::TurnFailed { error: e.to_string() }),
+            Err(e) => (
+                SessionStatus::Error,
+                SessionDelta::TurnFailed { error: e.to_string(), turn_seq },
+            ),
         };
         {
             let mut st = self.state.lock();
@@ -178,7 +197,7 @@ impl SessionWorker {
             st.touch();
         }
         self.emit(delta);
-        self.emit(SessionDelta::Status { status });
+        self.emit(SessionDelta::Status { status, turn_seq });
     }
 
     /// Wait until inbound agent updates for this session stop arriving, so the
@@ -237,5 +256,217 @@ pub struct SessionHandle {
 impl SessionHandle {
     pub fn send(&self, cmd: SessionCommand) -> Result<()> {
         self.cmd_tx.send(cmd).map_err(|_| Error::WorkerGone)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atlas_acp::{AuthMethodWire, NewSessionInfo, PermissionDecision};
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    /// Captures every emitted delta so a test can assert on turn identity.
+    #[derive(Default)]
+    struct CollectingSink(Mutex<Vec<SessionDeltaEnvelope>>);
+    impl DeltaSink for CollectingSink {
+        fn emit(&self, envelope: SessionDeltaEnvelope) {
+            self.0.lock().push(envelope);
+        }
+    }
+
+    /// Minimal backend: only `send_prompt` / `mark_turn_started` are exercised by
+    /// `handle_send`; everything else is unreachable in these tests.
+    struct MockBackend {
+        state: Arc<Mutex<SessionState>>,
+        /// Set `pending_turn_error` mid-prompt (simulates the manager's
+        /// out-of-band `AcpEvent::TurnFailed`) while still returning success.
+        inject_error: Option<String>,
+        /// Make `send_prompt` itself fail (the RPC-error path).
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentBackend for MockBackend {
+        async fn new_session(&self, _a: AgentId, _c: PathBuf) -> atlas_acp::Result<NewSessionInfo> {
+            unimplemented!()
+        }
+        async fn load_session(
+            &self,
+            _a: AgentId,
+            _s: SessionId,
+            _c: PathBuf,
+        ) -> atlas_acp::Result<Option<serde_json::Value>> {
+            unimplemented!()
+        }
+        async fn send_prompt(
+            &self,
+            _a: AgentId,
+            _s: SessionId,
+            _t: String,
+        ) -> atlas_acp::Result<String> {
+            if self.fail {
+                return Err(atlas_acp::AcpError::other("boom"));
+            }
+            if let Some(e) = &self.inject_error {
+                self.state.lock().pending_turn_error = Some(e.clone());
+            }
+            Ok("end_turn".to_string())
+        }
+        async fn set_session_mode(
+            &self,
+            _a: AgentId,
+            _s: SessionId,
+            _m: String,
+        ) -> atlas_acp::Result<()> {
+            Ok(())
+        }
+        fn mark_turn_started(&self, _a: AgentId, _s: &SessionId) -> atlas_acp::Result<()> {
+            Ok(())
+        }
+        fn cancel_turn(&self, _a: AgentId, _s: SessionId) -> atlas_acp::Result<()> {
+            Ok(())
+        }
+        fn respond_permission(
+            &self,
+            _a: AgentId,
+            _r: Uuid,
+            _d: PermissionDecision,
+        ) -> atlas_acp::Result<()> {
+            Ok(())
+        }
+        fn register_session(&self, _a: AgentId, _s: SessionId) -> atlas_acp::Result<()> {
+            Ok(())
+        }
+        fn drop_session(&self, _a: AgentId, _s: &SessionId) -> atlas_acp::Result<()> {
+            Ok(())
+        }
+        fn auth_methods(&self, _a: AgentId) -> atlas_acp::Result<Vec<AuthMethodWire>> {
+            Ok(vec![])
+        }
+        async fn authenticate(&self, _a: AgentId, _m: String) -> atlas_acp::Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _a: AgentId) -> atlas_acp::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn setup(inject_error: Option<String>, fail: bool) -> (SessionWorker, Arc<CollectingSink>) {
+        let agent_id = AgentId(Uuid::new_v4());
+        let state = Arc::new(Mutex::new(SessionState::new(
+            agent_id,
+            "sess".into(),
+            "/tmp".into(),
+            "claude".into(),
+        )));
+        let sink = Arc::new(CollectingSink::default());
+        let backend = Arc::new(MockBackend {
+            state: state.clone(),
+            inject_error,
+            fail,
+        });
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let worker = SessionWorker {
+            state,
+            agent_id,
+            acp_session_id: SessionId::new("sess"),
+            backend,
+            sink: sink.clone(),
+            rx,
+        };
+        (worker, sink)
+    }
+
+    #[tokio::test]
+    async fn success_turn_stamps_seq_and_finishes() {
+        let (worker, sink) = setup(None, false);
+        worker.handle_send("hi".into()).await;
+        let deltas = sink.0.lock();
+        // Turn start.
+        assert!(matches!(
+            deltas[0].delta,
+            SessionDelta::Status {
+                status: SessionStatus::Running,
+                turn_seq: 1,
+            }
+        ));
+        // Terminal carries the same turn identity.
+        assert!(deltas
+            .iter()
+            .any(|e| matches!(&e.delta, SessionDelta::TurnFinished { turn_seq: 1, .. })));
+        assert!(matches!(
+            deltas.last().unwrap().delta,
+            SessionDelta::Status {
+                status: SessionStatus::Idle,
+                turn_seq: 1,
+            }
+        ));
+        assert!(!deltas
+            .iter()
+            .any(|e| matches!(e.delta, SessionDelta::TurnFailed { .. })));
+    }
+
+    #[tokio::test]
+    async fn pending_turn_error_wins_over_success() {
+        let (worker, sink) = setup(Some("agent failed".into()), false);
+        worker.handle_send("hi".into()).await;
+        let deltas = sink.0.lock();
+        assert!(deltas
+            .iter()
+            .any(|e| matches!(&e.delta, SessionDelta::TurnFailed { turn_seq: 1, .. })));
+        assert!(!deltas
+            .iter()
+            .any(|e| matches!(e.delta, SessionDelta::TurnFinished { .. })));
+        assert!(matches!(
+            deltas.last().unwrap().delta,
+            SessionDelta::Status {
+                status: SessionStatus::Error,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_prompt_error_emits_single_terminal() {
+        let (worker, sink) = setup(None, true);
+        worker.handle_send("hi".into()).await;
+        let deltas = sink.0.lock();
+        assert!(deltas
+            .iter()
+            .any(|e| matches!(&e.delta, SessionDelta::TurnFailed { turn_seq: 1, .. })));
+        // Exactly one terminal delta (single writer).
+        let terminals = deltas
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.delta,
+                    SessionDelta::TurnFinished { .. } | SessionDelta::TurnFailed { .. }
+                )
+            })
+            .count();
+        assert_eq!(terminals, 1);
+    }
+
+    #[tokio::test]
+    async fn turn_seq_increments_each_turn() {
+        let (worker, sink) = setup(None, false);
+        worker.handle_send("one".into()).await;
+        worker.handle_send("two".into()).await;
+        let deltas = sink.0.lock();
+        let runnings: Vec<u64> = deltas
+            .iter()
+            .filter_map(|e| match &e.delta {
+                SessionDelta::Status {
+                    status: SessionStatus::Running,
+                    turn_seq,
+                } => Some(*turn_seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runnings, vec![1, 2]);
+        assert!(deltas
+            .iter()
+            .any(|e| matches!(&e.delta, SessionDelta::TurnFinished { turn_seq: 2, .. })));
     }
 }

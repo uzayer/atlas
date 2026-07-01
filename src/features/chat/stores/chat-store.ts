@@ -1015,23 +1015,39 @@ function appendThoughtToDraft(s: ChatDraft, acpSessionId: string, text: string):
   session.messages.push(makeAssistantThinkingMessage(text));
 }
 
+/** A terminal (idle/error) delta carries the `turn_seq` of the turn it ends.
+ *  Reject one whose turn is older than the session's current turn — a newer
+ *  send already superseded it (the parallel / queued / wake premature-"done"
+ *  class). A missing or 0 `turn_seq` (native cersei agent) is treated as
+ *  current, so nothing regresses there. */
+function isStaleTurn(session: ChatSession, turnSeq: number | undefined): boolean {
+  if (!turnSeq) return false;
+  return turnSeq < (session.currentTurnSeq ?? 0);
+}
+
 function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
   const tid = findTabByAcpSession(s.sessions, env.session_id);
   if (!tid) return;
   const session = s.sessions[tid];
   switch (env.kind) {
     case "status": {
-      session.status =
-        env.status === "idle"
-          ? "idle"
-          : env.status === "running"
-            ? "running"
-            : env.status === "waiting"
-              ? "waiting"
-              : "error";
+      const seq = env.turn_seq;
+      if (env.status === "running" || env.status === "waiting") {
+        // Turn start / paused-for-user (plan / permission): adopt the turn
+        // identity and stay in an active (busy) state.
+        if (seq && seq > (session.currentTurnSeq ?? 0)) session.currentTurnSeq = seq;
+        session.status = env.status;
+        return;
+      }
+      // idle / error are terminal — drop one for an already-superseded turn.
+      if (isStaleTurn(session, seq)) return;
+      session.status = env.status === "idle" ? "idle" : "error";
       return;
     }
     case "turn_finished": {
+      // Reject a terminal for a turn already superseded by a newer send —
+      // don't flip to idle or inject an empty-turn placeholder for stale turns.
+      if (isStaleTurn(session, env.turn_seq)) return;
                 // Empty-turn detection: if no assistant content arrived
                 // between the last user message and turn-end, insert a
                 // placeholder so the UI doesn't show a vanishing spinner.
@@ -1107,6 +1123,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       return;
     }
     case "turn_failed": {
+      if (isStaleTurn(session, env.turn_seq)) return;
       session.messages.push(
         makeAssistantTextMessage(`ACP error: ${env.error}`)
       );

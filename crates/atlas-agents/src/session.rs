@@ -151,6 +151,18 @@ pub struct SessionState {
     /// race where the prompt response resolves a beat before the agent's final
     /// streamed chunk lands. Not part of the serialised snapshot.
     pub activity_seq: u64,
+    /// Monotonic turn identity, bumped at the START of every turn (worker's
+    /// `handle_send`). Stamped onto every emitted delta so the frontend can
+    /// reject a stale terminal (idle/error) delta belonging to a turn that has
+    /// already been superseded by a newer send — the real safety net against
+    /// premature-idle under parallel / queued / wake-timing races. Not
+    /// serialised into the snapshot.
+    pub turn_seq: u64,
+    /// Set by the manager's ACP dispatch when the agent reports a turn failure
+    /// out-of-band (an `AcpEvent::TurnFailed` that isn't already surfaced as the
+    /// `send_prompt` `Err`). The worker drains it when emitting terminal state
+    /// so terminal status has a single writer (the worker). Not serialised.
+    pub pending_turn_error: Option<String>,
 }
 
 impl SessionState {
@@ -173,6 +185,8 @@ impl SessionState {
             created_at: now,
             updated_at: now,
             activity_seq: 0,
+            turn_seq: 0,
+            pending_turn_error: None,
         }
     }
 

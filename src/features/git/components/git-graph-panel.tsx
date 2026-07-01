@@ -211,14 +211,11 @@ function GraphView({
   return (
     <div className="h-full flex flex-col bg-bg-sidebar">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 h-[28px] shrink-0 border-b border-border-subtle">
+      <div className="flex items-center justify-between px-3 h-[32px] shrink-0 border-b border-border-subtle">
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wide">
-            Git Graph
-          </span>
           {rows.length > 0 && (
-            <span className="text-[10px] text-text-tertiary">
-              · {rows.length} commits
+            <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wide">
+              {rows.length} commits
             </span>
           )}
         </div>

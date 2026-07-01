@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { stripInjectedContext } from "@/features/chat/lib/atlas-context";
 import { openNewAgentChat } from "@/features/chat/lib/open-agent-session";
+import { isBusyAgentStatus } from "@/types/agent";
 import { ClaudeIcon, CodexIcon } from "@/components/agent-icons";
 import { AtlasLoader } from "@/components/atlas-loader";
 import { timeAgo } from "@/lib/time-ago";
@@ -428,7 +429,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   const runningKeys = useMemo(() => {
     const set = new Set<string>();
     for (const s of Object.values(tabSummaries)) {
-      if (s.status !== "running") continue;
+      if (!isBusyAgentStatus(s.status)) continue;
       const liveId = s.acpSessionId ?? `live-${s.id}`;
       set.add(`agent:${liveId}`);
     }
@@ -498,11 +499,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
           : "claude-code";
 
     // Decide target tab. If the current tab's session is mid-flight
-    // (status === "running"), we MUST NOT overwrite it — the agent is
+    // (running OR waiting on the user), we MUST NOT overwrite it — the agent is
     // still streaming back into that session and the user needs to see
     // it keep running. Open the clicked history in a new chat tab
     // instead. Otherwise replace in-place (idle tab is fair game).
-    const currentRunning = storeSnapshot[tabId]?.status === "running";
+    const currentRunning = isBusyAgentStatus(storeSnapshot[tabId]?.status);
     const targetTabId = currentRunning
       ? `chat-${Date.now().toString(36)}-${Math.random()
           .toString(36)

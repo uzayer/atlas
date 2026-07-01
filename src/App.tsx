@@ -506,6 +506,26 @@ export function App() {
       rafId = requestAnimationFrame(flush);
     };
 
+    // When the webview is hidden/throttled, requestAnimationFrame is paused, so
+    // buffered deltas (incl. a turn's terminal + the next turn's "running") sit
+    // unapplied until the next frame. Flush immediately on wake so status
+    // ordering is applied promptly and a stale "done" can't visibly linger.
+    const flushOnWake = () => flush();
+    window.addEventListener("atlas:window-active", flushOnWake);
+
+    // A turn_finished / turn_failed for a turn already superseded by a newer
+    // send (parallel / queued / wake timing) must not fire a "done"
+    // notification or a memory reindex — mirror the chat-store's stale-turn
+    // guard here so side effects don't run for a turn the store will ignore.
+    const isStaleAgentTurn = (sessionId: string, turnSeq?: number): boolean => {
+      if (!turnSeq) return false;
+      for (const sess of Object.values(useChatStore.getState().sessions)) {
+        if (sess.acpSessionId === sessionId)
+          return turnSeq < (sess.currentTurnSeq ?? 0);
+      }
+      return false;
+    };
+
     const bufferDelta = (env: AgentDelta) => {
       // Coalesce same-id `tool_call_upserted` events: replace the
       // entry at the position the tool first appeared so the latest
@@ -671,6 +691,9 @@ export function App() {
           // flips back to "idle" (see chat-store.ts:591).
           bufferDelta(env);
           schedule();
+          // Superseded by a newer send → the store ignores the idle flip; skip
+          // the "done" notification, memory reindex, and log too.
+          if (isStaleAgentTurn(env.session_id, env.turn_seq)) return;
           // Keep the native agent's project memory fresh (debounced, cheap).
           if (env.stop_reason !== "cancelled") autoIndexAfterTurn(env.session_id);
           logEvent({
@@ -703,6 +726,7 @@ export function App() {
         case "turn_failed": {
           bufferDelta(env);
           schedule();
+          if (isStaleAgentTurn(env.session_id, env.turn_seq)) return;
           const info = agentSessionInfo(env.session_id);
           notify().add({
             kind: "agent-failed",
@@ -735,6 +759,7 @@ export function App() {
     return () => {
       cancelled = true;
       if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener("atlas:window-active", flushOnWake);
       unlistenFocus?.();
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("pointerdown", onUserActivity);
