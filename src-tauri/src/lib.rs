@@ -2,6 +2,7 @@ mod commands;
 mod logging;
 mod menu;
 mod state;
+mod telemetry;
 
 use std::sync::Arc;
 
@@ -26,6 +27,12 @@ pub fn run() {
     // Install a tracing subscriber that prints `tracing::info!` etc. to
     // stderr. Verbosity is controlled by `RUST_LOG`; see `logging.rs`.
     logging::init();
+
+    // Load a `.env` from the current dir (if any) so source / fork builds can
+    // point telemetry at their own PostHog OSS project via POSTHOG_KEY /
+    // POSTHOG_HOST without a rebuild. No-op when absent. Must run before the
+    // telemetry client resolves its key in `setup()`.
+    let _ = dotenvy::dotenv();
 
     // Strip CLAUDECODE so child ACP agents (canonical claude-code-acp) don't
     // refuse to start when Atlas was launched from a parent Claude Code shell.
@@ -94,8 +101,62 @@ pub fn run() {
             // Pre-load the Rust-owned `AppState` (currentProject + recents)
             // before the webview starts loading — paid in parallel with the
             // WebView framework init, ~1ms on warm cache.
-            let app_state: AppStateHandle = Arc::new(Mutex::new(AppState::load(&app.handle())));
+            let mut loaded = AppState::load(&app.handle());
+            // Ensure a stable anonymous telemetry id exists, persisting it on the
+            // very first launch so it survives even if the user never changes a
+            // setting (which is what would otherwise trigger a save). No PII.
+            let first_launch = loaded.telemetry_anon_id.is_none();
+            if first_launch {
+                loaded.telemetry_anon_id = Some(uuid::Uuid::new_v4().to_string());
+                let _ = AppState::save(&app.handle(), &loaded);
+            }
+            let anon_id = loaded.telemetry_anon_id.clone().unwrap_or_default();
+            let telemetry_enabled = loaded.settings.share_telemetry;
+            let app_state: AppStateHandle = Arc::new(Mutex::new(loaded));
             app.manage(app_state);
+
+            // Opt-in product telemetry. Inert unless the user has enabled it AND
+            // a PostHog key resolves (env / telemetry.json / build-time default).
+            let (telemetry, flush_rx) =
+                telemetry::TelemetryClient::new(&app.handle(), anon_id, telemetry_enabled);
+            app.manage(telemetry.clone());
+            if let Some(rx) = flush_rx {
+                let tclient = telemetry.clone();
+                tauri::async_runtime::spawn(async move {
+                    telemetry::run_flush_loop(tclient, rx).await;
+                });
+            }
+            // Crash capture: best-effort synchronous POST from the panic hook
+            // (the build is `panic = "abort"`, so the async flush task can't be
+            // relied on). Chains to the previously-installed hook. `location` is
+            // Atlas's own `file:line`; `message` is redacted of path/URL tokens.
+            {
+                let tclient = telemetry.clone();
+                let prev = std::panic::take_hook();
+                std::panic::set_hook(Box::new(move |info| {
+                    let location = info
+                        .location()
+                        .map(|l| format!("{}:{}", l.file(), l.line()))
+                        .unwrap_or_default();
+                    let msg = info
+                        .payload()
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+                        .unwrap_or("panic");
+                    tclient.capture_panic_blocking(serde_json::json!({
+                        "location": location,
+                        "message": telemetry::redact_message(msg, 160),
+                    }));
+                    prev(info);
+                }));
+            }
+            // Launch / active-user signal.
+            telemetry.capture(
+                "app_started",
+                serde_json::json!({ "is_first_launch": first_launch }),
+            );
+
             commands::agents::install_manager(&app.handle());
             // Silent background refresh of model pricing from models.dev — first
             // launch populates the cache; later launches update only on change.
@@ -319,6 +380,9 @@ pub fn run() {
             commands::log::clear_project_log,
             commands::app_state::bootstrap_app_state,
             commands::app_state::save_app_state,
+            commands::telemetry::telemetry_config,
+            commands::telemetry::telemetry_set_enabled,
+            commands::telemetry::telemetry_capture,
             commands::compose_prompt::compose_prompt,
             commands::cli::cli_status,
             commands::cli::cli_install_helper,

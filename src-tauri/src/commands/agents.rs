@@ -50,6 +50,46 @@ impl DeltaSink for TauriDeltaSink {
             tracing::error!(target: "atlas_agents::emit", "failed to emit atlas:agents event: {e}");
         }
 
+        // Opt-in telemetry (metadata only — no message text, no paths). The
+        // sink is the one place that sees every agent's turn end, so usage /
+        // finish / failure are captured here. No-op unless the user opted in.
+        {
+            let tel = self
+                .app
+                .state::<Arc<crate::telemetry::TelemetryClient>>();
+            match &envelope.delta {
+                SessionDelta::UsageUpdated { usage } => {
+                    // Cumulative numeric counters only; stamped onto the next
+                    // `agent_turn_finished` for this session.
+                    tel.note_usage(
+                        &envelope.session_id,
+                        serde_json::to_value(usage).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                SessionDelta::TurnFinished { stop_reason } => {
+                    let usage = tel.take_usage(&envelope.session_id);
+                    tel.capture(
+                        "agent_turn_finished",
+                        serde_json::json!({
+                            "agent_kind": envelope.agent_id.0.to_string(),
+                            "stop_reason": stop_reason,
+                            "usage": usage,
+                        }),
+                    );
+                }
+                SessionDelta::TurnFailed { error } => {
+                    tel.capture(
+                        "agent_turn_failed",
+                        serde_json::json!({
+                            "agent_kind": envelope.agent_id.0.to_string(),
+                            "error_summary": crate::telemetry::redact_message(error, 160),
+                        }),
+                    );
+                }
+                _ => {}
+            }
+        }
+
         // Resolve this session's project cwd once via the in-memory session map
         // (cheap; no disk I/O). A delta before the session's first `agents_send`
         // has no meta yet → every memory action below is a silent no-op.
@@ -273,6 +313,13 @@ pub async fn agents_send(
     sharing: State<'_, MemorySharingState>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Telemetry: a turn was initiated (metadata only). Fires for every send,
+    // including bare sends below. No-op unless the user opted in.
+    app.state::<Arc<crate::telemetry::TelemetryClient>>().capture(
+        "agent_turn_started",
+        serde_json::json!({ "agent_kind": key.agent_id.0.to_string() }),
+    );
+
     // Resolve the project cwd. Unknown session → just send as-is (don't fail
     // the turn on a snapshot miss).
     let Ok(snapshot) = manager.snapshot(&key) else {

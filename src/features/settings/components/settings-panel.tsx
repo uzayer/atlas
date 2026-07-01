@@ -33,6 +33,7 @@ import { useDevFlagsStore } from "../stores/dev-flags-store";
 import { useModelPricingStore } from "../stores/model-pricing-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { setEnabled as setTelemetryEnabled } from "@/features/telemetry/posthog-client";
 import { isDev } from "@/lib/env";
 
 // Developer section is dev-build only — production users never see the
@@ -246,6 +247,21 @@ function GeneralSettings() {
         <Toggle
           checked={settings.enableAtlasLogs}
           onChange={(next) => updateSettings({ enableAtlasLogs: next })}
+        />
+      </SettingRow>
+      <SettingRow
+        label="Share anonymous usage data"
+        description="Anonymous, privacy-preserving usage data (app launches, agents/skills used, token counts, crashes) to help improve Atlas. Never your prompts, code, paths, or keys. See TELEMETRY.md."
+      >
+        <Toggle
+          checked={settings.shareTelemetry}
+          onChange={(next) => {
+            updateSettings({ shareTelemetry: next });
+            setTelemetryEnabled(next);
+            void invoke("telemetry_set_enabled", { enabled: next }).catch(
+              () => {},
+            );
+          }}
         />
       </SettingRow>
       <SettingRow

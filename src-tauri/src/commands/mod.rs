@@ -57,5 +57,6 @@ pub mod review;
 pub mod search;
 pub mod sessions_watch;
 pub mod skills;
+pub mod telemetry;
 pub mod terminal;
 pub mod window;

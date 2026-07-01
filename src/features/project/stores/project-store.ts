@@ -45,6 +45,10 @@ export interface AppSettings {
   /** Global interface zoom (1 == 100%). Driven by the ⌘+/⌘-/⌘0 hotkeys;
    *  applied via the native WebView zoom. */
   uiScale: number;
+  /** Anonymous product telemetry (PostHog). Default ON (opt-out) — gates both
+   *  the Rust emitter and the frontend crash reporter. See
+   *  `src/features/telemetry`. */
+  shareTelemetry: boolean;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -52,6 +56,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   enableAtlasLogs: true,
   showHiddenFiles: true,
   uiScale: DEFAULT_SCALE,
+  shareTelemetry: true,
 };
 
 /**

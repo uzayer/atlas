@@ -32,6 +32,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+use tauri::{AppHandle, Manager};
 
 use serde::{Deserialize, Serialize};
 
@@ -1767,6 +1770,7 @@ pub async fn skills_read(
 /// Enable/disable a single agent for a skill (create/remove its symlink).
 #[tauri::command]
 pub async fn skills_set_enabled(
+    app: AppHandle,
     scope: String,
     name: String,
     agent: String,
@@ -1774,22 +1778,39 @@ pub async fn skills_set_enabled(
     project_path: Option<String>,
 ) -> Result<(), String> {
     let root = root_for(&scope, project_path.as_deref())?;
-    tokio::task::spawn_blocking(move || set_enabled(&root, &scope, &name, &agent, enabled))
+    let (name_ev, agent_ev) = (name.clone(), agent.clone());
+    let res = tokio::task::spawn_blocking(move || set_enabled(&root, &scope, &name, &agent, enabled))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    if res.is_ok() {
+        app.state::<Arc<crate::telemetry::TelemetryClient>>().capture(
+            if enabled { "skill_enabled" } else { "skill_disabled" },
+            serde_json::json!({ "skill": name_ev, "agent": agent_ev }),
+        );
+    }
+    res
 }
 
 /// Delete a skill: remove every agent symlink, then the canonical dir.
 #[tauri::command]
 pub async fn skills_delete(
+    app: AppHandle,
     scope: String,
     name: String,
     project_path: Option<String>,
 ) -> Result<(), String> {
     let root = root_for(&scope, project_path.as_deref())?;
-    tokio::task::spawn_blocking(move || delete_skill(&root, &scope, &name))
+    let (name_ev, scope_ev) = (name.clone(), scope.clone());
+    let res = tokio::task::spawn_blocking(move || delete_skill(&root, &scope, &name))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    if res.is_ok() {
+        app.state::<Arc<crate::telemetry::TelemetryClient>>().capture(
+            "skill_deleted",
+            serde_json::json!({ "skill": name_ev, "scope": scope_ev }),
+        );
+    }
+    res
 }
 
 /// Absolute path to a skill's `SKILL.md` (for opening in the editor).
@@ -2601,6 +2622,7 @@ pub async fn pack_remote_preview(source: String) -> Result<Pack, String> {
 /// (Phase 3) and no script execution.
 #[tauri::command]
 pub async fn pack_install_remote(
+    app: AppHandle,
     scope: String,
     source: String,
     force: Option<bool>,
@@ -2608,7 +2630,9 @@ pub async fn pack_install_remote(
 ) -> Result<PackInstallResult, String> {
     let root = root_for(&scope, project_path.as_deref())?;
     let force = force.unwrap_or(false);
-    tokio::task::spawn_blocking(move || {
+    let source_ev = source.clone();
+    let scope_ev = scope.clone();
+    let res = tokio::task::spawn_blocking(move || {
         let (owner, repo) = parse_owner_repo(&source)?;
         let (tmp, commit) = fetch_repo_to_temp(&owner, &repo)?;
         let result = install_pack_from_dir(&root, &tmp, &source, &commit, force);
@@ -2616,7 +2640,18 @@ pub async fn pack_install_remote(
         result
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if let Ok(result) = &res {
+        app.state::<Arc<crate::telemetry::TelemetryClient>>().capture(
+            "pack_installed",
+            serde_json::json!({
+                "source": source_ev,
+                "scope": scope_ev,
+                "skill_count": result.pack.components.len(),
+            }),
+        );
+    }
+    res
 }
 
 /// Install ONE skill from a cloned repo into the canonical store — the granular
@@ -2666,13 +2701,18 @@ fn install_skill_from_dir(
 /// skill. Granular alternative to `pack_install_remote`.
 #[tauri::command]
 pub async fn pack_install_skill(
+    app: AppHandle,
     scope: String,
     source: String,
     skill_id: String,
     project_path: Option<String>,
 ) -> Result<SkillMeta, String> {
     let root = root_for(&scope, project_path.as_deref())?;
-    tokio::task::spawn_blocking(move || {
+    // Cloned for the telemetry event (the closure moves the originals). `source`
+    // is a public GitHub `owner/repo` slug; `scope` is "global"/"project".
+    let source_ev = source.clone();
+    let scope_ev = scope.clone();
+    let res = tokio::task::spawn_blocking(move || {
         let (owner, repo) = parse_owner_repo(&source)?;
         let (tmp, _commit) = fetch_repo_to_temp(&owner, &repo)?;
         let res = install_skill_from_dir(&root, &scope, &tmp, &skill_id);
@@ -2680,7 +2720,14 @@ pub async fn pack_install_skill(
         res
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    if let Ok(meta) = &res {
+        app.state::<Arc<crate::telemetry::TelemetryClient>>().capture(
+            "skill_downloaded",
+            serde_json::json!({ "skill": meta.name, "source": source_ev, "scope": scope_ev }),
+        );
+    }
+    res
 }
 
 /// List packs installed in this scope (manifest + provenance).

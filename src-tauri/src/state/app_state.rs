@@ -83,6 +83,11 @@ pub struct AppState {
     pub active_workspace_id: Option<String>,
     #[serde(default)]
     pub settings: AppSettings,
+    /// Stable anonymous id for opt-in product telemetry (PostHog `distinct_id`).
+    /// Generated once on first launch (see `lib.rs` setup); never contains PII.
+    /// `None` on old `state.json` files — backfilled + persisted at startup.
+    #[serde(default)]
+    pub telemetry_anon_id: Option<String>,
     #[serde(default = "default_version")]
     pub version: u32,
 }
@@ -100,6 +105,7 @@ impl Default for AppState {
             groups: Vec::new(),
             active_workspace_id: None,
             settings: AppSettings::default(),
+            telemetry_anon_id: None,
             version: SCHEMA_VERSION,
         }
     }
@@ -159,6 +165,13 @@ pub struct AppSettings {
     /// on the frontend (⌘+/⌘-/⌘0); persisted so it survives relaunch.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    /// Anonymous product telemetry (PostHog). Default **ON** (opt-out, like
+    /// VS Code / Zed) — privacy-preserving metadata only; the user can turn it
+    /// off anytime in Settings → General. Gates both the Rust emitter and the
+    /// frontend `posthog-js` crash reporter. Still inert unless a key resolves.
+    /// See `crate::telemetry`.
+    #[serde(default = "default_true")]
+    pub share_telemetry: bool,
 }
 
 fn default_true() -> bool {
@@ -176,6 +189,7 @@ impl Default for AppSettings {
             enable_atlas_logs: true,
             show_hidden_files: true,
             ui_scale: default_ui_scale(),
+            share_telemetry: true,
         }
     }
 }
