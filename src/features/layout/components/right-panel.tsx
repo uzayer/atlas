@@ -2,7 +2,7 @@ import { lazy, Suspense } from "react";
 import { cn } from "@/lib/utils";
 import { useLayoutStore } from "../stores/layout-store";
 import { PanelSkeleton } from "@/components/panel-skeleton";
-import { Network, GitCompare, Github, CheckCheck } from "lucide-react";
+import { GitCommit, GitCompare, Github, CheckCheck } from "lucide-react";
 
 // All four right-panel sub-panels are lazy so they don't run their first
 // invokes / vendor parses during the boot-cascade window. The user lands
@@ -34,9 +34,9 @@ const ReviewAgentsPanel = lazy(() =>
 );
 
 const sections = [
-  { id: "review-agents" as const, label: "Review", icon: CheckCheck },
   { id: "changes" as const, label: "Source Control", icon: GitCompare },
-  { id: "git-graph" as const, label: "Git Graph", icon: Network },
+  { id: "review-agents" as const, label: "Review", icon: CheckCheck },
+  { id: "git-graph" as const, label: "Commit", icon: GitCommit },
   { id: "github" as const, label: "GitHub", icon: Github },
 ];
 

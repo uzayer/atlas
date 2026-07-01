@@ -11,6 +11,7 @@ import {
   X,
   ScrollText,
   Settings,
+  Zap,
   Pin,
   PinOff,
   ChevronRight,
@@ -27,6 +28,7 @@ import {
   type Workspace,
   type WorkspaceGroup,
 } from "../stores/workspace-store";
+import { useSettingsNav } from "@/features/settings/stores/settings-nav-store";
 import { pickAndAddWorkspace } from "../lib/pick-workspace";
 import { useRunningChatKeys } from "../lib/agent-activity";
 import { openAgentSession } from "@/features/chat/lib/open-agent-session";
@@ -564,6 +566,14 @@ export function WorkspaceSidebar() {
       <div className="px-1.5 pb-1 shrink-0 space-y-0.5">
         <HeaderButton icon={<AtlasIcon size={14} className="rounded-[3px]" />} label="Console" onClick={() => openTabSingleton("mission-control", "Console")} />
         <HeaderButton icon={<ScrollText size={13} />} label="See Logs" onClick={() => openTabSingleton("log", "Log")} />
+        <HeaderButton
+          icon={<Zap size={13} />}
+          label="Skills"
+          onClick={() => {
+            useSettingsNav.getState().goTo("skills");
+            openTabSingleton("settings", "Settings");
+          }}
+        />
         <HeaderButton icon={<Settings size={13} />} label="Settings" onClick={() => openTabSingleton("settings", "Settings")} />
       </div>
 

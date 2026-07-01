@@ -326,6 +326,7 @@ pub fn run() {
             // were replaced by ACP. Session-history readers below are still in use.
             commands::claude::list_claude_sessions,
             commands::gitdiff::git_diff_structured,
+            commands::gitdiff::git_commit_changed_files,
             commands::gitdiff::git_diff_line_status,
             commands::claude::delete_claude_session,
             commands::claude::read_claude_session,

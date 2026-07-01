@@ -14,6 +14,7 @@ import {
   Settings,
   Search,
   Timer,
+  GitCompare,
   type LucideProps,
 } from "lucide-react";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
@@ -46,6 +47,7 @@ const MODULES: ModuleEntry[] = [
   { id: "memory", type: "memory", label: "Memory", icon: BrainCircuit },
   { id: "research", type: "research", label: "Research", icon: BookOpen },
   { id: "canvas", type: "canvas", label: "Spaces", icon: Map },
+  { id: "diff", type: "diff", label: "Git Diff", icon: GitCompare },
   { id: "browser", type: "browser", label: "Browser", icon: Globe },
   { id: "editor", type: "editor", label: "Untitled Editor", icon: Code, shortcut: "⌘N" },
   { id: "log", type: "log", label: "Log", icon: ScrollText },

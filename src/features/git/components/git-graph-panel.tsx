@@ -20,6 +20,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useGitStore } from "@/features/git/stores/git-store";
+import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { CommitRowView } from "./commit-node";
 import {
   ROW_HEIGHT,
@@ -88,7 +89,12 @@ export function GitGraphPanel() {
   }, [path, queryClient]);
 
   const onSelect = useCallback((sha: string) => {
-    setSelectedSha((cur) => (cur === sha ? null : sha));
+    setSelectedSha(sha);
+    // Jump to Source Control → History and open this commit's detail view.
+    const layout = useLayoutStore.getState();
+    layout.actions.setRightSection("changes");
+    if (!layout.rightPanel.visible) layout.actions.toggleRightPanel();
+    void useGitStore.getState().actions.loadCommit(sha);
   }, []);
 
   if (!path || !isRepo) {

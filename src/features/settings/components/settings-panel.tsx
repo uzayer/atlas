@@ -34,6 +34,7 @@ import { useModelPricingStore } from "../stores/model-pricing-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { setEnabled as setTelemetryEnabled } from "@/features/telemetry/posthog-client";
+import { useSettingsNav } from "../stores/settings-nav-store";
 import { isDev } from "@/lib/env";
 
 // Developer section is dev-build only — production users never see the
@@ -57,6 +58,17 @@ const NAV_COLLAPSED_KEY = "atlas:settings:navCollapsed";
 
 export function SettingsPanel({ initialSection }: { initialSection?: string } = {}) {
   const [activeSection, setActiveSection] = useState(initialSection ?? "general");
+
+  // Honor cross-component "open Settings → <section>" requests (e.g. the
+  // sidebar's Skills button), whether this panel is fresh or already mounted.
+  const navSection = useSettingsNav((s) => s.section);
+  const clearNav = useSettingsNav((s) => s.clear);
+  useEffect(() => {
+    if (navSection) {
+      setActiveSection(navSection);
+      clearNav();
+    }
+  }, [navSection, clearNav]);
   const [navCollapsed, setNavCollapsed] = useState(() => {
     try {
       return localStorage.getItem(NAV_COLLAPSED_KEY) === "1";
@@ -109,7 +121,7 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
           onClick={toggleNav}
           title={navCollapsed ? "Show sidebar" : "Hide sidebar"}
           className={cn(
-            "mt-1 flex items-center h-[30px] whitespace-nowrap border-t border-border-default pt-px text-[11px] font-medium text-text-tertiary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer",
+            "mt-1 flex items-center h-[30px] whitespace-nowrap border-t border-border-default text-[11px] font-medium text-text-tertiary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer",
             navCollapsed ? "justify-center px-0" : "gap-2 px-4",
           )}
         >
@@ -265,7 +277,7 @@ function GeneralSettings() {
         />
       </SettingRow>
       <SettingRow
-        label="atlas terminal helper"
+        label="Atlas CLI"
         description={`Adds an \`atlas\` command to your shell — type \`atlas .\` in any terminal to open the current folder as a project. Refreshed automatically on every launch so an older copy never lingers. ${cliInstalledLine}.`}
       >
         <button

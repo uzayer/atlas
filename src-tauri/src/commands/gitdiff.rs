@@ -10,8 +10,25 @@ use std::process::Command;
 /// is the `-U` value (large → whole-file side-by-side). Falls back to
 /// `--no-index` against /dev/null so brand-new / untracked files render as
 /// all-added instead of an empty diff.
-fn run_git_diff(path: &str, file: &str, staged: bool, context: u32) -> Result<String, String> {
+fn run_git_diff(
+    path: &str,
+    file: &str,
+    staged: bool,
+    context: u32,
+    commit: Option<&str>,
+) -> Result<String, String> {
     let ctx = format!("-U{context}");
+    // Commit mode: the diff INTRODUCED by `commit` for this file. `git show`
+    // diffs the commit against its parent (and against the empty tree for the
+    // root commit), so it works uniformly.
+    if let Some(sha) = commit {
+        let output = Command::new("git")
+            .args(["show", "--no-color", &ctx, "--format=", sha, "--", file])
+            .current_dir(path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
     let mut args: Vec<&str> = vec!["diff", "--no-color", &ctx];
     if staged {
         args.push("--cached");
@@ -83,10 +100,51 @@ pub async fn git_diff_structured(
     path: String,
     file: String,
     staged: bool,
+    commit: Option<String>,
 ) -> Result<FileDiff, String> {
     tokio::task::spawn_blocking(move || {
-        let diff = run_git_diff(&path, &file, staged, 100_000)?;
+        let diff = run_git_diff(&path, &file, staged, 100_000, commit.as_deref())?;
         Ok(build_file_diff(&diff, &file, &language_of(&file)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Serde-friendly changed-file entry (path + porcelain status letter).
+#[derive(serde::Serialize)]
+pub struct CommitFile {
+    pub path: String,
+    pub status: String,
+}
+
+/// Files changed by a single commit (name + status), for the diff viewer's
+/// commit-browsing tree. `git show --name-status` against the commit.
+#[tauri::command]
+pub async fn git_commit_changed_files(
+    path: String,
+    sha: String,
+) -> Result<Vec<CommitFile>, String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git")
+            .args(["show", "--no-color", "--name-status", "--format=", &sha])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut out = Vec::new();
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut parts = line.split('\t');
+            let status = parts.next().unwrap_or("").to_string();
+            // Renames are `R100\told\tnew` — take the last field (new path).
+            let file = parts.last().unwrap_or("").to_string();
+            if !file.is_empty() {
+                out.push(CommitFile { path: file, status });
+            }
+        }
+        Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -101,7 +159,7 @@ pub async fn git_diff_line_status(
     staged: bool,
 ) -> Result<LineStatus, String> {
     tokio::task::spawn_blocking(move || {
-        let diff = run_git_diff(&path, &file, staged, 0)?;
+        let diff = run_git_diff(&path, &file, staged, 0, None)?;
         let fd = build_file_diff(&diff, &file, "");
         Ok(line_status(&fd))
     })

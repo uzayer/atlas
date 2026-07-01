@@ -548,6 +548,7 @@ function TabContent({ tab }: { tab: Tab }) {
           repoPath={tab.data.repoPath as string}
           file={tab.data.file as string}
           staged={!!tab.data.staged}
+          commit={(tab.data.commit as string | null | undefined) ?? null}
         />
       );
     case "unsupported":
@@ -578,6 +579,7 @@ const NEW_TAB_OPTIONS: Array<{ type: TabType; label: string; icon: React.Element
   { type: "chat", label: "Agents", icon: AtlasIcon },
   { type: "model-chat", label: "Chat", icon: MessageSquare },
   { type: "terminal", label: "Terminal", icon: Terminal },
+  { type: "diff", label: "Git Diff", icon: GitCompare },
   { type: "canvas", label: "Spaces", icon: Map },
   { type: "browser", label: "Browser", icon: Globe },
   { type: "research", label: "Research", icon: BookOpen },

@@ -124,7 +124,7 @@ export function HistoryView() {
           <div className="px-3 pb-2">
             <div className="text-[12px] text-text-primary font-medium">{selected.subject}</div>
             {selected.body && (
-              <pre className="mt-1 whitespace-pre-wrap break-words font-sans text-[11px] text-text-tertiary">
+              <pre className="mt-1 max-h-32 overflow-y-auto hide-scrollbar whitespace-pre-wrap break-words font-sans text-[11px] text-text-tertiary">
                 {selected.body}
               </pre>
             )}

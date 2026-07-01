@@ -1,8 +1,9 @@
-import { memo, useMemo, useRef, useState } from "react";
-import { ChevronRight, ChevronDown } from "lucide-react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronRight, ChevronDown, GitCommit } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { useQuery } from "@tanstack/react-query";
 import { useGitStore } from "../stores/git-store";
-import { openGitDiff } from "../lib/git-diff-api";
+import { openGitDiff, gitCommitChangedFiles } from "../lib/git-diff-api";
 
 const TREE_ROW_H = 22;
 
@@ -13,6 +14,9 @@ interface ChangedFilesTreeProps {
   staged: boolean;
   /** Path of the file currently shown in the diff pane (highlighted). */
   currentFile: string;
+  /** When set, the tree lists the files changed by this commit (commit-browse
+   *  mode) instead of the working tree; the picker at the top switches it. */
+  commit?: string | null;
 }
 
 interface DirNode {
@@ -122,22 +126,49 @@ export const ChangedFilesTree = memo(function ChangedFilesTree({
   repoPath,
   staged,
   currentFile,
+  commit = null,
 }: ChangedFilesTreeProps) {
   const files = useGitStore.use.files();
+  const log = useGitStore.use.log();
+  const gitActions = useGitStore.use.actions();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  // Populate the commit picker (recent history) on first mount.
+  useEffect(() => {
+    if (repoPath && log.length === 0) void gitActions.loadLog(repoPath).catch(() => {});
+  }, [repoPath, log.length, gitActions]);
+
+  // In commit-browse mode, list the files that commit changed.
+  const commitFilesQuery = useQuery({
+    queryKey: ["commit-files", repoPath, commit],
+    queryFn: () => gitCommitChangedFiles(repoPath, commit!),
+    enabled: !!repoPath && !!commit,
+    staleTime: 30_000,
+  });
+
+  const openFile = (path: string) => openGitDiff(repoPath, path, staged, commit);
+
+  // Switch the whole diff tab to a different commit (or the working tree) for
+  // the currently-open file.
+  const onPickCommit = (sha: string) =>
+    openGitDiff(repoPath, currentFile, staged, sha || null);
 
   const tree = useMemo(() => {
     const seen = new Set<string>();
-    const scoped = files
-      .filter((f) => f.staged === staged)
-      .filter((f) => (seen.has(f.path) ? false : (seen.add(f.path), true)))
-      .map((f) => ({ path: f.path, status: f.status }));
+    const source: { path: string; status: string }[] = commit
+      ? (commitFilesQuery.data ?? []).map((f) => ({ path: f.path, status: f.status }))
+      : files
+          .filter((f) => f.staged === staged)
+          .map((f) => ({ path: f.path, status: f.status }));
+    const scoped = source.filter((f) =>
+      seen.has(f.path) ? false : (seen.add(f.path), true),
+    );
     // Ensure the open file is present even if the store hasn't caught up.
     if (currentFile && !seen.has(currentFile)) {
       scoped.push({ path: currentFile, status: "M" });
     }
     return buildTree(scoped);
-  }, [files, staged, currentFile]);
+  }, [files, staged, currentFile, commit, commitFilesQuery.data]);
 
   const rows = useMemo(
     () => flatten(tree, collapsed, 0),
@@ -161,10 +192,23 @@ export const ChangedFilesTree = memo(function ChangedFilesTree({
     });
 
   return (
-    <div className="flex h-full w-56 shrink-0 flex-col border-r border-[var(--border-default)] bg-[var(--bg-secondary)]">
-      <div className="flex h-8 shrink-0 items-center border-b border-[var(--border-default)] px-3 text-[10px] uppercase tracking-wide text-[var(--text-tertiary)]">
-        Changed files
-        <span className="ml-auto tabular-nums">
+    <div className="flex h-full w-full flex-col border-r border-[var(--border-default)] bg-[var(--bg-secondary)]">
+      <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--border-default)] px-2">
+        <GitCommit size={12} className="shrink-0 text-[var(--text-tertiary)]" />
+        <select
+          value={commit ?? ""}
+          onChange={(e) => onPickCommit(e.target.value)}
+          title="Inspect a commit's changes"
+          className="min-w-0 flex-1 h-6 rounded border border-[var(--border-default)] bg-[var(--bg-elevated)] px-1.5 text-[10px] text-[var(--text-primary)] outline-none"
+        >
+          <option value="">Working tree</option>
+          {log.map((c) => (
+            <option key={c.hash} value={c.hash}>
+              {c.short_hash} · {c.message}
+            </option>
+          ))}
+        </select>
+        <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-tertiary)]">
           {rows.filter((r) => !r.node.isDir).length}
         </span>
       </div>
@@ -196,7 +240,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree({
             return (
               <button
                 key={`f:${node.path}`}
-                onClick={() => openGitDiff(repoPath, node.path, staged)}
+                onClick={() => openFile(node.path)}
                 title={node.path}
                 className={`${common.className} gap-1.5 text-[11px] ${
                   active

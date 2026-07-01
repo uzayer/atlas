@@ -19,8 +19,6 @@ export type LinkKind = "url" | "path" | "text";
 
 export interface PathRun {
   text: string;
-  /** @deprecated use `kind`. Kept so existing call sites don't break. */
-  isPath: boolean;
   kind: LinkKind;
 }
 
@@ -61,26 +59,20 @@ export function splitLinks(text: string): PathRun[] {
     matches.push({ start, end, kind: "path" });
   }
 
-  if (matches.length === 0) return [{ text, isPath: false, kind: "text" }];
+  if (matches.length === 0) return [{ text, kind: "text" }];
   matches.sort((a, b) => a.start - b.start);
 
   const out: PathRun[] = [];
   let last = 0;
   for (const m of matches) {
     if (m.start < last) continue; // overlap guard (URLs win, added first)
-    if (m.start > last) out.push({ text: text.slice(last, m.start), isPath: false, kind: "text" });
+    if (m.start > last) out.push({ text: text.slice(last, m.start), kind: "text" });
     out.push({
       text: text.slice(m.start, m.end),
-      isPath: m.kind === "path",
       kind: m.kind,
     });
     last = m.end;
   }
-  if (last < text.length) out.push({ text: text.slice(last), isPath: false, kind: "text" });
+  if (last < text.length) out.push({ text: text.slice(last), kind: "text" });
   return out;
-}
-
-/** @deprecated path-only split — use {@link splitLinks}. */
-export function splitPaths(text: string): PathRun[] {
-  return splitLinks(text).map((r) => (r.kind === "url" ? { ...r, isPath: false, kind: "text" as const } : r));
 }

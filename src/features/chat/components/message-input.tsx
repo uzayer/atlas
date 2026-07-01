@@ -348,6 +348,12 @@ function AcpModePicker({ tabId }: { tabId: string }) {
  * dropup mirroring the mode picker. Hidden when the agent exposes no models or
  * for the native agent (which uses ProviderModelPills + its BYOK catalog).
  */
+/** Claude Code advertises its default model as "Recommended"; show "Default". */
+function modelLabel(m: { id: string; name: string }): string {
+  if (m.name.trim().toLowerCase() === "recommended" || m.id === "default") return "Default";
+  return m.name;
+}
+
 function AcpModelPicker({ tabId }: { tabId: string }) {
   const currentModel = useChatStore((s) => s.sessions[tabId]?.acpCurrentModel);
   const availableModels = useChatStore((s) => s.sessions[tabId]?.acpAvailableModels);
@@ -391,7 +397,7 @@ function AcpModelPicker({ tabId }: { tabId: string }) {
         title="Model"
       >
         <Cpu size={11} className="shrink-0 text-[var(--text-tertiary)]" />
-        <span className="max-w-[120px] truncate">{current?.name ?? currentModel ?? "Model"}</span>
+        <span className="max-w-[120px] truncate">{current ? modelLabel(current) : (currentModel ?? "Model")}</span>
         <ChevronDown size={10} className="shrink-0 text-[var(--text-tertiary)]" />
       </button>
       {open && (
@@ -428,12 +434,12 @@ function AcpModelPicker({ tabId }: { tabId: string }) {
                   >
                     <span className="flex-1 min-w-0">
                       <span className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--text-primary)]">
-                        <span className="truncate">{m.name}</span>
+                        <span className="truncate">{modelLabel(m)}</span>
                         {active && (
                           <Check size={11} className="shrink-0 text-[var(--accent-primary)]" />
                         )}
                       </span>
-                      {m.description && (
+                      {m.description && m.description.trim().toLowerCase() !== "recommended" && (
                         <span className="mt-0.5 block text-[9px] leading-snug text-[var(--text-tertiary)] line-clamp-2">
                           {m.description}
                         </span>

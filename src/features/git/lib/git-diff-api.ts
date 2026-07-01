@@ -43,8 +43,25 @@ export function gitDiffStructured(
   repoPath: string,
   file: string,
   staged: boolean,
+  /** When set, show the diff introduced by this commit (via `git show`). */
+  commit?: string | null,
 ): Promise<FileDiff> {
-  return invoke<FileDiff>("git_diff_structured", { path: repoPath, file, staged });
+  return invoke<FileDiff>("git_diff_structured", {
+    path: repoPath,
+    file,
+    staged,
+    commit: commit ?? null,
+  });
+}
+
+export interface CommitFile {
+  path: string;
+  status: string;
+}
+
+/** Files changed by a single commit (for the diff viewer's commit browser). */
+export function gitCommitChangedFiles(repoPath: string, sha: string): Promise<CommitFile[]> {
+  return invoke<CommitFile[]>("git_commit_changed_files", { path: repoPath, sha });
 }
 
 export function gitDiffLineStatus(
@@ -60,9 +77,14 @@ export function gitDiffLineStatus(
  * by file + staged-ness so the staged and worktree diffs of the same file are
  * distinct tabs and re-opening focuses the existing one.
  */
-export function openGitDiff(repoPath: string, file: string, staged: boolean): void {
+export function openGitDiff(
+  repoPath: string,
+  file: string,
+  staged: boolean,
+  commit?: string | null,
+): void {
   const base = file.split("/").pop() ?? file;
-  const id = `diff:${file}:${staged ? "s" : "w"}`;
+  const id = `diff:${file}:${staged ? "s" : "w"}${commit ? `:${commit}` : ""}`;
   const { addTab, setActiveTab } = useLayoutStore.getState().actions;
   addTab({
     id,
@@ -70,7 +92,7 @@ export function openGitDiff(repoPath: string, file: string, staged: boolean): vo
     title: base,
     closable: true,
     dirty: false,
-    data: { repoPath, file, staged },
+    data: { repoPath, file, staged, commit: commit ?? null },
   });
   setActiveTab(id);
 }

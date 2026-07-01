@@ -13,6 +13,8 @@ import { openFile } from "@/lib/open-file";
 import { getLanguage } from "../lib/diff";
 import { highlightDiffLine } from "../lib/diff-highlight";
 import { gitDiffStructured, type DiffSide, type DiffRow } from "../lib/git-diff-api";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { useGitStore } from "../stores/git-store";
 import { ChangedFilesTree } from "./changed-files-tree";
 import { DiffMinimap } from "./diff-minimap";
 
@@ -56,9 +58,13 @@ function sideLen(side: DiffSide | null): number {
 }
 
 interface GitDiffPanelProps {
-  repoPath: string;
-  file: string;
-  staged: boolean;
+  /** Falls back to the active repo when opened as a standalone module. */
+  repoPath?: string;
+  /** Empty when opened as a module — the tree is shown and the pane prompts. */
+  file?: string;
+  staged?: boolean;
+  /** When set, the diff for this file at a specific commit (via `git show`). */
+  commit?: string | null;
 }
 
 function sideBg(side: DiffSide | null, isLeft: boolean): string | undefined {
@@ -252,15 +258,22 @@ const DiffRow = memo(function DiffRow({
   );
 });
 
-export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
+export function GitDiffPanel({
+  repoPath: repoPathProp,
+  file = "",
+  staged = false,
+  commit = null,
+}: GitDiffPanelProps) {
+  const storeRepo = useGitStore.use.repoPath();
+  const repoPath = repoPathProp || storeRepo || "";
   const scrollRef = useRef<HTMLDivElement>(null);
   const [blockCursor, setBlockCursor] = useState(0);
   const lang = getLanguage(file);
 
-  const queryKey = ["git-diff", repoPath, file, staged] as const;
+  const queryKey = ["git-diff", repoPath, file, staged, commit] as const;
   const { data, isLoading, refetch } = useQuery({
     queryKey,
-    queryFn: () => gitDiffStructured(repoPath, file, staged),
+    queryFn: () => gitDiffStructured(repoPath, file, staged, commit),
     enabled: !!repoPath && !!file,
     staleTime: 10_000,
   });
@@ -338,17 +351,25 @@ export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
   }, [maxLineLen]);
 
   return (
-    <div className="flex h-full bg-[var(--bg-primary)]">
-      {/* Left: compact tree of changed files to jump between diffs */}
-      <ChangedFilesTree repoPath={repoPath} staged={staged} currentFile={file} />
+    <PanelGroup
+      direction="horizontal"
+      autoSaveId="git-diff-tree"
+      className="h-full bg-[var(--bg-primary)]"
+    >
+      {/* Left: resizable tree of changed files (+ commit picker) */}
+      <Panel defaultSize={22} minSize={12} maxSize={45} className="min-w-0">
+        <ChangedFilesTree repoPath={repoPath} staged={staged} currentFile={file} commit={commit} />
+      </Panel>
+      <PanelResizeHandle className="w-px bg-border-default hover:bg-accent data-[resize-handle-active]:bg-accent transition-colors cursor-col-resize" />
 
       {/* Main column: toolbar + diff body */}
-      <div className="flex h-full min-w-0 flex-1 flex-col">
+      <Panel className="min-w-0">
+      <div className="flex h-full min-w-0 flex-col">
       {/* Toolbar */}
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[var(--border-default)] px-3">
         <FileCode2 size={12} className="shrink-0 text-[var(--text-tertiary)]" />
         <span className="truncate font-mono text-[11px] text-[var(--text-secondary)]">
-          {file}
+          {file || "Git Diff"}
         </span>
         {staged && (
           <span className="shrink-0 rounded bg-[var(--bg-elevated)] px-1.5 py-px text-[9px] uppercase tracking-wide text-[var(--text-tertiary)]">
@@ -361,6 +382,7 @@ export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
             <span className="text-[var(--status-error)]">-{stats.deletions}</span>
           </span>
         )}
+        {!!file && (
         <div className="ml-auto flex items-center gap-0.5">
           <span className="mr-1 font-mono text-[10px] text-[var(--text-tertiary)] tabular-nums">
             {diffCount} diff{diffCount !== 1 ? "s" : ""}
@@ -396,10 +418,15 @@ export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
             <ExternalLink size={11} />
           </button>
         </div>
+        )}
       </div>
 
       {/* Body */}
-      {isLoading ? (
+      {!file ? (
+        <div className="flex flex-1 items-center justify-center px-3 text-center text-[11px] text-[var(--text-tertiary)]">
+          Pick a file from the left to view its diff — or choose a commit to browse.
+        </div>
+      ) : isLoading ? (
         <div className="px-3 py-8 text-center text-[11px] text-[var(--text-tertiary)]">
           Loading diff…
         </div>
@@ -432,6 +459,7 @@ export function GitDiffPanel({ repoPath, file, staged }: GitDiffPanelProps) {
         </div>
       )}
       </div>
-    </div>
+      </Panel>
+    </PanelGroup>
   );
 }

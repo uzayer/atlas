@@ -41,6 +41,13 @@ export function GitManagerPanel() {
     if (repoPath) void actions.refreshAll(repoPath).catch(() => {});
   }, [repoPath, actions]);
 
+  // When a commit is selected elsewhere (e.g. clicking a node in the Git Graph),
+  // jump this panel to History so its commit-detail view shows.
+  const selectedCommit = useGitStore.use.selectedCommit();
+  useEffect(() => {
+    if (selectedCommit) setView("history");
+  }, [selectedCommit]);
+
   const run = async (label: string, fn: () => Promise<void>) => {
     setBusy(label);
     try {
