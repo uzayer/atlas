@@ -64,15 +64,18 @@ export function ProviderModelPills({
   model,
   onProvider,
   onModel,
-  compress,
+  compress = false,
   onCompress,
+  showCompress = true,
 }: {
   provider: string;
   model: string;
   onProvider: (id: string) => void;
   onModel: (id: string) => void;
-  compress: boolean;
-  onCompress: (on: boolean) => void;
+  /** RTK compression toggle — agent-composer only. Omit for plain BYOK pickers. */
+  compress?: boolean;
+  onCompress?: (on: boolean) => void;
+  showCompress?: boolean;
 }) {
   const keys = useByokStore.use.keys();
   const loaded = useByokStore.use.loaded();
@@ -341,8 +344,9 @@ export function ProviderModelPills({
           </div>
 
           {/* RTK compression toggle (Cursor "MAX Mode"-style footer). */}
+          {showCompress && (
           <button
-            onClick={() => onCompress(!compress)}
+            onClick={() => onCompress?.(!compress)}
             className="flex w-full items-center gap-2 border-t border-[var(--border-subtle)] px-2.5 py-2 text-left text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] cursor-pointer outline-none"
             title="Tool-output compression — shrinks tool results to save tokens"
           >
@@ -356,6 +360,7 @@ export function ProviderModelPills({
               <span className="h-2.5 w-2.5 rounded-full bg-[var(--bg-elevated)]" />
             </span>
           </button>
+          )}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>

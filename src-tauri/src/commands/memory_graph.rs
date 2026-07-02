@@ -9,17 +9,18 @@
 //! global app-data dir; the per-project vector index lives in `.atlas/`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use atlas_embed::{BruteForce, Embedder, VectorStore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, State};
 
 use super::agent_memory::{collect_corpus, MemoryDoc};
+use super::memory_indexer::MemoryRegistry;
 
-const MODEL_NAME: &str = "all-MiniLM-L6-v2";
-const HF_BASE: &str =
-    "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main";
+/// Files every BERT sentence-transformer ships — constant across embedding models;
+/// only the source repo (and dir) vary by the user's selection.
 pub(crate) const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 
 /// kNN fan-out per node when building similarity edges.
@@ -29,15 +30,11 @@ const SIM_THRESHOLD: f32 = 0.35;
 
 // ── Model location + status ─────────────────────────────────────────────────
 
+/// Dir of the **selected** embedding model (`app_data/models/<embedding_model_id>`).
+/// Delegates to the model manager so every embedding consumer follows the user's
+/// choice. See `super::models`.
 pub(crate) fn model_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("no app data dir: {e}"))?
-        .join("models")
-        .join(MODEL_NAME);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create model dir: {e}"))?;
-    Ok(dir)
+    super::models::model_dir_for(app, &super::models::selected_embedding_id(app))
 }
 
 #[derive(Debug, Serialize)]
@@ -53,7 +50,7 @@ pub async fn memory_embed_status(app: AppHandle) -> Result<EmbedStatus, String> 
     let downloaded = MODEL_FILES.iter().all(|f| dir.join(f).exists());
     Ok(EmbedStatus {
         downloaded,
-        model: MODEL_NAME.to_string(),
+        model: super::models::selected_embedding_id(&app),
         model_dir: dir.to_string_lossy().to_string(),
     })
 }
@@ -61,27 +58,23 @@ pub async fn memory_embed_status(app: AppHandle) -> Result<EmbedStatus, String> 
 // ── Download (streamed, with throttled progress events) ─────────────────────
 
 #[derive(Debug, Clone, Serialize)]
-struct DownloadProgress {
-    file: String,
-    file_index: usize,
-    file_count: usize,
-    received: u64,
-    total: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
 struct DownloadDone {
     success: bool,
     error: Option<String>,
 }
 
-/// Kicks off the model download in the background and returns immediately. The
-/// frontend listens for `atlas:memory-embed:progress` and `:done`.
+/// Download the **selected** embedding model in the background (Memory ▸ Graph
+/// gate). The frontend listens for `atlas:memory-embed:progress` and `:done`.
+/// The Local Model Manager uses the generic `models::model_download` instead.
 #[tauri::command]
 pub async fn memory_embed_download(app: AppHandle) -> Result<(), String> {
+    let id = super::models::selected_embedding_id(&app);
+    let entry = super::models::find_entry(&id).ok_or_else(|| format!("unknown embedding model '{id}'"))?;
     let dir = model_dir(&app)?;
     tokio::spawn(async move {
-        let result = download_model(&app, &dir).await;
+        let result =
+            super::models::download_files(&app, &id, &dir, &entry.files, "atlas:memory-embed:progress")
+                .await;
         let _ = app.emit(
             "atlas:memory-embed:done",
             DownloadDone {
@@ -89,77 +82,8 @@ pub async fn memory_embed_download(app: AppHandle) -> Result<(), String> {
                 error: result.err(),
             },
         );
+        let _ = app.emit("atlas:models-changed", ());
     });
-    Ok(())
-}
-
-async fn download_model(app: &AppHandle, dir: &std::path::Path) -> Result<(), String> {
-    use futures::StreamExt;
-    use tokio::io::AsyncWriteExt;
-
-    let client = reqwest::Client::builder()
-        .user_agent("Atlas-IDE")
-        .build()
-        .map_err(|e| format!("http client: {e}"))?;
-
-    for (idx, fname) in MODEL_FILES.iter().enumerate() {
-        let url = format!("{HF_BASE}/{fname}");
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("GET {fname}: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("GET {fname}: {e}"))?;
-        let total = resp.content_length().unwrap_or(0);
-
-        let tmp = dir.join(format!("{fname}.part"));
-        let mut file = tokio::fs::File::create(&tmp)
-            .await
-            .map_err(|e| format!("create {fname}: {e}"))?;
-
-        let mut received: u64 = 0;
-        let mut last_emit: u64 = 0;
-        let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("stream {fname}: {e}"))?;
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| format!("write {fname}: {e}"))?;
-            received += chunk.len() as u64;
-            // Throttle: emit at most ~every 1 MB (and always at the end below).
-            if received - last_emit >= 1_048_576 {
-                last_emit = received;
-                let _ = app.emit(
-                    "atlas:memory-embed:progress",
-                    DownloadProgress {
-                        file: fname.to_string(),
-                        file_index: idx,
-                        file_count: MODEL_FILES.len(),
-                        received,
-                        total,
-                    },
-                );
-            }
-        }
-        file.flush().await.map_err(|e| format!("flush {fname}: {e}"))?;
-        drop(file);
-        tokio::fs::rename(&tmp, dir.join(fname))
-            .await
-            .map_err(|e| format!("finalize {fname}: {e}"))?;
-
-        // Final per-file progress tick (received == total).
-        let _ = app.emit(
-            "atlas:memory-embed:progress",
-            DownloadProgress {
-                file: fname.to_string(),
-                file_index: idx,
-                file_count: MODEL_FILES.len(),
-                received,
-                total: total.max(received),
-            },
-        );
-    }
     Ok(())
 }
 
@@ -268,7 +192,11 @@ pub struct MemoryGraph {
 /// and return the similarity graph. Errors with `"model-not-downloaded"` if the
 /// embedding model isn't present yet (the frontend gates on that).
 #[tauri::command]
-pub async fn memory_index_build(app: AppHandle, project_path: String) -> Result<MemoryGraph, String> {
+pub async fn memory_index_build(
+    app: AppHandle,
+    project_path: String,
+    registry: State<'_, Arc<MemoryRegistry>>,
+) -> Result<MemoryGraph, String> {
     let dir = model_dir(&app)?;
     let model_ready = MODEL_FILES.iter().all(|f| dir.join(f).exists());
     if !model_ready {
@@ -295,34 +223,43 @@ pub async fn memory_index_build(app: AppHandle, project_path: String) -> Result<
         });
     }
 
+    // Shared, load-once MiniLM (reused by the indexer, retrieve, query, policy and
+    // memory-chat) instead of loading a fresh ~90 MB model per graph build.
+    let embedder = registry
+        .provider(&app)
+        .await
+        .ok_or("model-not-downloaded")?
+        .embedder();
+
     let cache = load_index(&project_path);
+    let model_id = super::models::selected_embedding_id(&app);
     let pp = project_path.clone();
 
-    tokio::task::spawn_blocking(move || build_graph_blocking(dir, pp, docs, cache))
+    tokio::task::spawn_blocking(move || build_graph_blocking(embedder, model_id, pp, docs, cache))
         .await
         .map_err(|e| format!("index task: {e}"))?
 }
 
 fn build_graph_blocking(
-    model_dir: PathBuf,
+    embedder: Arc<Embedder>,
+    model_id: String,
     project_path: String,
     docs: Vec<MemoryDoc>,
     cache: StoredIndex,
 ) -> Result<MemoryGraph, String> {
     use std::collections::HashMap;
 
-    // Reuse cached vectors for unchanged docs (keyed by content hash).
-    let cached: HashMap<String, Vec<f32>> =
-        cache.docs.into_iter().map(|d| (d.hash, d.vector)).collect();
+    // Reuse cached vectors for unchanged docs (keyed by content hash) — but ONLY if
+    // the cache was built with the currently-selected embedding model. A different
+    // model produces vectors in a different space, so on a model switch we drop the
+    // cache and re-embed everything.
+    let cached: HashMap<String, Vec<f32>> = if cache.model == model_id {
+        cache.docs.into_iter().map(|d| (d.hash, d.vector)).collect()
+    } else {
+        HashMap::new()
+    };
 
     let hashes: Vec<String> = docs.iter().map(|d| hash_text(&embed_text(d))).collect();
-    let need_embed = hashes.iter().any(|h| !cached.contains_key(h));
-
-    let embedder = if need_embed {
-        Some(Embedder::load(&model_dir).map_err(|e| format!("load model: {e}"))?)
-    } else {
-        None
-    };
 
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(docs.len());
     let mut dim = cache.dim;
@@ -332,8 +269,6 @@ fn build_graph_blocking(
             vectors.push(v.clone());
         } else {
             let v = embedder
-                .as_ref()
-                .unwrap()
                 .embed_one(&embed_text(doc))
                 .map_err(|e| format!("embed: {e}"))?;
             dim = v.len();
@@ -343,7 +278,7 @@ fn build_graph_blocking(
 
     // Persist the refreshed index.
     let stored = StoredIndex {
-        model: MODEL_NAME.to_string(),
+        model: model_id,
         dim,
         docs: docs
             .iter()
@@ -472,6 +407,7 @@ pub async fn memory_index_query(
     project_path: String,
     query: String,
     top_k: Option<usize>,
+    registry: State<'_, Arc<MemoryRegistry>>,
 ) -> Result<Vec<QueryHit>, String> {
     let dir = model_dir(&app)?;
     if !MODEL_FILES.iter().all(|f| dir.join(f).exists()) {
@@ -487,8 +423,15 @@ pub async fn memory_index_query(
     }
     let k = top_k.unwrap_or(10);
 
+    // Shared, load-once MiniLM — no per-query model reload (this is the interactive
+    // search hot path).
+    let embedder = registry
+        .provider(&app)
+        .await
+        .ok_or("model-not-downloaded")?
+        .embedder();
+
     tokio::task::spawn_blocking(move || -> Result<Vec<QueryHit>, String> {
-        let embedder = Embedder::load(&dir).map_err(|e| format!("load model: {e}"))?;
         let qv = embedder.embed_one(&q).map_err(|e| format!("embed query: {e}"))?;
         let ids: Vec<String> = index.docs.iter().map(|d| d.id.clone()).collect();
         let vectors: Vec<Vec<f32>> = index.docs.into_iter().map(|d| d.vector).collect();

@@ -10,14 +10,16 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use atlas_embed::{cosine, Embedder};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
 use super::agent_memory::collect_corpus;
 use super::memory_graph::{load_doc_vectors, model_dir, MODEL_FILES};
+use super::memory_indexer::MemoryRegistry;
 
 /// Minimum cosine for a probe to claim a statement as its policy value.
 const MATCH_THRESHOLD: f32 = 0.30;
@@ -145,7 +147,11 @@ fn split_statements(body: &str) -> Vec<String> {
 }
 
 #[tauri::command]
-pub async fn memory_policies(app: AppHandle, project_path: String) -> Result<Vec<Policy>, String> {
+pub async fn memory_policies(
+    app: AppHandle,
+    project_path: String,
+    registry: State<'_, Arc<MemoryRegistry>>,
+) -> Result<Vec<Policy>, String> {
     let dir = model_dir(&app)?;
     if !MODEL_FILES.iter().all(|f| dir.join(f).exists()) {
         return Err("model-not-downloaded".into());
@@ -164,19 +170,24 @@ pub async fn memory_policies(app: AppHandle, project_path: String) -> Result<Vec
         return Ok(vec![]);
     }
 
+    // Shared, load-once MiniLM — no per-distillation model reload.
+    let embedder = registry
+        .provider(&app)
+        .await
+        .ok_or("model-not-downloaded")?
+        .embedder();
+
     let pp = project_path.clone();
-    tokio::task::spawn_blocking(move || compute_policies(dir, pp, docs))
+    tokio::task::spawn_blocking(move || compute_policies(embedder, pp, docs))
         .await
         .map_err(|e| format!("policy task: {e}"))?
 }
 
 fn compute_policies(
-    model_dir: PathBuf,
+    embedder: Arc<Embedder>,
     project_path: String,
     docs: Vec<super::agent_memory::MemoryDoc>,
 ) -> Result<Vec<Policy>, String> {
-    let embedder = Embedder::load(&model_dir).map_err(|e| format!("load model: {e}"))?;
-
     // ── Stage 1: doc-level vectors, reusing the graph's index where built ──
     // This is the expensive part the old version redid per statement; here the
     // whole-file vectors come free from the graph index, and we only embed the

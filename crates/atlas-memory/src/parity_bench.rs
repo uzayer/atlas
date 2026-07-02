@@ -140,7 +140,7 @@ fn retrieve_is_agent_agnostic_and_well_formed_when_model_available() {
         return;
     };
     let embedder = atlas_embed::Embedder::load(&model).expect("load MiniLM");
-    let provider = MiniLmProvider::new(Arc::new(embedder));
+    let provider = MiniLmProvider::new(Arc::new(embedder), "all-MiniLM-L6-v2");
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     let mut root = std::env::temp_dir();

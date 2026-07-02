@@ -1,10 +1,12 @@
 //! `chat` — a small on-device quantized instruct model for local RAG answers.
 //!
 //! Sibling to the BERT `Embedder`: same candle stack, but a generative decoder
-//! instead of an encoder. Loads a GGUF Qwen2.5-Instruct checkpoint + its
-//! `tokenizer.json`, then streams tokens for a fully-formatted prompt. CPU-only —
-//! a 0.5B model at Q4 answers a short RAG query in a couple seconds, which is the
-//! point: no API key, no network, the codebase's own memory answered locally.
+//! instead of an encoder. Loads a GGUF Qwen3 checkpoint + its `tokenizer.json`,
+//! then streams tokens for a fully-formatted prompt. Runs on the Apple-Silicon
+//! GPU via candle's Metal backend when the `metal` feature is compiled in
+//! (`src-tauri` enables it for macOS), falling back to CPU otherwise — a 0.6B
+//! model at Q4 answers a short RAG query in a second or two, which is the point:
+//! no API key, no network, the codebase's own memory answered locally.
 
 use std::path::Path;
 

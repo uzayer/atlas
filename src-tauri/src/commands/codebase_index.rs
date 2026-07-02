@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use atlas_codeindex::{compose_text, scan, structural_text, CodebaseDoc, CodebaseIndex, ScannedFile};
 use atlas_embed::chat::{build_qwen_prompt, QuantizedChatModel};
@@ -22,6 +23,7 @@ use tauri::{AppHandle, Emitter, State};
 use super::byok::byok_get;
 use super::memory_chat::{local_model_paths, MemoryChatState};
 use super::memory_graph::memory_index_build;
+use super::memory_indexer::MemoryRegistry;
 
 /// Caps on how many files get an LLM summary per build (structural is uncapped).
 const PROVIDER_SUMMARY_CAP: usize = 150;
@@ -84,6 +86,7 @@ pub async fn codebase_index_build(
     project_path: String,
     opts: BuildOpts,
     state: State<'_, MemoryChatState>,
+    registry: State<'_, Arc<MemoryRegistry>>,
 ) -> Result<CodebaseIndexStatus, String> {
     let pp = project_path.trim_end_matches('/').to_string();
     let full = opts.mode == "full";
@@ -153,7 +156,7 @@ pub async fn codebase_index_build(
 
     // 6. Re-embed the unified corpus (codebase docs are now in collect_corpus).
     emit(&app, "embedding", 0, 0);
-    let _ = memory_index_build(app.clone(), pp.clone()).await;
+    let _ = memory_index_build(app.clone(), pp.clone(), registry).await;
 
     emit(&app, "done", index.docs.len(), index.docs.len());
     Ok(status_of(&index))
@@ -184,7 +187,6 @@ async fn provider_summaries(
 
     use futures::stream::{self, StreamExt};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
     let cancel = atlas_review::CancellationToken::new();
     let done = Arc::new(AtomicUsize::new(0));
     // Concurrent API calls; emit progress live as each completes so the

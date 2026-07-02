@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   ReactFlowProvider,
   Background,
   BackgroundVariant,
+  ConnectionMode,
   useReactFlow,
   type Node,
   type Edge,
@@ -13,13 +14,30 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Plus, Maximize2, Minimize2, Crosshair, StickyNote } from "lucide-react";
+import { StickyNote } from "lucide-react";
 import { useProjectStore } from "@/features/project/stores/project-store";
-import { useCanvasStore, type CanvasNode } from "../stores/canvas-store";
-import { NoteNode, type NoteNodeData } from "./note-node";
-import { NoteInspector } from "./note-inspector";
+import { useCanvasStore, groupBounds, type CanvasNode, type ShapeType } from "../stores/canvas-store";
+import { canvasMediaUpload } from "../lib/canvas-api";
+import { NoteNode } from "./note-node";
+import { TextNode } from "./text-node";
+import { MediaNode } from "./media-node";
+import { ShapeNode } from "./shape-node";
+import { GroupFrameNode } from "./group-frame-node";
+import { CanvasToolbar } from "./canvas-toolbar";
+import { CanvasHeader } from "./canvas-header";
+import { CanvasExportToolbar } from "./canvas-export-toolbar";
+import { NoteEditorPanel } from "./note-editor-panel";
+import { AiInputFloat } from "./ai-input-float";
+import { AiGroupMarkers } from "./ai-group-marker";
+import { AiThreadPanel } from "./ai-thread-panel";
 
-const nodeTypes = { note: NoteNode };
+const nodeTypes = {
+  note: NoteNode,
+  text: TextNode,
+  media: MediaNode,
+  shape: ShapeNode,
+  groupframe: GroupFrameNode,
+};
 
 export function CanvasPanel() {
   const fullscreen = useCanvasStore.use.fullscreen();
@@ -69,18 +87,44 @@ function CanvasSurface({
   const storeProjectPath = useCanvasStore.use.projectPath();
   const nodes = useCanvasStore.use.nodes();
   const edges = useCanvasStore.use.edges();
-  const selectedId = useCanvasStore.use.selectedId();
+  const aiGroups = useCanvasStore.use.aiGroups();
+  const selectedIds = useCanvasStore.use.selectedIds();
   const loaded = useCanvasStore.use.loaded();
+  const activeTool = useCanvasStore.use.activeTool();
+  const canUndo = useCanvasStore.use.canUndo();
+  const canRedo = useCanvasStore.use.canRedo();
   const {
     loadProject,
     addNote,
+    addText,
+    addMedia,
+    addShape,
     moveNote,
     deleteNote,
     addEdge,
     deleteEdge,
     setSelected,
+    setSelectedIds,
     setViewport,
+    setTool,
+    beginInteraction,
+    undo,
+    redo,
   } = useCanvasStore.use.actions();
+
+  // A create-tool (or Ask AI) is armed → the click overlay is active.
+  const armed =
+    activeTool === "note" ||
+    activeTool === "text" ||
+    activeTool === "ai" ||
+    activeTool.startsWith("shape:");
+
+  // Which note is open in the slide-in editor (null = closed). Notes open on
+  // double-click; text edits inline; media has no editor.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  // AI: floating composer position (after an "Ask AI" click) + open thread.
+  const [aiInput, setAiInput] = useState<{ screen: { x: number; y: number }; flow: { x: number; y: number } } | null>(null);
+  const [threadFor, setThreadFor] = useState<{ groupId: string; at: { x: number; y: number } } | null>(null);
 
   // Load when the project changes.
   useEffect(() => {
@@ -93,23 +137,33 @@ function CanvasSurface({
   const rf = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
 
-  // Project store data → xyflow shape.
-  const rfNodes = useMemo<Node<NoteNodeData>[]>(
+  // Project store data → xyflow shape. Node `type` = kind so xyflow routes to the
+  // right renderer; `data` carries only what that renderer needs.
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const rfNodes = useMemo<Node[]>(
     () =>
       nodes.map((n) => ({
         id: n.id,
-        type: "note",
+        type: n.kind,
         position: { x: n.x, y: n.y },
-        selected: n.id === selectedId,
-        data: {
-          title: n.title,
-          body: n.body,
-          updatedAt: n.updatedAt,
-        },
-        // We disable connections-from-everywhere; handles on the node provide them.
+        selected: selectedSet.has(n.id),
+        // Shapes are resizable, so React Flow owns their box dimensions.
+        ...(n.kind === "shape" ? { width: n.width ?? 160, height: n.height ?? 90 } : {}),
+        data:
+          n.kind === "note"
+            ? { title: n.title, body: n.body, updatedAt: n.updatedAt, icon: n.icon }
+            : n.kind === "text"
+              ? { text: n.text ?? "" }
+              : n.kind === "shape"
+                ? { shapeType: n.shapeType ?? "rectangle", text: n.text ?? "" }
+                : {
+                    src: n.src ?? "",
+                    projectPath: projectPath ?? "",
+                    width: n.width,
+                  },
         draggable: true,
       })),
-    [nodes, selectedId]
+    [nodes, selectedSet, projectPath]
   );
   const rfEdges = useMemo<Edge[]>(
     () =>
@@ -117,26 +171,63 @@ function CanvasSurface({
         id: e.id,
         source: e.source,
         target: e.target,
+        sourceHandle: e.sourceHandle ?? undefined,
+        targetHandle: e.targetHandle ?? undefined,
         type: "smoothstep",
         style: { stroke: "rgba(255,255,255,0.25)", strokeWidth: 1.5 },
       })),
     [edges]
   );
 
-  // Apply position changes back to the store.
+  // Subtle dashed frame per AI group, as a NON-interactive background node placed
+  // FIRST in the node array so every real node paints above the border.
+  const frameNodes = useMemo<Node[]>(
+    () =>
+      Object.keys(aiGroups).flatMap((gid) => {
+        const b = groupBounds(nodes, gid);
+        if (!b) return [];
+        return [
+          {
+            id: `frame:${gid}`,
+            type: "groupframe",
+            position: { x: b.x - 8, y: b.y - 8 },
+            width: b.width + 16,
+            height: b.height + 16,
+            selectable: false,
+            draggable: false,
+            connectable: false,
+            deletable: false,
+            focusable: false,
+            zIndex: 0,
+            style: { pointerEvents: "none" as const },
+            data: {},
+          },
+        ];
+      }),
+    [aiGroups, nodes]
+  );
+  const allNodes = useMemo(() => [...frameNodes, ...rfNodes], [frameNodes, rfNodes]);
+
+  // Apply position/remove/selection changes back to the store. Selection is
+  // multi (marquee): fold every select change into the current set.
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
+      let selChanged = false;
+      const sel = new Set(useCanvasStore.getState().selectedIds);
       for (const c of changes) {
         if (c.type === "position" && c.position) {
           moveNote(c.id, c.position.x, c.position.y);
         } else if (c.type === "remove") {
           deleteNote(c.id);
         } else if (c.type === "select") {
-          if (c.selected) setSelected(c.id);
+          selChanged = true;
+          if (c.selected) sel.add(c.id);
+          else sel.delete(c.id);
         }
       }
+      if (selChanged) setSelectedIds([...sel]);
     },
-    [moveNote, deleteNote, setSelected]
+    [moveNote, deleteNote, setSelectedIds]
   );
 
   const onEdgesChange = useCallback(
@@ -150,25 +241,160 @@ function CanvasSurface({
 
   const onConnect = useCallback(
     (c: Connection) => {
-      if (c.source && c.target) addEdge(c.source, c.target);
+      if (c.source && c.target) addEdge(c.source, c.target, c.sourceHandle, c.targetHandle);
     },
     [addEdge]
   );
 
-  const handleAddNote = useCallback(() => {
-    // Drop new notes near the current viewport center so they're visible.
+  const viewportCenter = useCallback(
+    (dx = 0, dy = 0) => {
+      const wrap = wrapperRef.current;
+      if (!wrap) return undefined;
+      const rect = wrap.getBoundingClientRect();
+      const c = rf.screenToFlowPosition({
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      });
+      return { x: c.x + dx, y: c.y + dy };
+    },
+    [rf]
+  );
+
+  // Empty-canvas click just clears selection. Create-tools are handled by the
+  // drag-to-create overlay (which covers the pane while a create-tool is armed).
+  const onPaneClick = useCallback(() => setSelected(null), [setSelected]);
+
+  // ── Drag-to-create (Excalidraw-style) ──────────────────────────────────────
+  // While a create-tool is armed, an overlay captures pointer drags: press+drag
+  // sizes the shape (Shift = 1:1 square), a plain click drops a default size.
+  const [preview, setPreview] = useState<{ left: number; top: number; w: number; h: number } | null>(
+    null
+  );
+  const dragStart = useRef<{ sx: number; sy: number; fx: number; fy: number } | null>(null);
+
+  const overlayDown = useCallback(
+    (e: React.PointerEvent) => {
+      const wrap = wrapperRef.current;
+      if (!wrap) return;
+      const r = wrap.getBoundingClientRect();
+      const flow = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      dragStart.current = { sx: e.clientX - r.left, sy: e.clientY - r.top, fx: flow.x, fy: flow.y };
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      setPreview(null);
+    },
+    [rf]
+  );
+
+  const overlayMove = useCallback((e: React.PointerEvent) => {
+    const st = dragStart.current;
     const wrap = wrapperRef.current;
-    if (!wrap) {
-      addNote();
-      return;
+    if (!st || !wrap) return;
+    const r = wrap.getBoundingClientRect();
+    let dx = e.clientX - r.left - st.sx;
+    let dy = e.clientY - r.top - st.sy;
+    if (e.shiftKey) {
+      const s = Math.max(Math.abs(dx), Math.abs(dy));
+      dx = (dx < 0 ? -1 : 1) * s;
+      dy = (dy < 0 ? -1 : 1) * s;
     }
-    const rect = wrap.getBoundingClientRect();
-    const center = rf.screenToFlowPosition({
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2,
+    setPreview({
+      left: Math.min(st.sx, st.sx + dx),
+      top: Math.min(st.sy, st.sy + dy),
+      w: Math.abs(dx),
+      h: Math.abs(dy),
     });
-    addNote({ x: center.x - 160, y: center.y - 60 });
-  }, [rf, addNote]);
+  }, []);
+
+  const overlayUp = useCallback(
+    (e: React.PointerEvent) => {
+      const st = dragStart.current;
+      dragStart.current = null;
+      setPreview(null);
+      if (!st) return;
+      const tool = useCanvasStore.getState().activeTool;
+      const end = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      let dx = end.x - st.fx;
+      let dy = end.y - st.fy;
+      if (e.shiftKey) {
+        const s = Math.max(Math.abs(dx), Math.abs(dy));
+        dx = (dx < 0 ? -1 : 1) * s;
+        dy = (dy < 0 ? -1 : 1) * s;
+      }
+      const x = Math.min(st.fx, st.fx + dx);
+      const y = Math.min(st.fy, st.fy + dy);
+      const w = Math.abs(dx);
+      const h = Math.abs(dy);
+      const tiny = w < 8 && h < 8; // treat as a click → default size
+      if (tool === "ai") {
+        // Open the AI composer at the click point (screen = wrapper-relative).
+        setAiInput({ screen: { x: st.sx, y: st.sy }, flow: { x: st.fx, y: st.fy } });
+        setTool("select");
+        return;
+      }
+      if (tool.startsWith("shape:")) {
+        const type = tool.slice(6) as ShapeType;
+        if (tiny) addShape(type, { x: st.fx - 65, y: st.fy - 45 });
+        else addShape(type, { x, y }, { width: w, height: h });
+      } else if (tool === "note") {
+        addNote({ x: st.fx - 130, y: st.fy - 40 });
+      } else if (tool === "text") {
+        addText({ x: st.fx, y: st.fy });
+      }
+      setTool("select");
+    },
+    [rf, addShape, addNote, addText, setTool]
+  );
+
+  // Escape disarms a create-tool (back to the default pointer/pan mode).
+  useEffect(() => {
+    if (!armed) return;
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setTool("select");
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [armed, setTool]);
+
+  // Undo / redo — Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y. Only when the
+  // canvas tab is actually visible and focus isn't in a text field/editor.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const w = wrapperRef.current;
+      if (!w || w.offsetParent === null) return;
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if ((key === "z" && e.shiftKey) || key === "y") {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [undo, redo]);
+
+  const handleInsertMedia = useCallback(async () => {
+    if (!projectPath) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const sel = await open({
+      multiple: false,
+      filters: [
+        { name: "Image", extensions: ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg"] },
+      ],
+    });
+    if (!sel || Array.isArray(sel)) return;
+    const path = sel as string;
+    try {
+      const rel = await canvasMediaUpload(projectPath, path);
+      addMedia({ src: rel, mediaKind: "image" }, viewportCenter(-160, -90));
+    } catch {
+      /* silent — the dialog can be retried */
+    }
+  }, [projectPath, addMedia, viewportCenter]);
 
   const handleFit = useCallback(() => {
     if (nodes.length === 0) return;
@@ -191,6 +417,12 @@ function CanvasSurface({
     [rf]
   );
 
+  // Open the slide-in editor on a note double-click (text/media aren't notes).
+  const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
+    const n = useCanvasStore.getState().nodes.find((x) => x.id === node.id);
+    if (n?.kind === "note") setEditingId(node.id);
+  }, []);
+
   if (!projectPath) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-[12px] text-text-tertiary gap-2 px-6 text-center">
@@ -202,76 +434,111 @@ function CanvasSurface({
   }
 
   return (
-    <div className="h-full flex flex-col bg-bg-base">
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 px-3 h-[32px] shrink-0 border-b border-border-default">
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-text-secondary font-medium">Spaces</span>
-          <span className="text-[10px] text-text-tertiary">· {nodes.length} notes</span>
+    <div ref={wrapperRef} className="h-full min-h-0 relative bg-bg-base">
+      {!loaded && (
+        <div className="absolute inset-0 flex items-center justify-center text-[11px] text-text-tertiary z-30">
+          Loading…
         </div>
-        <div className="flex items-center gap-0.5">
-          <button
-            onClick={handleAddNote}
-            className="flex items-center gap-1.5 px-2 h-6 rounded text-[11px] text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors cursor-pointer"
-            title="Add note"
-          >
-            <Plus size={11} />
-            Note
-          </button>
-          <button
-            onClick={handleFit}
-            className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-primary transition-colors cursor-pointer"
-            title="Fit to view"
-          >
-            <Crosshair size={11} />
-          </button>
-          <button
-            onClick={onToggleFullscreen}
-            className="p-1 rounded hover:bg-bg-hover text-text-tertiary hover:text-text-primary transition-colors cursor-pointer"
-            title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
-          >
-            {fullscreen ? <Minimize2 size={11} /> : <Maximize2 size={11} />}
-          </button>
-        </div>
-      </div>
+      )}
 
-      {/* Canvas + inspector */}
-      <div ref={wrapperRef} className="flex-1 min-h-0 relative">
-        {!loaded && (
-          <div className="absolute inset-0 flex items-center justify-center text-[11px] text-text-tertiary">
-            Loading…
-          </div>
-        )}
+      <ReactFlow
+        nodes={allNodes}
+        edges={rfEdges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onConnect={onConnect}
+        onNodeDragStart={() => beginInteraction()}
+        onNodeDoubleClick={onNodeDoubleClick}
+        onPaneClick={onPaneClick}
+        onMoveEnd={onMoveEnd}
+        nodeTypes={nodeTypes}
+        connectionMode={ConnectionMode.Loose}
+        connectionRadius={40}
+        minZoom={0.2}
+        maxZoom={2}
+        fitView={false}
+        defaultViewport={useCanvasStore.getState().viewport}
+        deleteKeyCode={["Backspace", "Delete"]}
+        proOptions={{ hideAttribution: true }}
+        // Drag empty canvas to pan (hold Space also pans); click selects a node;
+        // Shift-click multi-selects. No marquee tool (it fought Space-to-pan).
+        panOnScroll
+      >
+        <Background
+          variant={BackgroundVariant.Dots}
+          gap={20}
+          size={1.2}
+          color="rgba(255,255,255,0.18)"
+        />
+      </ReactFlow>
 
-        <ReactFlow
-          nodes={rfNodes}
-          edges={rfEdges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          onPaneClick={() => setSelected(null)}
-          onMoveEnd={onMoveEnd}
-          nodeTypes={nodeTypes}
-          minZoom={0.2}
-          maxZoom={2}
-          fitView={false}
-          defaultViewport={useCanvasStore.getState().viewport}
-          deleteKeyCode={["Backspace", "Delete"]}
-          proOptions={{ hideAttribution: true }}
-          panOnScroll
+      {/* Drag-to-create overlay — only mounted while a create-tool is armed. */}
+      {armed && (
+        <div
+          className="absolute inset-0 z-10 cursor-crosshair"
+          onPointerDown={overlayDown}
+          onPointerMove={overlayMove}
+          onPointerUp={overlayUp}
         >
-          <Background
-            variant={BackgroundVariant.Dots}
-            gap={20}
-            size={1.2}
-            color="rgba(255,255,255,0.18)"
-          />
-        </ReactFlow>
+          {preview && (
+            <div
+              className="absolute rounded border border-[var(--accent-primary)] bg-[var(--accent-primary)]/10 pointer-events-none"
+              style={{ left: preview.left, top: preview.top, width: preview.w, height: preview.h }}
+            />
+          )}
+        </div>
+      )}
 
-        {selectedId && (
-          <NoteInspector onClose={() => setSelected(null)} onJumpToNode={jumpToNode} />
-        )}
-      </div>
+      {/* Floating overlays (Miro-style) */}
+      <CanvasHeader
+        noteCount={nodes.length}
+        fullscreen={fullscreen}
+        onFit={handleFit}
+        onToggleFullscreen={onToggleFullscreen}
+      />
+      <CanvasExportToolbar />
+      <CanvasToolbar
+        activeTool={activeTool}
+        onTool={setTool}
+        onInsertMedia={handleInsertMedia}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={undo}
+        onRedo={redo}
+      />
+
+      {editingId && (
+        <NoteEditorPanel
+          key={editingId}
+          noteId={editingId}
+          projectPath={projectPath}
+          onClose={() => setEditingId(null)}
+          onJumpToNode={(id) => {
+            setEditingId(id);
+            jumpToNode(id);
+          }}
+        />
+      )}
+
+      {/* AI copilot: ✨ group pins, floating composer, and thread popover. */}
+      <AiGroupMarkers onOpenThread={(groupId, at) => setThreadFor({ groupId, at })} />
+      {aiInput && (
+        <AiInputFloat
+          screen={aiInput.screen}
+          flow={aiInput.flow}
+          projectPath={projectPath}
+          onClose={() => setAiInput(null)}
+        />
+      )}
+      {threadFor && (
+        <AiThreadPanel
+          key={threadFor.groupId}
+          groupId={threadFor.groupId}
+          at={threadFor.at}
+          projectPath={projectPath}
+          onClose={() => setThreadFor(null)}
+        />
+      )}
     </div>
   );
 }

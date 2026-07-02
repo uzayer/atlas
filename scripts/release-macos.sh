@@ -105,6 +105,43 @@ export APPLE_SIGNING_IDENTITY
 export APPLE_TEAM_ID
 [[ "${SKIP_NOTARIZE}" != "1" ]] && export APPLE_ID APPLE_PASSWORD
 
+# ── 4b. Bake the PostHog telemetry key (mirrors scripts/with-posthog-env.mjs) ─
+# CRITICAL: this script calls `tauri build` DIRECTLY, not through that Node
+# wrapper — so without loading `.env` here, `option_env!("ATLAS_POSTHOG_KEY")`
+# in src-tauri/telemetry resolves to None and the released app ships with
+# telemetry INERT (this is why PostHog "works in dev but not production": dev
+# goes through the wrapper). `build.rs` already declares rerun-if-env-changed,
+# so setting these forces a recompile that bakes the key in. Real env always
+# wins over `.env`; a missing/blank key just leaves telemetry disabled.
+load_env_key() {
+  local name="$1"
+  # NOTE: every early-exit uses `return 0`. A bare `return` after a failed test
+  # (`[[ … ]] || return`) propagates that test's non-zero status, and under
+  # `set -e` a top-level call to a function returning non-zero aborts the whole
+  # script — which silently killed the release right after the notarize check.
+  [[ -n "${!name:-}" ]] && return 0   # real env wins
+  [[ -f .env ]] || return 0
+  local line val
+  line="$(grep -E "^[[:space:]]*${name}[[:space:]]*=" .env | tail -n1 || true)"
+  [[ -n "${line}" ]] || return 0
+  val="${line#*=}"
+  # trim surrounding whitespace, then surrounding quotes
+  val="$(printf '%s' "${val}" | sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^["'\'']//; s/["'\'']$//')"
+  export "${name}=${val}"
+}
+load_env_key ATLAS_POSTHOG_KEY
+load_env_key ATLAS_POSTHOG_HOST
+load_env_key POSTHOG_KEY
+load_env_key POSTHOG_HOST
+# Accept POSTHOG_* as aliases for the build-time ATLAS_* names.
+[[ -z "${ATLAS_POSTHOG_KEY:-}"  && -n "${POSTHOG_KEY:-}"  ]] && export ATLAS_POSTHOG_KEY="${POSTHOG_KEY}"
+[[ -z "${ATLAS_POSTHOG_HOST:-}" && -n "${POSTHOG_HOST:-}" ]] && export ATLAS_POSTHOG_HOST="${POSTHOG_HOST}"
+if [[ -n "${ATLAS_POSTHOG_KEY:-}" ]]; then
+  ok "PostHog telemetry key embedded for this release"
+else
+  log "PostHog key not set (.env missing key) — telemetry will be INERT in this build"
+fi
+
 # ── 5. Build ────────────────────────────────────────────────────────────────
 if [[ "${UNIVERSAL}" == "1" ]]; then
   # Manual universal build: two single-arch builds + lipo. Avoids the

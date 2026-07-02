@@ -1,14 +1,17 @@
 import { memo } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { type NodeProps } from "@xyflow/react";
 import { StickyNote } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Markdown } from "@/lib/markdown";
 import { timeAgo } from "@/lib/time-ago";
+import { NodeHandles } from "./node-handles";
 
 export interface NoteNodeData extends Record<string, unknown> {
   title: string;
   body: string;
   updatedAt: string;
+  /** Optional emoji shown instead of the default sticky-note glyph. */
+  icon?: string;
 }
 
 export const NoteNode = memo(function NoteNode({ data, selected }: NodeProps) {
@@ -18,7 +21,7 @@ export const NoteNode = memo(function NoteNode({ data, selected }: NodeProps) {
   return (
     <div
       className={cn(
-        "group relative rounded-2xl overflow-hidden",
+        "group relative rounded-2xl overflow-visible",
         "min-w-[260px] max-w-[360px]",
         "bg-[var(--bg-secondary)]/70 backdrop-blur-3xl backdrop-saturate-150",
         "border shadow-2xl transition-colors",
@@ -30,22 +33,17 @@ export const NoteNode = memo(function NoteNode({ data, selected }: NodeProps) {
       {/* Inner glow */}
       <div className="absolute inset-0 rounded-2xl bg-gradient-to-b from-white/5 to-transparent opacity-60 pointer-events-none" />
 
-      {/* Connection handles — small, surface only on hover */}
-      <Handle
-        type="target"
-        position={Position.Left}
-        className="!w-2 !h-2 !rounded-full !border-0 !bg-white/40 opacity-0 group-hover:opacity-100 transition-opacity"
-      />
-      <Handle
-        type="source"
-        position={Position.Right}
-        className="!w-2 !h-2 !rounded-full !border-0 !bg-white/40 opacity-0 group-hover:opacity-100 transition-opacity"
-      />
+      {/* Connection handles — one per side (4-way linking). */}
+      <NodeHandles selected={selected} />
 
       {/* Header */}
       <div className="relative flex items-center gap-2 border-b border-white/10 px-3 py-2">
         <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10 shrink-0">
-          <StickyNote size={13} className="text-white/80" />
+          {d.icon ? (
+            <span className="text-[15px] leading-none">{d.icon}</span>
+          ) : (
+            <StickyNote size={13} className="text-white/80" />
+          )}
         </div>
         <div className="flex-1 min-w-0">
           <div className="text-[13px] font-semibold text-[var(--text-primary)] truncate">
@@ -58,7 +56,7 @@ export const NoteNode = memo(function NoteNode({ data, selected }: NodeProps) {
       </div>
 
       {/* Body preview */}
-      <div className="relative px-3 py-2.5 max-h-[180px] overflow-hidden">
+      <div className="relative px-3 py-2.5 max-h-[180px] overflow-hidden rounded-b-2xl">
         {isEmpty ? (
           <div className="text-[11px] text-[var(--text-tertiary)] italic">
             Empty note — open to edit.

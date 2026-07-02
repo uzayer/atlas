@@ -1,11 +1,126 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, ChevronDown, GitCommit } from "lucide-react";
+import { ChevronRight, ChevronDown, GitCommit, GitBranch, Search } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useQuery } from "@tanstack/react-query";
+import { cn } from "@/lib/utils";
 import { useGitStore } from "../stores/git-store";
 import { openGitDiff, gitCommitChangedFiles } from "../lib/git-diff-api";
 
 const TREE_ROW_H = 22;
+
+interface CommitLite {
+  hash: string;
+  short_hash: string;
+  message: string;
+  author?: string;
+}
+
+/** Searchable commit combobox with the current branch shown as a pill. Replaces
+ *  the plain <select>; "Working tree" is the default (null commit). */
+function CommitPicker({
+  commit,
+  branch,
+  log,
+  onPick,
+}: {
+  commit: string | null;
+  branch: string;
+  log: CommitLite[];
+  onPick: (sha: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const selected = commit ? log.find((c) => c.hash === commit) ?? null : null;
+  const label = commit
+    ? selected
+      ? `${selected.short_hash} · ${selected.message}`
+      : commit.slice(0, 7)
+    : "Working tree";
+
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return log;
+    return log.filter(
+      (c) =>
+        c.short_hash.toLowerCase().includes(s) ||
+        c.message.toLowerCase().includes(s) ||
+        (c.author ?? "").toLowerCase().includes(s),
+    );
+  }, [log, q]);
+
+  const pick = (sha: string) => {
+    onPick(sha);
+    setOpen(false);
+    setQ("");
+  };
+
+  return (
+    <div className="relative min-w-0 flex-1">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title="Inspect a commit's changes"
+        className="flex h-6 w-full min-w-0 items-center gap-1 rounded border border-[var(--border-default)] bg-[var(--bg-elevated)] px-1.5 text-[10px] text-[var(--text-primary)] outline-none hover:bg-[var(--bg-hover)]"
+      >
+        {branch && (
+          <span className="flex shrink-0 items-center gap-0.5 rounded bg-[var(--bg-secondary)] px-1 py-px text-[9px] text-[var(--text-tertiary)]">
+            <GitBranch size={8} />
+            <span className="max-w-[70px] truncate">{branch}</span>
+          </span>
+        )}
+        <span className="min-w-0 flex-1 truncate text-left font-mono">{label}</span>
+        <ChevronDown size={11} className="shrink-0 text-[var(--text-tertiary)]" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
+          <div className="absolute left-0 right-0 top-full z-50 mt-1 overflow-hidden rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)] shadow-[var(--shadow-overlay)]">
+            <div className="flex h-7 items-center gap-1.5 border-b border-[var(--border-subtle)] px-2">
+              <Search size={11} className="shrink-0 text-[var(--text-tertiary)]" />
+              <input
+                autoFocus
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search commits…"
+                spellCheck={false}
+                className="min-w-0 flex-1 bg-transparent text-[10px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
+              />
+            </div>
+            <div className="max-h-[280px] overflow-y-auto hide-scrollbar py-1">
+              <button
+                type="button"
+                onClick={() => pick("")}
+                className={cn(
+                  "flex w-full items-center px-2 py-1.5 text-left text-[10px] hover:bg-[var(--bg-hover)]",
+                  !commit ? "text-[var(--text-primary)]" : "text-[var(--text-secondary)]",
+                )}
+              >
+                Working tree
+              </button>
+              {filtered.map((c) => (
+                <button
+                  key={c.hash}
+                  type="button"
+                  onClick={() => pick(c.hash)}
+                  className={cn(
+                    "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-[10px] hover:bg-[var(--bg-hover)]",
+                    c.hash === commit ? "text-[var(--text-primary)]" : "text-[var(--text-secondary)]",
+                  )}
+                >
+                  <span className="shrink-0 font-mono text-[var(--text-tertiary)]">{c.short_hash}</span>
+                  <span className="min-w-0 flex-1 truncate">{c.message}</span>
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="px-2 py-2 text-[10px] text-[var(--text-tertiary)]">No commits</div>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 interface ChangedFilesTreeProps {
   repoPath: string;
@@ -130,6 +245,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree({
 }: ChangedFilesTreeProps) {
   const files = useGitStore.use.files();
   const log = useGitStore.use.log();
+  const branch = useGitStore.use.branch();
   const gitActions = useGitStore.use.actions();
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
@@ -195,19 +311,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree({
     <div className="flex h-full w-full flex-col border-r border-[var(--border-default)] bg-[var(--bg-secondary)]">
       <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--border-default)] px-2">
         <GitCommit size={12} className="shrink-0 text-[var(--text-tertiary)]" />
-        <select
-          value={commit ?? ""}
-          onChange={(e) => onPickCommit(e.target.value)}
-          title="Inspect a commit's changes"
-          className="min-w-0 flex-1 h-6 rounded border border-[var(--border-default)] bg-[var(--bg-elevated)] px-1.5 text-[10px] text-[var(--text-primary)] outline-none"
-        >
-          <option value="">Working tree</option>
-          {log.map((c) => (
-            <option key={c.hash} value={c.hash}>
-              {c.short_hash} · {c.message}
-            </option>
-          ))}
-        </select>
+        <CommitPicker commit={commit} branch={branch} log={log} onPick={onPickCommit} />
         <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-tertiary)]">
           {rows.filter((r) => !r.node.isDir).length}
         </span>

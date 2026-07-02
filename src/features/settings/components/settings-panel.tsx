@@ -13,6 +13,7 @@ import {
   KeyRound,
   LayoutTemplate,
   Zap,
+  Boxes,
   Plus,
   Minus,
   ChevronLeft,
@@ -29,6 +30,7 @@ import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
 import { SkillsAndPacks } from "./skills-and-packs";
+import { ModelsManager } from "./models-manager";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
 import { useModelPricingStore } from "../stores/model-pricing-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
@@ -47,6 +49,7 @@ const SECTIONS = [
   { id: "layouts", label: "Layouts", icon: LayoutTemplate },
   { id: "providers", label: "API Keys", icon: KeyRound },
   { id: "skills", label: "Skills", icon: Zap },
+  { id: "models", label: "Local Models", icon: Boxes },
   { id: "keybindings", label: "Keybindings", icon: Keyboard },
   ...(isDev
     ? [{ id: "developer", label: "Developer", icon: FlaskConical }]
@@ -92,7 +95,7 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
       {/* Settings nav — collapses to an icon rail (labels become tooltips). */}
       <div
         className={cn(
-          "shrink-0 border-r border-border-default bg-bg-primary py-2 flex flex-col",
+          "shrink-0 border-r border-border-default bg-bg-primary pt-2 flex flex-col",
           navCollapsed ? "w-[44px]" : "w-[180px]",
         )}
       >
@@ -148,6 +151,10 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
       ) : activeSection === "skills" ? (
         <div className="flex-1 min-w-0 min-h-0">
           <SkillsAndPacks />
+        </div>
+      ) : activeSection === "models" ? (
+        <div className="flex-1 min-w-0 min-h-0">
+          <ModelsManager />
         </div>
       ) : (
         <ScrollArea className="flex-1 p-6">
@@ -512,7 +519,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.18 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.19 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">

@@ -188,21 +188,18 @@ export function KnowledgePanel() {
     const proj = currentProject.path;
     const id = useKnowledgeStore.getState().activeEntryId;
     if (!id) return;
+    // Gate on the EDITOR's own dirty ref — the single race-free source of truth
+    // for "has the body changed since it was loaded / last saved?". We must NOT
+    // gate on the store's `editContent`: `selectEntry`/`loadEntries` overwrite
+    // that with disk content, so comparing against it skipped real saves (the
+    // "content reverts / new note stays Untitled" data-loss bug).
+    if (!editorRef.current.isDirty()) return;
     const md = await editorRef.current.flush();
     if (md === null) return;
     // Workspace switched or the active note changed while flushing → abort.
     const live = useProjectStore.getState().currentProject;
     if (!live || live.path !== proj) return;
     if (useKnowledgeStore.getState().activeEntryId !== id) return;
-    // CONTENT-based dirty check, not the React `isDirty` flag. The flag is a
-    // stale closure (set async via onDirty) — gating Cmd+S / navigation on it
-    // is exactly how a draft got lost: a keystroke could race ahead of the
-    // state update and the save would silently no-op. Comparing the live
-    // markdown to what's loaded is race-free and never skips a real change.
-    if (md === useKnowledgeStore.getState().editContent) {
-      setIsDirty(false);
-      return;
-    }
     setEditContent(md);
     await saveEntry(proj, id, md);
     setIsDirty(false);
@@ -211,18 +208,6 @@ export function KnowledgePanel() {
     // the new state.
     void invalidateLinks();
   }, [currentProject, setEditContent, saveEntry, invalidateLinks]);
-
-  // Debounced autosave — the real safety net against losing a draft to an
-  // accidental navigation, tab switch, or crash. Fires ~1.2s after the last
-  // edit; idempotent (the content check above skips no-op writes).
-  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scheduleAutosave = useCallback(() => {
-    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
-    autosaveTimer.current = setTimeout(() => {
-      autosaveTimer.current = null;
-      void flushAndSave();
-    }, 1200);
-  }, [flushAndSave]);
 
   // Coordinate with workspace switching: the switch awaits `flushAll()` BEFORE
   // it snapshots/swaps the active workspace, so register a flush that writes the
@@ -234,34 +219,23 @@ export function KnowledgePanel() {
     return registerFlush("knowledge", async (ctx) => {
       if (!ctx.path || !editorRef.current) return;
       const id = useKnowledgeStore.getState().activeEntryId;
-      if (!id) return;
+      if (!id || !editorRef.current.isDirty()) return;
       const md = await editorRef.current.flush();
-      if (md === null || md === useKnowledgeStore.getState().editContent) return;
+      if (md === null) return;
       await saveEntry(ctx.path, id, md);
     });
   }, [saveEntry]);
 
-  // On workspace change, drop any pending autosave from the PREVIOUS workspace
-  // so its 1.2s timer can't fire against the new one. The outgoing edits are
-  // already persisted by the awaited `flushAll()` above, so cancelling here is
-  // safe and prevents a cross-workspace write.
-  useEffect(() => {
-    return () => {
-      if (autosaveTimer.current) {
-        clearTimeout(autosaveTimer.current);
-        autosaveTimer.current = null;
-      }
-    };
-  }, [currentProject?.path]);
-
   // Flush on window blur (switching apps) and on unmount (tab close / switch
-  // away from the KB tab) so unsaved edits are never stranded.
+  // away from the KB tab) so unsaved edits are never stranded. These are
+  // boundary flushes, not a timer — autosave was removed (it caused stale,
+  // racey writes); saves happen on Cmd+S, note switch, blur, unmount, and
+  // workspace switch, each gated on the editor's live dirty ref.
   useEffect(() => {
     const onBlur = () => void flushAndSave();
     window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("blur", onBlur);
-      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
       void flushAndSave();
     };
   }, [flushAndSave]);
@@ -390,10 +364,6 @@ export function KnowledgePanel() {
       // gated on `isDirty` (which could be a stale `false` and drop the draft).
       // flushAndSave's content check makes the no-change case a cheap no-op.
       if (activeEntryId && id !== activeEntryId) {
-        if (autosaveTimer.current) {
-          clearTimeout(autosaveTimer.current);
-          autosaveTimer.current = null;
-        }
         await flushAndSave();
       }
       selectEntry(id);
@@ -673,7 +643,6 @@ export function KnowledgePanel() {
                   initialMarkdown={editContent}
                   onDirty={() => {
                     setIsDirty(true);
-                    scheduleAutosave();
                   }}
                 />
                 {backlinksFooter.length > 0 && (

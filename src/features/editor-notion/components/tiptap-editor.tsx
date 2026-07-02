@@ -23,6 +23,11 @@ export interface TiptapEditorHandle {
    *  points (Cmd+S, blur, entry switch). Returns the latest markdown,
    *  or `null` if the editor isn't mounted. */
   flush(): Promise<string | null>;
+  /** Whether the doc has been mutated since it was loaded/seeded or since
+   *  the last `flush()`. Backed by an internal ref (updated synchronously in
+   *  `onUpdate`), so it's a race-free source of truth for "is there anything
+   *  to save?" — unlike a React state flag set via a deferred callback. */
+  isDirty(): boolean;
   /** Drop the current `documentId` from the in-memory document cache.
    *  Use after `delete_knowledge_note`. */
   evict(id: string): void;
@@ -183,6 +188,7 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
       ref,
       () => ({
         flush,
+        isDirty: () => dirtyRef.current,
         evict: (id) => dropCachedDoc(id),
         getEditor: () => editor,
       }),

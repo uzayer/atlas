@@ -7,13 +7,20 @@ import {
   RefreshCw,
   ExternalLink,
   FileCode2,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { openFile } from "@/lib/open-file";
 import { getLanguage } from "../lib/diff";
 import { highlightDiffLine } from "../lib/diff-highlight";
 import { gitDiffStructured, type DiffSide, type DiffRow } from "../lib/git-diff-api";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import {
+  Panel,
+  PanelGroup,
+  PanelResizeHandle,
+  type ImperativePanelHandle,
+} from "react-resizable-panels";
 import { useGitStore } from "../stores/git-store";
 import { ChangedFilesTree } from "./changed-files-tree";
 import { DiffMinimap } from "./diff-minimap";
@@ -270,6 +277,12 @@ export function GitDiffPanel({
   const [blockCursor, setBlockCursor] = useState(0);
   const lang = getLanguage(file);
 
+  // Collapsible left tree (changed files + commit picker).
+  const treePanelRef = useRef<ImperativePanelHandle>(null);
+  const [treeCollapsed, setTreeCollapsed] = useState(false);
+  const toggleTree = () =>
+    treeCollapsed ? treePanelRef.current?.expand() : treePanelRef.current?.collapse();
+
   const queryKey = ["git-diff", repoPath, file, staged, commit] as const;
   const { data, isLoading, refetch } = useQuery({
     queryKey,
@@ -356,8 +369,18 @@ export function GitDiffPanel({
       autoSaveId="git-diff-tree"
       className="h-full bg-[var(--bg-primary)]"
     >
-      {/* Left: resizable tree of changed files (+ commit picker) */}
-      <Panel defaultSize={22} minSize={12} maxSize={45} className="min-w-0">
+      {/* Left: resizable + collapsible tree of changed files (+ commit picker) */}
+      <Panel
+        ref={treePanelRef}
+        collapsible
+        collapsedSize={0}
+        defaultSize={22}
+        minSize={12}
+        maxSize={45}
+        className="min-w-0"
+        onCollapse={() => setTreeCollapsed(true)}
+        onExpand={() => setTreeCollapsed(false)}
+      >
         <ChangedFilesTree repoPath={repoPath} staged={staged} currentFile={file} commit={commit} />
       </Panel>
       <PanelResizeHandle className="w-px bg-border-default hover:bg-accent data-[resize-handle-active]:bg-accent transition-colors cursor-col-resize" />
@@ -367,6 +390,13 @@ export function GitDiffPanel({
       <div className="flex h-full min-w-0 flex-col">
       {/* Toolbar */}
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-[var(--border-default)] px-3">
+        <button
+          onClick={toggleTree}
+          className="-ml-1 rounded p-1 text-[var(--text-tertiary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
+          title={treeCollapsed ? "Show changed files" : "Hide changed files"}
+        >
+          {treeCollapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
+        </button>
         <FileCode2 size={12} className="shrink-0 text-[var(--text-tertiary)]" />
         <span className="truncate font-mono text-[11px] text-[var(--text-secondary)]">
           {file || "Git Diff"}
