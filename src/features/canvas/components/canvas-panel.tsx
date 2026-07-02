@@ -16,17 +16,28 @@ import "@xyflow/react/dist/style.css";
 import * as Dialog from "@radix-ui/react-dialog";
 import { StickyNote } from "lucide-react";
 import { useProjectStore } from "@/features/project/stores/project-store";
-import { useCanvasStore, type CanvasNode, type ShapeType } from "../stores/canvas-store";
+import { useCanvasStore, groupBounds, type CanvasNode, type ShapeType } from "../stores/canvas-store";
 import { canvasMediaUpload } from "../lib/canvas-api";
 import { NoteNode } from "./note-node";
 import { TextNode } from "./text-node";
 import { MediaNode } from "./media-node";
 import { ShapeNode } from "./shape-node";
+import { GroupFrameNode } from "./group-frame-node";
 import { CanvasToolbar } from "./canvas-toolbar";
 import { CanvasHeader } from "./canvas-header";
+import { CanvasExportToolbar } from "./canvas-export-toolbar";
 import { NoteEditorPanel } from "./note-editor-panel";
+import { AiInputFloat } from "./ai-input-float";
+import { AiGroupMarkers } from "./ai-group-marker";
+import { AiThreadPanel } from "./ai-thread-panel";
 
-const nodeTypes = { note: NoteNode, text: TextNode, media: MediaNode, shape: ShapeNode };
+const nodeTypes = {
+  note: NoteNode,
+  text: TextNode,
+  media: MediaNode,
+  shape: ShapeNode,
+  groupframe: GroupFrameNode,
+};
 
 export function CanvasPanel() {
   const fullscreen = useCanvasStore.use.fullscreen();
@@ -76,6 +87,7 @@ function CanvasSurface({
   const storeProjectPath = useCanvasStore.use.projectPath();
   const nodes = useCanvasStore.use.nodes();
   const edges = useCanvasStore.use.edges();
+  const aiGroups = useCanvasStore.use.aiGroups();
   const selectedIds = useCanvasStore.use.selectedIds();
   const loaded = useCanvasStore.use.loaded();
   const activeTool = useCanvasStore.use.activeTool();
@@ -100,12 +112,19 @@ function CanvasSurface({
     redo,
   } = useCanvasStore.use.actions();
 
-  // A create-tool is armed → the drag-to-create overlay is active.
-  const armed = activeTool === "note" || activeTool === "text" || activeTool.startsWith("shape:");
+  // A create-tool (or Ask AI) is armed → the click overlay is active.
+  const armed =
+    activeTool === "note" ||
+    activeTool === "text" ||
+    activeTool === "ai" ||
+    activeTool.startsWith("shape:");
 
   // Which note is open in the slide-in editor (null = closed). Notes open on
   // double-click; text edits inline; media has no editor.
   const [editingId, setEditingId] = useState<string | null>(null);
+  // AI: floating composer position (after an "Ask AI" click) + open thread.
+  const [aiInput, setAiInput] = useState<{ screen: { x: number; y: number }; flow: { x: number; y: number } } | null>(null);
+  const [threadFor, setThreadFor] = useState<{ groupId: string; at: { x: number; y: number } } | null>(null);
 
   // Load when the project changes.
   useEffect(() => {
@@ -159,6 +178,35 @@ function CanvasSurface({
       })),
     [edges]
   );
+
+  // Subtle dashed frame per AI group, as a NON-interactive background node placed
+  // FIRST in the node array so every real node paints above the border.
+  const frameNodes = useMemo<Node[]>(
+    () =>
+      Object.keys(aiGroups).flatMap((gid) => {
+        const b = groupBounds(nodes, gid);
+        if (!b) return [];
+        return [
+          {
+            id: `frame:${gid}`,
+            type: "groupframe",
+            position: { x: b.x - 8, y: b.y - 8 },
+            width: b.width + 16,
+            height: b.height + 16,
+            selectable: false,
+            draggable: false,
+            connectable: false,
+            deletable: false,
+            focusable: false,
+            zIndex: 0,
+            style: { pointerEvents: "none" as const },
+            data: {},
+          },
+        ];
+      }),
+    [aiGroups, nodes]
+  );
+  const allNodes = useMemo(() => [...frameNodes, ...rfNodes], [frameNodes, rfNodes]);
 
   // Apply position/remove/selection changes back to the store. Selection is
   // multi (marquee): fold every select change into the current set.
@@ -277,6 +325,12 @@ function CanvasSurface({
       const w = Math.abs(dx);
       const h = Math.abs(dy);
       const tiny = w < 8 && h < 8; // treat as a click → default size
+      if (tool === "ai") {
+        // Open the AI composer at the click point (screen = wrapper-relative).
+        setAiInput({ screen: { x: st.sx, y: st.sy }, flow: { x: st.fx, y: st.fy } });
+        setTool("select");
+        return;
+      }
       if (tool.startsWith("shape:")) {
         const type = tool.slice(6) as ShapeType;
         if (tiny) addShape(type, { x: st.fx - 65, y: st.fy - 45 });
@@ -388,7 +442,7 @@ function CanvasSurface({
       )}
 
       <ReactFlow
-        nodes={rfNodes}
+        nodes={allNodes}
         edges={rfEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
@@ -442,6 +496,7 @@ function CanvasSurface({
         onFit={handleFit}
         onToggleFullscreen={onToggleFullscreen}
       />
+      <CanvasExportToolbar />
       <CanvasToolbar
         activeTool={activeTool}
         onTool={setTool}
@@ -462,6 +517,26 @@ function CanvasSurface({
             setEditingId(id);
             jumpToNode(id);
           }}
+        />
+      )}
+
+      {/* AI copilot: ✨ group pins, floating composer, and thread popover. */}
+      <AiGroupMarkers onOpenThread={(groupId, at) => setThreadFor({ groupId, at })} />
+      {aiInput && (
+        <AiInputFloat
+          screen={aiInput.screen}
+          flow={aiInput.flow}
+          projectPath={projectPath}
+          onClose={() => setAiInput(null)}
+        />
+      )}
+      {threadFor && (
+        <AiThreadPanel
+          key={threadFor.groupId}
+          groupId={threadFor.groupId}
+          at={threadFor.at}
+          projectPath={projectPath}
+          onClose={() => setThreadFor(null)}
         />
       )}
     </div>

@@ -374,6 +374,7 @@ pub fn run() {
             commands::canvas::save_canvas,
             commands::canvas::canvas_media_upload,
             commands::canvas::canvas_media_data_url,
+            commands::canvas::canvas_codebase_context,
             commands::log::load_pinned_log,
             commands::log::append_pinned_log,
             commands::log::clear_pinned_log,

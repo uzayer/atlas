@@ -17,3 +17,18 @@ export function canvasMediaUpload(projectPath: string, srcPath: string): Promise
 export function canvasMediaDataUrl(projectPath: string, src: string): Promise<string> {
   return invoke<string>("canvas_media_data_url", { projectPath, src });
 }
+
+/** Compact codebase-structure summary (top files by dependency rank) for the AI
+ *  copilot's architecture prompts. Empty string if the codebase index isn't built. */
+export function canvasCodebaseContext(projectPath: string, maxFiles?: number): Promise<string> {
+  return invoke<string>("canvas_codebase_context", { projectPath, maxFiles });
+}
+
+/** RAG-augmented context prompt over project memory + codebase (BYOK-safe: does no
+ *  local generation). Reused from Memory ▸ Chat. */
+export function memoryChatRetrieve(
+  projectPath: string,
+  query: string,
+): Promise<{ prompt: string; sources: unknown[] }> {
+  return invoke("memory_chat_retrieve", { projectPath, query });
+}
