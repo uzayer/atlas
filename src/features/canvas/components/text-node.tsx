@@ -18,7 +18,18 @@ export const TextNode = memo(function TextNode({ id, data, selected }: NodeProps
   const [editing, setEditing] = useState(false);
 
   useEffect(() => {
-    if (editing) ref.current?.focus();
+    if (!editing) return;
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Programmatic focus() alone doesn't place a caret in a contentEditable —
+    // set a collapsed range at the end so the blinking cursor is visible.
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
   }, [editing]);
 
   const commit = useCallback(() => {
@@ -38,9 +49,9 @@ export const TextNode = memo(function TextNode({ id, data, selected }: NodeProps
       <div
         ref={ref}
         className={cn(
-          "whitespace-pre-wrap break-words min-w-[40px] px-1 py-0.5 outline-none",
-          "text-[15px] leading-snug text-[var(--text-primary)]",
-          editing ? "nodrag cursor-text" : "cursor-default select-none",
+          "whitespace-pre-wrap break-words min-w-[40px] min-h-[1.25em] px-1 py-0.5 outline-none",
+          "text-[15px] leading-snug text-[var(--text-primary)] caret-[var(--accent-primary)]",
+          editing ? "nodrag cursor-text select-text" : "cursor-default select-none",
         )}
         contentEditable={editing}
         suppressContentEditableWarning

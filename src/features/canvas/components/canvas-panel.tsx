@@ -15,7 +15,6 @@ import {
 import "@xyflow/react/dist/style.css";
 import * as Dialog from "@radix-ui/react-dialog";
 import { StickyNote } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useCanvasStore, type CanvasNode, type ShapeType } from "../stores/canvas-store";
 import { canvasMediaUpload } from "../lib/canvas-api";
@@ -77,9 +76,11 @@ function CanvasSurface({
   const storeProjectPath = useCanvasStore.use.projectPath();
   const nodes = useCanvasStore.use.nodes();
   const edges = useCanvasStore.use.edges();
-  const selectedId = useCanvasStore.use.selectedId();
+  const selectedIds = useCanvasStore.use.selectedIds();
   const loaded = useCanvasStore.use.loaded();
   const activeTool = useCanvasStore.use.activeTool();
+  const canUndo = useCanvasStore.use.canUndo();
+  const canRedo = useCanvasStore.use.canRedo();
   const {
     loadProject,
     addNote,
@@ -91,9 +92,16 @@ function CanvasSurface({
     addEdge,
     deleteEdge,
     setSelected,
+    setSelectedIds,
     setViewport,
     setTool,
+    beginInteraction,
+    undo,
+    redo,
   } = useCanvasStore.use.actions();
+
+  // A create-tool is armed → the drag-to-create overlay is active.
+  const armed = activeTool === "note" || activeTool === "text" || activeTool.startsWith("shape:");
 
   // Which note is open in the slide-in editor (null = closed). Notes open on
   // double-click; text edits inline; media has no editor.
@@ -112,25 +120,23 @@ function CanvasSurface({
 
   // Project store data → xyflow shape. Node `type` = kind so xyflow routes to the
   // right renderer; `data` carries only what that renderer needs.
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const rfNodes = useMemo<Node[]>(
     () =>
       nodes.map((n) => ({
         id: n.id,
         type: n.kind,
         position: { x: n.x, y: n.y },
-        selected: n.id === selectedId,
+        selected: selectedSet.has(n.id),
+        // Shapes are resizable, so React Flow owns their box dimensions.
+        ...(n.kind === "shape" ? { width: n.width ?? 160, height: n.height ?? 90 } : {}),
         data:
           n.kind === "note"
             ? { title: n.title, body: n.body, updatedAt: n.updatedAt, icon: n.icon }
             : n.kind === "text"
               ? { text: n.text ?? "" }
               : n.kind === "shape"
-                ? {
-                    shapeType: n.shapeType ?? "rectangle",
-                    text: n.text ?? "",
-                    width: n.width,
-                    height: n.height,
-                  }
+                ? { shapeType: n.shapeType ?? "rectangle", text: n.text ?? "" }
                 : {
                     src: n.src ?? "",
                     projectPath: projectPath ?? "",
@@ -138,7 +144,7 @@ function CanvasSurface({
                   },
         draggable: true,
       })),
-    [nodes, selectedId, projectPath]
+    [nodes, selectedSet, projectPath]
   );
   const rfEdges = useMemo<Edge[]>(
     () =>
@@ -154,20 +160,26 @@ function CanvasSurface({
     [edges]
   );
 
-  // Apply position changes back to the store.
+  // Apply position/remove/selection changes back to the store. Selection is
+  // multi (marquee): fold every select change into the current set.
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
+      let selChanged = false;
+      const sel = new Set(useCanvasStore.getState().selectedIds);
       for (const c of changes) {
         if (c.type === "position" && c.position) {
           moveNote(c.id, c.position.x, c.position.y);
         } else if (c.type === "remove") {
           deleteNote(c.id);
         } else if (c.type === "select") {
-          if (c.selected) setSelected(c.id);
+          selChanged = true;
+          if (c.selected) sel.add(c.id);
+          else sel.delete(c.id);
         }
       }
+      if (selChanged) setSelectedIds([...sel]);
     },
-    [moveNote, deleteNote, setSelected]
+    [moveNote, deleteNote, setSelectedIds]
   );
 
   const onEdgesChange = useCallback(
@@ -200,26 +212,116 @@ function CanvasSurface({
     [rf]
   );
 
-  // Click a create-tool, then click the canvas to drop it there; then revert to
-  // Select. `connector`/`select` just clear selection on an empty-canvas click.
-  const onPaneClick = useCallback(
-    (e: React.MouseEvent) => {
-      const tool = useCanvasStore.getState().activeTool;
-      if (tool === "note" || tool === "text") {
-        const p = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-        if (tool === "note") addNote({ x: p.x - 130, y: p.y - 40 });
-        else addText({ x: p.x, y: p.y });
-        setTool("select");
-      } else if (tool.startsWith("shape:")) {
-        const p = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-        addShape(tool.slice(6) as ShapeType, { x: p.x - 65, y: p.y - 45 });
-        setTool("select");
-      } else {
-        setSelected(null);
-      }
-    },
-    [rf, addNote, addText, addShape, setTool, setSelected]
+  // Empty-canvas click just clears selection. Create-tools are handled by the
+  // drag-to-create overlay (which covers the pane while a create-tool is armed).
+  const onPaneClick = useCallback(() => setSelected(null), [setSelected]);
+
+  // ── Drag-to-create (Excalidraw-style) ──────────────────────────────────────
+  // While a create-tool is armed, an overlay captures pointer drags: press+drag
+  // sizes the shape (Shift = 1:1 square), a plain click drops a default size.
+  const [preview, setPreview] = useState<{ left: number; top: number; w: number; h: number } | null>(
+    null
   );
+  const dragStart = useRef<{ sx: number; sy: number; fx: number; fy: number } | null>(null);
+
+  const overlayDown = useCallback(
+    (e: React.PointerEvent) => {
+      const wrap = wrapperRef.current;
+      if (!wrap) return;
+      const r = wrap.getBoundingClientRect();
+      const flow = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      dragStart.current = { sx: e.clientX - r.left, sy: e.clientY - r.top, fx: flow.x, fy: flow.y };
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      setPreview(null);
+    },
+    [rf]
+  );
+
+  const overlayMove = useCallback((e: React.PointerEvent) => {
+    const st = dragStart.current;
+    const wrap = wrapperRef.current;
+    if (!st || !wrap) return;
+    const r = wrap.getBoundingClientRect();
+    let dx = e.clientX - r.left - st.sx;
+    let dy = e.clientY - r.top - st.sy;
+    if (e.shiftKey) {
+      const s = Math.max(Math.abs(dx), Math.abs(dy));
+      dx = (dx < 0 ? -1 : 1) * s;
+      dy = (dy < 0 ? -1 : 1) * s;
+    }
+    setPreview({
+      left: Math.min(st.sx, st.sx + dx),
+      top: Math.min(st.sy, st.sy + dy),
+      w: Math.abs(dx),
+      h: Math.abs(dy),
+    });
+  }, []);
+
+  const overlayUp = useCallback(
+    (e: React.PointerEvent) => {
+      const st = dragStart.current;
+      dragStart.current = null;
+      setPreview(null);
+      if (!st) return;
+      const tool = useCanvasStore.getState().activeTool;
+      const end = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      let dx = end.x - st.fx;
+      let dy = end.y - st.fy;
+      if (e.shiftKey) {
+        const s = Math.max(Math.abs(dx), Math.abs(dy));
+        dx = (dx < 0 ? -1 : 1) * s;
+        dy = (dy < 0 ? -1 : 1) * s;
+      }
+      const x = Math.min(st.fx, st.fx + dx);
+      const y = Math.min(st.fy, st.fy + dy);
+      const w = Math.abs(dx);
+      const h = Math.abs(dy);
+      const tiny = w < 8 && h < 8; // treat as a click → default size
+      if (tool.startsWith("shape:")) {
+        const type = tool.slice(6) as ShapeType;
+        if (tiny) addShape(type, { x: st.fx - 65, y: st.fy - 45 });
+        else addShape(type, { x, y }, { width: w, height: h });
+      } else if (tool === "note") {
+        addNote({ x: st.fx - 130, y: st.fy - 40 });
+      } else if (tool === "text") {
+        addText({ x: st.fx, y: st.fy });
+      }
+      setTool("select");
+    },
+    [rf, addShape, addNote, addText, setTool]
+  );
+
+  // Escape disarms a create-tool (back to the default pointer/pan mode).
+  useEffect(() => {
+    if (!armed) return;
+    const h = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setTool("select");
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [armed, setTool]);
+
+  // Undo / redo — Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y. Only when the
+  // canvas tab is actually visible and focus isn't in a text field/editor.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const w = wrapperRef.current;
+      if (!w || w.offsetParent === null) return;
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if ((key === "z" && e.shiftKey) || key === "y") {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [undo, redo]);
 
   const handleInsertMedia = useCallback(async () => {
     if (!projectPath) return;
@@ -277,8 +379,6 @@ function CanvasSurface({
     );
   }
 
-  const armed = activeTool === "note" || activeTool === "text" || activeTool.startsWith("shape:");
-
   return (
     <div ref={wrapperRef} className="h-full min-h-0 relative bg-bg-base">
       {!loaded && (
@@ -288,12 +388,12 @@ function CanvasSurface({
       )}
 
       <ReactFlow
-        className={cn(armed && "[&_.react-flow__pane]:!cursor-crosshair")}
         nodes={rfNodes}
         edges={rfEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onNodeDragStart={() => beginInteraction()}
         onNodeDoubleClick={onNodeDoubleClick}
         onPaneClick={onPaneClick}
         onMoveEnd={onMoveEnd}
@@ -306,6 +406,8 @@ function CanvasSurface({
         defaultViewport={useCanvasStore.getState().viewport}
         deleteKeyCode={["Backspace", "Delete"]}
         proOptions={{ hideAttribution: true }}
+        // Drag empty canvas to pan (hold Space also pans); click selects a node;
+        // Shift-click multi-selects. No marquee tool (it fought Space-to-pan).
         panOnScroll
       >
         <Background
@@ -316,6 +418,23 @@ function CanvasSurface({
         />
       </ReactFlow>
 
+      {/* Drag-to-create overlay — only mounted while a create-tool is armed. */}
+      {armed && (
+        <div
+          className="absolute inset-0 z-10 cursor-crosshair"
+          onPointerDown={overlayDown}
+          onPointerMove={overlayMove}
+          onPointerUp={overlayUp}
+        >
+          {preview && (
+            <div
+              className="absolute rounded border border-[var(--accent-primary)] bg-[var(--accent-primary)]/10 pointer-events-none"
+              style={{ left: preview.left, top: preview.top, width: preview.w, height: preview.h }}
+            />
+          )}
+        </div>
+      )}
+
       {/* Floating overlays (Miro-style) */}
       <CanvasHeader
         noteCount={nodes.length}
@@ -323,7 +442,15 @@ function CanvasSurface({
         onFit={handleFit}
         onToggleFullscreen={onToggleFullscreen}
       />
-      <CanvasToolbar activeTool={activeTool} onTool={setTool} onInsertMedia={handleInsertMedia} />
+      <CanvasToolbar
+        activeTool={activeTool}
+        onTool={setTool}
+        onInsertMedia={handleInsertMedia}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={undo}
+        onRedo={redo}
+      />
 
       {editingId && (
         <NoteEditorPanel

@@ -77,9 +77,13 @@ interface CanvasState {
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   viewport: CanvasViewport;
-  selectedId: string | null;
+  /** Ids of currently-selected nodes (multi-select via marquee / shift-click). */
+  selectedIds: string[];
   fullscreen: boolean;
   activeTool: CanvasTool;
+  /** Mirrors the module-level undo/redo stacks for toolbar button state. */
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 type NodePatch = Partial<
@@ -98,7 +102,11 @@ interface CanvasActions {
       opts: { src: string; mediaKind: MediaKind; width?: number; height?: number },
       at?: { x: number; y: number },
     ) => string;
-    addShape: (shapeType: ShapeType, at?: { x: number; y: number }) => string;
+    addShape: (
+      shapeType: ShapeType,
+      at?: { x: number; y: number },
+      size?: { width: number; height: number },
+    ) => string;
     updateNote: (id: string, patch: NodePatch) => void;
     deleteNote: (id: string) => void;
     moveNote: (id: string, x: number, y: number) => void;
@@ -109,11 +117,19 @@ interface CanvasActions {
       targetHandle?: string | null,
     ) => void;
     deleteEdge: (id: string) => void;
+    /** Replace the selection with a single id (or clear when null). */
     setSelected: (id: string | null) => void;
+    /** Replace the whole selection set (marquee / multi-select). */
+    setSelectedIds: (ids: string[]) => void;
     setViewport: (vp: CanvasViewport) => void;
     setFullscreen: (open: boolean) => void;
     toggleFullscreen: () => void;
     setTool: (tool: CanvasTool) => void;
+    /** Snapshot the current nodes/edges so the next mutation is one undo step.
+     *  Call at the START of a continuous interaction (node drag / resize). */
+    beginInteraction: () => void;
+    undo: () => void;
+    redo: () => void;
   };
 }
 
@@ -153,6 +169,24 @@ function scheduleSave() {
   }, SAVE_DEBOUNCE_MS);
 }
 
+// ── Undo/redo snapshot stacks ────────────────────────────────────────────────
+// Module-level (not reactive). The store mirrors `canUndo`/`canRedo` for the
+// toolbar. A continuous drag/resize captures ONE snapshot at its start
+// (`beginInteraction`), so it collapses into a single undo step — matching how
+// Excalidraw batches a drag into one history entry.
+interface HistorySnap {
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+}
+let past: HistorySnap[] = [];
+let future: HistorySnap[] = [];
+const HISTORY_CAP = 50;
+
+function resetHistory() {
+  past = [];
+  future = [];
+}
+
 function parseFile(raw: string): CanvasFile {
   try {
     const parsed = JSON.parse(raw) as Partial<CanvasFile>;
@@ -176,15 +210,30 @@ function parseFile(raw: string): CanvasFile {
 
 export const useCanvasStore = createSelectors(
   create<CanvasState & CanvasActions>()(
-    immer((set, get) => ({
+    immer((set, get) => {
+      // Capture the pre-mutation nodes/edges as one undo step. `get()` inside a
+      // producer returns committed (pre-`set`) state, and immer never mutates a
+      // previously-produced object, so storing the references is a safe snapshot.
+      const takeSnapshot = () => {
+        past.push({ nodes: get().nodes, edges: get().edges });
+        if (past.length > HISTORY_CAP) past.shift();
+        future = [];
+        set((s) => {
+          s.canUndo = true;
+          s.canRedo = false;
+        });
+      };
+      return {
       projectPath: null,
       loaded: false,
       nodes: [],
       edges: [],
       viewport: emptyViewport,
-      selectedId: null,
+      selectedIds: [],
       fullscreen: false,
       activeTool: "select",
+      canUndo: false,
+      canRedo: false,
       actions: {
         loadProject: async (path) => {
           if (saveTimer) {
@@ -196,18 +245,21 @@ export const useCanvasStore = createSelectors(
             s.loaded = false;
             s.nodes = [];
             s.edges = [];
-            s.selectedId = null;
+            s.selectedIds = [];
             s.viewport = emptyViewport;
           });
           try {
             const raw = await loadCanvas(path);
             const parsed = parseFile(raw);
+            resetHistory();
             set((s) => {
               if (s.projectPath !== path) return; // user switched projects mid-load
               s.nodes = parsed.nodes;
               s.edges = parsed.edges;
               s.viewport = parsed.viewport;
               s.loaded = true;
+              s.canUndo = false;
+              s.canRedo = false;
             });
           } catch {
             set((s) => {
@@ -217,6 +269,7 @@ export const useCanvasStore = createSelectors(
           }
         },
         addNote: (at) => {
+          takeSnapshot();
           const id = genId("n");
           const stamp = nowIso();
           const x = at?.x ?? 0;
@@ -233,13 +286,14 @@ export const useCanvasStore = createSelectors(
               createdAt: stamp,
               updatedAt: stamp,
             });
-            s.selectedId = id;
+            s.selectedIds = [id];
           });
           scheduleSave();
           logEvent({ source: "canvas", kind: "note-add", summary: "New note", payload: { id } });
           return id;
         },
         addText: (at) => {
+          takeSnapshot();
           const id = genId("n");
           const stamp = nowIso();
           set((s) => {
@@ -255,17 +309,21 @@ export const useCanvasStore = createSelectors(
               createdAt: stamp,
               updatedAt: stamp,
             });
-            s.selectedId = id;
+            s.selectedIds = [id];
           });
           scheduleSave();
           logEvent({ source: "canvas", kind: "text-add", summary: "New text", payload: { id } });
           return id;
         },
-        addShape: (shapeType, at) => {
+        addShape: (shapeType, at, size) => {
+          takeSnapshot();
           const id = genId("n");
           const stamp = nowIso();
-          // Ellipse/diamond read best square-ish; rectangles a touch wider.
-          const [w, h] = shapeType === "ellipse" || shapeType === "diamond" ? [130, 130] : [160, 90];
+          // Default sizes when placed with a click; drag-to-create passes `size`.
+          const [defW, defH] =
+            shapeType === "ellipse" || shapeType === "diamond" ? [130, 130] : [160, 90];
+          const w = size ? Math.max(20, Math.round(size.width)) : defW;
+          const h = size ? Math.max(20, Math.round(size.height)) : defH;
           set((s) => {
             s.nodes.push({
               id,
@@ -281,13 +339,14 @@ export const useCanvasStore = createSelectors(
               createdAt: stamp,
               updatedAt: stamp,
             });
-            s.selectedId = id;
+            s.selectedIds = [id];
           });
           scheduleSave();
           logEvent({ source: "canvas", kind: "shape-add", summary: shapeType, payload: { id } });
           return id;
         },
         addMedia: ({ src, mediaKind, width, height }, at) => {
+          takeSnapshot();
           const id = genId("n");
           const stamp = nowIso();
           set((s) => {
@@ -305,7 +364,7 @@ export const useCanvasStore = createSelectors(
               createdAt: stamp,
               updatedAt: stamp,
             });
-            s.selectedId = id;
+            s.selectedIds = [id];
           });
           scheduleSave();
           logEvent({ source: "canvas", kind: "media-add", summary: mediaKind, payload: { id } });
@@ -327,11 +386,12 @@ export const useCanvasStore = createSelectors(
             scheduleSave();
           }),
         deleteNote: (id) => {
+          takeSnapshot();
           const removed = get().nodes.find((n) => n.id === id);
           set((s) => {
             s.nodes = s.nodes.filter((n) => n.id !== id);
             s.edges = s.edges.filter((e) => e.source !== id && e.target !== id);
-            if (s.selectedId === id) s.selectedId = null;
+            s.selectedIds = s.selectedIds.filter((x) => x !== id);
             scheduleSave();
           });
           if (removed) {
@@ -359,6 +419,7 @@ export const useCanvasStore = createSelectors(
               (e.source === target && e.target === source)
           );
           if (exists) return;
+          takeSnapshot();
           set((s) => {
             s.edges.push({ id: genId("e"), source, target, sourceHandle, targetHandle });
             scheduleSave();
@@ -371,6 +432,7 @@ export const useCanvasStore = createSelectors(
           });
         },
         deleteEdge: (id) => {
+          takeSnapshot();
           set((s) => {
             s.edges = s.edges.filter((e) => e.id !== id);
             scheduleSave();
@@ -379,7 +441,11 @@ export const useCanvasStore = createSelectors(
         },
         setSelected: (id) =>
           set((s) => {
-            s.selectedId = id;
+            s.selectedIds = id ? [id] : [];
+          }),
+        setSelectedIds: (ids) =>
+          set((s) => {
+            s.selectedIds = ids;
           }),
         setViewport: (vp) =>
           set((s) => {
@@ -398,7 +464,33 @@ export const useCanvasStore = createSelectors(
           set((s) => {
             s.activeTool = tool;
           }),
+        beginInteraction: () => takeSnapshot(),
+        undo: () => {
+          if (past.length === 0) return;
+          future.push({ nodes: get().nodes, edges: get().edges });
+          const prev = past.pop()!;
+          set((s) => {
+            s.nodes = prev.nodes;
+            s.edges = prev.edges;
+            s.canUndo = past.length > 0;
+            s.canRedo = true;
+          });
+          scheduleSave();
+        },
+        redo: () => {
+          if (future.length === 0) return;
+          past.push({ nodes: get().nodes, edges: get().edges });
+          const next = future.pop()!;
+          set((s) => {
+            s.nodes = next.nodes;
+            s.edges = next.edges;
+            s.canUndo = true;
+            s.canRedo = future.length > 0;
+          });
+          scheduleSave();
+        },
       },
-    }))
+      };
+    })
   )
 );

@@ -1,13 +1,13 @@
 import {
-  MousePointer2,
   StickyNote,
   Type,
   Image as ImageIcon,
-  Spline,
   Square,
   RectangleHorizontal,
   Circle,
   Diamond,
+  Undo2,
+  Redo2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { CanvasTool } from "../stores/canvas-store";
@@ -18,11 +18,12 @@ interface ToolDef {
   label: string;
 }
 
+// No dedicated Select tool — the default (empty-canvas drag pans, hold Space to
+// pan, click selects) is always active; create-tools auto-revert to it. Connect
+// nodes by dragging between their edge handles (no tool needed).
 const TOOLS: ToolDef[] = [
-  { tool: "select", icon: MousePointer2, label: "Select" },
   { tool: "note", icon: StickyNote, label: "Note" },
   { tool: "text", icon: Type, label: "Text" },
-  { tool: "connector", icon: Spline, label: "Connector — drag between node edges" },
 ];
 
 /** Flowchart shapes — each drops that geometry on the next canvas click. */
@@ -42,10 +43,18 @@ export function CanvasToolbar({
   activeTool,
   onTool,
   onInsertMedia,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
 }: {
   activeTool: CanvasTool;
   onTool: (tool: CanvasTool) => void;
   onInsertMedia: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
 }) {
   return (
     <div
@@ -72,6 +81,26 @@ export function CanvasToolbar({
         className="flex h-8 w-8 items-center justify-center rounded-lg text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
       >
         <ImageIcon size={16} />
+      </button>
+
+      <div className="my-0.5 h-px w-5 bg-white/10" />
+      <button
+        type="button"
+        title="Undo (⌘Z)"
+        onClick={onUndo}
+        disabled={!canUndo}
+        className="flex h-8 w-8 items-center justify-center rounded-lg text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+      >
+        <Undo2 size={16} />
+      </button>
+      <button
+        type="button"
+        title="Redo (⌘⇧Z)"
+        onClick={onRedo}
+        disabled={!canRedo}
+        className="flex h-8 w-8 items-center justify-center rounded-lg text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+      >
+        <Redo2 size={16} />
       </button>
     </div>
   );

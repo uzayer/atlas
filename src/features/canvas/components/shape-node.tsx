@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { type NodeProps } from "@xyflow/react";
+import { NodeResizer, type NodeProps } from "@xyflow/react";
 import { cn } from "@/lib/utils";
 import { useCanvasStore, type ShapeType } from "../stores/canvas-store";
 import { NodeHandles } from "./node-handles";
@@ -7,8 +7,6 @@ import { NodeHandles } from "./node-handles";
 export interface ShapeNodeData extends Record<string, unknown> {
   shapeType: ShapeType;
   text: string;
-  width?: number;
-  height?: number;
 }
 
 /** The shape outline, drawn in a normalized 100×100 viewBox stretched to the
@@ -44,12 +42,23 @@ function ShapeSvg({ type, stroke }: { type: ShapeType; stroke: string }) {
  *  only editable content is a centered text label (double-click to edit). */
 export const ShapeNode = memo(function ShapeNode({ id, data, selected }: NodeProps) {
   const d = data as ShapeNodeData;
-  const { updateNote } = useCanvasStore.use.actions();
+  const { updateNote, moveNote, beginInteraction } = useCanvasStore.use.actions();
   const ref = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState(false);
 
   useEffect(() => {
-    if (editing) ref.current?.focus();
+    if (!editing) return;
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    // Programmatic focus() alone doesn't place a caret in a contentEditable —
+    // set a collapsed range at the end so the blinking cursor is visible.
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
   }, [editing]);
 
   const commit = useCallback(() => {
@@ -60,11 +69,21 @@ export const ShapeNode = memo(function ShapeNode({ id, data, selected }: NodePro
   const stroke = selected ? "var(--accent-primary)" : "rgba(255,255,255,0.25)";
 
   return (
-    <div
-      className="group relative"
-      style={{ width: d.width ?? 160, height: d.height ?? 90 }}
-      onDoubleClick={() => setEditing(true)}
-    >
+    // React Flow owns the box size (so NodeResizer can drive it); the shape fills
+    // it. Size is persisted to the store via onResize.
+    <div className="group relative h-full w-full" onDoubleClick={() => setEditing(true)}>
+      <NodeResizer
+        isVisible={selected}
+        minWidth={40}
+        minHeight={40}
+        lineClassName="!border-[var(--accent-primary)]/70"
+        handleClassName="!bg-[var(--accent-primary)] !border-white/60 !w-2 !h-2 !rounded-sm"
+        onResizeStart={() => beginInteraction()}
+        onResize={(_, p) => {
+          moveNote(id, p.x, p.y);
+          updateNote(id, { width: p.width, height: p.height });
+        }}
+      />
       <NodeHandles selected={selected} />
       <ShapeSvg type={d.shapeType} stroke={stroke} />
       {/* Centered label overlay */}
@@ -73,8 +92,11 @@ export const ShapeNode = memo(function ShapeNode({ id, data, selected }: NodePro
           ref={ref}
           className={cn(
             "max-w-full whitespace-pre-wrap break-words text-center outline-none",
-            "text-[12px] leading-snug text-[var(--text-primary)]",
-            editing ? "nodrag cursor-text" : "cursor-default select-none",
+            "text-[12px] leading-snug text-[var(--text-primary)] caret-[var(--accent-primary)]",
+            // An empty contentEditable has no line box, so the caret can't render;
+            // a min line-height gives it one when the shape has no text yet.
+            "min-h-[1.25em] min-w-[2px]",
+            editing ? "nodrag cursor-text select-text" : "cursor-default select-none",
           )}
           contentEditable={editing}
           suppressContentEditableWarning
