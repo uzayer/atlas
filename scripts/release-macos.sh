@@ -115,11 +115,15 @@ export APPLE_TEAM_ID
 # wins over `.env`; a missing/blank key just leaves telemetry disabled.
 load_env_key() {
   local name="$1"
-  [[ -n "${!name:-}" ]] && return   # real env wins
-  [[ -f .env ]] || return
+  # NOTE: every early-exit uses `return 0`. A bare `return` after a failed test
+  # (`[[ … ]] || return`) propagates that test's non-zero status, and under
+  # `set -e` a top-level call to a function returning non-zero aborts the whole
+  # script — which silently killed the release right after the notarize check.
+  [[ -n "${!name:-}" ]] && return 0   # real env wins
+  [[ -f .env ]] || return 0
   local line val
   line="$(grep -E "^[[:space:]]*${name}[[:space:]]*=" .env | tail -n1 || true)"
-  [[ -n "${line}" ]] || return
+  [[ -n "${line}" ]] || return 0
   val="${line#*=}"
   # trim surrounding whitespace, then surrounding quotes
   val="$(printf '%s' "${val}" | sed -E 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^["'\'']//; s/["'\'']$//')"
