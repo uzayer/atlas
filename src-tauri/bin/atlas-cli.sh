@@ -58,7 +58,7 @@ for candidate in \
   fi
 done
 if [ -z "$app" ] && command -v mdfind >/dev/null 2>&1; then
-  app="$(mdfind "kMDItemCFBundleIdentifier == 'com.atlas.ide'" 2>/dev/null | head -n 1)"
+  app="$(mdfind "kMDItemCFBundleIdentifier == 'dev.atlas.ide'" 2>/dev/null | head -n 1)"
 fi
 if [ -z "$app" ]; then
   app="Atlas.app"  # let `open` resolve via LaunchServices as a fallback
