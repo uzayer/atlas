@@ -77,11 +77,17 @@ interface GitDiffPanelProps {
 function sideBg(side: DiffSide | null, isLeft: boolean): string | undefined {
   if (!side) return "rgba(255,255,255,0.018)"; // filler (no line on this side)
   if (side.kind === "context") return undefined;
-  return isLeft ? "rgba(244,63,63,0.13)" : "rgba(34,197,94,0.13)";
+  // Left side = deletions (red), right side = additions (green). Colors follow
+  // the active editor theme's diff tokens (atlas rgba values as fallbacks).
+  return isLeft
+    ? "var(--diff-remove-side-bg, rgba(244,63,63,0.13))"
+    : "var(--diff-add-side-bg, rgba(34,197,94,0.13))";
 }
 
 function emphBg(isLeft: boolean): string {
-  return isLeft ? "rgba(244,63,63,0.34)" : "rgba(52,211,153,0.34)";
+  return isLeft
+    ? "var(--diff-emph-remove-bg, rgba(244,63,63,0.34))"
+    : "var(--diff-emph-add-bg, rgba(52,211,153,0.34))";
 }
 
 const isLeftChange = (r?: DiffRow) => !!r?.left && r.left.kind !== "context";

@@ -29,6 +29,7 @@ import {
 import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
+import { CodeEditorThemesSettings } from "./code-editor-themes-settings";
 import { SkillsAndPacks } from "./skills-and-packs";
 import { ModelsManager } from "./models-manager";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
@@ -372,6 +373,9 @@ function AppearanceSettings() {
           </button>
         </div>
       </SettingRow>
+
+      <div className="h-px bg-border-default" />
+      <CodeEditorThemesSettings />
     </div>
   );
 }

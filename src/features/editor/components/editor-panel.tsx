@@ -1,10 +1,11 @@
 import { useEffect, useRef, useCallback } from "react";
 import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from "@codemirror/view";
-import { EditorState, type Extension } from "@codemirror/state";
+import { EditorState, Compartment, type Extension } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
+import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
-import { tags } from "@lezer/highlight";
+import { getEditorTheme } from "../themes/themes";
+import { buildEditorChromeTheme, buildHighlightStyle } from "../themes/build-cm-theme";
 import { useEditorStore } from "../stores/editor-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
@@ -18,93 +19,15 @@ import { gitDiffLineStatus } from "@/features/git/lib/git-diff-api";
 const TOOLBAR_HEIGHT = 32;
 const DIRTY_CHECK_DEBOUNCE = 300; // ms — only check dirty state, not sync content
 
-// Atlas dark theme — editor chrome
-const atlasTheme = EditorView.theme(
-  {
-    "&": {
-      backgroundColor: "#000000",
-      color: "#b3b3b3",
-      height: "100%",
-    },
-    ".cm-content": {
-      fontFamily: "JetBrains Mono, SF Mono, Fira Code, monospace",
-      fontSize: "14px",
-      lineHeight: "18px",
-      caretColor: "#b3b3b3",
-      padding: "4px 0",
-    },
-    ".cm-cursor, .cm-dropCursor": {
-      borderLeftColor: "#b3b3b3",
-      borderLeftWidth: "2px",
-    },
-    ".cm-gutters": {
-      backgroundColor: "#000000",
-      color: "#222222",
-      border: "none",
-      minWidth: "40px",
-    },
-    ".cm-activeLineGutter": {
-      color: "#777777",
-      backgroundColor: "transparent",
-    },
-    ".cm-activeLine": {
-      backgroundColor: "#ffffff0a",
-    },
-    ".cm-selectionBackground, ::selection": {
-      backgroundColor: "#303030 !important",
-    },
-    ".cm-focused .cm-selectionBackground": {
-      backgroundColor: "#303030 !important",
-    },
-    ".cm-matchingBracket": {
-      backgroundColor: "#2d2d2d",
-      outline: "1px solid #3d3d3d",
-    },
-    ".cm-foldGutter .cm-gutterElement": {
-      color: "#333",
-      fontSize: "12px",
-    },
-    ".cm-foldPlaceholder": {
-      backgroundColor: "#1a1a1a",
-      border: "1px solid #2a2a2a",
-      color: "#555",
-    },
-    "&.cm-focused": {
-      outline: "none",
-    },
-    ".cm-scroller": {
-      overflow: "auto",
-      scrollbarWidth: "none",
-      "&::-webkit-scrollbar": { display: "none" },
-    },
-    ".cm-line": {
-      padding: "0 4px",
-    },
-  },
-  { dark: true }
-);
+// Editor theme — live-swappable via a Compartment. The concrete colors come
+// from the theme registry (src/features/editor/themes), keyed by the persisted
+// `settings.codeEditorTheme`.
+const themeCompartment = new Compartment();
 
-// Atlas syntax highlighting
-const atlasHighlightStyle = HighlightStyle.define([
-  { tag: tags.comment, color: "#555555", fontStyle: "italic" },
-  { tag: tags.keyword, color: "#585858", fontStyle: "italic" },
-  { tag: [tags.string, tags.special(tags.string)], color: "#aaaaaa" },
-  { tag: tags.number, color: "#aaaaaa" },
-  { tag: [tags.typeName, tags.className], color: "#cccccc" },
-  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: "#FFFF00" },
-  { tag: tags.variableName, color: "#ffffff" },
-  { tag: tags.operator, color: "#B3B3B3" },
-  { tag: tags.punctuation, color: "#B3B3B3" },
-  { tag: tags.tagName, color: "#cccccc" },
-  { tag: tags.attributeName, color: "#777777" },
-  { tag: [tags.constant(tags.variableName), tags.standard(tags.variableName)], color: "#aaaaaa" },
-  { tag: tags.regexp, color: "#999999" },
-  { tag: tags.escape, color: "#999999" },
-  { tag: tags.definition(tags.variableName), color: "#ffffff" },
-  { tag: tags.propertyName, color: "#b3b3b3" },
-  { tag: tags.bool, color: "#aaaaaa" },
-  { tag: tags.null, color: "#aaaaaa" },
-]);
+function themeExtensions(themeId: string | undefined | null): Extension {
+  const theme = getEditorTheme(themeId);
+  return [buildEditorChromeTheme(theme), syntaxHighlighting(buildHighlightStyle(theme))];
+}
 
 // Language extension loader — lazy imports for tree-shaking
 async function getLanguageExtension(lang: string): Promise<Extension> {
@@ -322,8 +245,7 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       const view = new EditorView({
         doc: originalContent,
         extensions: [
-          atlasTheme,
-          syntaxHighlighting(atlasHighlightStyle),
+          themeCompartment.of(themeExtensions(useProjectStore.getState().settings.codeEditorTheme)),
           langExt,
           lineNumbers(),
           diffGutter(),
@@ -375,6 +297,15 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       }
     };
   }, [path, !!buffer]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live-reskin the editor when the persisted theme changes — reconfigure the
+  // theme compartment in place so the buffer/undo history survive.
+  const codeEditorTheme = useProjectStore.use.settings().codeEditorTheme;
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: themeCompartment.reconfigure(themeExtensions(codeEditorTheme)) });
+  }, [codeEditorTheme]);
 
   if (!buffer) {
     return (

@@ -225,8 +225,8 @@ export function DiffView({
                 return (
                   <div
                     key={vr.index}
-                    style={base}
-                    className="border-x border-b border-border-default rounded-b-md bg-[#0a0a0a]"
+                    style={{ ...base, backgroundColor: "var(--diff-context-bg, #0a0a0a)" }}
+                    className="border-x border-b border-border-default rounded-b-md"
                   />
                 );
               }
@@ -238,13 +238,18 @@ export function DiffView({
                   // `max-content` + `minWidth: 100%` lets long lines grow past the
                   // viewport (one horizontal scrollbar on the outer container)
                   // while short lines still fill the width.
-                  style={{ ...base, width: "max-content", minWidth: "100%" }}
-                  className={cn(
-                    "flex text-[11px] font-mono leading-[20px] select-text border-x border-border-default",
-                    line.type === "add" && "bg-[#0d2211]",
-                    line.type === "remove" && "bg-[#220d0d]",
-                    line.type === "context" && "bg-[#0a0a0a]",
-                  )}
+                  style={{
+                    ...base,
+                    width: "max-content",
+                    minWidth: "100%",
+                    backgroundColor:
+                      line.type === "add"
+                        ? "var(--diff-add-line-bg, #0d2211)"
+                        : line.type === "remove"
+                          ? "var(--diff-remove-line-bg, #220d0d)"
+                          : "var(--diff-context-bg, #0a0a0a)",
+                  }}
+                  className="flex text-[11px] font-mono leading-[20px] select-text border-x border-border-default"
                 >
                   <span
                     className={cn(
