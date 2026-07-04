@@ -13,7 +13,12 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { openFile } from "@/lib/open-file";
 import { getLanguage } from "../lib/diff";
-import { highlightDiffLine } from "../lib/diff-highlight";
+import {
+  ensureDiffHighlight,
+  getCachedHighlight,
+  warmDiffHighlightWorker,
+  type LineTokens,
+} from "../lib/diff-highlight-cache";
 import { gitDiffStructured, type DiffSide, type DiffRow } from "../lib/git-diff-api";
 import {
   Panel,
@@ -98,11 +103,11 @@ const isRightChange = (r?: DiffRow) => !!r?.right && r.right.kind !== "context";
  *  with the (background) emphasis ranges at the character level. */
 function CellContent({
   side,
-  lang,
+  hlMap,
   isLeft,
 }: {
   side: DiffSide;
-  lang: string;
+  hlMap: LineTokens | null;
   isLeft: boolean;
 }) {
   const text = side.segments.map((s) => s.text).join("");
@@ -113,7 +118,10 @@ function CellContent({
     if (s.emph) for (let i = 0; i < s.text.length; i++) emph[o + i] = 1;
     o += s.text.length;
   }
-  const tokens = highlightDiffLine(lang, text) ?? [{ text, cls: null }];
+  // Precomputed off-thread (see diff-highlight-cache). `undefined` = not ready
+  // yet, `null` = computed-but-plain — both render raw text; the row upgrades to
+  // colored once the worker resolves and `hlMap` changes identity.
+  const tokens = hlMap?.get(text) ?? [{ text, cls: null }];
 
   const spans: React.ReactNode[] = [];
   let pos = 0;
@@ -143,13 +151,13 @@ function CellContent({
 
 function SideCell({
   side,
-  lang,
+  hlMap,
   isLeft,
   roundTop,
   roundBot,
 }: {
   side: DiffSide | null;
-  lang: string;
+  hlMap: LineTokens | null;
   isLeft: boolean;
   roundTop: boolean;
   roundBot: boolean;
@@ -179,10 +187,9 @@ function SideCell({
             className="inline-block"
             style={{
               transform: "translateX(calc(var(--diff-sx, 0px) * -1))",
-              willChange: "transform",
             }}
           >
-            <CellContent side={side} lang={lang} isLeft={isLeft} />
+            <CellContent side={side} hlMap={hlMap} isLeft={isLeft} />
           </span>
         ) : null}
       </code>
@@ -228,13 +235,13 @@ const DiffRow = memo(function DiffRow({
   row,
   prev,
   next,
-  lang,
+  hlMap,
   top,
 }: {
   row: DiffRow;
   prev?: DiffRow;
   next?: DiffRow;
-  lang: string;
+  hlMap: LineTokens | null;
   top: number;
 }) {
   const lc = isLeftChange(row);
@@ -254,7 +261,7 @@ const DiffRow = memo(function DiffRow({
     >
       <SideCell
         side={row.left}
-        lang={lang}
+        hlMap={hlMap}
         isLeft
         roundTop={lc && !isLeftChange(prev)}
         roundBot={lc && !isLeftChange(next)}
@@ -262,7 +269,7 @@ const DiffRow = memo(function DiffRow({
       <CenterMarker row={row} />
       <SideCell
         side={row.right}
-        lang={lang}
+        hlMap={hlMap}
         isLeft={false}
         roundTop={rc && !isRightChange(prev)}
         roundBot={rc && !isRightChange(next)}
@@ -280,7 +287,9 @@ export function GitDiffPanel({
   const storeRepo = useGitStore.use.repoPath();
   const repoPath = repoPathProp || storeRepo || "";
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [blockCursor, setBlockCursor] = useState(0);
+  // Jump cursor is internal-only (never rendered), so keep it in a ref — a jump
+  // must not force a full-panel re-render.
+  const blockCursorRef = useRef(0);
   const lang = getLanguage(file);
 
   // Collapsible left tree (changed files + commit picker).
@@ -307,17 +316,55 @@ export function GitDiffPanel({
   const rows = data?.rows ?? [];
   const changeBlocks = data?.changeBlocks ?? [];
 
+  // Precomputed syntax-highlight tokens for this file (built once off the main
+  // thread — see diff-highlight-cache). Rows read it synchronously; until it
+  // resolves they render raw text (never blank), then upgrade in one pass when
+  // `hlMap` changes identity. Keyed by file + a content signature so an edit
+  // (refetch) rebuilds rather than reusing stale tokens.
+  const hlKey = data
+    ? `${repoPath} ${file} ${staged} ${commit ?? ""} ${data.rows.length}:${data.stats.additions}:${data.stats.deletions}`
+    : "";
+  const [hlMap, setHlMap] = useState<LineTokens | null>(null);
+  useEffect(() => {
+    if (!data) {
+      setHlMap(null);
+      return;
+    }
+    warmDiffHighlightWorker();
+    const cached = getCachedHighlight(hlKey);
+    if (cached) {
+      setHlMap(cached);
+      return;
+    }
+    setHlMap(null); // paint raw immediately; upgrade when the worker resolves
+    const lines: string[] = [];
+    for (const r of data.rows) {
+      if (r.left) lines.push(r.left.segments.map((s) => s.text).join(""));
+      if (r.right) lines.push(r.right.segments.map((s) => s.text).join(""));
+    }
+    let cancelled = false;
+    void ensureDiffHighlight(hlKey, lang, lines).then((m) => {
+      if (!cancelled) setHlMap(m);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [hlKey, data, lang]);
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_H,
-    overscan: 12,
+    // Mounts are cheap now (token lookup, no per-row tokenize), so a wide
+    // overscan buys headroom against fast scrolls without blanking.
+    overscan: 32,
   });
 
   const jump = (dir: 1 | -1) => {
     if (changeBlocks.length === 0) return;
-    const next = (blockCursor + dir + changeBlocks.length) % changeBlocks.length;
-    setBlockCursor(next);
+    const next =
+      (blockCursorRef.current + dir + changeBlocks.length) % changeBlocks.length;
+    blockCursorRef.current = next;
     virtualizer.scrollToIndex(changeBlocks[next], { align: "center" });
   };
 
@@ -484,7 +531,7 @@ export function GitDiffPanel({
                 row={rows[vr.index]}
                 prev={rows[vr.index - 1]}
                 next={rows[vr.index + 1]}
-                lang={lang}
+                hlMap={hlMap}
                 top={vr.start}
               />
             ))}

@@ -166,6 +166,13 @@ function statusColor(status: string): string {
   }
 }
 
+/** First porcelain char → the single-letter badge. Untracked (`?`) reads as a
+ *  new file, so show "A" (Added) rather than the raw porcelain "?". */
+function statusLetter(status: string): string {
+  const c = status[0];
+  return c === "?" ? "A" : c;
+}
+
 function buildTree(files: { path: string; status: string }[]): DirNode {
   const root: DirNode = { name: "", path: "", isDir: true, children: [] };
   for (const { path, status } of files) {
@@ -357,7 +364,7 @@ export const ChangedFilesTree = memo(function ChangedFilesTree({
                   className="w-2 shrink-0 text-center font-mono text-[9px]"
                   style={{ color: statusColor(node.status) }}
                 >
-                  {node.status[0]}
+                  {statusLetter(node.status)}
                 </span>
                 <span className="truncate font-mono">{node.name}</span>
               </button>
