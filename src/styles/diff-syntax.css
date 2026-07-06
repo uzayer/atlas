@@ -15,72 +15,76 @@
  * by highlight.js) comes from the row's `text-text-secondary` (#b3b3b3),
  * matching the editor's operator/punctuation color. */
 
+/* Colors resolve from the active editor theme's CSS custom properties
+   (set on :root by applyEditorTheme). The atlas hex values remain as
+   fallbacks so an un-applied theme degrades to the original look. */
+
 .diff-syntax .hljs-comment,
 .diff-syntax .hljs-quote {
-  color: #555;
+  color: var(--cm-comment, #555);
   font-style: italic;
 }
 
 .diff-syntax .hljs-keyword,
 .diff-syntax .hljs-built_in {
-  color: #585858;
+  color: var(--cm-keyword, #585858);
   font-style: italic;
 }
 
 .diff-syntax .hljs-string,
 .diff-syntax .hljs-meta .hljs-string {
-  color: #aaa;
+  color: var(--cm-string, #aaa);
 }
 
 .diff-syntax .hljs-number,
 .diff-syntax .hljs-literal {
-  color: #aaa;
+  color: var(--cm-number, #aaa);
 }
 
 .diff-syntax .hljs-type,
 .diff-syntax .hljs-title.class_,
 .diff-syntax .hljs-class .hljs-title {
-  color: #ccc;
+  color: var(--cm-type, #ccc);
 }
 
 /* Bare title (rare fallthrough) reads as a type/name. */
 .diff-syntax .hljs-title {
-  color: #ccc;
+  color: var(--cm-type, #ccc);
 }
 
 /* The one accent: function/method names — must out-specify the bare title. */
 .diff-syntax .hljs-title.function_,
 .diff-syntax .hljs-function .hljs-title {
-  color: #ffff00;
+  color: var(--cm-func, #ffff00);
 }
 
 .diff-syntax .hljs-variable {
-  color: #fff;
+  color: var(--cm-variable, #fff);
 }
 
 .diff-syntax .hljs-tag,
 .diff-syntax .hljs-name {
-  color: #ccc;
+  color: var(--cm-tag, #ccc);
 }
 
 .diff-syntax .hljs-attr,
 .diff-syntax .hljs-attribute {
-  color: #777;
+  color: var(--cm-attr, #777);
 }
 
 .diff-syntax .hljs-symbol,
 .diff-syntax .hljs-bullet {
-  color: #aaa;
+  color: var(--cm-constant, #aaa);
 }
 
 .diff-syntax .hljs-regexp {
-  color: #999;
+  color: var(--cm-regexp, #999);
 }
 
 .diff-syntax .hljs-property {
-  color: #b3b3b3;
+  color: var(--cm-property, #b3b3b3);
 }
 
 .diff-syntax .hljs-meta {
-  color: #777;
+  color: var(--cm-meta, #777);
 }

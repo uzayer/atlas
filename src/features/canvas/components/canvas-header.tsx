@@ -1,18 +1,24 @@
-import { Crosshair, Maximize2, Minimize2 } from "lucide-react";
+import { Crosshair, Maximize2, Minimize2, PanelLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { AtlasIcon } from "@/components/atlas-icon";
+import { DEFAULT_PAGE_ICON } from "./pages-panel";
 
 /**
  * Floating top-left board header (replaces the old fixed bar). Glassmorphic pill
- * with the board name + note count and quick actions (fit, fullscreen).
+ * with the pages toggle + active page emoji/name + quick actions (fit, fullscreen).
  */
 export function CanvasHeader({
-  noteCount,
+  pageName,
+  pageIcon,
+  pagesOpen,
+  onTogglePages,
   fullscreen,
   onFit,
   onToggleFullscreen,
 }: {
-  noteCount: number;
+  pageName: string;
+  pageIcon?: string | null;
+  pagesOpen: boolean;
+  onTogglePages: () => void;
   fullscreen: boolean;
   onFit: () => void;
   onToggleFullscreen: () => void;
@@ -20,13 +26,30 @@ export function CanvasHeader({
   return (
     <div
       className={cn(
-        "absolute left-3 top-3 z-20 flex items-center gap-1.5 pl-2 pr-1 py-1",
+        "absolute left-3 top-3 z-20 flex items-center gap-1.5 pl-1 pr-1 py-1",
         "rounded-xl border border-white/10 bg-[var(--bg-secondary)]/70 backdrop-blur-2xl shadow-[var(--shadow-overlay)]",
       )}
     >
-      <AtlasIcon size={16} className="rounded-md shrink-0" />
-      <span className="text-[12px] font-semibold text-text-primary">Spaces</span>
-      <span className="text-[10px] text-text-tertiary">· {noteCount}</span>
+      <button
+        type="button"
+        onClick={onTogglePages}
+        title={pagesOpen ? "Hide pages" : "Show pages"}
+        className={cn(
+          "flex h-6 w-6 items-center justify-center rounded-md transition-colors cursor-pointer",
+          pagesOpen
+            ? "bg-bg-selected text-text-primary"
+            : "text-text-tertiary hover:bg-bg-hover hover:text-text-primary",
+        )}
+      >
+        <PanelLeft size={13} />
+      </button>
+      <div className="mx-0.5 h-4 w-px bg-white/10" />
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center text-[12px] leading-none">
+        {pageIcon || DEFAULT_PAGE_ICON}
+      </span>
+      <span className="max-w-[180px] truncate text-[12px] font-semibold text-text-primary">
+        {pageName || "Spaces"}
+      </span>
       <div className="mx-0.5 h-4 w-px bg-white/10" />
       <button
         type="button"

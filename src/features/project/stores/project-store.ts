@@ -17,6 +17,8 @@ import {
 import { registerFlush } from "@/features/workspaces/lib/flush-registry";
 import { persistHashOf } from "@/features/workspaces/lib/workspace-snapshot";
 import { applyUiScale, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
+import { applyEditorTheme } from "@/features/editor/themes/apply-editor-theme";
+import { DEFAULT_EDITOR_THEME_ID } from "@/features/editor/themes/themes";
 
 interface Project {
   name: string;
@@ -54,6 +56,9 @@ export interface AppSettings {
   embeddingModelId: string;
   /** Selected on-device LLM model id (== dir name). */
   llmModelId: string;
+  /** Code-editor color theme id (see src/features/editor/themes). Drives the
+   *  CodeMirror editor, the diff viewer and the source-control diff views. */
+  codeEditorTheme: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -64,6 +69,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   shareTelemetry: true,
   embeddingModelId: "all-MiniLM-L6-v2",
   llmModelId: "qwen3-0.6b",
+  codeEditorTheme: DEFAULT_EDITOR_THEME_ID,
 };
 
 /**
@@ -297,6 +303,7 @@ export const useProjectStore = createSelectors(
           void useExplorerStore.getState().actions.refresh();
         }
         if (partial.uiScale !== undefined) applyUiScale(partial.uiScale);
+        if (partial.codeEditorTheme !== undefined) applyEditorTheme(partial.codeEditorTheme);
       },
       hydrate: (payload: AppStateWire, opts?: { skipActiveSwitch?: boolean }) => {
         // Merge with defaults so older state.json files (written before a new
@@ -315,6 +322,9 @@ export const useProjectStore = createSelectors(
         // Re-apply the persisted interface zoom (needs the Tauri WebView API,
         // so it can only run here, not in the pre-mount boot path).
         applyUiScale(settings.uiScale);
+        // Re-apply the persisted code-editor theme (writes CSS custom
+        // properties consumed by the editor/diff surfaces).
+        applyEditorTheme(settings.codeEditorTheme);
 
         // Hand the multi-workspace fields to the workspace store. We hydrate
         // with `activeWorkspaceId: null` and then `switchTo` the persisted id

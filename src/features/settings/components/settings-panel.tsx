@@ -29,6 +29,7 @@ import {
 import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
+import { CodeEditorThemesSettings } from "./code-editor-themes-settings";
 import { SkillsAndPacks } from "./skills-and-packs";
 import { ModelsManager } from "./models-manager";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
@@ -372,6 +373,9 @@ function AppearanceSettings() {
           </button>
         </div>
       </SettingRow>
+
+      <div className="h-px bg-border-default" />
+      <CodeEditorThemesSettings />
     </div>
   );
 }
@@ -519,7 +523,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.19 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.20 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">
