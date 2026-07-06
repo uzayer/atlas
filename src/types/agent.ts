@@ -179,6 +179,12 @@ export interface ChatMessage {
    *  finishes. Drives the end-of-message usage footer. `saved` = approx tokens
    *  RTK compression shaved off this turn (0 when compression was off). */
   usage?: { input: number; output: number; cost: number; saved?: number };
+  /** Model that produced this assistant message, stamped when the message is
+   *  created (and backstopped at turn end). The badge renders ONLY this —
+   *  never live session state — so a later model or agent switch can't
+   *  relabel messages produced by a different model. Unstamped messages
+   *  (pre-fix history, disk-hydrated transcripts) render no badge. */
+  model?: string;
 }
 
 export interface ToolCallDisplay {

@@ -80,6 +80,12 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<Vec<PlanEntry>>,
+    /// Model that produced this assistant message — the session's current
+    /// model at creation time, or the transcript's recorded model on replay.
+    /// Lets the UI's per-message badge survive session reloads instead of
+    /// deriving it from live state (which mislabels after model switches).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -230,6 +236,7 @@ pub fn new_assistant_text(content: String) -> Message {
         thinking: String::new(),
         tool_calls: Vec::new(),
         plan: None,
+        model: None,
         timestamp: Utc::now(),
     }
 }
@@ -243,6 +250,7 @@ pub fn new_assistant_thinking(thinking: String) -> Message {
         thinking,
         tool_calls: Vec::new(),
         plan: None,
+        model: None,
         timestamp: Utc::now(),
     }
 }
@@ -256,6 +264,7 @@ pub fn new_assistant_tool(tool_call: ToolCall) -> Message {
         thinking: String::new(),
         tool_calls: vec![tool_call],
         plan: None,
+        model: None,
         timestamp: Utc::now(),
     }
 }
@@ -269,6 +278,7 @@ pub fn new_user_message(content: String) -> Message {
         thinking: String::new(),
         tool_calls: Vec::new(),
         plan: None,
+        model: None,
         timestamp: Utc::now(),
     }
 }

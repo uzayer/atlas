@@ -12,7 +12,6 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Sparkles } from "lucide-react";
 import type { ChatMessage } from "@/types/agent";
 import { MessageItem } from "./message-item";
-import { useChatStore } from "../stores/chat-store";
 import { cn } from "@/lib/utils";
 import { warmMarkdownWorker } from "@/lib/markdown-cache";
 
@@ -168,12 +167,11 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   const parentRef = useRef<HTMLDivElement>(null);
   const cacheKey = `${tabId}:${acpSessionId}`;
 
-  // Session model for the assistant turn badge (live model wins over the
-  // session default). Narrow selector so it only re-renders on change.
-  const sessionModel = useChatStore((s) => {
-    const sess = s.sessions[tabId];
-    return sess?.acpCurrentModel || sess?.model || null;
-  });
+  // The assistant turn badge renders the model stamped onto each message at
+  // creation (`message.model`) — never live session state, which relabels the
+  // whole thread when the session's model or agent changes later. Unstamped
+  // messages (pre-fix history, disk-hydrated transcripts) show no badge
+  // rather than a possibly-wrong one.
 
   // Apply role filter + map filtered→original indices in one pass. The old
   // implementation used `messages.findIndex` per filtered message, making
@@ -627,7 +625,7 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
                   <MessageItem
                     message={message}
                     streaming={message.id === streamingId}
-                    model={message.role === "assistant" ? sessionModel : null}
+                    model={message.model ?? null}
                     timeGapAbove={timeGapAbove}
                     dividerAbove={
                       vItem.index > 0 &&

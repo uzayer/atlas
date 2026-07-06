@@ -16,6 +16,7 @@ export function snapshotMessageToWire(m: SessionMessage) {
     role: m.role === "system" ? ("system" as const) : m.role,
     content: m.content,
     timestamp: m.timestamp,
+    model: m.model ?? null,
     toolCalls: m.tool_calls.map((tc) => ({
       toolName: tc.tool_name,
       kind: tc.kind ?? null,

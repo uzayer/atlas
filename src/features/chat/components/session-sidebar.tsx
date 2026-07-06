@@ -40,6 +40,7 @@ import {
   DEFAULT_PLUGIN_ID,
 } from "../lib/agents-api";
 import { AtlasIcon } from "@/components/atlas-icon";
+import { useRecentChatsStore } from "@/features/workspaces/stores/recent-chats-store";
 import { snapshotMessageToWire } from "../lib/snapshot-message";
 
 /** Compact token count: 1234 → "1.2k", 1_200_000 → "1.2M". */
@@ -212,7 +213,12 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   // `atlas:sessions-changed` whenever the project's JSONL directory mutates,
   // so we refetch on event rather than every 1.5–5s. The cost of the disk
   // walk only pays off when something actually changed.
-  const { data: agentList = [], isLoading } = useQuery({
+  const {
+    data: agentList = [],
+    isLoading,
+    isSuccess: agentReady,
+    isPlaceholderData: agentPlaceholder,
+  } = useQuery({
     queryKey,
     queryFn: () => listClaudeSessions(cwd),
     enabled: cwd.length > 0,
@@ -229,7 +235,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   // after a restart. No file watcher exists for the SQLite db, so this refetches
   // on the same focus / `atlas:sessions-changed` triggers as the Claude list.
   const codexQueryKey = ["codex-sessions", cwd] as const;
-  const { data: codexList = [] } = useQuery({
+  const {
+    data: codexList = [],
+    isSuccess: codexReady,
+    isPlaceholderData: codexPlaceholder,
+  } = useQuery({
     queryKey: codexQueryKey,
     queryFn: () => listCodexSessions(cwd),
     enabled: cwd.length > 0,
@@ -248,7 +258,11 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
   // Native Atlas (Cersei) sessions — persisted as JSON under the app config
   // dir, same merge treatment as Codex.
   const cerseiQueryKey = ["cersei-sessions", cwd] as const;
-  const { data: cerseiList = [] } = useQuery({
+  const {
+    data: cerseiList = [],
+    isSuccess: cerseiReady,
+    isPlaceholderData: cerseiPlaceholder,
+  } = useQuery({
     queryKey: cerseiQueryKey,
     queryFn: () => listCerseiSessions(cwd),
     enabled: cwd.length > 0,
@@ -351,6 +365,54 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     for (const d of codexList) diskById.set(d.id, { meta: d, agent: "codex" });
     for (const d of cerseiList) diskById.set(d.id, { meta: d, agent: "cersei" });
 
+    // An unbound live row (`live-<tabId>` key — after an agent switch or
+    // clearSession dropped the binding but kept messages, or during the
+    // first-send window before the binding lands) can describe the SAME
+    // conversation as a disk row listed under its real session id. Rendering
+    // both shows the session twice, so suppress the live twin whenever a
+    // disk row already covers the same first-user text.
+    const normFirstUser = (t: string) => stripInjectedContext(t).trim().slice(0, 60);
+    // Keyed by "<agent>|<text>", paired with the disk row's last-modified
+    // time. A live twin is only suppressed when the disk row belongs to the
+    // SAME agent and their activity times are close (a true twin's live
+    // `updatedAt` tracks its own disk `last_modified`). Cross-agent matches
+    // would repaint the chat with the wrong brand icon; distinct same-agent
+    // chats that merely share a short opener ("hi") are usually far apart in
+    // time, and suppressing those would hide a real conversation.
+    const diskPreviews = new Map<string, number>();
+    for (const { meta, agent } of diskById.values()) {
+      if (meta.preview && meta.preview !== "(no user message)") {
+        const p = normFirstUser(meta.preview);
+        if (!p) continue;
+        const ts = meta.last_modified ? Date.parse(meta.last_modified) : NaN;
+        if (Number.isNaN(ts)) continue;
+        const key = `${agent}|${p}`;
+        const prev = diskPreviews.get(key);
+        if (prev === undefined || ts > prev) diskPreviews.set(key, ts);
+      }
+    }
+    const TWIN_WINDOW_MS = 10 * 60 * 1000;
+    for (const [id, live] of Array.from(liveById)) {
+      if (!id.startsWith("live-")) continue;
+      const liveAgent =
+        live.agentType === "codex"
+          ? "codex"
+          : live.agentType === "cersei"
+            ? "cersei"
+            : "claude";
+      const first = normFirstUser(live.firstUserContent ?? "");
+      if (!first) continue;
+      const diskTs = diskPreviews.get(`${liveAgent}|${first}`);
+      const liveTs = Date.parse(live.updatedAt ?? "");
+      if (
+        diskTs !== undefined &&
+        !Number.isNaN(liveTs) &&
+        Math.abs(liveTs - diskTs) < TWIN_WINDOW_MS
+      ) {
+        liveById.delete(id);
+      }
+    }
+
     const allIds = new Set<string>([
       ...liveById.keys(),
       ...diskById.keys(),
@@ -420,6 +482,57 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
       .filter((a) => a.messageCount > 0)
       .sort((a, b) => (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? ""));
   }, [agentList, codexList, cerseiList, tabSummaries]);
+
+  // Self-heal the workspace panel's persisted "Chats" list for THIS project.
+  // That list (`atlas-recent-chats`) is recorded on agent activity and never
+  // re-validated against storage, so rows for sessions deleted elsewhere (or
+  // before purge-on-delete existed) linger forever. Once all three disk
+  // listings have real (non-placeholder) data, drop any row for this cwd whose
+  // session is neither on disk nor live in the chat-store. Placeholder data is
+  // excluded so a cwd switch can't purge the new project's rows against the
+  // old project's lists.
+  useEffect(() => {
+    if (!cwd) return;
+    if (!agentReady || !codexReady || !cerseiReady) return;
+    if (agentPlaceholder || codexPlaceholder || cerseiPlaceholder) return;
+    const diskIds = new Set<string>([
+      ...agentList.map((d) => d.id),
+      ...codexList.map((d) => d.id),
+      ...cerseiList.map((d) => d.id),
+    ]);
+    const liveAcp = new Set<string>();
+    const liveTabs = new Set<string>();
+    for (const s of Object.values(tabSummaries)) {
+      if (s.acpSessionId) liveAcp.add(s.acpSessionId);
+      liveTabs.add(s.id);
+    }
+    const { items: recent, actions } = useRecentChatsStore.getState();
+    // Grace period: a freshly-active row can be ahead of the polled disk
+    // listings (Codex/Cersei refresh on a 4s poll), so judging it against a
+    // stale snapshot would purge a real chat. Only rows quiet for a minute
+    // are eligible — truly deleted sessions get cleaned on a later pass.
+    const cutoff = Date.now() - 60_000;
+    for (const c of recent) {
+      if (c.projectPath !== cwd) continue;
+      if (c.updatedAt > cutoff) continue;
+      const alive = c.acpSessionId
+        ? diskIds.has(c.acpSessionId) || liveAcp.has(c.acpSessionId)
+        : liveTabs.has(c.tabId);
+      if (!alive) actions.remove(c.tabId);
+    }
+  }, [
+    cwd,
+    agentReady,
+    codexReady,
+    cerseiReady,
+    agentPlaceholder,
+    codexPlaceholder,
+    cerseiPlaceholder,
+    agentList,
+    codexList,
+    cerseiList,
+    tabSummaries,
+  ]);
 
   // Sessions currently running (used to show a spinner on the matching row).
   // Keys MUST match the `id`s used when constructing `items` above, otherwise
@@ -602,29 +715,24 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         key = await agents.loadSession(agent.agent_id, item.id, cwd);
       } catch (err) {
         if (isStale()) return;
-        console.warn("loadSession failed, falling back to new session:", err);
-        toast.message(
-          "Couldn't resume the old session — continuing in a new one.",
-          {
-            description:
-              err instanceof Error
-                ? err.message.slice(0, 120)
-                : String(err).slice(0, 120),
-          }
+        // Don't silently fork a NEW persisted session here — the clicked file
+        // stays on disk and the fork lists as a second history row for what
+        // the user experiences as one conversation. Surface the failure and
+        // ROLL BACK the optimistic binding set before the load: leaving
+        // `acpSessionId` pointing at a session the backend never loaded would
+        // block the chat panel's bind effect (it early-returns when a binding
+        // exists) and strand the tab. Clearing re-arms the normal new-session
+        // flow if the user keeps typing.
+        console.warn("loadSession failed:", err);
+        clearSession(targetTabId);
+        setTranscriptLoading(targetTabId, false);
+        toast.error(
+          `Couldn't resume this session: ${
+            err instanceof Error
+              ? err.message.slice(0, 120)
+              : String(err).slice(0, 120)
+          }`
         );
-        try {
-          const newKey = await agents.newSession(agent.agent_id, cwd);
-          if (isStale()) return;
-          setAcpBinding(targetTabId, agent.agent_id, newKey.session_id, cwd);
-          setTranscriptLoading(targetTabId, false);
-        } catch (newErr) {
-          if (!isStale()) {
-            setTranscriptLoading(targetTabId, false);
-            toast.error(
-              `Couldn't open agent session: ${newErr instanceof Error ? newErr.message : String(newErr)}`
-            );
-          }
-        }
         return;
       }
       if (isStale()) return;
@@ -678,6 +786,10 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
         return;
       }
       if (activeAcpId === item.id) clearSession(tabId);
+      // The workspace panel's "Chats" list is a separate persisted store
+      // recorded on agent activity and never re-validated against disk —
+      // purge the deleted session's row so it doesn't linger there.
+      useRecentChatsStore.getState().actions.removeBySession(item.id);
     } catch (err) {
       console.error("Failed to delete session:", err);
       toast.error(

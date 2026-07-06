@@ -20,6 +20,7 @@ import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL } from "@/types/agent";
 import { AgentMark } from "@/components/agent-mark";
 import { ProviderModelPills } from "./provider-model-pills";
 import { loadCerseiEffort, loadCerseiCompress } from "../lib/cersei-model-pref";
+import { loadCachedAcpModels } from "../lib/acp-models-cache";
 // `ChatInput` pulls in CodeMirror (~870 KB) via `cm-mention-extension`.
 // We import it dynamically so the chunk is not in the initial preload set.
 // The import is kicked off at module-evaluation time (below, outside the
@@ -357,6 +358,7 @@ function modelLabel(m: { id: string; name: string }): string {
 function AcpModelPicker({ tabId }: { tabId: string }) {
   const currentModel = useChatStore((s) => s.sessions[tabId]?.acpCurrentModel);
   const availableModels = useChatStore((s) => s.sessions[tabId]?.acpAvailableModels);
+  const agentType = useChatStore((s) => s.sessions[tabId]?.agentType ?? "claude-code");
   const { setAcpModel } = useChatStore.use.actions();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -371,20 +373,29 @@ function AcpModelPicker({ tabId }: { tabId: string }) {
     return () => window.removeEventListener("mousedown", onDown);
   }, [open]);
 
+  // Self-heal: ACP `session/load` doesn't re-advertise models, so a resumed /
+  // re-bound session can hold an empty list even though the agent has one —
+  // and hiding the picker on empty is exactly the "model selector disappears
+  // mid-session" bug. Fall back to the persisted per-agent cache (the mode
+  // picker self-heals the same way).
+  const models = useMemo(() => {
+    if (availableModels && availableModels.length > 0) return availableModels;
+    return loadCachedAcpModels(agentType)?.availableModels ?? [];
+  }, [availableModels, agentType]);
+
   const filtered = useMemo(() => {
-    const list = availableModels ?? [];
     const s = q.trim().toLowerCase();
-    if (!s) return list;
-    return list.filter(
+    if (!s) return models;
+    return models.filter(
       (m) =>
         m.name.toLowerCase().includes(s) ||
         m.id.toLowerCase().includes(s) ||
         (m.description ?? "").toLowerCase().includes(s),
     );
-  }, [availableModels, q]);
+  }, [models, q]);
 
-  if (!availableModels || availableModels.length === 0) return null;
-  const current = availableModels.find((m) => m.id === currentModel);
+  if (models.length === 0) return null;
+  const current = models.find((m) => m.id === currentModel);
 
   return (
     <div ref={ref} className="relative">

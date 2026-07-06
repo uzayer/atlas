@@ -32,7 +32,9 @@ pub trait AgentBackend: Send + Sync {
         session_id: SessionId,
         cwd: PathBuf,
     ) -> AcpResult<Option<serde_json::Value>>;
-    /// Drive one prompt turn; returns the lowercased stop-reason token.
+    /// Drive one prompt turn; returns the canonical snake_case stop-reason
+    /// token ("end_turn", "max_tokens", …) per the frontend contract in
+    /// `src/types/acp.ts`.
     async fn send_prompt(
         &self,
         agent_id: AgentId,
@@ -121,7 +123,22 @@ impl AgentBackend for AcpBackend {
         text: String,
     ) -> AcpResult<String> {
         let reason = self.0.send_prompt(agent_id, session_id, text).await?;
-        Ok(format!("{reason:?}").to_ascii_lowercase())
+        // Serialize via serde to get the canonical snake_case wire tokens
+        // ("end_turn", "max_tokens", …) the frontend contract expects;
+        // Debug-lowercasing produced "endturn" which the UI never matched.
+        Ok(serde_json::to_value(reason)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| {
+                // Unreachable for a fieldless serde enum; if an upstream change
+                // ever makes it fire, don't mask it as a silent normal finish.
+                tracing::warn!(
+                    target: "atlas_agents::backend",
+                    ?reason,
+                    "stop reason failed to serialize; defaulting to end_turn"
+                );
+                "end_turn".to_string()
+            }))
     }
     async fn set_session_mode(
         &self,
@@ -256,5 +273,26 @@ impl AgentBackend for CerseiBackend {
     }
     fn kill(&self, agent_id: AgentId) -> AcpResult<()> {
         self.0.kill(agent_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use atlas_acp::StopReason;
+
+    /// The frontend contract (`src/types/acp.ts`) consumes these exact tokens.
+    /// The original ATL-6 bug was an ad-hoc `format!("{r:?}").to_ascii_lowercase()`
+    /// producing "endturn" — this pins the serde round-trip `send_prompt` relies on.
+    #[test]
+    fn stop_reason_serializes_to_snake_case_wire_tokens() {
+        for (reason, want) in [
+            (StopReason::EndTurn, "end_turn"),
+            (StopReason::MaxTokens, "max_tokens"),
+            (StopReason::MaxTurnRequests, "max_turn_requests"),
+            (StopReason::Refusal, "refusal"),
+            (StopReason::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), want);
+        }
     }
 }
