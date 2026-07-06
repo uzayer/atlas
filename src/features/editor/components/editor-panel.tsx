@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
 import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from "@codemirror/view";
-import { EditorState, Compartment, type Extension } from "@codemirror/state";
+import { EditorState, Compartment, Transaction, type Extension } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
@@ -11,7 +11,7 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, RefreshCw } from "lucide-react";
 import { logEvent } from "@/features/log/lib/log";
 import { diffGutter, applyDiffStatus } from "../lib/diff-gutter";
 import { gitDiffLineStatus } from "@/features/git/lib/git-diff-api";
@@ -103,7 +103,8 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   const path = filePath ?? "";
   const isUntitled = path.startsWith("untitled:");
   const buffer = useEditorStore((s) => s.buffers[path]);
-  const { openBuffer, setDirty, markSaved } = useEditorStore.use.actions();
+  const { openBuffer, setDirty, markSaved, reloadBuffer, markExternallyChanged } =
+    useEditorStore.use.actions();
   const projectPath = useProjectStore.use.currentProject()?.path ?? "";
   const layoutActions = useLayoutStore.use.actions();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -122,9 +123,15 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       openBuffer(path, "");
       return;
     }
-    invoke<string>("read_file_content", { path })
-      .then((content) => openBuffer(path, content))
-      .catch(() => openBuffer(path, `// Failed to read: ${path}`));
+    void (async () => {
+      try {
+        const content = await invoke<string>("read_file_content", { path });
+        const mtime = await invoke<number>("file_mtime_ms", { path }).catch(() => 0);
+        openBuffer(path, content, mtime);
+      } catch {
+        openBuffer(path, `// Failed to read: ${path}`);
+      }
+    })();
   }, [path, buffer, openBuffer, isUntitled]);
 
   // Save: read content directly from CodeMirror, not from store.
@@ -146,9 +153,10 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
         if (!chosen) return; // user cancelled
         const newPath = chosen as string;
         await invoke("write_file_content", { path: newPath, content });
+        const mtime = await invoke<number>("file_mtime_ms", { path: newPath }).catch(() => 0);
         // Carry the freshly-saved content over to the new buffer key.
-        openBuffer(newPath, content);
-        markSaved(newPath, content);
+        openBuffer(newPath, content, mtime);
+        markSaved(newPath, content, mtime);
         // Swap the tab in place: close untitled, open real-path tab
         // with the same activation behavior addTab gives.
         layoutActions.closeTab(tabId);
@@ -173,7 +181,8 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
     }
     try {
       await invoke("write_file_content", { path, content });
-      markSaved(path, content);
+      const mtime = await invoke<number>("file_mtime_ms", { path }).catch(() => 0);
+      markSaved(path, content, mtime);
       logEvent({
         source: "editor",
         kind: "save",
@@ -215,6 +224,70 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   }, [path, projectPath, isUntitled]);
   refreshGutterRef.current = refreshDiffGutter;
 
+  // Re-seed the live CodeMirror view from a string without polluting undo
+  // history (external reload, not a user edit).
+  const replaceViewDoc = useCallback((content: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (view.state.doc.toString() === content) return;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: content },
+      annotations: Transaction.addToHistory.of(false),
+    });
+  }, []);
+
+  // Reconcile this buffer with disk when the file may have changed externally
+  // (agent/CLI edits). mtime-gated so unchanged files cost one cheap IPC. When
+  // the buffer is clean we reload silently; when it has unsaved edits we only
+  // flag it (`externallyChanged`) so the user can reload via the toolbar.
+  const revalidate = useCallback(async () => {
+    if (!path || isUntitled) return;
+    const buf = useEditorStore.getState().buffers[path];
+    if (!buf) return;
+    const mtime = await invoke<number>("file_mtime_ms", { path }).catch(() => 0);
+    if (!mtime || mtime <= buf.diskMtimeMs) return;
+    let content: string;
+    try {
+      content = await invoke<string>("read_file_content", { path });
+    } catch {
+      return;
+    }
+    // Re-read the buffer: it may have changed (dirty/gone) during the awaits.
+    const cur = useEditorStore.getState().buffers[path];
+    if (!cur) return;
+    const liveDoc = viewRef.current?.state.doc.toString() ?? cur.originalContent;
+    if (content === liveDoc) {
+      // Content matches what's shown (e.g. our own save) — just record mtime.
+      reloadBuffer(path, content, mtime);
+      return;
+    }
+    if (cur.dirty) {
+      markExternallyChanged(path, mtime);
+      return;
+    }
+    reloadBuffer(path, content, mtime);
+    replaceViewDoc(content);
+    refreshDiffGutter();
+  }, [path, isUntitled, reloadBuffer, markExternallyChanged, replaceViewDoc, refreshDiffGutter]);
+  const revalidateRef = useRef(revalidate);
+  revalidateRef.current = revalidate;
+
+  // User-initiated reload from the "changed on disk" toolbar affordance —
+  // discards unsaved edits (the user explicitly chose disk).
+  const forceReload = useCallback(async () => {
+    if (!path || isUntitled) return;
+    let content: string;
+    try {
+      content = await invoke<string>("read_file_content", { path });
+    } catch {
+      return;
+    }
+    const mtime = await invoke<number>("file_mtime_ms", { path }).catch(() => 0);
+    reloadBuffer(path, content, mtime);
+    replaceViewDoc(content);
+    refreshDiffGutter();
+  }, [path, isUntitled, reloadBuffer, replaceViewDoc, refreshDiffGutter]);
+
   // Repaint the gutter when the working tree changes elsewhere (commits,
   // stage/unstage, external edits) — same event the git store listens to.
   useEffect(() => {
@@ -223,6 +296,24 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       un.then((u) => u());
     };
   }, [refreshDiffGutter]);
+
+  // Reconcile with disk on the signals that indicate an external edit:
+  //  • buffer mount (fixes close-then-reopen showing a stale cached buffer),
+  //  • the recursive working-tree watcher (`atlas:explorer:changed`) for live
+  //    updates while the tab is open,
+  //  • native window focus regain (`atlas:window-active`) — the reported flow
+  //    of editing in the Claude Code CLI and switching back to Atlas.
+  useEffect(() => {
+    if (!buffer || isUntitled) return;
+    void revalidateRef.current();
+    const un = listen("atlas:explorer:changed", () => void revalidateRef.current());
+    const onActive = () => void revalidateRef.current();
+    window.addEventListener("atlas:window-active", onActive);
+    return () => {
+      un.then((u) => u());
+      window.removeEventListener("atlas:window-active", onActive);
+    };
+  }, [path, !!buffer, isUntitled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-paint when inputs settle (e.g. the project path resolves AFTER the view
   // was created, or the buffer swaps). The in-view-creation call covers the
@@ -235,7 +326,10 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   useEffect(() => {
     if (!buffer || !containerRef.current) return;
 
-    const originalContent = buffer.originalContent;
+    // Seed from the freshest store content — a disk revalidation may have
+    // reloaded the buffer between mount and this (async) view creation.
+    const originalContent =
+      useEditorStore.getState().buffers[path]?.originalContent ?? buffer.originalContent;
     let cancelled = false;
 
     (async () => {
@@ -285,6 +379,10 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       }
 
       viewRef.current = view;
+      // A revalidation that landed while the view was being built updates only
+      // the store; sync the view to it now (idempotent — no-op when equal).
+      const latest = useEditorStore.getState().buffers[path]?.originalContent;
+      if (latest !== undefined) replaceViewDoc(latest);
       refreshDiffGutter();
     })();
 
@@ -329,6 +427,16 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
         <Breadcrumbs filePath={path} projectPath={projectPath} />
         {buffer.dirty && (
           <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0 ml-2" />
+        )}
+        {buffer.externallyChanged && (
+          <button
+            type="button"
+            onClick={() => void forceReload()}
+            title="This file changed on disk. Reload discards your unsaved edits."
+            className="ml-auto inline-flex items-center gap-1 h-[20px] px-2 rounded-full border border-border-default bg-bg-elevated text-[10px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors shrink-0"
+          >
+            <RefreshCw size={10} /> Disk changed · Reload
+          </button>
         )}
       </div>
 

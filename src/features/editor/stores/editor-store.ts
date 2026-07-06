@@ -7,6 +7,12 @@ interface Buffer {
   originalContent: string;
   dirty: boolean;
   language: string;
+  /** Disk mtime (unix ms) at the last read/save — the freshness gate for
+   *  external-change revalidation. 0 until first known. */
+  diskMtimeMs: number;
+  /** Set when the file changed on disk while this buffer has unsaved edits, so
+   *  the editor can offer a manual reload instead of clobbering the user's work. */
+  externallyChanged: boolean;
 }
 
 interface EditorState {
@@ -16,9 +22,13 @@ interface EditorState {
 
 interface EditorActions {
   actions: {
-    openBuffer: (path: string, content: string) => void;
+    openBuffer: (path: string, content: string, mtimeMs?: number) => void;
     setDirty: (path: string, dirty: boolean) => void;
-    markSaved: (path: string, content: string) => void;
+    markSaved: (path: string, content: string, mtimeMs?: number) => void;
+    /** Overwrite a buffer's content from disk (external change, buffer clean). */
+    reloadBuffer: (path: string, content: string, mtimeMs: number) => void;
+    /** Flag a dirty buffer whose file changed on disk (no content overwrite). */
+    markExternallyChanged: (path: string, mtimeMs: number) => void;
     closeBuffer: (path: string) => void;
     setActive: (path: string) => void;
   };
@@ -45,7 +55,7 @@ export const useEditorStore = createSelectors(
       buffers: {},
       activeBufferPath: null,
       actions: {
-        openBuffer: (path, content) =>
+        openBuffer: (path, content, mtimeMs = 0) =>
           set((s) => {
             if (!s.buffers[path]) {
               s.buffers[path] = {
@@ -53,6 +63,8 @@ export const useEditorStore = createSelectors(
                 originalContent: content,
                 dirty: false,
                 language: detectLanguage(path),
+                diskMtimeMs: mtimeMs,
+                externallyChanged: false,
               };
             }
             s.activeBufferPath = path;
@@ -64,12 +76,32 @@ export const useEditorStore = createSelectors(
               buf.dirty = dirty;
             }
           }),
-        markSaved: (path, content) =>
+        markSaved: (path, content, mtimeMs) =>
           set((s) => {
             const buf = s.buffers[path];
             if (buf) {
               buf.originalContent = content;
               buf.dirty = false;
+              buf.externallyChanged = false;
+              if (mtimeMs !== undefined) buf.diskMtimeMs = mtimeMs;
+            }
+          }),
+        reloadBuffer: (path, content, mtimeMs) =>
+          set((s) => {
+            const buf = s.buffers[path];
+            if (buf) {
+              buf.originalContent = content;
+              buf.dirty = false;
+              buf.externallyChanged = false;
+              buf.diskMtimeMs = mtimeMs;
+            }
+          }),
+        markExternallyChanged: (path, mtimeMs) =>
+          set((s) => {
+            const buf = s.buffers[path];
+            if (buf) {
+              buf.externallyChanged = true;
+              buf.diskMtimeMs = mtimeMs;
             }
           }),
         closeBuffer: (path) =>
