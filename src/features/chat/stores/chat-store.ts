@@ -230,6 +230,9 @@ interface ChatActions {
         role: MessageRole;
         content: string;
         timestamp?: string;
+        /** Producing model recovered from the snapshot/transcript, so the
+         *  per-message badge survives session reloads. */
+        model?: string | null;
         toolCalls?: Array<{
           toolName: string;
           kind?: string | null;
@@ -522,23 +525,37 @@ export const useChatStore = createSelectors(
         setSessionAgentType: (tabId, agentType) =>
           set((s) => {
             const sess = s.sessions[tabId];
-            if (!sess || sess.agentType === agentType) return;
-            sess.agentType = agentType;
-            sess.claudePermissionMode =
-              agentType === "claude-code"
-                ? (sess.claudePermissionMode ?? "default")
-                : undefined;
-            if (agentType === "claude-code") {
-              // Claude has no ACP modes — clear any stale picker state left by
-              // the previously-selected agent so no ghost mode pill shows.
-              sess.acpAvailableModes = [];
-              sess.acpModesPending = false;
-              sess.acpCurrentMode = undefined;
+            if (!sess) return;
+            if (sess.agentType !== agentType) {
+              sess.agentType = agentType;
+              sess.claudePermissionMode =
+                agentType === "claude-code"
+                  ? (sess.claudePermissionMode ?? "default")
+                  : undefined;
+              if (agentType === "claude-code") {
+                // Claude has no ACP modes — clear any stale picker state left
+                // by the previously-selected agent so no ghost mode pill shows.
+                sess.acpAvailableModes = [];
+                sess.acpModesPending = false;
+                sess.acpCurrentMode = undefined;
+              }
+              // For codex/cersei the resume flow calls `setAcpModes`
+              // immediately after with the session's real advertised modes, so
+              // no cache seeding is needed here. Crucially the ACP binding
+              // (acpAgentId/acpSessionId) is left intact — this only relabels.
             }
-            // For codex/cersei the resume flow calls `setAcpModes` immediately
-            // after with the session's real advertised modes, so no cache
-            // seeding is needed here. Crucially the ACP binding
-            // (acpAgentId/acpSessionId) is left intact — this only relabels.
+            // Reseed model state even when the agent type is UNCHANGED. This
+            // action only runs from the resume flow, where the tab is being
+            // rebound to a different conversation — the previous conversation's
+            // `acpCurrentModel` would render raw on the picker and get stamped
+            // onto the resumed session's new messages (the wrong-label bug,
+            // same-agent variant). The resume snapshot's real models/current
+            // land right after via `setAcpModels` (which only seeds current
+            // when unset, so clearing here is what lets it take effect).
+            sess.cerseiProvider = undefined;
+            const cachedModels = loadCachedAcpModels(agentType);
+            sess.acpAvailableModels = cachedModels?.availableModels ?? [];
+            sess.acpCurrentModel = cachedModels?.currentModel ?? undefined;
           }),
         setActiveSession: (id) =>
           set((s) => {
@@ -690,6 +707,16 @@ export const useChatStore = createSelectors(
           set((s) => {
             const session = s.sessions[sessionId];
             if (!session) return;
+            // Never clobber a good list with an empty snapshot. ACP
+            // `session/load` doesn't re-advertise models, so a resume/re-bind
+            // snapshot can carry [] while the session already has the real
+            // list — and the picker hides itself whenever the list is empty.
+            if (
+              availableModels.length === 0 &&
+              (session.acpAvailableModels?.length ?? 0) > 0
+            ) {
+              return;
+            }
             session.acpAvailableModels = availableModels;
             // Only seed the current model from the snapshot when it carries one;
             // never clobber a user-driven selection the store already reflects.
@@ -770,6 +797,7 @@ export const useChatStore = createSelectors(
                 fileChanges: [],
                 plan: null,
                 timestamp: m.timestamp ?? new Date().toISOString(),
+                ...(m.role === "assistant" && m.model ? { model: m.model } : {}),
                 ...(split && split.context !== null
                   ? {
                       atlasProse: split.prose,
@@ -956,6 +984,22 @@ export const useChatStore = createSelectors(
 
 type ChatDraft = ChatState & ChatActions;
 
+/** Stamp the session's current model onto a freshly created assistant message
+ *  so the badge records the producing model as a historical fact. Deriving it
+ *  at render time from live session state is what leaked labels across agents
+ *  (a later model/agent switch relabeled the whole thread). */
+function stampProducingModel(
+  session: { acpCurrentModel?: string },
+  msg: ChatMessage,
+): ChatMessage {
+  // `session.model` is intentionally NOT a fallback — it's set to "" at
+  // creation and never written after, so `acpCurrentModel` is the only real
+  // source of the producing model.
+  const m = session.acpCurrentModel;
+  if (m) msg.model = m;
+  return msg;
+}
+
 function appendTextToDraft(s: ChatDraft, acpSessionId: string, text: string): void {
   if (!text) return;
   const tid = findTabByAcpSession(s.sessions, acpSessionId);
@@ -999,7 +1043,7 @@ function appendTextToDraft(s: ChatDraft, acpSessionId: string, text: string): vo
     last.content += text;
     return;
   }
-  session.messages.push(makeAssistantTextMessage(text));
+  session.messages.push(stampProducingModel(session, makeAssistantTextMessage(text)));
 }
 
 function appendThoughtToDraft(s: ChatDraft, acpSessionId: string, text: string): void {
@@ -1012,7 +1056,7 @@ function appendThoughtToDraft(s: ChatDraft, acpSessionId: string, text: string):
     last.thinking = (last.thinking ?? "") + text;
     return;
   }
-  session.messages.push(makeAssistantThinkingMessage(text));
+  session.messages.push(stampProducingModel(session, makeAssistantThinkingMessage(text)));
 }
 
 /** A terminal (idle/error) delta carries the `turn_seq` of the turn it ends.
@@ -1074,18 +1118,27 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
             : `(no response — stop_reason: ${env.stop_reason})`;
         session.messages.push(makeAssistantTextMessage(label));
       }
-      // Resolve any tool calls still in pending/running state. After
-      // Stop, the driver gate drops further updates from the agent
-      // for this session, so an in-flight tool would otherwise spin
-      // forever. Mark them failed so the user sees a clear terminal
-      // state instead of a phantom loader.
-      if (env.stop_reason === "cancelled") {
-        for (const msg of session.messages) {
-          for (const tc of msg.toolCalls) {
-            if (tc.status === "pending" || tc.status === "running") {
-              tc.status = "failed";
-            }
+      // Resolve any tool calls still in pending/running state on EVERY
+      // terminal, not just cancel. After Stop the driver gate drops further
+      // updates; on a normal end a dropped/raced final `tool_call_update`
+      // leaves the same phantom loader. The turn is over either way — sweep
+      // to a terminal state so no card can spin forever.
+      for (const msg of session.messages) {
+        for (const tc of msg.toolCalls) {
+          if (tc.status === "pending" || tc.status === "running") {
+            tc.status = env.stop_reason === "cancelled" ? "failed" : "completed";
           }
+        }
+      }
+      // Stamp the producing model onto this turn's assistant messages. The
+      // badge must be a historical fact per message — deriving it from live
+      // session state relabels the whole thread when the session's model or
+      // agent changes later (the "Claude messages labeled Gemini" leak).
+      const producingModel = session.acpCurrentModel;
+      if (producingModel) {
+        for (let i = lastUserIdx + 1; i < session.messages.length; i++) {
+          const m = session.messages[i];
+          if (m.role === "assistant" && !m.model) m.model = producingModel;
         }
       }
       session.status =
@@ -1147,7 +1200,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       // Rust already decided this is a new message; the frontend
       // mirrors without re-deciding.
       const m = env.message;
-      session.messages.push({
+      const appended: ChatMessage = {
         id: m.id,
         role: m.role,
         content: m.content,
@@ -1165,7 +1218,9 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
           : null,
         timestamp: m.timestamp,
         mode: m.mode,
-      });
+      };
+      if (appended.role === "assistant") stampProducingModel(session, appended);
+      session.messages.push(appended);
       return;
     }
     case "tool_call_upserted": {
@@ -1194,7 +1249,10 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
         return;
       }
       session.messages.push(
-        makeAssistantToolMessage(toChatToolCall(env.tool_call))
+        stampProducingModel(
+          session,
+          makeAssistantToolMessage(toChatToolCall(env.tool_call)),
+        )
       );
       return;
     }
@@ -1210,7 +1268,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       if (last && last.role === "assistant") {
         last.plan = planSteps;
       } else {
-        const fresh = makeAssistantTextMessage("");
+        const fresh = stampProducingModel(session, makeAssistantTextMessage(""));
         fresh.plan = planSteps;
         session.messages.push(fresh);
       }

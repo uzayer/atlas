@@ -719,6 +719,7 @@ impl AgentManager {
                 if !attached {
                     let mut msg = new_assistant_text(String::new());
                     msg.plan = Some(entries.clone());
+                    msg.model = st.current_model.clone();
                     st.messages.push(msg);
                 }
                 st.touch();
@@ -804,7 +805,8 @@ impl AgentManager {
                 )
             }
             _ => {
-                let msg = new_assistant_text(text);
+                let mut msg = new_assistant_text(text);
+                msg.model = st.current_model.clone();
                 let cloned = msg.clone();
                 st.messages.push(msg);
                 let agent_id = st.agent_id;
@@ -843,7 +845,8 @@ impl AgentManager {
                 )
             }
             _ => {
-                let msg = new_assistant_thinking(text);
+                let mut msg = new_assistant_thinking(text);
+                msg.model = st.current_model.clone();
                 let cloned = msg.clone();
                 st.messages.push(msg);
                 let agent_id = st.agent_id;
@@ -933,7 +936,8 @@ impl AgentManager {
                 .and_then(|l| l.as_array().cloned())
                 .unwrap_or_default(),
         };
-        let msg = new_assistant_tool(tool_call.clone());
+        let mut msg = new_assistant_tool(tool_call.clone());
+        msg.model = st.current_model.clone();
         let msg_id = msg.id.clone();
         st.messages.push(msg);
         let agent_id = st.agent_id;

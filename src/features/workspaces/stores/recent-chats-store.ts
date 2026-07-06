@@ -32,6 +32,10 @@ interface RecentChatsState {
     /** Upsert a chat to the front of the list (by tabId). */
     record: (chat: RecentChat) => void;
     remove: (tabId: string) => void;
+    /** Drop rows referring to a session deleted from disk. This list is
+     *  persisted and never re-validated against storage, so the delete flow
+     *  must purge it explicitly or the row lingers forever. */
+    removeBySession: (acpSessionId: string) => void;
     clear: () => void;
   };
 }
@@ -49,6 +53,13 @@ export const useRecentChatsStore = createSelectors(
             }),
           remove: (tabId) =>
             set((s) => ({ items: s.items.filter((c) => c.tabId !== tabId) })),
+          removeBySession: (acpSessionId) =>
+            set((s) => ({
+              items: s.items.filter(
+                (c) =>
+                  c.acpSessionId !== acpSessionId && c.tabId !== acpSessionId,
+              ),
+            })),
           clear: () => set({ items: [] }),
         },
       }),

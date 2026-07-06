@@ -64,6 +64,7 @@ import { logEvent } from "@/features/log/lib/log";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { loadCachedAcpModels } from "../lib/acp-models-cache";
 
 interface ChatPanelProps {
   tabId: string;
@@ -270,6 +271,22 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         });
         if (models.length > 0) {
           useChatStore.getState().actions.setAcpModels(tabId, snap.current_model, models);
+        } else {
+          // ACP `session/load` doesn't re-advertise models, so resumed
+          // sessions get an empty snapshot. Fall back to the per-agent cache —
+          // same agent, so no cross-agent leak — which also seeds
+          // `acpCurrentModel` (when unset) so new assistant messages get a
+          // model stamp/badge again in resumed sessions.
+          // Re-read the agent type from the store — the closed-over `session`
+          // is the render-time value and can be stale after the await.
+          const at =
+            useChatStore.getState().sessions[tabId]?.agentType ?? "claude-code";
+          const cached = loadCachedAcpModels(at);
+          if (cached && cached.availableModels.length > 0) {
+            useChatStore
+              .getState()
+              .actions.setAcpModels(tabId, cached.currentModel, cached.availableModels);
+          }
         }
       } catch {
         // best-effort backfill

@@ -514,7 +514,7 @@ impl CerseiRuntime {
         let built = Arc::new(built);
 
         let mut stream = built.run_stream(&text);
-        let mut stop = "endturn".to_string();
+        let mut stop = "end_turn".to_string();
         // TodoWrite tool-call ids — surfaced as plan cards, so their tool
         // start/end are suppressed from the raw tool-card stream.
         let mut todo_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1014,10 +1014,10 @@ fn tool_kind(name: &str) -> &'static str {
 fn map_stop(s: cersei::types::StopReason) -> &'static str {
     use cersei::types::StopReason as S;
     match s {
-        S::EndTurn => "endturn",
-        S::MaxTokens => "maxtokens",
-        S::ToolUse => "endturn",
-        S::StopSequence => "endturn",
+        S::EndTurn => "end_turn",
+        S::MaxTokens => "max_tokens",
+        S::ToolUse => "end_turn",
+        S::StopSequence => "end_turn",
         S::ContentFilter => "refusal",
     }
 }
@@ -1296,7 +1296,7 @@ mod tests {
             stop_reason: cersei::types::StopReason::EndTurn,
             usage: cersei::types::Usage::default(),
         });
-        assert!(matches!(step, TurnStep::SetStop(ref s) if s == "endturn"));
+        assert!(matches!(step, TurnStep::SetStop(ref s) if s == "end_turn"));
         assert_eq!(c.events.lock().len(), 0);
     }
 
@@ -1361,9 +1361,9 @@ mod tests {
     #[test]
     fn stop_reason_mapping() {
         use cersei::types::StopReason as S;
-        assert_eq!(map_stop(S::EndTurn), "endturn");
-        assert_eq!(map_stop(S::MaxTokens), "maxtokens");
-        assert_eq!(map_stop(S::ToolUse), "endturn");
+        assert_eq!(map_stop(S::EndTurn), "end_turn");
+        assert_eq!(map_stop(S::MaxTokens), "max_tokens");
+        assert_eq!(map_stop(S::ToolUse), "end_turn");
         assert_eq!(map_stop(S::ContentFilter), "refusal");
     }
 
@@ -1427,7 +1427,7 @@ mod tests {
             ["agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"],
             "TurnComplete emits nothing; the rest stay in wire order"
         );
-        assert!(matches!(last, TurnStep::SetStop(ref s) if s == "endturn"));
+        assert!(matches!(last, TurnStep::SetStop(ref s) if s == "end_turn"));
     }
 
     // ── Permission policy (the synthesized modes that mirror Claude Code) ──────

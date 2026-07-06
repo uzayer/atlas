@@ -50,6 +50,9 @@ export interface SessionMessage {
   thinking?: string;
   tool_calls: ToolCall[];
   plan?: PlanEntry[];
+  /** Model that produced this assistant message (stamped live or recovered
+   *  from the transcript on replay). Absent for user messages / old records. */
+  model?: string | null;
   timestamp: string;
 }
 
