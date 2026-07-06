@@ -34,27 +34,63 @@ pub struct Embedder {
     dim: usize,
 }
 
-/// Pick the fastest available device: the Apple-Silicon GPU via Metal when the
-/// `metal` feature is compiled in, else CPU. Metal init failures (e.g. headless
-/// CI) fall back to CPU rather than erroring. Mirrors `chat::best_device`.
-fn best_device() -> Device {
-    #[cfg(feature = "metal")]
-    {
-        match Device::new_metal(0) {
-            Ok(d) => {
-                eprintln!("atlas-embed: embedder using Metal device");
-                return d;
-            }
-            Err(e) => eprintln!("atlas-embed: Metal init failed ({e}); using CPU"),
+/// Try to build the Apple-Silicon Metal device. `None` when the `metal` feature
+/// is off or device init fails. As with the chat model, a successful device does
+/// NOT guarantee candle's Metal *kernels* compile on this OS — hence the guarded
+/// load below. Mirrors `chat::metal_device`.
+#[cfg(feature = "metal")]
+fn metal_device() -> Option<Device> {
+    match Device::new_metal(0) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            eprintln!("atlas-embed: Metal init failed ({e}); using CPU");
+            None
         }
     }
-    Device::Cpu
 }
 
 impl Embedder {
     /// Load from a directory containing `config.json`, `tokenizer.json` and
-    /// `model.safetensors`.
+    /// `model.safetensors`, preferring the Apple-Silicon GPU but resiliently
+    /// falling back to CPU.
+    ///
+    /// Like the chat model, candle can panic while compiling its Metal kernels on
+    /// an OS/toolchain metallib mismatch. The Metal path is `catch_unwind`-guarded
+    /// (with a warm-up forward inside `load_on` to force lazy kernel compilation)
+    /// and retries on CPU. `ATLAS_EMBED_CPU=1` skips Metal entirely.
     pub fn load(model_dir: &Path) -> Result<Self> {
+        let force_cpu = std::env::var_os("ATLAS_EMBED_CPU").is_some();
+
+        #[cfg(feature = "metal")]
+        {
+            if !force_cpu {
+                if let Some(dev) = metal_device() {
+                    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::load_on(model_dir, dev)
+                    }));
+                    match attempt {
+                        Ok(Ok(model)) => return Ok(model),
+                        Ok(Err(e)) => eprintln!(
+                            "atlas-embed: Metal embedder load failed ({e}); falling back to CPU"
+                        ),
+                        Err(_) => eprintln!(
+                            "atlas-embed: Metal embedder kernels failed to compile \
+                             (candle/OS metallib mismatch); falling back to CPU"
+                        ),
+                    }
+                    return Self::load_on(model_dir, Device::Cpu);
+                }
+            }
+        }
+
+        let _ = force_cpu; // silence unused warning when metal is off
+        Self::load_on(model_dir, Device::Cpu)
+    }
+
+    /// Build the embedder on an explicit device, ending with a warm-up forward so
+    /// candle's lazy Metal kernel compilation surfaces here (inside the caller's
+    /// panic guard) rather than on the first real embed.
+    fn load_on(model_dir: &Path, device: Device) -> Result<Self> {
         let config_path = model_dir.join("config.json");
         let tokenizer_path = model_dir.join("tokenizer.json");
         let weights_path = model_dir.join("model.safetensors");
@@ -77,19 +113,23 @@ impl Embedder {
             }))
             .map_err(|e| anyhow!("set truncation: {e}"))?;
 
-        let device = best_device();
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path.clone()], DTYPE, &device)
                 .with_context(|| format!("mmap {}", weights_path.display()))?
         };
         let model = BertModel::load(vb, &config).context("load BERT weights")?;
 
-        Ok(Self {
+        let embedder = Self {
             model,
             tokenizer,
             device,
             dim,
-        })
+        };
+        // Warm-up: run one forward so Metal kernels compile now (or panic here,
+        // under the load-time guard) instead of on the first retrieval.
+        let _ = embedder.embed_one("warm");
+
+        Ok(embedder)
     }
 
     pub fn dim(&self) -> usize {

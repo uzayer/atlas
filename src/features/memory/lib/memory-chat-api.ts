@@ -61,9 +61,13 @@ export interface SourceRef {
   filePath?: string | null;
 }
 
+/** Inference backend the local model runs on. */
+export type ChatBackend = "metal" | "cpu";
+
 /** Streaming events from Rust, tagged by `stream_id`. */
 export type MemoryChatEvent =
   | { stream_id: string; kind: "sources"; sources: SourceRef[] }
+  | { stream_id: string; kind: "backend"; backend: ChatBackend }
   | { stream_id: string; kind: "text_delta"; delta: string }
   | { stream_id: string; kind: "done" }
   | { stream_id: string; kind: "error"; message: string };
@@ -76,7 +80,9 @@ export interface MemoryWireMsg {
 export const memoryChat = {
   modelStatus: () => invoke<ChatModelStatus>("memory_chat_model_status"),
   modelDownload: () => invoke<void>("memory_chat_model_download"),
-  modelLoad: () => invoke<void>("memory_chat_model_load"),
+  modelLoad: () => invoke<ChatBackend>("memory_chat_model_load"),
+  /** Backend of the cached model, or null if not loaded yet. */
+  backend: () => invoke<ChatBackend | null>("memory_chat_backend"),
   send: (streamId: string, projectPath: string, messages: MemoryWireMsg[]) =>
     invoke<void>("memory_chat_send", { streamId, projectPath, messages }),
   retrieve: (projectPath: string, query: string) =>

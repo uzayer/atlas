@@ -145,7 +145,10 @@ codegen-units = 1   # Single codegen unit → better cross-function inlining
 lto = "fat"         # Fat LTO: maximum cross-crate dead-code elimination +
                     # inlining (smaller binary; ~2× link time vs thin)
 strip = "symbols"   # Smaller .app bundle, faster dyld load
-panic = "abort"     # Smaller binary; we don't `catch_unwind` anywhere
+panic = "unwind"    # REQUIRED: the local-LLM loader (memory_chat / atlas-embed)
+                    # `catch_unwind`s candle's Metal kernel-compile panic to fall
+                    # back to CPU. `abort` would crash the app instead of degrading
+                    # gracefully. Costs a little binary size for unwind tables.
 opt-level = 3       # Default for release, restated for clarity
 
 # Dev profile — Atlas's own app crate is small (~170 LOC + a handful of

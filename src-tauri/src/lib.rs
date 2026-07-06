@@ -475,6 +475,7 @@ pub fn run() {
             commands::memory_chat::memory_chat_model_status,
             commands::memory_chat::memory_chat_model_download,
             commands::memory_chat::memory_chat_model_load,
+            commands::memory_chat::memory_chat_backend,
             commands::memory_chat::memory_chat_send,
             commands::memory_chat::memory_chat_cancel,
             commands::memory_chat::memory_chat_retrieve,

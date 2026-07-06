@@ -20,21 +20,39 @@ use tokenizers::Tokenizer;
 /// Qwen3 ChatML control tokens. Generation stops at either.
 const STOP_TOKENS: [&str; 2] = ["<|im_end|>", "<|endoftext|>"];
 
-/// Pick the fastest available device: the Apple-Silicon GPU via Metal when the
-/// `metal` feature is compiled in, else CPU. Metal init failures (e.g. headless
-/// CI) fall back to CPU rather than erroring.
-fn best_device() -> Device {
-    #[cfg(feature = "metal")]
-    {
-        match Device::new_metal(0) {
-            Ok(d) => {
-                eprintln!("atlas-embed: chat model using Metal device");
-                return d;
-            }
-            Err(e) => eprintln!("atlas-embed: Metal init failed ({e}); using CPU"),
+/// Which compute backend the loaded model actually runs on. Surfaced to the UI
+/// so it can show a "Metal" vs "CPU" pill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatBackend {
+    /// Apple-Silicon GPU via candle's Metal backend.
+    Metal,
+    /// CPU — either no GPU, forced off, or Metal kernel-compile fell back.
+    Cpu,
+}
+
+impl ChatBackend {
+    /// Stable lowercase tag for IPC (`"metal"` / `"cpu"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatBackend::Metal => "metal",
+            ChatBackend::Cpu => "cpu",
         }
     }
-    Device::Cpu
+}
+
+/// Try to build the Apple-Silicon Metal device. `None` when the `metal` feature
+/// is off, the caller forced CPU, or device init itself fails (e.g. headless CI).
+/// Note: device init succeeding does NOT mean candle's Metal *kernels* will
+/// compile on this OS — that failure surfaces later, hence the guarded load.
+#[cfg(feature = "metal")]
+fn metal_device() -> Option<Device> {
+    match Device::new_metal(0) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            eprintln!("atlas-embed: Metal init failed ({e}); using CPU");
+            None
+        }
+    }
 }
 
 pub struct QuantizedChatModel {
@@ -42,19 +60,90 @@ pub struct QuantizedChatModel {
     tokenizer: Tokenizer,
     device: Device,
     stop_ids: Vec<u32>,
+    backend: ChatBackend,
 }
 
 impl QuantizedChatModel {
-    /// Load a GGUF checkpoint + its tokenizer. `gguf_path` is a quantized
-    /// Qwen2.5-Instruct file; `tokenizer_path` the matching `tokenizer.json`.
+    /// Load a GGUF checkpoint + its tokenizer, preferring the Apple-Silicon GPU
+    /// but resiliently falling back to CPU. `gguf_path` is a quantized Qwen3
+    /// file; `tokenizer_path` the matching `tokenizer.json`.
+    ///
+    /// The Metal path is panic-guarded: candle compiles its quantized-matmul
+    /// Metal kernels lazily and `.unwrap()`s the result *inside*
+    /// `candle-metal-kernels`, so an OS/toolchain metallib mismatch (the "AIR
+    /// builtin ... no definition was found" CompilerError) panics rather than
+    /// returning an `Err`. We catch that panic (and any `Err`), then retry on
+    /// CPU — the 0.6B Q4 model is perfectly usable there.
+    ///
+    /// Set `force_cpu` (e.g. from a persisted "Metal incompatible" marker or the
+    /// `ATLAS_EMBED_CPU` env var) to skip the Metal attempt entirely. Returns the
+    /// model plus `fell_back = true` when a Metal attempt was tried and failed,
+    /// so the caller can persist that decision.
     pub fn load(gguf_path: &Path, tokenizer_path: &Path) -> Result<Self> {
-        let device = best_device();
+        Self::load_with(gguf_path, tokenizer_path, false).map(|(m, _)| m)
+    }
+
+    /// Like [`load`] but exposes the force-CPU switch and whether a Metal attempt
+    /// fell back. `force_cpu` OR the `ATLAS_EMBED_CPU` env var skips Metal.
+    pub fn load_with(
+        gguf_path: &Path,
+        tokenizer_path: &Path,
+        force_cpu: bool,
+    ) -> Result<(Self, bool)> {
+        let env_cpu = std::env::var_os("ATLAS_EMBED_CPU").is_some();
+
+        #[cfg(feature = "metal")]
+        {
+            if !force_cpu && !env_cpu {
+                if let Some(dev) = metal_device() {
+                    // candle's kernel-compile panic lives inside catch_unwind;
+                    // AssertUnwindSafe because candle types aren't UnwindSafe.
+                    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::load_on(gguf_path, tokenizer_path, dev, ChatBackend::Metal)
+                    }));
+                    match attempt {
+                        Ok(Ok(model)) => return Ok((model, false)),
+                        Ok(Err(e)) => eprintln!(
+                            "atlas-embed: Metal chat-model load failed ({e}); falling back to CPU"
+                        ),
+                        Err(_) => eprintln!(
+                            "atlas-embed: Metal chat-model kernels failed to compile \
+                             (candle/OS metallib mismatch); falling back to CPU"
+                        ),
+                    }
+                    // Reached only on Metal failure: retry on CPU, flagged as fallback.
+                    let model =
+                        Self::load_on(gguf_path, tokenizer_path, Device::Cpu, ChatBackend::Cpu)?;
+                    return Ok((model, true));
+                }
+            }
+        }
+
+        let _ = (force_cpu, env_cpu); // silence unused warnings when metal is off
+        let model = Self::load_on(gguf_path, tokenizer_path, Device::Cpu, ChatBackend::Cpu)?;
+        Ok((model, false))
+    }
+
+    /// Build the model on an explicit device. Ends with a one-token warm-up
+    /// forward so candle's lazy Metal kernel compilation surfaces here (inside
+    /// the caller's panic guard) rather than mid-generation.
+    fn load_on(
+        gguf_path: &Path,
+        tokenizer_path: &Path,
+        device: Device,
+        backend: ChatBackend,
+    ) -> Result<Self> {
         let mut file = std::fs::File::open(gguf_path)
             .with_context(|| format!("open {}", gguf_path.display()))?;
         let content = gguf_file::Content::read(&mut file)
             .map_err(|e| anyhow!("read gguf header: {e}"))?;
-        let model = ModelWeights::from_gguf(content, &mut file, &device)
+        let mut model = ModelWeights::from_gguf(content, &mut file, &device)
             .map_err(|e| anyhow!("load gguf weights: {e}"))?;
+
+        // Warm-up: force any lazily-compiled matmul kernels to build now.
+        let warm = Tensor::new(&[0u32], &device)?.unsqueeze(0)?;
+        let _ = model.forward(&warm, 0)?;
+        model.clear_kv_cache();
 
         let tokenizer =
             Tokenizer::from_file(tokenizer_path).map_err(|e| anyhow!("load tokenizer: {e}"))?;
@@ -69,7 +158,13 @@ impl QuantizedChatModel {
             tokenizer,
             device,
             stop_ids,
+            backend,
         })
+    }
+
+    /// The compute backend this model is actually running on.
+    pub fn backend(&self) -> ChatBackend {
+        self.backend
     }
 
     /// Stream a completion for an already chat-templated `prompt`. `on_token` is
