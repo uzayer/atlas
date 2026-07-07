@@ -81,7 +81,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   embeddingModelId: "all-MiniLM-L6-v2",
   llmModelId: "qwen3-0.6b",
   codeEditorTheme: DEFAULT_EDITOR_THEME_ID,
-  adaptiveSuggestions: "parse",
+  adaptiveSuggestions: "llm",
   autoUpdate: true,
   updaterIgnoredVersion: null,
 };
