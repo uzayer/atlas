@@ -1,32 +1,51 @@
-//! In-app auto-updater (macOS DMG).
+//! In-app auto-updater (macOS DMG) — Figma/VSCode/Zed-style **background staged**
+//! updates.
 //!
-//! Atlas ships as an Apple-signed + notarized + stapled `.dmg`. There is no
-//! Tauri-updater `.app.tar.gz`/minisign artifact, so we do **not** use the Tauri
-//! updater plugin — instead this module checks PostHog remote config for the
-//! latest version + DMG URL, and, on the user's choice, downloads the DMG,
-//! verifies its Apple code signature (the trust anchor), and swaps the running
-//! `Atlas.app` bundle in place.
+//! Atlas ships as an Apple-signed + notarized + stapled `.dmg` (no Tauri-updater
+//! `.app.tar.gz`/minisign artifact), so we don't use the Tauri updater plugin.
+//! Instead:
 //!
-//! - `version` / `uri` come from PostHog remote config via
-//!   [`TelemetryClient::fetch_remote_config`] (works even when telemetry is
-//!   opted out — updates are not analytics).
-//! - The check runs non-blocking on every startup ([`check_in_background`]),
-//!   gated on the `auto_update` preference and the "ignored version".
-//! - The frontend renders the prompt and drives install via commands.
+//! 1. On startup (and every few hours) a non-blocking check queries PostHog
+//!    remote config for `{version, uri}` ([`check_in_background`]).
+//! 2. If newer, the DMG is **downloaded in the background** (resumable) to a
+//!    staging dir — the app stays fully usable, only a titlebar arc shows.
+//! 3. The DMG's Apple signature is verified and the `.app` is unpacked into a
+//!    pending "staged" location (the running binary is untouched).
+//! 4. The user is notified non-blockingly ("Restart to update"). They can
+//!    **Restart now** (swap + relaunch) or **Later** — in which case the staged
+//!    update is applied automatically on the next natural quit ([`apply_on_exit`]).
+//!
+//! Everything is `auto_update`-gated and honors an "ignored version".
 //!
 //! Events emitted to the frontend:
-//!   `atlas:update-available` `{ version, currentVersion }`
-//!   `atlas:update-progress`  `{ downloaded, total }`
-//!   `atlas:update-error`     `{ message, dmgOpened }`
+//!   `atlas:update-checking` `{ checking }`
+//!   `atlas:update-available` `{ version, currentVersion }`      (download starting)
+//!   `atlas:update-progress`  `{ version, downloaded, total, phase }`
+//!   `atlas:update-ready`     `{ version }`                       (staged, restart to apply)
+//!   `atlas:update-error`     `{ message }`
+//!   `atlas:update-applied`   `{ version }`                       (post-restart toast)
 
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::io::AsyncWriteExt;
+
+/// Concurrent connections used to fetch the DMG. GitHub release assets (S3)
+/// throttle per-connection, so a single stream can be very slow (~67 KB/s seen
+/// for a 20 MB file); splitting into ranged segments saturates the link.
+const DL_CONNECTIONS: u64 = 8;
+/// Below this size, parallelism isn't worth the extra requests — stream it.
+const DL_PARALLEL_MIN: u64 = 4 * 1024 * 1024;
+/// Flush accumulated bytes to disk once a segment buffers this much.
+const DL_WRITE_CHUNK: usize = 1024 * 1024;
 
 use crate::state::{AppState, AppStateHandle};
 use crate::telemetry::{RemoteUpdateConfig, TelemetryClient};
@@ -39,11 +58,33 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// fetched over an attacker-controllable remote-config URL.
 const EXPECTED_TEAM_ID: &str = "PLKDA3WBJJ";
 
-/// Holds the latest `{version, uri}` seen by a check, so `update_install` can
-/// act on it without re-fetching remote config.
+/// How often to re-check for updates while the app runs.
+const RECHECK_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Persisted record of a staged update (`<app_data>/updates/staging.json`).
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct Staging {
+    version: String,
+    /// Path to the verified, unpacked `.app` once ready.
+    staged_app: Option<String>,
+    /// The DMG has been downloaded, verified, and unpacked — ready to swap.
+    ready: bool,
+    /// The swap has been performed (applied on restart/quit) — used at startup
+    /// to detect a completed update and clean up.
+    #[serde(default)]
+    applied: bool,
+}
+
+/// In-memory updater state (managed).
 #[derive(Default)]
 pub struct UpdaterState {
+    /// Latest `{version, uri}` from a check.
     pending: Mutex<Option<RemoteUpdateConfig>>,
+    /// Guards against concurrent background downloads.
+    downloading: AtomicBool,
+    /// Version currently staged + ready (mirror of the on-disk manifest).
+    ready: Mutex<Option<String>>,
 }
 
 impl UpdaterState {
@@ -51,6 +92,35 @@ impl UpdaterState {
         Self::default()
     }
 }
+
+// ── Paths / manifest ─────────────────────────────────────────────────────────
+
+fn updates_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir: {e}"))?;
+    Ok(base.join("updates"))
+}
+
+fn manifest_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(updates_dir(app)?.join("staging.json"))
+}
+
+fn load_manifest(app: &AppHandle) -> Option<Staging> {
+    let path = manifest_path(app).ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn save_manifest(app: &AppHandle, m: &Staging) -> Result<(), String> {
+    let dir = updates_dir(app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("updates dir: {e}"))?;
+    let raw = serde_json::to_string_pretty(m).map_err(|e| format!("serialize manifest: {e}"))?;
+    std::fs::write(dir.join("staging.json"), raw).map_err(|e| format!("write manifest: {e}"))
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -60,8 +130,17 @@ pub struct UpdateStatus {
     pub current_version: String,
 }
 
-/// Semver "is `remote` strictly newer than `current`?". Returns false if either
-/// side fails to parse (never prompt on garbage).
+/// UI-hydration snapshot (Settings / titlebar on mount).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdaterSnapshot {
+    /// "idle" | "downloading" | "ready"
+    pub phase: String,
+    pub version: Option<String>,
+    pub current_version: String,
+}
+
+/// Semver "is `remote` strictly newer than `current`?". False on parse failure.
 fn is_newer(remote: &str, current: &str) -> bool {
     match (
         semver::Version::parse(remote.trim()),
@@ -72,7 +151,6 @@ fn is_newer(remote: &str, current: &str) -> bool {
     }
 }
 
-/// Read a snapshot of the two updater-relevant settings.
 fn read_settings(app: &AppHandle) -> (bool, Option<String>) {
     let state = app.state::<AppStateHandle>();
     let guard = state.lock();
@@ -82,20 +160,27 @@ fn read_settings(app: &AppHandle) -> (bool, Option<String>) {
     )
 }
 
-/// Fetch remote config via the shared telemetry client (key/host reuse).
 async fn fetch_remote(app: &AppHandle) -> Option<RemoteUpdateConfig> {
     let tel = app.state::<Arc<TelemetryClient>>().inner().clone();
     tel.fetch_remote_config().await
 }
 
-/// Emit the "backend is / isn't checking for updates" signal (drives the
-/// titlebar loading indicator).
 fn emit_checking(app: &AppHandle, checking: bool) {
     let _ = app.emit("atlas:update-checking", serde_json::json!({ "checking": checking }));
 }
 
-/// Non-blocking startup check. Honors the `auto_update` toggle + ignored
-/// version; emits `atlas:update-available` when a newer version exists.
+fn emit_progress(app: &AppHandle, version: &str, downloaded: u64, total: u64, phase: &str) {
+    let _ = app.emit(
+        "atlas:update-progress",
+        serde_json::json!({ "version": version, "downloaded": downloaded, "total": total, "phase": phase }),
+    );
+}
+
+// ── Check ────────────────────────────────────────────────────────────────────
+
+/// Non-blocking check. Honors `auto_update` + ignored version. If a newer
+/// version is found, kicks off the background download+stage (or re-notifies
+/// "ready" if it's already staged). Emits `atlas:update-available`.
 pub fn check_in_background(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -106,34 +191,47 @@ pub fn check_in_background(app: &AppHandle) {
         emit_checking(&app, true);
         let cfg = fetch_remote(&app).await;
         emit_checking(&app, false);
-        let Some(cfg) = cfg else {
-            return;
-        };
+        let Some(cfg) = cfg else { return };
         if !is_newer(&cfg.version, CURRENT_VERSION) {
             return;
         }
         if ignored.as_deref() == Some(cfg.version.as_str()) {
             return;
         }
-        *app.state::<UpdaterState>().pending.lock() = Some(cfg.clone());
-        let _ = app.emit(
-            "atlas:update-available",
-            serde_json::json!({
-                "version": cfg.version,
-                "currentVersion": CURRENT_VERSION,
-            }),
-        );
+        maybe_start_update(&app, cfg, false).await;
     });
 }
 
-/// Manual "Check for updates" (Settings). Ignores the auto_update / ignored-
-/// version gates — an explicit user action always re-checks. Emits
-/// `atlas:update-available` (so the same modal shows) when newer.
+/// Given a newer remote config, either re-notify a matching staged update or
+/// start the background download. `force` bypasses the ignored-version gate
+/// (used by the manual check).
+async fn maybe_start_update(app: &AppHandle, cfg: RemoteUpdateConfig, _force: bool) {
+    *app.state::<UpdaterState>().pending.lock() = Some(cfg.clone());
+
+    // Already downloaded + staged for this exact version → just notify.
+    if let Some(m) = load_manifest(app) {
+        if m.ready && m.version == cfg.version {
+            if let Some(p) = &m.staged_app {
+                if Path::new(p).exists() {
+                    *app.state::<UpdaterState>().ready.lock() = Some(cfg.version.clone());
+                    let _ = app.emit("atlas:update-ready", serde_json::json!({ "version": cfg.version }));
+                    return;
+                }
+            }
+        }
+    }
+
+    let _ = app.emit(
+        "atlas:update-available",
+        serde_json::json!({ "version": cfg.version, "currentVersion": CURRENT_VERSION }),
+    );
+    download_and_stage(app.clone(), cfg).await;
+}
+
+/// Manual "Check for updates" — bypasses the auto_update / ignored gates (an
+/// explicit user action). Triggers the background download when newer.
 #[tauri::command]
-pub async fn update_check_now(
-    app: AppHandle,
-    state: State<'_, UpdaterState>,
-) -> Result<UpdateStatus, String> {
+pub async fn update_check_now(app: AppHandle) -> Result<UpdateStatus, String> {
     emit_checking(&app, true);
     let cfg = fetch_remote(&app).await;
     emit_checking(&app, false);
@@ -143,21 +241,48 @@ pub async fn update_check_now(
         .unwrap_or(false);
     let version = cfg.as_ref().map(|c| c.version.clone());
     if available {
-        let cfg = cfg.unwrap();
-        *state.pending.lock() = Some(cfg.clone());
-        let _ = app.emit(
-            "atlas:update-available",
-            serde_json::json!({
-                "version": cfg.version,
-                "currentVersion": CURRENT_VERSION,
-            }),
-        );
+        maybe_start_update(&app, cfg.unwrap(), true).await;
     }
     Ok(UpdateStatus {
         available,
         version,
         current_version: CURRENT_VERSION.to_string(),
     })
+}
+
+/// Current updater state for UI hydration on mount.
+#[tauri::command]
+pub fn update_state(app: AppHandle, state: State<'_, UpdaterState>) -> UpdaterSnapshot {
+    if let Some(v) = state.ready.lock().clone() {
+        return UpdaterSnapshot {
+            phase: "ready".into(),
+            version: Some(v),
+            current_version: CURRENT_VERSION.to_string(),
+        };
+    }
+    if state.downloading.load(Ordering::SeqCst) {
+        let v = state.pending.lock().as_ref().map(|c| c.version.clone());
+        return UpdaterSnapshot {
+            phase: "downloading".into(),
+            version: v,
+            current_version: CURRENT_VERSION.to_string(),
+        };
+    }
+    // Fall back to the on-disk manifest (e.g. staged before this window mounted).
+    if let Some(m) = load_manifest(&app) {
+        if m.ready && is_newer(&m.version, CURRENT_VERSION) {
+            return UpdaterSnapshot {
+                phase: "ready".into(),
+                version: Some(m.version),
+                current_version: CURRENT_VERSION.to_string(),
+            };
+        }
+    }
+    UpdaterSnapshot {
+        phase: "idle".into(),
+        version: None,
+        current_version: CURRENT_VERSION.to_string(),
+    }
 }
 
 /// Persist a "don't prompt for this version again" choice.
@@ -181,93 +306,330 @@ pub fn update_ignore(
     Ok(())
 }
 
-/// Download + install the pending update's DMG. `relaunch=true` restarts into
-/// the new version immediately ("Install now"); `false` swaps the bundle and
-/// returns, so the *next* launch is the new version ("Install on next launch").
-#[tauri::command]
-pub async fn update_install(
-    relaunch: bool,
-    app: AppHandle,
-    state: State<'_, UpdaterState>,
-) -> Result<(), String> {
-    // Resolve the DMG URL — prefer the cached pending config, else re-fetch.
-    // Scope the guard so it isn't held across the await (keeps the future Send).
-    let pending = { state.pending.lock().clone() };
-    let cfg = match pending {
-        Some(c) => c,
-        None => fetch_remote(&app)
-            .await
-            .ok_or_else(|| "no update information available".to_string())?,
-    };
+// ── Download + stage ─────────────────────────────────────────────────────────
 
-    let app_bg = app.clone();
-    let install = tauri::async_runtime::spawn_blocking(move || install_dmg(&app_bg, &cfg.uri))
-        .await
-        .map_err(|e| format!("install task join: {e}"))?;
+/// Orchestrate a background download → verify → stage. Single-flight via the
+/// `downloading` guard. On success emits `atlas:update-ready`.
+async fn download_and_stage(app: AppHandle, cfg: RemoteUpdateConfig) {
+    if app
+        .state::<UpdaterState>()
+        .downloading
+        .swap(true, Ordering::SeqCst)
+    {
+        return; // a download is already in flight
+    }
+    let result = do_download_and_stage(&app, &cfg).await;
+    app.state::<UpdaterState>()
+        .downloading
+        .store(false, Ordering::SeqCst);
 
-    match install {
-        Ok(()) => {
-            if relaunch {
-                app.restart();
-            }
-            Ok(())
+    match result {
+        Ok(_) => {
+            *app.state::<UpdaterState>().ready.lock() = Some(cfg.version.clone());
+            let _ = app.emit("atlas:update-ready", serde_json::json!({ "version": cfg.version }));
         }
         Err(e) => {
-            let _ = app.emit(
-                "atlas:update-error",
-                serde_json::json!({ "message": e, "dmgOpened": false }),
-            );
-            Err(e)
+            tracing::warn!(target: "atlas::updater", "download/stage failed: {e}");
+            let _ = app.emit("atlas:update-error", serde_json::json!({ "message": e }));
         }
     }
 }
 
-/// The blocking DMG install pipeline: download → mount → verify Apple signature
-/// → swap the app bundle → detach. On a swap failure, opens the DMG for a manual
-/// drag-install and reports it.
-fn install_dmg(app: &AppHandle, uri: &str) -> Result<(), String> {
-    let tmp_dir = std::env::temp_dir().join(format!("atlas-update-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("temp dir: {e}"))?;
-    let dmg_path = tmp_dir.join("Atlas-update.dmg");
+async fn do_download_and_stage(app: &AppHandle, cfg: &RemoteUpdateConfig) -> Result<PathBuf, String> {
+    let dir = updates_dir(app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("updates dir: {e}"))?;
+    let dmg = dir.join(format!("Atlas-{}.dmg", cfg.version));
+    let part = dir.join(format!("Atlas-{}.dmg.part", cfg.version));
 
-    // 1. Download (streamed, with progress). A tiny current-thread runtime keeps
-    //    this whole routine synchronous/blocking-friendly.
-    download_blocking(app, uri, &dmg_path).map_err(|e| {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        e
-    })?;
+    // Already fully staged? short-circuit.
+    if let Some(m) = load_manifest(app) {
+        if m.ready && m.version == cfg.version {
+            if let Some(p) = m.staged_app {
+                if Path::new(&p).exists() {
+                    return Ok(PathBuf::from(p));
+                }
+            }
+        }
+    }
 
-    // 2. Mount read-only, no Finder window.
-    let mount_point = tmp_dir.join("mnt");
+    if !dmg.exists() {
+        download_to(app, &cfg.uri, &part, &dmg, &cfg.version).await?;
+    }
+
+    // Mount + verify + unpack (blocking / subprocess heavy).
+    let appc = app.clone();
+    let dmgc = dmg.clone();
+    let dirc = dir.clone();
+    let ver = cfg.version.clone();
+    let staged = tauri::async_runtime::spawn_blocking(move || stage_from_dmg(&appc, &dmgc, &dirc, &ver))
+        .await
+        .map_err(|e| format!("stage join: {e}"))??;
+
+    save_manifest(
+        app,
+        &Staging {
+            version: cfg.version.clone(),
+            staged_app: Some(staged.to_string_lossy().into_owned()),
+            ready: true,
+            applied: false,
+        },
+    )?;
+    // The DMG is unpacked; free the disk space (keep only the staged .app).
+    let _ = std::fs::remove_file(&dmg);
+    Ok(staged)
+}
+
+/// Download the DMG to `part`, then atomically rename to `final_path`. Uses a
+/// **parallel multi-connection range download** when the server supports it
+/// (fast on throttled CDNs like GitHub/S3); falls back to a single stream.
+async fn download_to(
+    app: &AppHandle,
+    uri: &str,
+    part: &Path,
+    final_path: &Path,
+    version: &str,
+) -> Result<(), String> {
+    // One pooled client shared by every connection.
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    // Probe with a 1-byte ranged GET: a 206 + `Content-Range: …/<total>` tells us
+    // the size AND that range requests work (so we can parallelize).
+    let (total, ranges_ok) = probe_size(&client, uri).await;
+
+    let _ = std::fs::remove_file(part);
+    let mut ok = false;
+    if ranges_ok && total >= DL_PARALLEL_MIN {
+        match download_parallel(app, &client, uri, part, total, version).await {
+            Ok(()) => ok = true,
+            Err(e) => {
+                // Range handling can misbehave behind some redirects/CDNs; degrade
+                // to a correct (if slower) single stream rather than fail.
+                tracing::warn!(target: "atlas::updater", "parallel download failed ({e}); falling back to single stream");
+                let _ = std::fs::remove_file(part);
+            }
+        }
+    }
+    if !ok {
+        download_stream(app, &client, uri, part, total, version).await?;
+    }
+
+    std::fs::rename(part, final_path).map_err(|e| {
+        let _ = std::fs::remove_file(part);
+        format!("finalize download: {e}")
+    })
+}
+
+/// Returns `(total_bytes, range_supported)`. `total = 0` when unknown.
+async fn probe_size(client: &reqwest::Client, uri: &str) -> (u64, bool) {
+    let resp = client
+        .get(uri)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .await;
+    let Ok(resp) = resp else { return (0, false) };
+    if resp.status().as_u16() == 206 {
+        // Content-Range: "bytes 0-0/12345"
+        if let Some(total) = resp
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.rsplit('/').next())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            return (total, true);
+        }
+    }
+    // Range not honored — fall back to the full length if advertised.
+    (resp.content_length().unwrap_or(0), false)
+}
+
+/// Parallel range download: pre-size the file, fetch N byte-ranges concurrently,
+/// each writing at its absolute offset. A ticker emits smooth progress.
+async fn download_parallel(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    uri: &str,
+    part: &Path,
+    total: u64,
+    version: &str,
+) -> Result<(), String> {
+    let file = std::fs::File::create(part).map_err(|e| format!("create part: {e}"))?;
+    file.set_len(total).map_err(|e| format!("size part: {e}"))?;
+    let file = Arc::new(file);
+
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let done = Arc::new(AtomicBool::new(false));
+
+    // Progress ticker — decoupled from the writers so emits stay smooth and
+    // aren't multiplied by the concurrent connections.
+    let ticker = {
+        let app = app.clone();
+        let downloaded = downloaded.clone();
+        let done = done.clone();
+        let version = version.to_string();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                emit_progress(&app, &version, downloaded.load(Ordering::Relaxed), total, "downloading");
+                if done.load(Ordering::Relaxed) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+    };
+
+    let seg = total.div_ceil(DL_CONNECTIONS);
+    let mut handles = Vec::new();
+    let mut start = 0u64;
+    while start < total {
+        let end = (start + seg).min(total) - 1;
+        let client = client.clone();
+        let uri = uri.to_string();
+        let file = file.clone();
+        let downloaded = downloaded.clone();
+        handles.push(tauri::async_runtime::spawn(async move {
+            download_segment(&client, &uri, start, end, file, downloaded).await
+        }));
+        start += seg;
+    }
+
+    let mut err: Option<String> = None;
+    for h in handles {
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => err = Some(e),
+            Err(e) => err = Some(format!("segment join: {e}")),
+        }
+    }
+    done.store(true, Ordering::Relaxed);
+    let _ = ticker.await;
+
+    if let Some(e) = err {
+        let _ = std::fs::remove_file(part);
+        return Err(e);
+    }
+    emit_progress(app, version, total, total, "downloading");
+    Ok(())
+}
+
+/// Fetch one byte-range and write it at its absolute offset (positional writes
+/// are safe to run concurrently on non-overlapping ranges).
+async fn download_segment(
+    client: &reqwest::Client,
+    uri: &str,
+    start: u64,
+    end: u64,
+    file: Arc<std::fs::File>,
+    downloaded: Arc<AtomicU64>,
+) -> Result<(), String> {
+    let resp = client
+        .get(uri)
+        .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
+        .send()
+        .await
+        .map_err(|e| format!("segment request: {e}"))?;
+    // Require a *partial* response — a 200 means the server ignored the Range and
+    // sent the whole file, which would corrupt this offset-based writer.
+    if resp.status().as_u16() != 206 {
+        return Err(format!("segment download not ranged: HTTP {}", resp.status()));
+    }
+
+    let mut offset = start;
+    let mut buf: Vec<u8> = Vec::with_capacity(DL_WRITE_CHUNK);
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("segment chunk: {e}"))?;
+        downloaded.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+        buf.extend_from_slice(&chunk);
+        if buf.len() >= DL_WRITE_CHUNK {
+            let data = std::mem::take(&mut buf);
+            let at = offset;
+            offset += data.len() as u64;
+            let f = file.clone();
+            tokio::task::spawn_blocking(move || f.write_all_at(&data, at))
+                .await
+                .map_err(|e| format!("write join: {e}"))?
+                .map_err(|e| format!("write segment: {e}"))?;
+        }
+    }
+    if !buf.is_empty() {
+        let at = offset;
+        tokio::task::spawn_blocking(move || file.write_all_at(&buf, at))
+            .await
+            .map_err(|e| format!("write join: {e}"))?
+            .map_err(|e| format!("write segment: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Single-connection fallback (no range support / small file).
+async fn download_stream(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    uri: &str,
+    part: &Path,
+    total: u64,
+    version: &str,
+) -> Result<(), String> {
+    let resp = client.get(uri).send().await.map_err(|e| format!("download: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("download failed: HTTP {}", resp.status()));
+    }
+    let total = if total > 0 { total } else { resp.content_length().unwrap_or(0) };
+    let mut file = tokio::fs::File::create(part)
+        .await
+        .map_err(|e| format!("create part: {e}"))?;
+    let mut downloaded = 0u64;
+    let mut last_emit = 0u64;
+    emit_progress(app, version, 0, total, "downloading");
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("download chunk: {e}"))?;
+        file.write_all(&chunk).await.map_err(|e| format!("write: {e}"))?;
+        downloaded += chunk.len() as u64;
+        if downloaded - last_emit >= DL_WRITE_CHUNK as u64 || (total > 0 && downloaded >= total) {
+            last_emit = downloaded;
+            emit_progress(app, version, downloaded, total, "downloading");
+        }
+    }
+    file.flush().await.map_err(|e| format!("flush: {e}"))?;
+    Ok(())
+}
+
+/// Mount the DMG, verify its Apple signature, and unpack the `.app` into
+/// `<updates>/staged/Atlas.app`. Returns the staged `.app` path.
+fn stage_from_dmg(app: &AppHandle, dmg: &Path, dir: &Path, version: &str) -> Result<PathBuf, String> {
+    emit_progress(app, version, 0, 0, "verifying");
+    let mount_point = dir.join("mnt");
+    let _ = std::fs::remove_dir_all(&mount_point);
     std::fs::create_dir_all(&mount_point).map_err(|e| format!("mount dir: {e}"))?;
+
     let out = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
         .arg(&mount_point)
-        .arg(&dmg_path)
+        .arg(dmg)
         .output()
         .map_err(|e| format!("hdiutil attach: {e}"))?;
     if !out.status.success() {
-        let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(format!(
             "failed to mount update DMG: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
 
-    // Everything past mount must detach before returning.
-    let result = install_from_mount(app, &mount_point, &dmg_path);
+    let result = stage_from_mount(&mount_point, dir);
 
     let _ = Command::new("hdiutil")
         .args(["detach", "-quiet"])
         .arg(&mount_point)
         .output();
-    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let _ = std::fs::remove_dir_all(&mount_point);
     result
 }
 
-/// Verify + swap, given a mounted DMG volume.
-fn install_from_mount(app: &AppHandle, mount_point: &Path, dmg_path: &Path) -> Result<(), String> {
-    // Find `*.app` at the volume root.
+fn stage_from_mount(mount_point: &Path, dir: &Path) -> Result<PathBuf, String> {
     let src_app = std::fs::read_dir(mount_point)
         .map_err(|e| format!("read mount: {e}"))?
         .filter_map(|e| e.ok())
@@ -275,63 +637,172 @@ fn install_from_mount(app: &AppHandle, mount_point: &Path, dmg_path: &Path) -> R
         .find(|p| p.extension().map(|x| x == "app").unwrap_or(false))
         .ok_or_else(|| "no .app found in the update DMG".to_string())?;
 
-    // 3. Verify the Apple signature + team id BEFORE trusting the payload.
+    // Verify the Apple signature + team id BEFORE trusting the payload.
     verify_signature(&src_app)?;
 
-    // 4. Resolve the running install location (…/Atlas.app).
-    let dest_app = current_app_bundle()?;
+    let staged_dir = dir.join("staged");
+    let _ = std::fs::remove_dir_all(&staged_dir);
+    std::fs::create_dir_all(&staged_dir).map_err(|e| format!("staged dir: {e}"))?;
+    let staged_app = staged_dir.join("Atlas.app");
 
-    // 5. Swap: back up the current bundle, ditto the new one into place. On any
-    //    failure, restore from backup and fall back to opening the DMG.
-    let backup = dest_app.with_extension("app.bak");
-    let _ = std::fs::remove_dir_all(&backup);
-    if dest_app.exists() {
-        std::fs::rename(&dest_app, &backup)
-            .map_err(|e| swap_fallback(app, dmg_path, format!("back up current app: {e}")))?;
-    }
     let out = Command::new("ditto")
         .arg(&src_app)
-        .arg(&dest_app)
+        .arg(&staged_app)
         .output()
-        .map_err(|e| format!("ditto: {e}"));
-    match out {
-        Ok(o) if o.status.success() => {
-            let _ = std::fs::remove_dir_all(&backup);
-            Ok(())
-        }
-        other => {
-            // Restore the original bundle, then fall back.
-            if backup.exists() {
-                let _ = std::fs::remove_dir_all(&dest_app);
-                let _ = std::fs::rename(&backup, &dest_app);
+        .map_err(|e| format!("ditto: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "failed to unpack update: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(staged_app)
+}
+
+// ── Apply (swap) ─────────────────────────────────────────────────────────────
+
+/// "Restart now": swap the staged `.app` over the running install and relaunch.
+#[tauri::command]
+pub async fn update_apply(app: AppHandle) -> Result<(), String> {
+    let m = load_manifest(&app).ok_or("no update is staged")?;
+    if !m.ready {
+        return Err("update not ready yet".into());
+    }
+    let staged = m.staged_app.clone().ok_or("no staged app")?;
+    let staged_path = PathBuf::from(staged);
+    if !staged_path.exists() {
+        return Err("staged update is missing".into());
+    }
+    let dest = current_app_bundle()?;
+
+    let sp = staged_path.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || swap_app(&sp, &dest))
+        .await
+        .map_err(|e| format!("apply join: {e}"))?;
+
+    match res {
+        Ok(()) => {
+            let _ = save_manifest(
+                &app,
+                &Staging {
+                    version: m.version,
+                    staged_app: None,
+                    ready: false,
+                    applied: true,
+                },
+            );
+            if let Ok(dir) = updates_dir(&app) {
+                let _ = std::fs::remove_dir_all(dir.join("staged"));
             }
-            let detail = match other {
-                Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
-                Err(e) => e,
-            };
-            Err(swap_fallback(app, dmg_path, format!("install failed: {detail}")))
+            app.restart();
+        }
+        Err(e) => {
+            let _ = app.emit("atlas:update-error", serde_json::json!({ "message": e }));
+            Err(e)
         }
     }
 }
 
-/// Open the downloaded DMG in Finder so the user can drag-install manually, and
-/// return an error string that says so. Used when the in-place swap can't run
-/// (e.g. the app dir isn't user-writable).
-fn swap_fallback(app: &AppHandle, dmg_path: &Path, reason: String) -> String {
-    use tauri_plugin_opener::OpenerExt;
-    let opened = app
-        .opener()
-        .open_path(dmg_path.to_string_lossy(), None::<&str>)
-        .is_ok();
-    let _ = app.emit(
-        "atlas:update-error",
-        serde_json::json!({ "message": reason, "dmgOpened": opened }),
-    );
-    if opened {
-        format!("{reason} — opened the installer so you can update manually")
-    } else {
-        reason
+/// Apply a staged update at natural quit ("Later"). Best-effort, blocking, no
+/// relaunch — the next launch is the new version. Skipped for ignored versions.
+pub fn apply_on_exit(app: &AppHandle) {
+    let Some(m) = load_manifest(app) else { return };
+    if !m.ready {
+        return;
     }
+    if !is_newer(&m.version, CURRENT_VERSION) {
+        return;
+    }
+    let ignored = app
+        .state::<AppStateHandle>()
+        .lock()
+        .settings
+        .updater_ignored_version
+        .clone();
+    if ignored.as_deref() == Some(m.version.as_str()) {
+        return;
+    }
+    let Some(staged) = m.staged_app.clone() else { return };
+    let staged_path = PathBuf::from(staged);
+    if !staged_path.exists() {
+        return;
+    }
+    let Ok(dest) = current_app_bundle() else { return };
+    if swap_app(&staged_path, &dest).is_ok() {
+        let _ = save_manifest(
+            app,
+            &Staging {
+                version: m.version,
+                staged_app: None,
+                ready: false,
+                applied: true,
+            },
+        );
+        if let Ok(dir) = updates_dir(app) {
+            let _ = std::fs::remove_dir_all(dir.join("staged"));
+        }
+    }
+}
+
+/// Startup housekeeping: if a staged update was applied (we're now running a
+/// version >= the staged one), clean it up and toast. Call before the first
+/// check.
+pub fn init_on_startup(app: &AppHandle) {
+    let Some(m) = load_manifest(app) else { return };
+    // Running a version at or beyond the staged one → the staging is obsolete
+    // (applied on the previous quit, or superseded by a manual install).
+    if !is_newer(&m.version, CURRENT_VERSION) {
+        if let Ok(dir) = updates_dir(app) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        if m.applied {
+            let _ = app.emit("atlas:update-applied", serde_json::json!({ "version": CURRENT_VERSION }));
+        }
+    }
+}
+
+/// Periodically re-check for updates while the app runs.
+pub fn spawn_periodic(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(RECHECK_INTERVAL);
+        interval.tick().await; // consume the immediate first tick (startup already checked)
+        loop {
+            interval.tick().await;
+            check_in_background(&app);
+        }
+    });
+}
+
+/// Swap `staged` over `dest` with a `.bak` rollback. Tries an atomic rename
+/// (same APFS volume — instant); falls back to a `ditto` copy.
+fn swap_app(staged: &Path, dest: &Path) -> Result<(), String> {
+    let backup = dest.with_extension("app.bak");
+    let _ = std::fs::remove_dir_all(&backup);
+    if dest.exists() {
+        std::fs::rename(dest, &backup).map_err(|e| format!("back up current app: {e}"))?;
+    }
+    // Fast path: atomic directory rename on the same volume.
+    if std::fs::rename(staged, dest).is_err() {
+        let out = Command::new("ditto")
+            .arg(staged)
+            .arg(dest)
+            .output()
+            .map_err(|e| format!("ditto: {e}"))?;
+        if !out.status.success() {
+            // Roll back to the original bundle.
+            let _ = std::fs::remove_dir_all(dest);
+            if backup.exists() {
+                let _ = std::fs::rename(&backup, dest);
+            }
+            return Err(format!(
+                "install failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&backup);
+    Ok(())
 }
 
 /// `codesign --verify --deep --strict` + Team ID match + `spctl` Gatekeeper
@@ -346,13 +817,11 @@ fn verify_signature(app_path: &Path) -> Result<(), String> {
         return Err("update rejected: code signature invalid".into());
     }
 
-    // Team ID gate — the update must be signed by Atlas's Apple team.
     let info = Command::new("codesign")
         .args(["-dvvv"])
         .arg(app_path)
         .output()
         .map_err(|e| format!("codesign -dvvv: {e}"))?;
-    // codesign writes the signing info to stderr.
     let meta = String::from_utf8_lossy(&info.stderr);
     let team_ok = meta
         .lines()
@@ -376,7 +845,6 @@ fn verify_signature(app_path: &Path) -> Result<(), String> {
 /// (`…/Atlas.app/Contents/MacOS/atlas` → `…/Atlas.app`).
 fn current_app_bundle() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    // Strip MacOS/<bin>, Contents, then we're at the .app.
     let app = exe
         .parent() // MacOS
         .and_then(|p| p.parent()) // Contents
@@ -391,46 +859,4 @@ fn current_app_bundle() -> Result<PathBuf, String> {
             app.display()
         ))
     }
-}
-
-/// Streamed download with `atlas:update-progress` events, on a small runtime so
-/// the caller stays a plain blocking fn.
-fn download_blocking(app: &AppHandle, uri: &str, dest: &Path) -> Result<(), String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("runtime: {e}"))?;
-    rt.block_on(async move {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| format!("http client: {e}"))?;
-        let resp = client
-            .get(uri)
-            .send()
-            .await
-            .map_err(|e| format!("download: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("download failed: HTTP {}", resp.status()));
-        }
-        let total = resp.content_length().unwrap_or(0);
-        let mut file = std::fs::File::create(dest).map_err(|e| format!("create dmg: {e}"))?;
-        let mut downloaded: u64 = 0;
-        let mut stream = resp.bytes_stream();
-        let mut last_emit: u64 = 0;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("download chunk: {e}"))?;
-            use std::io::Write;
-            file.write_all(&chunk).map_err(|e| format!("write dmg: {e}"))?;
-            downloaded += chunk.len() as u64;
-            // Throttle emits to ~every 1 MB to avoid flooding the event bus.
-            if downloaded - last_emit >= 1_048_576 || downloaded == total {
-                last_emit = downloaded;
-                let _ = app.emit(
-                    "atlas:update-progress",
-                    serde_json::json!({ "downloaded": downloaded, "total": total }),
-                );
-            }
-        }
-        Ok(())
-    })
 }

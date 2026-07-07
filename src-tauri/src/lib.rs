@@ -161,10 +161,13 @@ pub fn run() {
             // Silent background refresh of model pricing from models.dev — first
             // launch populates the cache; later launches update only on change.
             commands::models_pricing::refresh_in_background(&app.handle());
-            // Non-blocking auto-update check against PostHog remote config. Gated
-            // on the `auto_update` preference; emits `atlas:update-available` when
-            // a newer signed DMG is published. See `commands::updater`.
+            // Auto-update: clean up any staged update that already took effect,
+            // then run a non-blocking background check + a periodic re-check. The
+            // download/verify/stage happens silently; the user is only prompted
+            // once it's ready to restart. See `commands::updater`.
+            commands::updater::init_on_startup(&app.handle());
             commands::updater::check_in_background(&app.handle());
+            commands::updater::spawn_periodic(&app.handle());
 
             // Background memory indexer (Step 4): a single owned Tokio task drains
             // a bounded queue and indexes each open project's corpus into its
@@ -393,7 +396,8 @@ pub fn run() {
             commands::telemetry::telemetry_set_enabled,
             commands::telemetry::telemetry_capture,
             commands::updater::update_check_now,
-            commands::updater::update_install,
+            commands::updater::update_apply,
+            commands::updater::update_state,
             commands::updater::update_ignore,
             commands::compose_prompt::compose_prompt,
             commands::cli::cli_status,
@@ -526,6 +530,13 @@ pub fn run() {
             commands::skills::pack_projections,
             commands::skills::pack_components_list,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Atlas");
+        .build(tauri::generate_context!())
+        .expect("error while building Atlas")
+        .run(|app_handle, event| {
+            // Apply-on-quit: if the user chose "Later" for a staged update, swap
+            // it in on the way out so the next launch is the new version.
+            if let tauri::RunEvent::Exit = event {
+                commands::updater::apply_on_exit(app_handle);
+            }
+        });
 }

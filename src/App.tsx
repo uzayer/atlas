@@ -55,12 +55,14 @@ import { NotificationPanel } from "@/features/notifications/components/notificat
 import { UpdateAvailableModal } from "@/features/updater/components/update-available-modal";
 import { useUpdaterStore } from "@/features/updater/stores/updater-store";
 import {
-  listenUpdateAvailable,
+  updater,
   listenUpdateProgress,
+  listenUpdateReady,
+  listenUpdateApplied,
   listenUpdateError,
   listenUpdateChecking,
 } from "@/features/updater/lib/updater-api";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
 import { clampScale, SCALE_STEP, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
 
 // Interface-zoom helpers (⌘+/⌘-/⌘0). They read + write the persisted
@@ -136,23 +138,30 @@ export function App() {
   }, []);
 
   // Auto-update: route the Rust updater events into the updater store, which
-  // drives the <UpdateAvailableModal />. The startup check runs in Rust; here we
-  // just reflect its outcome. See src/features/updater + commands::updater.
+  // drives the titlebar arc/badge and the <UpdateAvailableModal />. The
+  // check/download/verify/stage all run in Rust; here we just reflect the phase.
+  // See src/features/updater + commands::updater.
   useEffect(() => {
+    const a = useUpdaterStore.getState().actions;
     const offs: Array<Promise<() => void>> = [
-      listenUpdateAvailable((e) => {
-        useUpdaterStore.getState().actions.setAvailable(e.version, e.currentVersion);
+      listenUpdateProgress((e) => a.setDownloading(e.version, e.downloaded, e.total, e.phase)),
+      listenUpdateReady((e) => a.setReady(e.version)),
+      listenUpdateApplied((e) => {
+        a.reset();
+        toast.success(`Updated to Atlas ${e.version}.`);
       }),
-      listenUpdateProgress((e) => {
-        useUpdaterStore.getState().actions.setProgress(e.downloaded, e.total);
-      }),
-      listenUpdateError((e) => {
-        useUpdaterStore.getState().actions.setError(e.message);
-      }),
-      listenUpdateChecking((e) => {
-        useUpdaterStore.getState().actions.setChecking(e.checking);
-      }),
+      listenUpdateError((e) => a.setError(e.message)),
+      listenUpdateChecking((e) => a.setChecking(e.checking)),
     ];
+    // Hydrate from the current backend state (e.g. staged before this mount).
+    // Show the titlebar badge but don't pop the modal on launch — the live
+    // `atlas:update-ready` event opens it; hydration is badge-only.
+    void updater.state().then((s) => {
+      if (s.phase === "ready" && s.version) {
+        a.setReady(s.version);
+        a.dismissModal();
+      }
+    });
     return () => {
       for (const p of offs) void p.then((off) => off());
     };

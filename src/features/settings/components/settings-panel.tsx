@@ -39,6 +39,7 @@ import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { setEnabled as setTelemetryEnabled } from "@/features/telemetry/posthog-client";
 import { updater } from "@/features/updater/lib/updater-api";
+import { useUpdaterStore } from "@/features/updater/stores/updater-store";
 import { useSettingsNav } from "../stores/settings-nav-store";
 import { isDev } from "@/lib/env";
 
@@ -387,14 +388,21 @@ function AppearanceSettings() {
 function UpdatesSettings() {
   const settings = useProjectStore.use.settings();
   const { updateSettings } = useProjectStore.use.actions();
+  const phase = useUpdaterStore.use.phase();
+  const version = useUpdaterStore.use.version();
+  const progress = useUpdaterStore.use.progress();
+  const { beginApply, setError } = useUpdaterStore.use.actions();
   const [checking, setChecking] = useState(false);
+
+  const downloading = phase === "downloading";
+  const ready = phase === "ready" || phase === "applying";
 
   const checkNow = async () => {
     setChecking(true);
     try {
       const status = await updater.checkNow();
-      // When an update exists, Rust emits `atlas:update-available` and the
-      // root-level modal opens automatically; only surface the "up to date" case.
+      // When an update exists, the background download starts and the store
+      // reflects it below; only surface the "up to date" case here.
       if (!status.available) {
         toast.success(`You're on the latest version (${status.currentVersion}).`);
       }
@@ -405,12 +413,49 @@ function UpdatesSettings() {
     }
   };
 
+  const restart = () => {
+    beginApply();
+    void updater.apply().catch((e) => setError(String(e)));
+  };
+
+  // The "Check for updates" row swaps its control based on the live phase:
+  // downloading → progress; ready → Restart button; else → Check now.
+  const control = ready ? (
+    <button
+      type="button"
+      onClick={restart}
+      className={cn(
+        "h-7 rounded-md px-2.5 text-[11px] font-medium",
+        "bg-[var(--text-primary)] text-[var(--bg-base)] hover:opacity-90 transition-opacity",
+      )}
+    >
+      Restart to update
+    </button>
+  ) : downloading ? (
+    <span className="text-[11px] text-text-tertiary tabular-nums">
+      {progress != null ? `Downloading ${Math.round(progress * 100)}%` : "Preparing…"}
+    </span>
+  ) : (
+    <button
+      type="button"
+      onClick={() => void checkNow()}
+      disabled={checking}
+      className={cn(
+        "h-7 rounded-md px-2.5 text-[11px] font-medium border border-border-default bg-bg-elevated",
+        "text-text-primary hover:bg-bg-hover transition-colors",
+        "disabled:opacity-50 disabled:cursor-not-allowed",
+      )}
+    >
+      {checking ? "Checking…" : "Check now"}
+    </button>
+  );
+
   return (
     <div className="space-y-6">
       <SectionTitle title="Updates" subtitle="How Atlas keeps itself up to date" />
       <SettingRow
         label="Automatic updates"
-        description="On every launch, check for a newer version in the background and prompt you to install it. Updates are Apple-signed and notarized; Atlas verifies the signature before installing. Turn off to never check or prompt."
+        description="Check for a newer version in the background and download it automatically. Updates are Apple-signed and notarized; Atlas verifies the signature before installing. Turn off to never check or download."
       >
         <Toggle
           checked={settings.autoUpdate}
@@ -418,21 +463,14 @@ function UpdatesSettings() {
         />
       </SettingRow>
       <SettingRow
-        label="Check for updates"
-        description="Check now regardless of the automatic-update setting. If a newer version is available you'll get the install prompt; otherwise you're already up to date."
+        label={ready ? `Update ready${version ? ` (${version})` : ""}` : "Check for updates"}
+        description={
+          ready
+            ? "A new version has been downloaded and verified. Restart now, or it'll be applied automatically the next time you quit Atlas."
+            : "Check now regardless of the automatic-update setting. Newer versions download in the background; you'll be prompted to restart when ready."
+        }
       >
-        <button
-          type="button"
-          onClick={() => void checkNow()}
-          disabled={checking}
-          className={cn(
-            "h-7 rounded-md px-2.5 text-[11px] font-medium border border-border-default bg-bg-elevated",
-            "text-text-primary hover:bg-bg-hover transition-colors",
-            "disabled:opacity-50 disabled:cursor-not-allowed",
-          )}
-        >
-          {checking ? "Checking…" : "Check now"}
-        </button>
+        {control}
       </SettingRow>
     </div>
   );

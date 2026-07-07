@@ -222,26 +222,49 @@ function LeftPanelToggle() {
   );
 }
 
+/** Tiny determinate ring for the titlebar download indicator. */
+function ArcProgress({ value }: { value: number }) {
+  const r = 6;
+  const c = 2 * Math.PI * r;
+  const off = c * (1 - Math.max(0, Math.min(1, value)));
+  return (
+    <svg width={14} height={14} viewBox="0 0 16 16" className="-rotate-90">
+      <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeOpacity={0.25} strokeWidth={2} />
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeDasharray={c}
+        strokeDashoffset={off}
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 /**
- * Titlebar shorthand for the auto-updater: a down-arrow that triggers a manual
- * "check for updates", and a spinner while the backend is checking (driven by
- * the `atlas:update-checking` event → updater store). When an update is found,
- * the root-level <UpdateAvailableModal /> opens automatically.
+ * Titlebar auto-update indicator. Idle → a down-arrow that triggers a manual
+ * "check for updates". While the backend checks → spinner. While the update
+ * downloads in the background → an arc showing progress. Once staged and ready
+ * → a badge dot; clicking reopens the "Restart to update" prompt. All state is
+ * driven by the `atlas:update-*` events → updater store (fully non-blocking).
  */
 function UpdateButton() {
   const checking = useUpdaterStore.use.checking();
   const phase = useUpdaterStore.use.phase();
-  const version = useUpdaterStore.use.version();
-  const currentVersion = useUpdaterStore.use.currentVersion();
-  const { setAvailable } = useUpdaterStore.use.actions();
+  const progress = useUpdaterStore.use.progress();
+  const { openModal } = useUpdaterStore.use.actions();
 
-  const hasPending = phase !== "installing" && !!version;
+  const downloading = phase === "downloading";
+  const ready = phase === "ready" || phase === "applying";
 
   const onClick = () => {
-    if (checking) return;
-    // If a check already found an update, just re-open the prompt.
-    if (hasPending && phase !== "available") {
-      setAvailable(version!, currentVersion ?? "");
+    if (checking || downloading) return;
+    if (ready) {
+      openModal();
       return;
     }
     void updater
@@ -254,25 +277,37 @@ function UpdateButton() {
       .catch((e) => toast.error(`Update check failed: ${e instanceof Error ? e.message : String(e)}`));
   };
 
+  const title = checking
+    ? "Checking for updates…"
+    : downloading
+      ? progress != null
+        ? `Downloading update… ${Math.round(progress * 100)}%`
+        : "Preparing update…"
+      : ready
+        ? "Update ready — click to restart"
+        : "Check for updates";
+
   return (
     <button
       onClick={onClick}
-      disabled={checking}
+      disabled={checking || downloading}
       className={cn(
         "relative flex items-center justify-center w-6 h-6 rounded hover:bg-[#ffffff08] transition-all duration-150 outline-none focus:outline-none",
-        hasPending ? "text-[#ccc]" : "text-[#555] hover:text-[#aaa]",
+        ready || downloading ? "text-[#ccc]" : "text-[#555] hover:text-[#aaa]",
       )}
-      title={checking ? "Checking for updates…" : hasPending ? "Update available" : "Check for updates"}
+      title={title}
     >
       {checking ? (
         <Loader2 size={14} className="animate-spin" />
+      ) : downloading ? (
+        progress != null ? <ArcProgress value={progress} /> : <Loader2 size={14} className="animate-spin" />
       ) : (
         <ArrowDownToLine size={14} />
       )}
-      {hasPending && !checking && (
+      {ready && (
         <span
           className="absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full bg-[var(--accent-primary)] ring-1 ring-[#000] pointer-events-none"
-          aria-label="Update available"
+          aria-label="Update ready"
         />
       )}
     </button>
