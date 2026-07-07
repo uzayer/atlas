@@ -620,29 +620,46 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   return (
     <div className="relative flex-1 min-h-0">
       {userAnchors.length > 1 && (
-        <div className="pointer-events-none absolute left-1.5 top-1/2 z-[2] flex max-h-[70%] -translate-y-1/2 flex-col justify-center gap-1.5 overflow-hidden">
-          {userAnchors.map((a) => {
-            const active = a.index === activeAnchorIndex;
-            return (
-              <button
-                key={a.id}
-                type="button"
-                title={a.preview}
-                onClick={() => {
-                  // Ensure user rows are visible before jumping.
-                  window.dispatchEvent(
-                    new CustomEvent("atlas:chat-jump", { detail: { index: a.index } }),
-                  );
-                }}
-                className={cn(
-                  "pointer-events-auto h-0.5 rounded-full transition-all duration-150",
-                  active
-                    ? "w-4 bg-[var(--accent-primary)]"
-                    : "w-2 bg-[var(--text-tertiary)]/40 hover:w-3 hover:bg-[var(--text-tertiary)]",
-                )}
-              />
-            );
-          })}
+        <div className="pointer-events-none absolute left-0 top-1/2 z-[3] -translate-y-1/2">
+          {/* Fade so the rail reads cleanly over message borders/content. */}
+          <div className="pointer-events-none absolute inset-y-[-12px] left-0 w-10 bg-gradient-to-r from-[var(--bg-surface)] via-[var(--bg-surface)]/70 to-transparent" />
+          {/* No overflow here: an `overflow` container would clip the
+              horizontally-extending hover tooltip. Natural height, centered. */}
+          <div className="relative flex flex-col justify-center gap-1.5 py-2 pl-2 pr-4">
+            {userAnchors.map((a) => {
+              const active = a.index === activeAnchorIndex;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  aria-label={a.preview || "Jump to message"}
+                  onClick={() =>
+                    window.dispatchEvent(
+                      new CustomEvent("atlas:chat-jump", { detail: { index: a.index } }),
+                    )
+                  }
+                  className="group pointer-events-auto relative flex cursor-pointer items-center"
+                >
+                  <span
+                    className={cn(
+                      "h-0.5 rounded-full transition-all duration-200 ease-out",
+                      active
+                        ? "w-4 bg-[var(--accent-primary)]"
+                        : "w-2 bg-[var(--text-tertiary)]/40 group-hover:w-3 group-hover:bg-[var(--text-tertiary)]",
+                    )}
+                  />
+                  {/* Styled tooltip: the target user message preview. High z so
+                      it renders above the thread content. */}
+                  <span
+                    className="pointer-events-none absolute left-5 top-1/2 z-[50] max-w-[260px] -translate-y-1/2 translate-x-[-4px] truncate rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1 text-[10px] text-[var(--text-secondary)] opacity-0 shadow-[var(--shadow-overlay)] transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100"
+                    style={{ backdropFilter: "blur(8px)" }}
+                  >
+                    {a.preview || "(message)"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
       <div

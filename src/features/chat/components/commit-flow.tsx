@@ -80,9 +80,9 @@ export function CommitFlow({
           onClick={() => void open()}
           disabled={phase === "generating"}
           className={cn(
-            "flex items-center gap-1.5 rounded-md border border-[var(--border-default)]",
-            "bg-[var(--bg-secondary)] px-2 py-1 text-[10px] text-[var(--text-tertiary)]",
-            "transition-colors hover:border-[var(--border-focus)] hover:text-[var(--text-secondary)]",
+            "inline-flex items-center gap-1.5 rounded-full border border-[var(--border-default)]",
+            "bg-[var(--bg-elevated)] px-3 py-1.5 text-[11px] font-medium leading-none text-[var(--text-secondary)]",
+            "cursor-pointer transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]",
             "disabled:opacity-60",
           )}
         >

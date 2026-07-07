@@ -26,8 +26,63 @@ import {
   getFilePathFromInput,
   classifyToolFileKind,
   countEditLines,
+  isFileCreated,
 } from "../lib/tool-files";
 import type { TurnFile } from "@/types/agent";
+
+/** Rebuild the adaptive per-turn `turnSummary` (files read/modified) from a
+ *  loaded transcript's tool calls. `turnSummary` is computed live at
+ *  turn_finished and NOT persisted, so a resumed/switched session (the chat is a
+ *  singleton tab, so navigating reloads from disk) would otherwise show no
+ *  adaptive card. Walk each turn (a run of assistant messages after a user
+ *  message) and freeze the accumulated files onto its trailing assistant
+ *  message — the same slot the live path uses. Mutates in place. */
+function reconstructTurnSummaries(messages: ChatMessage[]): void {
+  const flushTurn = (start: number, end: number) => {
+    const byPath = new Map<string, TurnFile>();
+    let lastAsst = -1;
+    for (let i = start; i < end; i++) {
+      const m = messages[i];
+      if (m.role !== "assistant") continue;
+      lastAsst = i;
+      for (const tc of m.toolCalls) {
+        const args = (tc.arguments ?? {}) as Record<string, unknown>;
+        const path = getFilePathFromInput(args);
+        const kind = classifyToolFileKind(tc.kind, tc.toolName);
+        if (!path || !kind) continue;
+        const counts =
+          kind === "edit"
+            ? countEditLines(tc.toolName, args)
+            : { added: 0, removed: 0 };
+        const created =
+          kind === "edit" ? isFileCreated(tc.toolName, args) : undefined;
+        const ex = byPath.get(path);
+        if (!ex) byPath.set(path, { path, kind, ...counts, created });
+        else {
+          ex.added += counts.added;
+          ex.removed += counts.removed;
+          if (kind === "edit") ex.kind = "edit";
+          if (created === false) ex.created = false;
+        }
+      }
+    }
+    if (lastAsst >= 0 && byPath.size > 0) {
+      messages[lastAsst].turnSummary = {
+        turnSeq: 0, // reconstructed — not tied to a live turn
+        files: Array.from(byPath.values()),
+        repoAtTurn: false,
+      };
+    }
+  };
+  let turnStart = 0;
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === "user" && i > turnStart) {
+      flushTurn(turnStart, i);
+      turnStart = i;
+    }
+  }
+  flushTurn(turnStart, messages.length);
+}
 
 /** Collapse the per-turn tool-id map into one entry per file path, summing
  *  edit counts; `edit` wins over `read` when a file was both read and edited. */
@@ -42,6 +97,7 @@ function aggregateTurnFiles(tools: Record<string, TurnFile>): TurnFile[] {
     ex.added += t.added;
     ex.removed += t.removed;
     if (t.kind === "edit") ex.kind = "edit";
+    if (t.created === false) ex.created = false; // any real modify → "M"
   }
   return Array.from(byPath.values());
 }
@@ -842,6 +898,10 @@ export const useChatStore = createSelectors(
                   : {}),
               };
             });
+            // Rebuild the adaptive per-turn cards (files read/modified) from the
+            // loaded tool calls — turnSummary is runtime-only, so without this a
+            // resumed/switched session shows no adaptive card.
+            reconstructTurnSummaries(session.messages);
             // Recompute the cached preview/count from the loaded transcript
             // so the sidebar doesn't have to scan messages on every chunk.
             session.firstUserContent =
@@ -1314,7 +1374,15 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
             kind === "edit"
               ? countEditLines(tc.tool_name, args)
               : { added: 0, removed: 0 };
-          session.turnScratch.tools[tc.id] = { path, kind, added, removed };
+          const created =
+            kind === "edit" ? isFileCreated(tc.tool_name, args) : undefined;
+          session.turnScratch.tools[tc.id] = {
+            path,
+            kind,
+            added,
+            removed,
+            created,
+          };
         }
       }
       const found = findToolCall(session, env.tool_call.id);

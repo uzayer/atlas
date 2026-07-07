@@ -26,6 +26,7 @@ import { toast } from "sonner";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { CachedMarkdown } from "@/lib/markdown-cache";
+import { StreamingMarkdown } from "./streaming-markdown";
 
 import {
   getFilePathFromInput,
@@ -234,17 +235,16 @@ export const MessageItem = memo(function MessageItem({
               />
             )}
 
-            {/* Markdown text — render plain pre while streaming for speed; markdown once settled */}
-            {prose && streaming ? (
-              <pre className="text-sm text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words select-text font-sans">
-                {prose}
-                {/* Blinking caret so a live turn reads like a terminal
-                  cursor — the clearest "this is generating now" cue. */}
-                <span className="atlas-stream-caret" aria-hidden />
-              </pre>
-            ) : null}
-            {prose && !streaming && (
-              <CachedMarkdown source={prose} className="text-sm" />
+            {/* Block-level markdown, formatted LIVE while streaming: only the
+                trailing block re-parses per frame; completed blocks are
+                source-keyed cache hits. Same renderer streaming + settled, so
+                there's no plain-text→markdown "pop" or reflow at turn end. */}
+            {prose && (
+              <StreamingMarkdown
+                source={prose}
+                streaming={streaming}
+                className="text-sm"
+              />
             )}
 
             {/* Heavy @-mention bodies (files / folders / repo READMEs / notes /

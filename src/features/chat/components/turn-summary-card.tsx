@@ -2,17 +2,39 @@ import { memo, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
-  FileText,
-  FilePenLine,
   ArrowRight,
-  BookMarked,
   Workflow,
   Loader2,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import type { ChatMessage } from "@/types/agent";
+import type { ChatMessage, TurnFile } from "@/types/agent";
+
+/** Git-standard status letter for a turn file: A(dded) / M(odified) / R(ead). */
+function FileStatusBadge({ file }: { file: TurnFile }) {
+  let letter = "R";
+  let color = "text-[var(--text-tertiary)]";
+  if (file.kind === "edit") {
+    if (file.created) {
+      letter = "A";
+      color = "text-[var(--status-success)]";
+    } else {
+      letter = "M";
+      color = "text-[#e0af68]";
+    }
+  }
+  return (
+    <span
+      className={cn(
+        "w-3 shrink-0 text-center font-mono text-[10px] font-semibold",
+        color,
+      )}
+    >
+      {letter}
+    </span>
+  );
+}
 import { useChatStore } from "../stores/chat-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useCanvasStore } from "@/features/canvas/stores/canvas-store";
@@ -172,17 +194,7 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
                   key={`${f.kind}:${f.path}`}
                   className="flex items-center gap-2 py-0.5 text-[11px]"
                 >
-                  {f.kind === "edit" ? (
-                    <FilePenLine
-                      size={12}
-                      className="shrink-0 text-[var(--accent-primary)]"
-                    />
-                  ) : (
-                    <FileText
-                      size={12}
-                      className="shrink-0 text-[var(--text-tertiary)]"
-                    />
-                  )}
+                  <FileStatusBadge file={f} />
                   <span className="truncate text-[var(--text-secondary)]">
                     {f.path}
                   </span>
@@ -243,7 +255,13 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
 
       {/* Turn-level actions */}
       <div className="flex flex-wrap items-center gap-1.5">
-        <ActionButton icon={<BookMarked size={12} />} label="Save to KB" onClick={saveToKb} />
+        <ActionButton
+          icon={
+            <span className="inline-block h-2 w-2 rounded-full bg-white" />
+          }
+          label="Save to KB"
+          onClick={saveToKb}
+        />
         {canDiagram && (
           <ActionButton
             icon={<Workflow size={12} />}
@@ -274,9 +292,9 @@ function ActionButton({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex items-center gap-1.5 rounded-md border border-[var(--border-default)]",
-        "bg-[var(--bg-secondary)] px-2 py-1 text-[10px] text-[var(--text-tertiary)]",
-        "transition-colors hover:border-[var(--border-focus)] hover:text-[var(--text-secondary)]",
+        "inline-flex items-center gap-1.5 rounded-full border border-[var(--border-default)]",
+        "bg-[var(--bg-elevated)] px-3 py-1.5 text-[11px] font-medium leading-none text-[var(--text-secondary)]",
+        "cursor-pointer transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]",
       )}
     >
       <span className="text-[var(--text-tertiary)]">{icon}</span>

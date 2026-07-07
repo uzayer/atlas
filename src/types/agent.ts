@@ -64,6 +64,9 @@ export interface TurnFile {
   kind: "read" | "edit";
   added: number;
   removed: number;
+  /** For edits only: the file was created new (all edit ops had empty `old`) →
+   *  git-status "A"; otherwise "M". Undefined for reads. */
+  created?: boolean;
 }
 
 export interface ChatSession {

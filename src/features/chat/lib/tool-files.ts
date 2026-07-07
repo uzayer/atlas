@@ -100,6 +100,16 @@ function countPart(oldStr: string, neu: string): { added: number; removed: numbe
   return { removed: Math.max(0, eo - start), added: Math.max(0, en - start) };
 }
 
+/** True when an edit tool call CREATED the file (every edit op had empty prior
+ *  content) → git-status "A". A normal edit (non-empty `old`) is "M". */
+export function isFileCreated(
+  toolName: string,
+  args: Record<string, unknown>,
+): boolean {
+  const parts = getEditParts(toolName, args);
+  return parts.length > 0 && parts.every((p) => p.old === "");
+}
+
 /** Total added/removed line counts for an edit tool call. */
 export function countEditLines(
   toolName: string,

@@ -165,12 +165,15 @@ export function DiffView({
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((vr) => {
               const row = rows[vr.index];
+              // No fixed `height` — rows are MEASURED (`measureElement` below),
+              // so a file-header/content line that renders taller than its
+              // estimate never overlaps the next row (the source-control diff
+              // overlap bug). `estimateSize` is just the initial guess.
               const base = {
                 position: "absolute" as const,
                 top: 0,
                 transform: `translateY(${vr.start}px)`,
                 width: "100%",
-                height: vr.size,
               };
 
               if (row.kind === "file-header") {
@@ -179,6 +182,8 @@ export function DiffView({
                 return (
                   <div
                     key={vr.index}
+                    data-index={vr.index}
+                    ref={virtualizer.measureElement}
                     style={base}
                     className="flex items-center gap-1.5 px-2 rounded-t-md border border-border-default bg-[#0F0F0F] hover:bg-[#141414] cursor-pointer group"
                     onClick={() => toggleFile(file.path)}
@@ -229,7 +234,10 @@ export function DiffView({
                 return (
                   <div
                     key={vr.index}
-                    style={{ ...base, backgroundColor: "var(--diff-context-bg, #0a0a0a)" }}
+                    data-index={vr.index}
+                    ref={virtualizer.measureElement}
+                    // Empty spacer — keep an explicit height so it measures 8px.
+                    style={{ ...base, height: 8, backgroundColor: "var(--diff-context-bg, #0a0a0a)" }}
                     className="border-x border-b border-border-default rounded-b-md"
                   />
                 );
@@ -239,13 +247,15 @@ export function DiffView({
               return (
                 <div
                   key={vr.index}
-                  // `max-content` + `minWidth: 100%` lets long lines grow past the
-                  // viewport (one horizontal scrollbar on the outer container)
-                  // while short lines still fill the width.
+                  data-index={vr.index}
+                  ref={virtualizer.measureElement}
+                  // Clip long lines to the viewport width (no horizontal scroll,
+                  // no row overflow/overlap). Users open the full diff view to
+                  // read a truncated line in its entirety.
                   style={{
                     ...base,
-                    width: "max-content",
-                    minWidth: "100%",
+                    width: "100%",
+                    overflow: "hidden",
                     backgroundColor:
                       line.type === "add"
                         ? "var(--diff-add-line-bg, #0d2211)"
@@ -289,13 +299,13 @@ function DiffCode({ content, language }: { content: string; language: string }) 
   const tokens = highlightDiffLine(language, content);
   if (!tokens) {
     return (
-      <span className="flex-1 whitespace-pre pr-3 text-text-secondary">
+      <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-pre pr-3 text-text-secondary">
         {content}
       </span>
     );
   }
   return (
-    <span className="diff-syntax flex-1 whitespace-pre pr-3 text-text-secondary">
+    <span className="diff-syntax flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-pre pr-3 text-text-secondary">
       {tokens.map((t, i) => (
         <span key={i} className={t.cls ?? undefined}>
           {t.text}
