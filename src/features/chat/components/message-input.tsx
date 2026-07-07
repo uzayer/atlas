@@ -44,6 +44,7 @@ import type {
 } from "./slash-command-picker";
 import { commandRequiresArgs } from "./slash-command-picker";
 import { CodexLoginDialog } from "./codex-login-dialog";
+import { PlanDock } from "./plan-dock";
 import type { MentionFile } from "../lib/mentions";
 import { useComposerFileDrop } from "../hooks/use-composer-file-drop";
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -1036,11 +1037,16 @@ export function MessageInput({
           </div>
         )}
 
+        {/* Live plan docked on top of the input bar (JetBrains-Air style). */}
+        <PlanDock tabId={tabId} />
+
         <div
           ref={composerRef}
           data-chat-composer
           className={cn(
-            "relative rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)]",
+            // `z-10` so the composer paints over — and visually tucks — the
+            // PlanDock's bottom edge (the attached-panel recipe).
+            "relative z-10 rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)]",
             "shadow-[0_8px_24px_rgba(0,0,0,0.35)]",
             // Soft macOS-style "active field" glow on focus — a faint
             // accent ring on top of the border shift (the border alone is

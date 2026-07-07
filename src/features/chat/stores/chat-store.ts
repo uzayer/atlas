@@ -22,6 +22,29 @@ import { loadCachedAcpModels, saveCachedAcpModels } from "../lib/acp-models-cach
 import { saveCerseiModelPref, saveCerseiEffort, saveCerseiCompress } from "../lib/cersei-model-pref";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
+import {
+  getFilePathFromInput,
+  classifyToolFileKind,
+  countEditLines,
+} from "../lib/tool-files";
+import type { TurnFile } from "@/types/agent";
+
+/** Collapse the per-turn tool-id map into one entry per file path, summing
+ *  edit counts; `edit` wins over `read` when a file was both read and edited. */
+function aggregateTurnFiles(tools: Record<string, TurnFile>): TurnFile[] {
+  const byPath = new Map<string, TurnFile>();
+  for (const t of Object.values(tools)) {
+    const ex = byPath.get(t.path);
+    if (!ex) {
+      byPath.set(t.path, { ...t });
+      continue;
+    }
+    ex.added += t.added;
+    ex.removed += t.removed;
+    if (t.kind === "edit") ex.kind = "edit";
+  }
+  return Array.from(byPath.values());
+}
 
 /**
  * Push a session's permission mode to its bound ACP agent. The mode chip
@@ -243,6 +266,18 @@ interface ChatActions {
     ) => void;
     /** Mirror the composer's plain text into the per-tab draft slot. */
     setDraft: (tabId: string, text: string) => void;
+    /** Set/patch the adaptive next-step suggestions on a turn's trailing
+     *  message. `turnSeq` is the stale guard — a late async result for a
+     *  superseded turn is dropped. */
+    setTurnSuggestions: (
+      tabId: string,
+      messageId: string,
+      turnSeq: number,
+      patch: {
+        status: "idle" | "loading" | "ready" | "error";
+        chips?: string[];
+      },
+    ) => void;
     /** Drop a draft (on submit, or when its tab closes). */
     clearDraft: (tabId: string) => void;
     enqueueMessage: (sessionId: string, text: string) => void;
@@ -857,6 +892,21 @@ export const useChatStore = createSelectors(
           set((s) => {
             delete s.drafts[tabId];
           }),
+        setTurnSuggestions: (tabId, messageId, turnSeq, patch) =>
+          set((s) => {
+            const session = s.sessions[tabId];
+            if (!session) return;
+            // Drop a result belonging to a turn already superseded by a newer
+            // send (turnSeq 0 = native/legacy, always current).
+            if (turnSeq !== 0 && turnSeq < (session.currentTurnSeq ?? 0)) return;
+            const msg = session.messages.find((m) => m.id === messageId);
+            if (!msg) return;
+            msg.suggestions = {
+              turnSeq,
+              status: patch.status,
+              chips: patch.chips ?? msg.suggestions?.chips ?? [],
+            };
+          }),
         enqueueMessage: (sessionId, text) =>
           set((s) => {
             const cur = s.queues[sessionId] ?? [];
@@ -1079,7 +1129,14 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       if (env.status === "running" || env.status === "waiting") {
         // Turn start / paused-for-user (plan / permission): adopt the turn
         // identity and stay in an active (busy) state.
-        if (seq && seq > (session.currentTurnSeq ?? 0)) session.currentTurnSeq = seq;
+        if (seq && seq > (session.currentTurnSeq ?? 0)) {
+          session.currentTurnSeq = seq;
+          // New turn — clear the previous turn's live plan so the docked panel
+          // doesn't show a stale one before this turn emits its own.
+          session.livePlan = undefined;
+          // Start a fresh per-turn files-touched scratch for the adaptive card.
+          session.turnScratch = { seq, tools: {} };
+        }
         session.status = env.status;
         return;
       }
@@ -1173,6 +1230,26 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
           }
         }
       }
+      // Freeze the per-turn files-touched scratch onto the trailing assistant
+      // message as `turnSummary` (mirrors the usage attach above). Only here at
+      // turn end, so the adaptive card never appears mid-stream. `repoAtTurn` is
+      // set by the card component (the store stays free of git/app deps).
+      if (session.turnScratch) {
+        const files = aggregateTurnFiles(session.turnScratch.tools);
+        if (files.length > 0) {
+          for (let i = session.messages.length - 1; i >= 0; i--) {
+            if (session.messages[i].role === "assistant") {
+              session.messages[i].turnSummary = {
+                turnSeq: session.turnScratch.seq,
+                files,
+                repoAtTurn: false,
+              };
+              break;
+            }
+          }
+        }
+        session.turnScratch = undefined;
+      }
       return;
     }
     case "turn_failed": {
@@ -1224,6 +1301,22 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       return;
     }
     case "tool_call_upserted": {
+      // Accumulate per-turn files-touched for the adaptive turn card, keyed by
+      // tool id so repeated pending→completed upserts are idempotent (O(1), no
+      // message rescan). Frozen into the trailing message at turn_finished.
+      if (session.turnScratch) {
+        const tc = env.tool_call;
+        const args = (tc.arguments ?? {}) as Record<string, unknown>;
+        const path = getFilePathFromInput(args);
+        const kind = classifyToolFileKind(tc.kind, tc.tool_name);
+        if (path && kind) {
+          const { added, removed } =
+            kind === "edit"
+              ? countEditLines(tc.tool_name, args)
+              : { added: 0, removed: 0 };
+          session.turnScratch.tools[tc.id] = { path, kind, added, removed };
+        }
+      }
       const found = findToolCall(session, env.tool_call.id);
       if (found) {
         Object.assign(found.tc, toChatToolCall(env.tool_call));
@@ -1272,6 +1365,8 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
         fresh.plan = planSteps;
         session.messages.push(fresh);
       }
+      // Mirror onto the session so the docked plan panel selects it directly.
+      session.livePlan = planSteps;
       return;
     }
     case "available_commands": {

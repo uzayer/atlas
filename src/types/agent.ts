@@ -58,6 +58,14 @@ export const CLAUDE_PERMISSION_MODE_LABEL: Record<ClaudePermissionMode, string> 
   bypassPermissions: "Bypass Permissions",
 };
 
+/** One file a turn read or modified, with edit line counts (0 for reads). */
+export interface TurnFile {
+  path: string;
+  kind: "read" | "edit";
+  added: number;
+  removed: number;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
@@ -71,6 +79,20 @@ export interface ChatSession {
    *  the guard against premature "done" under parallel / queued / wake timing.
    *  Absent (or 0) for the native cersei agent, which is treated as current. */
   currentTurnSeq?: number;
+  /** The current turn's live plan (ACP `plan` / TodoWrite), mirrored here from
+   *  the trailing assistant message so the docked plan panel above the composer
+   *  can select it with one narrow read instead of scanning `messages` every
+   *  streaming frame. Set on `plan_updated`, reset at each turn start. The dock
+   *  hides itself when this is empty or fully completed while idle. */
+  livePlan?: PlanStep[];
+  /** Per-turn scratch: files the current turn has read/edited, keyed by tool
+   *  call id so repeated pending→completed upserts are idempotent (no message
+   *  rescans). Reset at turn start, frozen into the trailing message's
+   *  `turnSummary` at turn_finished, then cleared. */
+  turnScratch?: {
+    seq: number;
+    tools: Record<string, TurnFile>;
+  };
   workingDirectory: string;
   tasks: AgentTask[];
   createdAt: string;
@@ -179,6 +201,23 @@ export interface ChatMessage {
    *  finishes. Drives the end-of-message usage footer. `saved` = approx tokens
    *  RTK compression shaved off this turn (0 when compression was off). */
   usage?: { input: number; output: number; cost: number; saved?: number };
+  /** Adaptive per-turn footer, frozen onto the trailing assistant message at
+   *  turn_finished (mirrors `usage` — never set mid-stream). Drives the
+   *  TurnSummaryCard's files-read/modified accordion + action buttons. */
+  turnSummary?: {
+    turnSeq: number;
+    files: TurnFile[];
+    /** Whether the workspace was a git repo when the turn ended (gates commit). */
+    repoAtTurn: boolean;
+  };
+  /** Agent-suggested next steps for this turn's footer. Generated once at
+   *  turn end (parse-first, optional BYOK). `turnSeq` guards against a stale
+   *  async result landing after a newer turn started. */
+  suggestions?: {
+    turnSeq: number;
+    status: "idle" | "loading" | "ready" | "error";
+    chips: string[];
+  };
   /** Model that produced this assistant message, stamped when the message is
    *  created (and backstopped at turn end). The badge renders ONLY this —
    *  never live session state — so a later model or agent switch can't

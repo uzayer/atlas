@@ -545,6 +545,21 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     pinToBottom,
   ]);
 
+  // Auto-follow the TURN-END adaptive card. The streaming effect above is gated
+  // on `isStreaming`, so it doesn't fire when the trailing message grows *after*
+  // the turn ends — i.e. when the TurnSummaryCard's files/actions land at
+  // turn_finished, or its suggestion chips resolve from loading→ready. Without
+  // this a near-bottom reader drifts up a few hundred px as the card appears.
+  // Same near-bottom gate, so a user reading above is never yanked.
+  const trailingFooterSig = `${trailing?.turnSummary ? 1 : 0}:${trailing?.suggestions?.status ?? ""}:${trailing?.suggestions?.chips.length ?? 0}`;
+  useEffect(() => {
+    if (filtered.length === 0) return;
+    const el = parentRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distance <= NEAR_BOTTOM_PX) pinToBottom();
+  }, [trailingFooterSig, filtered.length, pinToBottom]);
+
   const scrollToBottom = useCallback(() => {
     if (filtered.length === 0) return;
     pinToBottom();
@@ -578,8 +593,58 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     return () => window.removeEventListener("atlas:chat-jump", handler);
   }, [jumpToMessage]);
 
+  // ChatGPT-style navigation rail: one tick per user message, on the left.
+  const userAnchors = useMemo(
+    () =>
+      messages
+        .map((m, i) => ({ id: m.id, index: i, role: m.role, content: m.content }))
+        .filter((a) => a.role === "user")
+        .map((a) => ({
+          id: a.id,
+          index: a.index,
+          preview: (a.content || "").replace(/\s+/g, " ").trim().slice(0, 80),
+        })),
+    [messages],
+  );
+  // The active tick = the last user message at/above the top of the viewport.
+  const topOriginalIndex = (() => {
+    const items = virtualizer.getVirtualItems();
+    return items.length ? (indexMap[items[0].index] ?? 0) : 0;
+  })();
+  let activeAnchorIndex = -1;
+  for (const a of userAnchors) {
+    if (a.index <= topOriginalIndex) activeAnchorIndex = a.index;
+    else break;
+  }
+
   return (
     <div className="relative flex-1 min-h-0">
+      {userAnchors.length > 1 && (
+        <div className="pointer-events-none absolute left-1.5 top-1/2 z-[2] flex max-h-[70%] -translate-y-1/2 flex-col justify-center gap-1.5 overflow-hidden">
+          {userAnchors.map((a) => {
+            const active = a.index === activeAnchorIndex;
+            return (
+              <button
+                key={a.id}
+                type="button"
+                title={a.preview}
+                onClick={() => {
+                  // Ensure user rows are visible before jumping.
+                  window.dispatchEvent(
+                    new CustomEvent("atlas:chat-jump", { detail: { index: a.index } }),
+                  );
+                }}
+                className={cn(
+                  "pointer-events-auto h-0.5 rounded-full transition-all duration-150",
+                  active
+                    ? "w-4 bg-[var(--accent-primary)]"
+                    : "w-2 bg-[var(--text-tertiary)]/40 hover:w-3 hover:bg-[var(--text-tertiary)]",
+                )}
+              />
+            );
+          })}
+        </div>
+      )}
       <div
         ref={parentRef}
         // `overflow-anchor: none` stops the browser's native scroll
@@ -624,6 +689,7 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
                 >
                   <MessageItem
                     message={message}
+                    tabId={tabId}
                     streaming={message.id === streamingId}
                     model={message.model ?? null}
                     timeGapAbove={timeGapAbove}

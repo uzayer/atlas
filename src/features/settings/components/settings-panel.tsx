@@ -290,6 +290,17 @@ function GeneralSettings() {
         />
       </SettingRow>
       <SettingRow
+        label="AI next-step suggestions"
+        description="After an agent turn, suggest 2-3 follow-up actions as clickable chips. On: when the agent didn't already list next steps, generate them with one cheap call to your selected BYOK model. Off still shows suggestions parsed from the reply, for free."
+      >
+        <Toggle
+          checked={settings.adaptiveSuggestions === "llm"}
+          onChange={(next) =>
+            updateSettings({ adaptiveSuggestions: next ? "llm" : "parse" })
+          }
+        />
+      </SettingRow>
+      <SettingRow
         label="Atlas CLI"
         description={`Adds an \`atlas\` command to your shell — type \`atlas .\` in any terminal to open the current folder as a project. Refreshed automatically on every launch so an older copy never lingers. ${cliInstalledLine}.`}
       >

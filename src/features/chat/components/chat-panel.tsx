@@ -1,5 +1,8 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
+import { parseNextSteps } from "../lib/next-steps";
+import { resolveByok } from "../lib/byok-resolve";
+import { generateSuggestions } from "../lib/generate-suggestions";
 import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
 import { loadCachedAcpModes } from "../lib/acp-modes-cache";
 import { warmAcpModels, otherAcpAgent } from "../lib/warm-acp-models";
@@ -351,7 +354,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   // fast path for freshly-created sessions.
 
   // Pre-warm the Codex agent in the background. The ~3-4s a fresh switch to
-  // Codex pays is dominated by spawning `npx @zed-industries/codex-acp` + the
+  // Codex pays is dominated by spawning `npx @agentclientprotocol/codex-acp` + the
   // ACP initialize handshake; `ensureAgent` does exactly that (deduped/cached,
   // no session, no auth), so paying it ahead of time makes the actual switch
   // fast. Gated on the user having used Codex before (a persisted modes cache
@@ -399,7 +402,83 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         Promise.resolve().then(() => handleSendRef.current?.(next, []));
       }
     }
+    // Adaptive next-step chips: parse a trailing "Next steps" list from the
+    // just-finished turn's assistant text (free, all agents). The LLM
+    // augmentation (Phase 4) hangs off the same edge.
+    if (turnFinished) {
+      const st = useChatStore.getState();
+      const sess = st.sessions[tabId];
+      if (sess) {
+        let lastUserIdx = -1;
+        for (let i = sess.messages.length - 1; i >= 0; i--) {
+          if (sess.messages[i].role === "user") {
+            lastUserIdx = i;
+            break;
+          }
+        }
+        const turnMsgs = sess.messages.slice(lastUserIdx + 1);
+        const lastAsst = [...turnMsgs]
+          .reverse()
+          .find((m) => m.role === "assistant");
+        if (lastAsst && !lastAsst.suggestions) {
+          const text = turnMsgs
+            .filter((m) => m.role === "assistant")
+            .map((m) => m.content)
+            .filter(Boolean)
+            .join("\n");
+          const chips = parseNextSteps(text);
+          const turnSeq = sess.currentTurnSeq ?? 0;
+          if (chips.length) {
+            st.actions.setTurnSuggestions(tabId, lastAsst.id, turnSeq, {
+              status: "ready",
+              chips,
+            });
+          } else if (
+            useProjectStore.getState().settings.adaptiveSuggestions === "llm"
+          ) {
+            // No explicit "Next steps" list — fall back to a single cheap BYOK
+            // call, if the user has a model configured (opt-in setting).
+            const byok = resolveByok();
+            if (byok) {
+              const msgId = lastAsst.id;
+              const editedFiles = (lastAsst.turnSummary?.files ?? [])
+                .filter((f) => f.kind === "edit")
+                .map((f) => f.path);
+              st.actions.setTurnSuggestions(tabId, msgId, turnSeq, {
+                status: "loading",
+                chips: [],
+              });
+              void generateSuggestions({
+                turnText: text,
+                files: editedFiles,
+                provider: byok.provider,
+                model: byok.model,
+              }).then((llmChips) => {
+                useChatStore
+                  .getState()
+                  .actions.setTurnSuggestions(tabId, msgId, turnSeq, {
+                    status: llmChips.length ? "ready" : "idle",
+                    chips: llmChips,
+                  });
+              });
+            }
+          }
+        }
+      }
+    }
   }, [session?.status, session?.acpSessionId, tabId]);
+
+  // Suggestion chips (and other adaptive affordances) send as the next message.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ text?: string }>).detail;
+      if (detail?.text && handleSendRef.current) {
+        handleSendRef.current(detail.text, []);
+      }
+    };
+    window.addEventListener("atlas:chat-send", handler);
+    return () => window.removeEventListener("atlas:chat-send", handler);
+  }, []);
 
   if (!session) return null;
 

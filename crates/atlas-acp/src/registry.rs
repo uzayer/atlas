@@ -61,16 +61,25 @@ impl AgentSpec {
         }
     }
 
-    /// Codex ACP bridge — Zed Industries' `codex-acp`, which embeds the Codex
-    /// engine and speaks ACP over stdio. Launched via `npx` (mirrors
-    /// `claude_code_ts`); the npm package ships a `codex-acp` bin launcher.
+    /// Codex ACP bridge — speaks ACP over stdio around the Codex engine.
+    /// Launched via `npx` (mirrors `claude_code_ts`); ships a `codex-acp` bin.
     /// Auth is inherited from the host env / `~/.codex` (ChatGPT login or
     /// `OPENAI_API_KEY`) — see `sanitize_host_env`.
+    ///
+    /// Uses `@agentclientprotocol/codex-acp` (the maintained replacement for the
+    /// deprecated `@zed-industries/codex-acp`). CRITICAL: the old package shipped
+    /// the Codex engine as a platform-specific **optional dependency**
+    /// (`@zed-industries/codex-acp-darwin-arm64`); after an npm/npx cache clear
+    /// npx would silently fail to reinstall that optional binary, and the agent
+    /// crashed on launch with `ERR_MODULE_NOT_FOUND`. The new package has no
+    /// optional platform binary — it depends on `@openai/codex` as a regular
+    /// dependency + a pure-JS `dist/index.js`, so a clean/cold cache installs it
+    /// reliably. Do NOT revert to `@zed-industries/codex-acp`.
     pub fn codex() -> Self {
         Self {
             spec_id: "codex".into(),
             display_name: "Codex (ACP)".into(),
-            command: "npx -y @zed-industries/codex-acp".into(),
+            command: "npx -y @agentclientprotocol/codex-acp".into(),
         }
     }
 
