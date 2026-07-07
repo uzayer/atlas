@@ -2,12 +2,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use agent_client_protocol::schema::{
-    ClientCapabilities, InitializeRequest, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionId, SessionNotification,
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
+    ClientCapabilities, InitializeRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SessionId, SessionNotification,
 };
-use agent_client_protocol::{Agent, ConnectionTo};
-use agent_client_protocol_tokio::{AcpAgent, LineDirection};
+use agent_client_protocol::{AcpAgent, Agent, ConnectionTo, LineDirection};
 use dashmap::DashMap;
 use serde::Serialize;
 use serde_json::{Map, Value};

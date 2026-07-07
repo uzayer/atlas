@@ -8,7 +8,7 @@
 //! `SessionSnapshot` is the serialisable wire shape — produced on demand for
 //! tab-activate, never streamed.
 
-use agent_client_protocol::schema as acp_schema;
+use agent_client_protocol::schema::v1 as acp_schema;
 use atlas_acp::AgentId;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -150,24 +150,16 @@ pub struct SessionState {
     pub usage: Usage,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// Monotonic counter bumped each time an inbound agent update is applied
-    /// (text/thinking chunk, tool call, plan, …). The worker samples it after
-    /// `send_prompt` returns to detect when the ACP notification stream has
-    /// gone quiet before flipping the turn to idle — closing the cross-task
-    /// race where the prompt response resolves a beat before the agent's final
-    /// streamed chunk lands. Not part of the serialised snapshot.
-    pub activity_seq: u64,
-    /// Monotonic turn identity, bumped at the START of every turn (worker's
-    /// `handle_send`). Stamped onto every emitted delta so the frontend can
+    /// Monotonic turn identity, bumped at the START of every turn (the actor's
+    /// `start_turn`). Stamped onto every emitted delta so the frontend can
     /// reject a stale terminal (idle/error) delta belonging to a turn that has
-    /// already been superseded by a newer send — the real safety net against
-    /// premature-idle under parallel / queued / wake-timing races. Not
-    /// serialised into the snapshot.
+    /// already been superseded by a newer send. Not serialised into the
+    /// snapshot.
     pub turn_seq: u64,
-    /// Set by the manager's ACP dispatch when the agent reports a turn failure
-    /// out-of-band (an `AcpEvent::TurnFailed` that isn't already surfaced as the
-    /// `send_prompt` `Err`). The worker drains it when emitting terminal state
-    /// so terminal status has a single writer (the worker). Not serialised.
+    /// Set by `apply_event` when the agent reports a turn failure out-of-band
+    /// (an `AcpEvent::TurnFailed` that isn't already surfaced as the `prompt`
+    /// `Err`). The actor drains it when emitting terminal state so terminal
+    /// status has a single writer. Not serialised.
     pub pending_turn_error: Option<String>,
 }
 
@@ -190,7 +182,6 @@ impl SessionState {
             usage: Usage::default(),
             created_at: now,
             updated_at: now,
-            activity_seq: 0,
             turn_seq: 0,
             pending_turn_error: None,
         }

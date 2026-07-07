@@ -370,8 +370,57 @@ pub async fn collect_corpus(project_path: &str) -> Vec<MemoryDoc> {
     docs.extend(read_codebase_docs(&project_path));
     docs.extend(read_shared_memory_docs(&project_path));
     docs.extend(read_cersei_docs(&project_path));
+    // Fold the knowledge base in (source "note") so KB notes are retrievable by
+    // every agent through the same embedding + the `search_memory` tool — they
+    // were previously reachable ONLY via manual `~`/`@note` mentions.
+    docs.extend(read_knowledge_docs(&project_path));
 
     docs
+}
+
+/// Fold the project knowledge base (`.atlas/knowledge/**/*.md`) into the corpus
+/// so KB notes rank alongside code + memory in retrieval. Tagged `source:"note"`
+/// so the Shared Context layer can weight / toggle them independently.
+fn read_knowledge_docs(project_path: &str) -> Vec<MemoryDoc> {
+    let entries = match crate::commands::knowledge::list_knowledge_sync(project_path) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    entries
+        .into_iter()
+        .filter(|e| !e.content.trim().is_empty())
+        .map(|e| {
+            let summary = e
+                .content
+                .lines()
+                .map(|l| l.trim_start_matches('#').trim())
+                .find(|l| !l.is_empty())
+                .unwrap_or(&e.title)
+                .chars()
+                .take(200)
+                .collect::<String>();
+            let stem = e.id.rsplit('/').next().unwrap_or(&e.id).to_string();
+            let mut aliases = vec![stem];
+            if !e.title.is_empty() && !aliases.contains(&e.title) {
+                aliases.push(e.title.clone());
+            }
+            let timestamp_ms = chrono::DateTime::parse_from_rfc3339(&e.updated_at)
+                .map(|d| d.timestamp_millis())
+                .unwrap_or(0);
+            MemoryDoc {
+                id: format!("kb:{}", e.id),
+                title: e.title,
+                summary,
+                kind: "note".into(),
+                source: "note".into(),
+                file_path: Some(e.file_path),
+                timestamp_ms,
+                text: e.content,
+                aliases,
+                links: vec![],
+            }
+        })
+        .collect()
 }
 
 /// Fold native Atlas (cersei) session transcripts into the corpus so the

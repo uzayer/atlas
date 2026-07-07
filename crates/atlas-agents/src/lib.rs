@@ -7,19 +7,23 @@
 //! - `plugin`     — descriptors for spawnable agents (claude / codex / opencode)
 //! - `manager`    — multi-agent / multi-session registry, wraps `atlas_acp::AgentRegistry`
 //! - `session`    — `SessionState` + serializable `SessionSnapshot`
-//! - `worker`     — one tokio task per session; drains a command queue,
-//!                  serialises send-prompt turns, never blocks the UI
+//! - `actor`      — one single-owner tokio task per session; drives turns and
+//!                  applies events in one FIFO so the idle/ordering race can't occur
+//! - `handle`     — the per-session handle the manager holds (state + actor channels)
 //! - `events`     — `SessionDelta` wire shape + `DeltaSink` trait
 //! - `transcript` — JSONL replay (claude-code transcripts) for `load_session`
 
+pub mod actor;
+pub mod apply;
 pub mod backend;
+pub mod connection;
 pub mod error;
 pub mod events;
+pub mod handle;
 pub mod manager;
 pub mod plugin;
 pub mod session;
 pub mod transcript;
-pub mod worker;
 
 pub use atlas_cersei::SessionMeta;
 // Memory-RAG grounding seam for the native agent — the Tauri layer registers a
@@ -29,9 +33,15 @@ pub use atlas_cersei::{MemDoc, MemorySearchFn, ReplayItem, register_memory_searc
 pub use atlas_cersei::{corpus_sessions as cersei_corpus_sessions, CorpusSession as CerseiCorpusSession};
 // On-disk cersei session dir (cwd-hashed) — used by the session file-watcher.
 pub use atlas_cersei::project_sessions_dir as cersei_project_sessions_dir;
+pub use atlas_agentkit::{
+    AgentConnection, AuthFlow, CompressionCtl, EffortControl, ModelSelector, RunningTurn,
+    SessionModes, TurnId,
+};
 pub use backend::{AcpBackend, AgentBackend, CerseiBackend};
+pub use connection::BackendConnection;
 pub use error::{Error, Result};
-pub use events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
+pub use atlas_bus::{EventBus, InboundMiddleware, InboundPipeline, OutboundMiddleware, OutboundPipeline};
+pub use events::{DeltaSink, Emitter, SessionDelta, SessionDeltaEnvelope};
 pub use manager::{AgentManager, SessionKey};
 pub use plugin::{PluginSpec, TranscriptKind, builtin_plugins, find_plugin};
 pub use session::{

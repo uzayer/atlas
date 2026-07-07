@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use agent_client_protocol::schema as acp_schema;
+use agent_client_protocol::schema::v1 as acp_schema;
 use async_trait::async_trait;
 use atlas_acp::{AcpError, AcpEvent, AgentId, AgentInfo, EventSink, NewSessionInfo, Result, SessionId};
 use cersei::prelude::{PermissionDecision as CerseiDecision, PermissionPolicy, PermissionRequest};

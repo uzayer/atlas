@@ -26,7 +26,7 @@ pub async fn list_knowledge(project_path: String) -> Result<Vec<KnowledgeEntry>,
         .map_err(|e| e.to_string())?
 }
 
-fn list_knowledge_sync(project_path: &str) -> Result<Vec<KnowledgeEntry>, String> {
+pub(crate) fn list_knowledge_sync(project_path: &str) -> Result<Vec<KnowledgeEntry>, String> {
     let kb_dir = Path::new(project_path).join(".atlas").join("knowledge");
     if !kb_dir.exists() {
         return Ok(vec![]);

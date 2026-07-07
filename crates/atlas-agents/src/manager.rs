@@ -10,7 +10,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_client_protocol::schema as acp_schema;
 use atlas_acp::{
     AcpEvent, AgentId, AgentInfo, AgentRegistry, AuthMethodWire, EventSink, NewSessionInfo,
     PermissionDecision, SessionId,
@@ -18,20 +17,18 @@ use atlas_acp::{
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::backend::{AcpBackend, AgentBackend, CerseiBackend};
 use crate::error::{Error, Result};
-use crate::events::{DeltaSink, SessionDelta, SessionDeltaEnvelope};
+use crate::events::{DeltaSink, Emitter, SessionDelta, SessionDeltaEnvelope};
 use crate::plugin::{PluginSpec, TranscriptKind, builtin_plugins, find_plugin};
 use crate::session::{
-    Message, MessageMode, PlanEntry, SessionModeInfo, SessionSnapshot, SessionState, SessionStatus,
-    ToolCall, ToolCallStatus, extract_text_block, format_tool_content, map_tool_status,
-    new_assistant_text, new_assistant_thinking, new_assistant_tool, normalise_tool_input,
+    Message, SessionModeInfo, SessionSnapshot, SessionState, ToolCall, ToolCallStatus,
+    new_assistant_text, new_assistant_thinking, new_assistant_tool,
 };
+use crate::handle::SessionHandle;
 use crate::transcript;
-use crate::worker::{SessionCommand, SessionHandle, SessionWorker};
 
 /// Per-session key: (`agent_id`, raw acp session id string).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -52,7 +49,9 @@ struct ManagerInner {
     agent_plugins: DashMap<AgentId, String>,
     /// Per-agent backend (ACP subprocess vs in-process Cersei), chosen at spawn.
     agent_backends: DashMap<AgentId, Arc<dyn AgentBackend>>,
-    sink: Arc<dyn DeltaSink>,
+    /// Single outbound fan-out: publishes every delta to the global event bus
+    /// and the host sink.
+    emitter: Arc<Emitter>,
 }
 
 impl AgentManager {
@@ -66,9 +65,16 @@ impl AgentManager {
                 sessions: DashMap::new(),
                 agent_plugins: DashMap::new(),
                 agent_backends: DashMap::new(),
-                sink,
+                emitter: Arc::new(Emitter::new(sink)),
             }),
         }
+    }
+
+    /// Subscribe to the global event bus — every session delta, in wire order,
+    /// for any in-process (or, later, cloud) consumer. The host's window
+    /// fan-out and the ACP-sink path are unaffected.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SessionDeltaEnvelope> {
+        self.inner.emitter.subscribe()
     }
 
     pub fn list_plugins(&self) -> Vec<PluginSpec> {
@@ -332,45 +338,31 @@ impl AgentManager {
     }
 
     pub fn send(&self, key: &SessionKey, text: String) -> Result<()> {
-        self.handle_for(key)?.send(SessionCommand::SendPrompt(text))
+        self.handle_for(key)?.send_prompt(text)
     }
 
-    /// Cancel an in-flight turn IMMEDIATELY. We deliberately bypass the
-    /// worker's mpsc queue here because the worker is almost certainly
-    /// `await`ing `send_prompt` for the turn we want to cancel — that
-    /// await holds the loop, so a `SessionCommand::Cancel` queued
-    /// behind it wouldn't be processed until the turn naturally ended.
-    /// By calling `cancel_turn` directly on the registry we set the
-    /// driver's cancellation guard immediately, so the next inbound
-    /// event from the agent (text chunk, tool call, permission
-    /// request) is dropped at the protocol boundary instead of
-    /// reaching the chat-store and the UI.
-    ///
-    /// The agent will eventually wind down the turn and the worker's
-    /// `send_prompt` await will resolve with `StopReason::Cancelled` —
-    /// the worker then emits `TurnFinished` + the terminal `Status`
-    /// delta the same way it does for any clean turn end.
+    /// Cancel an in-flight turn. The actor services this on its control channel
+    /// ahead of any queued work (`biased` select), calls the connection's
+    /// `cancel`, and the turn's own terminal (`stop_reason = "cancelled"`) then
+    /// flows through the FIFO and finalizes the UI.
     pub fn cancel(&self, key: &SessionKey) -> Result<()> {
-        let handle = self.handle_for(key)?;
-        self.backend_for(handle.agent_id)?
-            .cancel_turn(handle.agent_id, handle.acp_session_id.clone())?;
-        Ok(())
+        self.handle_for(key)?.cancel()
     }
 
     pub fn set_mode(&self, key: &SessionKey, mode_id: String) -> Result<()> {
-        self.handle_for(key)?.send(SessionCommand::SetMode(mode_id))
+        self.handle_for(key)?.set_mode(mode_id)
     }
 
     pub fn set_model(&self, key: &SessionKey, model_id: String) -> Result<()> {
-        self.handle_for(key)?.send(SessionCommand::SetModel(model_id))
+        self.handle_for(key)?.set_model(model_id)
     }
 
     pub fn set_effort(&self, key: &SessionKey, effort: String) -> Result<()> {
-        self.handle_for(key)?.send(SessionCommand::SetEffort(effort))
+        self.handle_for(key)?.set_effort(effort)
     }
 
     pub fn set_compress(&self, key: &SessionKey, on: bool) -> Result<()> {
-        self.handle_for(key)?.send(SessionCommand::SetCompress(on))
+        self.handle_for(key)?.set_compress(on)
     }
 
     /// Resolve a pending permission request.
@@ -401,34 +393,10 @@ impl AgentManager {
             agent_id,
             session_id: session_id.to_string(),
         };
-        let handle = self.handle_for(&key)?;
-        self.backend_for(agent_id)?
-            .respond_permission(agent_id, request_id, decision)?;
-        let sid = handle.acp_session_id.to_string();
-        self.inner.sink.emit(SessionDeltaEnvelope {
-            agent_id: handle.agent_id,
-            session_id: sid.clone(),
-            delta: SessionDelta::PermissionResolved { request_id },
-        });
-        // The turn resumes now that the user answered — flip `Waiting` back to
-        // `Running` so the UI shows work again. (A terminal from the worker will
-        // supersede this if the answer actually ended the turn.)
-        let turn_seq = {
-            let mut st = handle.state.lock();
-            if st.status == SessionStatus::Waiting {
-                st.status = SessionStatus::Running;
-            }
-            st.turn_seq
-        };
-        self.inner.sink.emit(SessionDeltaEnvelope {
-            agent_id: handle.agent_id,
-            session_id: sid,
-            delta: SessionDelta::Status {
-                status: SessionStatus::Running,
-                turn_seq,
-            },
-        });
-        Ok(())
+        // The actor resolves the permission on its control channel and emits
+        // `PermissionResolved` + the resumed `Running` status itself.
+        self.handle_for(&key)?
+            .respond_permission(request_id, decision)
     }
 
     fn handle_for(&self, key: &SessionKey) -> Result<Arc<SessionHandle>> {
@@ -491,8 +459,6 @@ impl AgentManager {
         }
         let state = Arc::new(Mutex::new(state));
 
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
-
         // Backend was registered at spawn(); fall back to ACP defensively.
         let backend: Arc<dyn AgentBackend> = self
             .inner
@@ -501,22 +467,25 @@ impl AgentManager {
             .map(|e| e.value().clone())
             .unwrap_or_else(|| Arc::new(AcpBackend(self.inner.acp.clone())));
 
-        let worker = SessionWorker {
-            state: state.clone(),
-            agent_id: key.agent_id,
-            acp_session_id: acp_session_id.clone(),
-            backend,
-            sink: self.inner.sink.clone(),
-            rx: cmd_rx,
-        };
-        worker.spawn();
+        // Every session is driven by the single-owner actor. It applies inbound
+        // events and finalizes the turn in one FIFO, so the idle/ordering race
+        // is gone by construction (no quiesce poll).
+        let conn: Arc<dyn atlas_agentkit::AgentConnection> =
+            Arc::new(crate::connection::BackendConnection::new(backend, key.agent_id));
+        let actor = crate::actor::SessionActor::spawn(
+            state.clone(),
+            key.agent_id,
+            acp_session_id.clone(),
+            conn,
+            self.inner.emitter.clone(),
+        );
 
         let handle = Arc::new(SessionHandle {
             state,
             agent_id: key.agent_id,
             acp_session_id,
             plugin_id,
-            cmd_tx,
+            actor,
         });
         self.inner.sessions.insert(key, handle);
     }
@@ -533,13 +502,14 @@ impl AgentManager {
     }
 
     fn emit(&self, envelope: SessionDeltaEnvelope) {
-        self.inner.sink.emit(envelope);
+        self.inner.emitter.emit(envelope);
     }
 
     fn dispatch(&self, agent_id: AgentId, event: AcpEvent) {
-        match event {
+        // Agent-wide: fan the disconnect out to every one of the dead agent's
+        // sessions (this stays in the manager because it spans sessions).
+        let session_id = match &event {
             AcpEvent::AgentDisconnected { reason } => {
-                // Fan out to all sessions of the dead agent.
                 let keys: Vec<SessionKey> = self
                     .inner
                     .sessions
@@ -558,400 +528,21 @@ impl AgentManager {
                     self.inner.sessions.remove(&key);
                 }
                 self.inner.agent_plugins.remove(&agent_id);
-            }
-            AcpEvent::SessionUpdate { session_id, update } => {
-                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    self.apply_session_update(&handle, update);
-                }
-            }
-            AcpEvent::PermissionRequest {
-                request_id,
-                session_id,
-                tool_call,
-                options,
-            } => {
-                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    // The turn is paused waiting on the user (e.g. a plan / tool
-                    // approval). Surface a distinct `Waiting` status so the UI
-                    // keeps an active affordance instead of looking idle/"done".
-                    let (sid, turn_seq) = {
-                        let mut st = handle.state.lock();
-                        st.status = SessionStatus::Waiting;
-                        (st.session_id.clone(), st.turn_seq)
-                    };
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: sid.clone(),
-                        delta: SessionDelta::Status {
-                            status: SessionStatus::Waiting,
-                            turn_seq,
-                        },
-                    });
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: sid,
-                        delta: SessionDelta::PermissionRequest {
-                            request_id,
-                            tool_call: serde_json::to_value(&tool_call).unwrap_or_default(),
-                            options: serde_json::to_value(&options).unwrap_or_default(),
-                        },
-                    });
-                }
-            }
-            AcpEvent::TurnFailed {
-                session_id,
-                turn_id: _,
-                error,
-            } => {
-                // Single terminal-status writer = the worker. Rather than
-                // mutating status + emitting a terminal delta here (which raced
-                // the worker's own terminal emit and carried no turn identity),
-                // record the error so the worker reports it when `send_prompt`
-                // returns. In practice ACP failures already surface as the
-                // `send_prompt` `Err`, so this is a belt-and-suspenders path.
-                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    handle.state.lock().pending_turn_error = Some(error);
-                }
-            }
-            AcpEvent::Usage {
-                session_id,
-                input_tokens,
-                output_tokens,
-                cost,
-            } => {
-                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    let mut st = handle.state.lock();
-                    st.usage.input_tokens = input_tokens;
-                    st.usage.output_tokens = output_tokens;
-                    st.usage.cost = cost;
-                    let usage = st.usage.clone();
-                    let sid = st.session_id.clone();
-                    drop(st);
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: sid,
-                        delta: SessionDelta::UsageUpdated { usage },
-                    });
-                }
-            }
-            AcpEvent::Compaction { session_id, active } => {
-                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    let sid = handle.state.lock().session_id.clone();
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: sid,
-                        delta: SessionDelta::Compaction { active },
-                    });
-                }
-            }
-            AcpEvent::CompressionSaved { session_id, saved_tokens } => {
-                if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-                    let sid = handle.state.lock().session_id.clone();
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: sid,
-                        delta: SessionDelta::CompressionSaved { saved_tokens },
-                    });
-                }
-            }
-        }
-    }
-
-    fn apply_session_update(&self, handle: &SessionHandle, update: acp_schema::SessionUpdate) {
-        // Decode through JSON — `SessionUpdate` is `#[non_exhaustive]` and its
-        // variants carry schema types that are awkward to match directly. The
-        // wire form is stable, so going through serde_json gives us a clean
-        // dispatch on `sessionUpdate`.
-        let Ok(v) = serde_json::to_value(&update) else {
-            return;
-        };
-        let Some(kind) = v.get("sessionUpdate").and_then(|s| s.as_str()) else {
-            return;
-        };
-        // Record inbound activity so the worker can wait for the agent's
-        // stream to quiesce before signalling turn-end (see worker's
-        // `await_quiescence`). Bumped for every recognised update kind — the
-        // goal is simply "the agent sent us something just now".
-        {
-            let mut st = handle.state.lock();
-            st.activity_seq = st.activity_seq.wrapping_add(1);
-        }
-        match kind {
-            "agent_message_chunk" => {
-                let Some(content) = v.get("content") else { return };
-                let Ok(block) = serde_json::from_value::<acp_schema::ContentBlock>(content.clone()) else {
-                    return;
-                };
-                if let Some(text) = extract_text_block(&block) {
-                    self.append_text_chunk(handle, text);
-                }
-            }
-            "agent_thought_chunk" => {
-                let Some(content) = v.get("content") else { return };
-                let Ok(block) = serde_json::from_value::<acp_schema::ContentBlock>(content.clone()) else {
-                    return;
-                };
-                if let Some(text) = extract_text_block(&block) {
-                    self.append_thinking_chunk(handle, text);
-                }
-            }
-            "tool_call" | "tool_call_update" => {
-                self.apply_tool_call(handle, &v, kind == "tool_call_update");
-            }
-            "plan" => {
-                let entries: Vec<PlanEntry> = v
-                    .get("entries")
-                    .and_then(|e| serde_json::from_value(e.clone()).ok())
-                    .unwrap_or_default();
-                let mut st = handle.state.lock();
-                st.plan = entries.clone();
-                // Attach to the trailing assistant message, or seed a fresh one.
-                let attached = if let Some(last) = st.messages.last_mut() {
-                    if matches!(last.role, crate::session::MessageRole::Assistant) {
-                        last.plan = Some(entries.clone());
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                if !attached {
-                    let mut msg = new_assistant_text(String::new());
-                    msg.plan = Some(entries.clone());
-                    msg.model = st.current_model.clone();
-                    st.messages.push(msg);
-                }
-                st.touch();
-                let sid = st.session_id.clone();
-                let agent_id = st.agent_id;
-                drop(st);
-                self.emit(SessionDeltaEnvelope {
-                    agent_id,
-                    session_id: sid,
-                    delta: SessionDelta::PlanUpdated { plan: entries },
-                });
-            }
-            "available_commands_update" => {
-                let commands: Vec<serde_json::Value> = v
-                    .get("availableCommands")
-                    .and_then(|c| c.as_array().cloned())
-                    .unwrap_or_default();
-                let mut st = handle.state.lock();
-                st.available_commands = commands.clone();
-                let sid = st.session_id.clone();
-                let agent_id = st.agent_id;
-                drop(st);
-                self.emit(SessionDeltaEnvelope {
-                    agent_id,
-                    session_id: sid,
-                    delta: SessionDelta::AvailableCommands { commands },
-                });
-            }
-            "current_mode_update" => {
-                let Some(mode_id) = v.get("currentModeId").and_then(|s| s.as_str()) else { return };
-                let mut st = handle.state.lock();
-                st.current_mode = Some(mode_id.to_string());
-                let sid = st.session_id.clone();
-                let agent_id = st.agent_id;
-                drop(st);
-                self.emit(SessionDeltaEnvelope {
-                    agent_id,
-                    session_id: sid,
-                    delta: SessionDelta::ModeChanged {
-                        mode_id: mode_id.to_string(),
-                    },
-                });
-            }
-            "current_model_update" => {
-                let Some(model_id) = v.get("currentModelId").and_then(|s| s.as_str()) else { return };
-                let mut st = handle.state.lock();
-                st.current_model = Some(model_id.to_string());
-                let sid = st.session_id.clone();
-                let agent_id = st.agent_id;
-                drop(st);
-                self.emit(SessionDeltaEnvelope {
-                    agent_id,
-                    session_id: sid,
-                    delta: SessionDelta::ModelChanged {
-                        model_id: model_id.to_string(),
-                    },
-                });
-            }
-            _ => {}
-        }
-    }
-
-    fn append_text_chunk(&self, handle: &SessionHandle, text: String) {
-        let mut st = handle.state.lock();
-        let (delta, agent_id, sid) = match st.messages.last_mut() {
-            Some(last)
-                if last.role == crate::session::MessageRole::Assistant
-                    && last.mode == MessageMode::Text
-                    && last.tool_calls.is_empty() =>
-            {
-                last.content.push_str(&text);
-                let msg_id = last.id.clone();
-                let agent_id = st.agent_id;
-                let sid = st.session_id.clone();
-                st.touch();
-                (
-                    SessionDelta::TextChunk {
-                        message_id: msg_id,
-                        delta: text,
-                    },
-                    agent_id,
-                    sid,
-                )
-            }
-            _ => {
-                let mut msg = new_assistant_text(text);
-                msg.model = st.current_model.clone();
-                let cloned = msg.clone();
-                st.messages.push(msg);
-                let agent_id = st.agent_id;
-                let sid = st.session_id.clone();
-                st.touch();
-                (SessionDelta::MessageAppended { message: cloned }, agent_id, sid)
-            }
-        };
-        drop(st);
-        self.emit(SessionDeltaEnvelope {
-            agent_id,
-            session_id: sid,
-            delta,
-        });
-    }
-
-    fn append_thinking_chunk(&self, handle: &SessionHandle, text: String) {
-        let mut st = handle.state.lock();
-        let (delta, agent_id, sid) = match st.messages.last_mut() {
-            Some(last)
-                if last.role == crate::session::MessageRole::Assistant
-                    && last.mode == MessageMode::Thinking =>
-            {
-                last.thinking.push_str(&text);
-                let msg_id = last.id.clone();
-                let agent_id = st.agent_id;
-                let sid = st.session_id.clone();
-                st.touch();
-                (
-                    SessionDelta::ThinkingChunk {
-                        message_id: msg_id,
-                        delta: text,
-                    },
-                    agent_id,
-                    sid,
-                )
-            }
-            _ => {
-                let mut msg = new_assistant_thinking(text);
-                msg.model = st.current_model.clone();
-                let cloned = msg.clone();
-                st.messages.push(msg);
-                let agent_id = st.agent_id;
-                let sid = st.session_id.clone();
-                st.touch();
-                (SessionDelta::MessageAppended { message: cloned }, agent_id, sid)
-            }
-        };
-        drop(st);
-        self.emit(SessionDeltaEnvelope {
-            agent_id,
-            session_id: sid,
-            delta,
-        });
-    }
-
-    fn apply_tool_call(&self, handle: &SessionHandle, v: &serde_json::Value, is_update: bool) {
-        let Some(tool_call_id) = v.get("toolCallId").and_then(|s| s.as_str()) else {
-            return;
-        };
-        let raw_input_val = v.get("rawInput");
-        let title = v.get("title").and_then(|s| s.as_str()).map(|s| s.to_string());
-        let kind = v.get("kind").and_then(|s| s.as_str()).map(|s| s.to_string());
-        let status_raw = v.get("status").and_then(|s| s.as_str());
-        let content_val = v.get("content").cloned();
-        let formatted = content_val
-            .as_ref()
-            .and_then(format_tool_content);
-
-        let mut st = handle.state.lock();
-
-        // Upsert by toolCallId across existing messages.
-        for msg in st.messages.iter_mut().rev() {
-            if let Some(tc) = msg.tool_calls.iter_mut().find(|t| t.id == tool_call_id) {
-                tc.status = map_tool_status(status_raw, tc.status);
-                if let Some(input) = raw_input_val {
-                    tc.arguments = normalise_tool_input(Some(input));
-                }
-                if let Some(t) = title.clone() {
-                    tc.tool_name = t.clone();
-                    tc.title = Some(t);
-                }
-                if let Some(k) = kind.clone() {
-                    tc.kind = Some(k);
-                }
-                if let Some(result) = formatted.clone() {
-                    tc.result = Some(result);
-                }
-                let updated = tc.clone();
-                let msg_id = msg.id.clone();
-                let agent_id = st.agent_id;
-                let sid = st.session_id.clone();
-                st.touch();
-                drop(st);
-                self.emit(SessionDeltaEnvelope {
-                    agent_id,
-                    session_id: sid,
-                    delta: SessionDelta::ToolCallUpserted {
-                        message_id: msg_id,
-                        tool_call: updated,
-                    },
-                });
                 return;
             }
-        }
-
-        // First sighting — only the initial `tool_call` event creates a new
-        // message; lone `tool_call_update` for an unknown id is ignored to
-        // match the existing frontend's behaviour.
-        if is_update {
-            return;
-        }
-
-        let tool_call = ToolCall {
-            id: tool_call_id.to_string(),
-            tool_name: title
-                .clone()
-                .or_else(|| kind.clone())
-                .unwrap_or_else(|| "tool".to_string()),
-            title: title.clone(),
-            kind: kind.clone(),
-            status: map_tool_status(status_raw, ToolCallStatus::Running),
-            arguments: normalise_tool_input(raw_input_val),
-            result: formatted,
-            locations: v
-                .get("locations")
-                .and_then(|l| l.as_array().cloned())
-                .unwrap_or_default(),
+            AcpEvent::SessionUpdate { session_id, .. }
+            | AcpEvent::PermissionRequest { session_id, .. }
+            | AcpEvent::TurnFailed { session_id, .. }
+            | AcpEvent::Usage { session_id, .. }
+            | AcpEvent::Compaction { session_id, .. }
+            | AcpEvent::CompressionSaved { session_id, .. } => session_id.clone(),
         };
-        let mut msg = new_assistant_tool(tool_call.clone());
-        msg.model = st.current_model.clone();
-        let msg_id = msg.id.clone();
-        st.messages.push(msg);
-        let agent_id = st.agent_id;
-        let sid = st.session_id.clone();
-        st.touch();
-        drop(st);
-        self.emit(SessionDeltaEnvelope {
-            agent_id,
-            session_id: sid,
-            delta: SessionDelta::ToolCallUpserted {
-                message_id: msg_id,
-                tool_call,
-            },
-        });
+
+        // Per-session: push the event onto the target actor's FIFO, where it is
+        // applied on the actor's task ordered before the turn terminal.
+        if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
+            handle.route_event(event);
+        }
     }
 }
 

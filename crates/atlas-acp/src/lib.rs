@@ -11,15 +11,16 @@ pub mod driver;
 pub mod error;
 pub mod events;
 pub mod registry;
+pub mod schema;
+pub mod spawn;
 
 pub use driver::AuthMethodWire;
 pub use error::{AcpError, Result};
 pub use events::{AcpEvent, EventSink};
-pub use registry::{
-    AgentId, AgentInfo, AgentRegistry, AgentSpec, NewSessionInfo, PermissionDecision,
-    managed_node_bin, register_managed_node_bin, sanitize_host_env,
-};
+pub use registry::{AgentId, AgentInfo, AgentRegistry, AgentSpec, PermissionDecision};
+pub use schema::NewSessionInfo;
+pub use spawn::{managed_node_bin, register_managed_node_bin, sanitize_host_env};
 
 // Re-export schema types the host needs (so it doesn't have to take a direct
 // dep on `agent-client-protocol-schema`).
-pub use agent_client_protocol::schema::{SessionId, StopReason};
+pub use agent_client_protocol::schema::v1::{SessionId, StopReason};

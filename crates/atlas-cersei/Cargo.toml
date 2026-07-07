@@ -35,18 +35,7 @@ atlas-acp = { path = "../atlas-acp" }
 # Needed to CONSTRUCT the typed ACP schema values (`SessionUpdate`,
 # `ToolCallUpdate`, `PermissionOption`) that ride inside `AcpEvent`. Feature set
 # mirrors atlas-acp so Cargo unifies to one build and the wire shapes match.
-agent-client-protocol = { version = "0.11", features = [
-    "unstable_auth_methods",
-    "unstable_boolean_config",
-    "unstable_logout",
-    "unstable_message_id",
-    "unstable_session_additional_directories",
-    "unstable_session_close",
-    "unstable_session_fork",
-    "unstable_session_model",
-    "unstable_session_resume",
-    "unstable_session_usage",
-] }
+agent-client-protocol = { version = "1.2", features = ["unstable"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

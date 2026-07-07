@@ -19,33 +19,31 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-client-protocol"
-version = "0.11.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af62fb84df2af0f933d8f5fd78b843fa5eb0ec5a48fa1b528c41951d0bbe36c"
+checksum = "882b815ffa67b023e1b40e7ea3bab3f05869654e8565d6811870c5545285e1d3"
 dependencies = [
  "agent-client-protocol-derive",
  "agent-client-protocol-schema",
- "anyhow",
+ "async-process",
+ "blocking",
  "futures",
  "futures-concurrency",
- "jsonrpcmsg",
- "rmcp",
  "rustc-hash 2.1.2",
  "schemars 1.2.1",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
+ "shell-words",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "agent-client-protocol-derive"
-version = "0.11.1"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cabdc9d845d08ec7ed2d0c9de1ae4a1b198301407d55855261572761be90ec9f"
+checksum = "dd5ca63f112bd2459bcaf9eda0683b9ba95fc3b5e5fdd9036ca941c6a09345b1"
 dependencies = [
  "quote",
  "syn 2.0.117",
@@ -53,9 +51,9 @@ dependencies = [
 
 [[package]]
 name = "agent-client-protocol-schema"
-version = "0.12.0"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49bae57dad1c28a362fbdcf7bab0583316a02b45a70792109fced55780a3b63c"
+checksum = "06679e1542356341f4550ccfb16338b64f37f6af70de2105446ef6fbb078234c"
 dependencies = [
  "anyhow",
  "derive_more 2.1.1",
@@ -65,21 +63,6 @@ dependencies = [
  "serde_with",
  "strum",
  "tracing",
-]
-
-[[package]]
-name = "agent-client-protocol-tokio"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e1572b219f22c4b3be0f20f934c8b6f1d1457126ce72923c4f6608f96153b65"
-dependencies = [
- "agent-client-protocol",
- "futures",
- "serde",
- "serde_json",
- "shell-words",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -367,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "atlas"
-version = "0.1.19"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "atlas-acp",
@@ -419,11 +402,21 @@ name = "atlas-acp"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
- "agent-client-protocol-tokio",
  "dashmap",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "atlas-agentkit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "atlas-acp",
  "tokio",
  "tracing",
  "uuid",
@@ -436,6 +429,8 @@ dependencies = [
  "agent-client-protocol",
  "async-trait",
  "atlas-acp",
+ "atlas-agentkit",
+ "atlas-bus",
  "atlas-cersei",
  "chrono",
  "dashmap",
@@ -447,6 +442,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "atlas-bus"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4198,16 +4202,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jsonrpcmsg"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d833a15225c779251e13929203518c2ff26e2fe0f322d584b213f4f4dad37bd"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5422,12 +5416,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
-name = "pastey"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5a797f0e07bdf071d15742978fc3128ec6c22891c31a3a931513263904c982a"
-
-[[package]]
 name = "pathdiff"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6485,41 +6473,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rmcp"
-version = "1.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0810a9f717d9828f475fe1f629f4c305c8464b7f496c3a854b58d29e65f4058e"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "futures",
- "pastey",
- "pin-project-lite",
- "rmcp-macros",
- "schemars 1.2.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "rmcp-macros"
-version = "1.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aefac48c364756e97f04c0401ba3231e8607882c7c1d92da0437dc16307904d"
-dependencies = [
- "darling 0.23.0",
- "proc-macro2",
- "quote",
- "serde_json",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "rusqlite"
 version = "0.32.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6758,7 +6711,6 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
 dependencies = [
- "chrono",
  "dyn-clone",
  "ref-cast",
  "schemars_derive 1.2.1",
@@ -8354,7 +8306,6 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
- "futures-io",
  "futures-sink",
  "futures-util",
  "pin-project-lite",

@@ -1,4 +1,4 @@
-use agent_client_protocol::schema as acp_schema;
+use agent_client_protocol::schema::v1 as acp_schema;
 use serde::Serialize;
 use uuid::Uuid;
 

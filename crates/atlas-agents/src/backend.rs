@@ -66,15 +66,6 @@ pub trait AgentBackend: Send + Sync {
     fn set_compress(&self, _agent_id: AgentId, _session_id: &SessionId, _on: bool) -> AcpResult<()> {
         Ok(())
     }
-    /// Whether the worker should wait for the inbound update stream to go
-    /// quiet before signalling turn-end. True for out-of-process ACP agents,
-    /// where streamed notifications land on the driver task asynchronously and
-    /// can race past the prompt response. The native backend emits its chunks
-    /// inline before `send_prompt` returns, so it has nothing to wait for —
-    /// default `false`.
-    fn quiesce_turn_end(&self) -> bool {
-        false
-    }
     fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<()>;
     fn cancel_turn(&self, agent_id: AgentId, session_id: SessionId) -> AcpResult<()>;
     fn respond_permission(
@@ -160,9 +151,6 @@ impl AgentBackend for AcpBackend {
         self.0
             .set_session_config_option(agent_id, session_id, "model", model_id)
             .await
-    }
-    fn quiesce_turn_end(&self) -> bool {
-        true
     }
     fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<()> {
         self.0.mark_turn_started(agent_id, session_id)
