@@ -66,6 +66,28 @@ pub struct TelemetryConfig {
     pub key: Option<String>,
 }
 
+/// The two auto-update values pulled from PostHog remote config.
+#[derive(Debug, Clone)]
+pub struct RemoteUpdateConfig {
+    /// Latest version, raw string (e.g. `"0.1.21"`).
+    pub version: String,
+    /// Direct download URL of the release DMG.
+    pub uri: String,
+}
+
+/// Coerce a PostHog `featureFlagPayloads` value into a plain string. Payloads
+/// may arrive already as a JSON string, or double-encoded (a string whose
+/// contents are themselves a JSON-quoted string, e.g. `"\"0.1.21\""`).
+fn payload_string(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::String(inner)) => Some(inner),
+            _ => Some(s.clone()),
+        },
+        _ => None,
+    }
+}
+
 /// Managed Tauri state. Cheap to clone (`Arc`). Every public method is an
 /// instant no-op when inert or disabled.
 pub struct TelemetryClient {
@@ -235,6 +257,34 @@ impl TelemetryClient {
                 self.api_key.clone()
             },
         }
+    }
+
+    /// Fetch the two auto-update remote-config values (`version`, `uri`) from
+    /// PostHog using the official `posthog-rs` SDK's feature-flag evaluation
+    /// (`evaluate_flags` → `/flags/?v=2`), keyed on the project token + anon
+    /// distinct id. Both values are stored as PostHog **remote-config flag
+    /// payloads** (JSON-encoded strings, so `get_flag_payload` returns e.g.
+    /// `"\"0.1.20\""` — decoded via [`payload_string`]). Deliberately
+    /// **independent of the telemetry opt-in** (app updates are not analytics) —
+    /// it only requires a resolved project key (i.e. not inert). Returns `None`
+    /// when inert or on any error.
+    pub async fn fetch_remote_config(&self) -> Option<RemoteUpdateConfig> {
+        let key = self.api_key.clone()?; // inert build → no key → skip
+        let host = self.host.clone();
+        let client = posthog_rs::client((key.as_str(), host.as_str())).await;
+        let flags = client
+            .evaluate_flags(
+                self.distinct_id.as_str(),
+                posthog_rs::EvaluateFlagsOptions::default(),
+            )
+            .await
+            .ok()?;
+        let version = flags.get_flag_payload("version").as_ref().and_then(payload_string)?;
+        let uri = flags.get_flag_payload("uri").as_ref().and_then(payload_string)?;
+        if version.trim().is_empty() || uri.trim().is_empty() {
+            return None;
+        }
+        Some(RemoteUpdateConfig { version, uri })
     }
 
     /// Flip the live opt-in gate. Records a single `telemetry_opt_in` on enable

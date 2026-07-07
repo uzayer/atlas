@@ -188,6 +188,15 @@ pub struct AppSettings {
     /// the frontend; persisted so it survives relaunch.
     #[serde(default = "default_code_editor_theme")]
     pub code_editor_theme: String,
+    /// Auto-update master switch. When ON (default), every startup runs a
+    /// non-blocking check against PostHog remote config and prompts if a newer
+    /// version is available. See `crate::commands::updater`.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// A version the user chose to "Ignore" in the update prompt — the startup
+    /// check won't re-prompt for exactly this version. `None` = nothing ignored.
+    #[serde(default)]
+    pub updater_ignored_version: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -225,6 +234,8 @@ impl Default for AppSettings {
             embedding_model_id: default_embedding_model(),
             llm_model_id: default_llm_model(),
             code_editor_theme: default_code_editor_theme(),
+            auto_update: true,
+            updater_ignored_version: None,
         }
     }
 }

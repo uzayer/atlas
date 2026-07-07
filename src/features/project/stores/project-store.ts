@@ -59,6 +59,12 @@ export interface AppSettings {
   /** Code-editor color theme id (see src/features/editor/themes). Drives the
    *  CodeMirror editor, the diff viewer and the source-control diff views. */
   codeEditorTheme: string;
+  /** Auto-update master switch. ON (default) → every startup checks PostHog
+   *  remote config and prompts when a newer signed DMG is available. */
+  autoUpdate: boolean;
+  /** A version the user chose to "Ignore" in the update prompt; the startup
+   *  check won't re-prompt for exactly this version. */
+  updaterIgnoredVersion: string | null;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -70,6 +76,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   embeddingModelId: "all-MiniLM-L6-v2",
   llmModelId: "qwen3-0.6b",
   codeEditorTheme: DEFAULT_EDITOR_THEME_ID,
+  autoUpdate: true,
+  updaterIgnoredVersion: null,
 };
 
 /**

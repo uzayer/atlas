@@ -52,6 +52,14 @@ import { logEvent } from "@/features/log/lib/log";
 import { warmMarkdownWorker } from "@/lib/markdown-cache";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
 import { NotificationPanel } from "@/features/notifications/components/notification-panel";
+import { UpdateAvailableModal } from "@/features/updater/components/update-available-modal";
+import { useUpdaterStore } from "@/features/updater/stores/updater-store";
+import {
+  listenUpdateAvailable,
+  listenUpdateProgress,
+  listenUpdateError,
+  listenUpdateChecking,
+} from "@/features/updater/lib/updater-api";
 import { Toaster } from "sonner";
 import { clampScale, SCALE_STEP, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
 
@@ -124,6 +132,29 @@ export function App() {
     });
     return () => {
       void unlisten.then((off) => off());
+    };
+  }, []);
+
+  // Auto-update: route the Rust updater events into the updater store, which
+  // drives the <UpdateAvailableModal />. The startup check runs in Rust; here we
+  // just reflect its outcome. See src/features/updater + commands::updater.
+  useEffect(() => {
+    const offs: Array<Promise<() => void>> = [
+      listenUpdateAvailable((e) => {
+        useUpdaterStore.getState().actions.setAvailable(e.version, e.currentVersion);
+      }),
+      listenUpdateProgress((e) => {
+        useUpdaterStore.getState().actions.setProgress(e.downloaded, e.total);
+      }),
+      listenUpdateError((e) => {
+        useUpdaterStore.getState().actions.setError(e.message);
+      }),
+      listenUpdateChecking((e) => {
+        useUpdaterStore.getState().actions.setChecking(e.checking);
+      }),
+    ];
+    return () => {
+      for (const p of offs) void p.then((off) => off());
     };
   }, []);
 
@@ -1173,6 +1204,7 @@ export function App() {
       <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />
       <HintOverlay />
       <NotificationPanel />
+      <UpdateAvailableModal />
       <BrowserOverlayWatcher />
       <Toaster
         position="bottom-right"

@@ -1,6 +1,6 @@
 [package]
 name = "atlas"
-version = "0.1.20"
+version = "0.1.19"
 edition = "2021"
 
 [lib]
@@ -118,6 +118,11 @@ rig-core = "0.38.1"
 # their own PostHog OSS project via `POSTHOG_KEY`/`POSTHOG_HOST` without a
 # rebuild. Tiny, zero transitive deps. See `crate::telemetry`.
 dotenvy = "0.15"
+# Semver comparison for the auto-updater's version gate (PostHog `version`
+# remote-config value vs the running `CARGO_PKG_VERSION`). See
+# `crate::commands::updater`.
+semver = "1"
+posthog-rs = "0.14"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Native NSWindow access for the titlebar double-click "zoom" (AppKit

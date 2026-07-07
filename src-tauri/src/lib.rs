@@ -161,6 +161,10 @@ pub fn run() {
             // Silent background refresh of model pricing from models.dev — first
             // launch populates the cache; later launches update only on change.
             commands::models_pricing::refresh_in_background(&app.handle());
+            // Non-blocking auto-update check against PostHog remote config. Gated
+            // on the `auto_update` preference; emits `atlas:update-available` when
+            // a newer signed DMG is published. See `commands::updater`.
+            commands::updater::check_in_background(&app.handle());
 
             // Background memory indexer (Step 4): a single owned Tokio task drains
             // a bounded queue and indexes each open project's corpus into its
@@ -202,6 +206,7 @@ pub fn run() {
         .manage(commands::memory_chat::MemoryChatState::new())
         .manage(commands::memory_sharing::MemorySharingState::new())
         .manage(commands::shared_memory::SharedMemoryStore::new())
+        .manage(commands::updater::UpdaterState::new())
         // Drop a window's per-window index + mention caches when it closes, so
         // its file watcher stops and memory is freed (these states are keyed by
         // webview label for multi-window project scoping).
@@ -387,6 +392,9 @@ pub fn run() {
             commands::telemetry::telemetry_config,
             commands::telemetry::telemetry_set_enabled,
             commands::telemetry::telemetry_capture,
+            commands::updater::update_check_now,
+            commands::updater::update_install,
+            commands::updater::update_ignore,
             commands::compose_prompt::compose_prompt,
             commands::cli::cli_status,
             commands::cli::cli_install_helper,

@@ -3,10 +3,13 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
-import { PanelLeft, PanelRight, Bell, Layers } from "lucide-react";
+import { PanelLeft, PanelRight, Bell, Layers, ArrowDownToLine, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
+import { useUpdaterStore } from "@/features/updater/stores/updater-store";
+import { updater } from "@/features/updater/lib/updater-api";
 
 function useTauriWindow() {
   const windowRef = useRef<TauriWindow | null>(null);
@@ -106,6 +109,7 @@ export function Titlebar() {
 
       {currentProject && (
         <div className="flex items-center gap-1.5">
+          <UpdateButton />
           <NotificationButton />
           <RightPanelToggle />
         </div>
@@ -214,6 +218,63 @@ function LeftPanelToggle() {
       title={leftPanel.visible ? "Hide left panel" : "Show left panel"}
     >
       <PanelLeft size={14} className={leftPanel.visible ? "" : "opacity-40"} />
+    </button>
+  );
+}
+
+/**
+ * Titlebar shorthand for the auto-updater: a down-arrow that triggers a manual
+ * "check for updates", and a spinner while the backend is checking (driven by
+ * the `atlas:update-checking` event → updater store). When an update is found,
+ * the root-level <UpdateAvailableModal /> opens automatically.
+ */
+function UpdateButton() {
+  const checking = useUpdaterStore.use.checking();
+  const phase = useUpdaterStore.use.phase();
+  const version = useUpdaterStore.use.version();
+  const currentVersion = useUpdaterStore.use.currentVersion();
+  const { setAvailable } = useUpdaterStore.use.actions();
+
+  const hasPending = phase !== "installing" && !!version;
+
+  const onClick = () => {
+    if (checking) return;
+    // If a check already found an update, just re-open the prompt.
+    if (hasPending && phase !== "available") {
+      setAvailable(version!, currentVersion ?? "");
+      return;
+    }
+    void updater
+      .checkNow()
+      .then((status) => {
+        if (!status.available) {
+          toast.success(`You're on the latest version (${status.currentVersion}).`);
+        }
+      })
+      .catch((e) => toast.error(`Update check failed: ${e instanceof Error ? e.message : String(e)}`));
+  };
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={checking}
+      className={cn(
+        "relative flex items-center justify-center w-6 h-6 rounded hover:bg-[#ffffff08] transition-all duration-150 outline-none focus:outline-none",
+        hasPending ? "text-[#ccc]" : "text-[#555] hover:text-[#aaa]",
+      )}
+      title={checking ? "Checking for updates…" : hasPending ? "Update available" : "Check for updates"}
+    >
+      {checking ? (
+        <Loader2 size={14} className="animate-spin" />
+      ) : (
+        <ArrowDownToLine size={14} />
+      )}
+      {hasPending && !checking && (
+        <span
+          className="absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full bg-[var(--accent-primary)] ring-1 ring-[#000] pointer-events-none"
+          aria-label="Update available"
+        />
+      )}
     </button>
   );
 }

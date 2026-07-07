@@ -152,12 +152,16 @@ export function DiffView({
   ) : null;
 
   return (
-    <div className={cn("flex flex-col min-h-0", className)}>
+    // `min-w-0` is load-bearing: the virtualized rows below use `width:
+    // max-content` so long lines can scroll horizontally. Without it, that
+    // intrinsic width propagates up the flex chain and the whole panel grows
+    // past its bounds (the diff bg bleeds outside) instead of scrolling.
+    <div className={cn("flex flex-col min-h-0 min-w-0", className)}>
       {header}
       {files.length === 0 ? (
         <div className="px-3 py-8 text-center text-[11px] text-text-tertiary">{emptyLabel}</div>
       ) : (
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto hide-scrollbar px-3 py-2">
+        <div ref={scrollRef} className="flex-1 min-h-0 min-w-0 overflow-auto hide-scrollbar px-3 py-2">
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((vr) => {
               const row = rows[vr.index];

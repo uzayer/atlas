@@ -18,6 +18,7 @@ import {
   Minus,
   ChevronLeft,
   ChevronRight,
+  DownloadCloud,
 } from "lucide-react";
 import {
   clampScale,
@@ -37,6 +38,7 @@ import { useModelPricingStore } from "../stores/model-pricing-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { setEnabled as setTelemetryEnabled } from "@/features/telemetry/posthog-client";
+import { updater } from "@/features/updater/lib/updater-api";
 import { useSettingsNav } from "../stores/settings-nav-store";
 import { isDev } from "@/lib/env";
 
@@ -51,6 +53,7 @@ const SECTIONS = [
   { id: "providers", label: "API Keys", icon: KeyRound },
   { id: "skills", label: "Skills", icon: Zap },
   { id: "models", label: "Local Models", icon: Boxes },
+  { id: "updates", label: "Updates", icon: DownloadCloud },
   { id: "keybindings", label: "Keybindings", icon: Keyboard },
   ...(isDev
     ? [{ id: "developer", label: "Developer", icon: FlaskConical }]
@@ -163,6 +166,7 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
             {activeSection === "general" && <GeneralSettings />}
             {activeSection === "appearance" && <AppearanceSettings />}
             {activeSection === "layouts" && <LayoutsSettings />}
+            {activeSection === "updates" && <UpdatesSettings />}
             {activeSection === "keybindings" && <KeybindingsSettings />}
             {isDev && activeSection === "developer" && <DeveloperSettings />}
             {activeSection === "about" && <AboutSettings />}
@@ -380,6 +384,60 @@ function AppearanceSettings() {
   );
 }
 
+function UpdatesSettings() {
+  const settings = useProjectStore.use.settings();
+  const { updateSettings } = useProjectStore.use.actions();
+  const [checking, setChecking] = useState(false);
+
+  const checkNow = async () => {
+    setChecking(true);
+    try {
+      const status = await updater.checkNow();
+      // When an update exists, Rust emits `atlas:update-available` and the
+      // root-level modal opens automatically; only surface the "up to date" case.
+      if (!status.available) {
+        toast.success(`You're on the latest version (${status.currentVersion}).`);
+      }
+    } catch (e) {
+      toast.error(`Update check failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <SectionTitle title="Updates" subtitle="How Atlas keeps itself up to date" />
+      <SettingRow
+        label="Automatic updates"
+        description="On every launch, check for a newer version in the background and prompt you to install it. Updates are Apple-signed and notarized; Atlas verifies the signature before installing. Turn off to never check or prompt."
+      >
+        <Toggle
+          checked={settings.autoUpdate}
+          onChange={(next) => updateSettings({ autoUpdate: next })}
+        />
+      </SettingRow>
+      <SettingRow
+        label="Check for updates"
+        description="Check now regardless of the automatic-update setting. If a newer version is available you'll get the install prompt; otherwise you're already up to date."
+      >
+        <button
+          type="button"
+          onClick={() => void checkNow()}
+          disabled={checking}
+          className={cn(
+            "h-7 rounded-md px-2.5 text-[11px] font-medium border border-border-default bg-bg-elevated",
+            "text-text-primary hover:bg-bg-hover transition-colors",
+            "disabled:opacity-50 disabled:cursor-not-allowed",
+          )}
+        >
+          {checking ? "Checking…" : "Check now"}
+        </button>
+      </SettingRow>
+    </div>
+  );
+}
+
 function KeybindingsSettings() {
   const groups: Array<{
     title: string;
@@ -523,7 +581,7 @@ function AboutSettings() {
           <AtlasIcon size={40} className="rounded-xl" />
           <div>
             <p className="text-sm font-semibold text-text-primary">Atlas</p>
-            <p className="text-[10px] text-text-tertiary">v0.1.20 — The second brain IDE</p>
+            <p className="text-[10px] text-text-tertiary">v0.1.19 — The second brain IDE</p>
           </div>
         </div>
         <p className="text-[11px] text-text-secondary leading-relaxed pt-2">
