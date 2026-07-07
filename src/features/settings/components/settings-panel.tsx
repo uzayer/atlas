@@ -290,13 +290,13 @@ function GeneralSettings() {
         />
       </SettingRow>
       <SettingRow
-        label="AI next-step suggestions"
-        description="After an agent turn, suggest 2-3 follow-up actions as clickable chips. On: when the agent didn't already list next steps, generate them with one cheap call to your selected BYOK model. Off still shows suggestions parsed from the reply, for free."
+        label="Next-step suggestions"
+        description="After each turn, the coding agent suggests 2-3 follow-up actions as clickable chips (click = send). It uses the agent's own live session context — no extra API key — and the request/suggestions are hidden from the thread."
       >
         <Toggle
-          checked={settings.adaptiveSuggestions === "llm"}
+          checked={settings.adaptiveSuggestions !== "off"}
           onChange={(next) =>
-            updateSettings({ adaptiveSuggestions: next ? "llm" : "parse" })
+            updateSettings({ adaptiveSuggestions: next ? "agent" : "off" })
           }
         />
       </SettingRow>

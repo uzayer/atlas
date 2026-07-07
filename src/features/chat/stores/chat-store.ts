@@ -22,6 +22,7 @@ import { loadCachedAcpModels, saveCachedAcpModels } from "../lib/acp-models-cach
 import { saveCerseiModelPref, saveCerseiEffort, saveCerseiCompress } from "../lib/cersei-model-pref";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
+import { extractNextSteps } from "../lib/next-steps";
 import {
   getFilePathFromInput,
   classifyToolFileKind,
@@ -66,12 +67,19 @@ function reconstructTurnSummaries(messages: ChatMessage[]): void {
         }
       }
     }
-    if (lastAsst >= 0 && byPath.size > 0) {
-      messages[lastAsst].turnSummary = {
-        turnSeq: 0, // reconstructed — not tied to a live turn
-        files: Array.from(byPath.values()),
-        repoAtTurn: false,
-      };
+    if (lastAsst >= 0) {
+      if (byPath.size > 0) {
+        messages[lastAsst].turnSummary = {
+          turnSeq: 0, // reconstructed — not tied to a live turn
+          files: Array.from(byPath.values()),
+          repoAtTurn: false,
+        };
+      }
+      // Restore agent-generated chips from the reply's <next_steps> block.
+      const chips = extractNextSteps(messages[lastAsst].content);
+      if (chips.length > 0) {
+        messages[lastAsst].suggestions = { turnSeq: 0, status: "ready", chips };
+      }
     }
   };
   let turnStart = 0;
@@ -1309,6 +1317,18 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
           }
         }
         session.turnScratch = undefined;
+      }
+      // Agent-generated next-step chips: extract the trailing assistant reply's
+      // hidden `<next_steps>` block into click-to-send suggestions. The raw
+      // content (with the block) stays in the store; the display path strips it.
+      for (let i = session.messages.length - 1; i >= 0; i--) {
+        const m = session.messages[i];
+        if (m.role !== "assistant") continue;
+        const chips = extractNextSteps(m.content);
+        if (chips.length > 0) {
+          m.suggestions = { turnSeq: env.turn_seq ?? 0, status: "ready", chips };
+        }
+        break;
       }
       return;
     }

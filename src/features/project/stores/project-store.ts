@@ -59,11 +59,11 @@ export interface AppSettings {
   /** Code-editor color theme id (see src/features/editor/themes). Drives the
    *  CodeMirror editor, the diff viewer and the source-control diff views. */
   codeEditorTheme: string;
-  /** Adaptive next-step suggestion chips in the agent chat's per-turn card:
-   *  - "off"   → no chips
-   *  - "parse" → free: parse a trailing "Next steps" list from the turn (default)
-   *  - "llm"   → parse first, else one cheap BYOK model call (needs keys). */
-  adaptiveSuggestions: "off" | "parse" | "llm";
+  /** Adaptive next-step suggestion chips in the agent chat's per-turn card.
+   *  "agent" (default) asks the coding agent to end each reply with a hidden
+   *  `<next_steps>` block (uses the live session context, no BYOK); "off"
+   *  disables it. (Legacy "parse"/"llm" values are treated as enabled.) */
+  adaptiveSuggestions: "off" | "agent";
   /** Auto-update master switch. ON (default) → every startup checks PostHog
    *  remote config and prompts when a newer signed DMG is available. */
   autoUpdate: boolean;
@@ -81,7 +81,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   embeddingModelId: "all-MiniLM-L6-v2",
   llmModelId: "qwen3-0.6b",
   codeEditorTheme: DEFAULT_EDITOR_THEME_ID,
-  adaptiveSuggestions: "llm",
+  adaptiveSuggestions: "agent",
   autoUpdate: true,
   updaterIgnoredVersion: null,
 };

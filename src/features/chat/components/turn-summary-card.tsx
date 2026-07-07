@@ -5,6 +5,7 @@ import {
   ArrowRight,
   Workflow,
   Loader2,
+  Sparkles,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -41,6 +42,7 @@ import { useCanvasStore } from "@/features/canvas/stores/canvas-store";
 import { useCanvasAiStore } from "@/features/canvas/stores/canvas-ai-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { resolveByok } from "../lib/byok-resolve";
+import { stripNextSteps } from "../lib/next-steps";
 import { CommitFlow } from "./commit-flow";
 
 function buildThreadMarkdown(sessionId: string): string | null {
@@ -49,7 +51,7 @@ function buildThreadMarkdown(sessionId: string): string | null {
   const lines: string[] = [`# Agent chat — ${session.title || "Untitled"}`, ""];
   for (const m of session.messages) {
     if (m.role !== "user" && m.role !== "assistant") continue;
-    const text = (m.atlasProse ?? m.content ?? "").trim();
+    const text = stripNextSteps(m.atlasProse ?? m.content ?? "").trim();
     if (!text) continue;
     lines.push(`## ${m.role === "user" ? "User" : "Assistant"}`, "", text, "");
   }
@@ -227,8 +229,13 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
       )}
 
       {chips.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {chips.map((chip, i) => (
+        <div className="space-y-1">
+          <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-[var(--text-tertiary)]">
+            <Sparkles size={10} className="text-[var(--accent-primary)]" />
+            Suggestions
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {chips.map((chip, i) => (
             <button
               key={i}
               type="button"
@@ -249,7 +256,8 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
                 className="shrink-0 text-[var(--text-tertiary)] group-hover:text-[var(--accent-primary)]"
               />
             </button>
-          ))}
+            ))}
+          </div>
         </div>
       )}
 

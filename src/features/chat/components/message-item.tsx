@@ -34,6 +34,7 @@ import {
   type EditPart,
 } from "../lib/tool-files";
 import { TurnSummaryCard } from "./turn-summary-card";
+import { stripNextSteps } from "../lib/next-steps";
 
 // User prompts composed via the @-mention picker carry a heavy
 // "Atlas context" suffix. The split + block count are computed ONCE
@@ -118,12 +119,15 @@ export const MessageItem = memo(function MessageItem({
   // chat-store on insert) and falls back to a one-time regex parse
   // for legacy messages — no regex per render in the hot path.
   const {
-    prose,
+    prose: rawProse,
     context,
     blockCount: contextBlockCount,
   } = isUser
     ? getAtlasSplit(message)
     : { prose: message.content, context: null, blockCount: 0 };
+  // Hide the agent's `<next_steps>` block (rendered as chips) and, on resume,
+  // our injected directive — from what the user reads.
+  const prose = stripNextSteps(rawProse);
 
   return (
     <div

@@ -1,8 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
-import { parseNextSteps } from "../lib/next-steps";
-import { resolveByok } from "../lib/byok-resolve";
-import { generateSuggestions } from "../lib/generate-suggestions";
+import { appendNextStepsDirective } from "../lib/next-steps";
 import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
 import { loadCachedAcpModes } from "../lib/acp-modes-cache";
 import { warmAcpModels, otherAcpAgent } from "../lib/warm-acp-models";
@@ -402,70 +400,8 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         Promise.resolve().then(() => handleSendRef.current?.(next, []));
       }
     }
-    // Adaptive next-step chips: parse a trailing "Next steps" list from the
-    // just-finished turn's assistant text (free, all agents). The LLM
-    // augmentation (Phase 4) hangs off the same edge.
-    if (turnFinished) {
-      const st = useChatStore.getState();
-      const sess = st.sessions[tabId];
-      if (sess) {
-        let lastUserIdx = -1;
-        for (let i = sess.messages.length - 1; i >= 0; i--) {
-          if (sess.messages[i].role === "user") {
-            lastUserIdx = i;
-            break;
-          }
-        }
-        const turnMsgs = sess.messages.slice(lastUserIdx + 1);
-        const lastAsst = [...turnMsgs]
-          .reverse()
-          .find((m) => m.role === "assistant");
-        if (lastAsst && !lastAsst.suggestions) {
-          const text = turnMsgs
-            .filter((m) => m.role === "assistant")
-            .map((m) => m.content)
-            .filter(Boolean)
-            .join("\n");
-          const chips = parseNextSteps(text);
-          const turnSeq = sess.currentTurnSeq ?? 0;
-          if (chips.length) {
-            st.actions.setTurnSuggestions(tabId, lastAsst.id, turnSeq, {
-              status: "ready",
-              chips,
-            });
-          } else if (
-            useProjectStore.getState().settings.adaptiveSuggestions === "llm"
-          ) {
-            // No explicit "Next steps" list — fall back to a single cheap BYOK
-            // call, if the user has a model configured (opt-in setting).
-            const byok = resolveByok();
-            if (byok) {
-              const msgId = lastAsst.id;
-              const editedFiles = (lastAsst.turnSummary?.files ?? [])
-                .filter((f) => f.kind === "edit")
-                .map((f) => f.path);
-              st.actions.setTurnSuggestions(tabId, msgId, turnSeq, {
-                status: "loading",
-                chips: [],
-              });
-              void generateSuggestions({
-                turnText: text,
-                files: editedFiles,
-                provider: byok.provider,
-                model: byok.model,
-              }).then((llmChips) => {
-                useChatStore
-                  .getState()
-                  .actions.setTurnSuggestions(tabId, msgId, turnSeq, {
-                    status: llmChips.length ? "ready" : "idle",
-                    chips: llmChips,
-                  });
-              });
-            }
-          }
-        }
-      }
-    }
+    // Next-step chips are extracted from the agent's own `<next_steps>` block in
+    // the chat-store `turn_finished` reducer — nothing to do here.
   }, [session?.status, session?.acpSessionId, tabId]);
 
   // Suggestion chips (and other adaptive affordances) send as the next message.
@@ -550,6 +486,14 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     } catch (err) {
       console.warn("composePrompt failed, sending raw text:", err);
       wirePrompt = actualContent;
+    }
+
+    // Ask the agent to end its reply with a hidden `<next_steps>` block — it has
+    // the live session context, so the suggestions are better than a separate
+    // model's. Appended to the WIRE prompt only (not the visible message); the
+    // directive + the block are stripped from the thread. Gated on the setting.
+    if (useProjectStore.getState().settings.adaptiveSuggestions !== "off") {
+      wirePrompt = appendNextStepsDirective(wirePrompt);
     }
 
     // Best-effort, invisible: record that this turn applied one or more skills
