@@ -276,22 +276,29 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     measureElement:
       typeof window !== "undefined" && !navigator.userAgent.includes("Firefox")
         ? (el) => {
-            // Round to an integer so re-measures of unchanged content
-            // return the exact same value and the virtualizer treats
-            // them as no-ops (no offset recompute, no scrollTop nudge).
-            //
-            // NB: we ALWAYS report the freshly-measured height. An earlier
-            // optimization skipped re-measuring while scrolling up (reuse
-            // cached size, TanStack #659) to avoid upward stutter — but
-            // Atlas message rows change height after first measure
-            // (streaming <pre> → rendered markdown, accordions toggling,
-            // images/code blocks settling), so a stale cached height left
-            // tall rows too short and the next row overlapped them. Always
-            // measuring is the correctness-first choice; the integer
-            // rounding + average-estimate already keep scrolling smooth.
+            const id = el?.getAttribute("data-message-id") ?? undefined;
+            // While actively scrolling, report the cached height for any
+            // already-measured settled row instead of re-reading the DOM. This
+            // stops a row that reflows mid-scroll (highlight applying, font
+            // swap, image load) from feeding a changed height back and shifting
+            // every offset below it — the lurch. The streaming tail is exempt
+            // (it must follow live growth), and rows with no cached height yet
+            // still measure (there's nothing to reuse). The scroll-idle
+            // reconcile in `onScroll` re-measures everything once movement
+            // stops, so nothing stays stale (the fix the old hack lacked).
+            if (
+              isScrollingRef.current &&
+              id &&
+              id !== streamTailIdRef.current &&
+              measuredHeights.has(id)
+            ) {
+              return measuredHeights.get(id)!;
+            }
+            // Round to an integer so re-measures of unchanged content return the
+            // exact same value and the virtualizer treats them as no-ops (no
+            // offset recompute, no scrollTop nudge).
             const raw = el?.getBoundingClientRect().height ?? averageHeight();
             const h = Math.round(raw);
-            const id = el?.getAttribute("data-message-id");
             if (id) recordHeight(id, h);
             return h;
           }
@@ -375,10 +382,58 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   const lastSeenLenRef = useRef(filtered.length);
   const filteredLenRef = useRef(filtered.length);
   filteredLenRef.current = filtered.length;
+
+  // The nav rail's active tick is derived from the top-of-viewport row. We keep
+  // it as rAF-throttled state sampled from real scroll movement rather than
+  // reading `virtualizer.getVirtualItems()[0]` inline every render — otherwise
+  // the tick tracks the virtualizer's offset in lockstep and jitters whenever a
+  // row re-measures (streaming settle, accordion toggle) recomputes offsets.
+  const [railTopVIndex, setRailTopVIndex] = useState(0);
+  const railRafRef = useRef<number | null>(null);
+
+  // Scroll-state gate for measurement (see `measureElement`). While the user is
+  // actively scrolling we return cached heights for settled rows instead of
+  // re-measuring, so a row settling/reflowing mid-scroll (highlight applying,
+  // font swap, image load) can't shift the virtualizer's offsets and lurch the
+  // viewport. On scroll-idle we force one `virtualizer.measure()` reconcile so
+  // any height that genuinely changed mid-scroll is corrected — this is what the
+  // previously-removed "skip while scrolling" hack lacked (it went stale and
+  // overlapped). The streaming tail is never skipped (it must follow growth).
+  const isScrollingRef = useRef(false);
+  const scrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamTailIdRef = useRef<string | null>(null);
+  streamTailIdRef.current =
+    isStreaming && filtered.length > 0 ? filtered[filtered.length - 1].id : null;
   useEffect(() => {
     const el = parentRef.current;
     if (!el) return;
     const onScroll = () => {
+      // Enter "scrolling" state and (re)arm the idle timer. `measureElement`
+      // skips re-measuring settled rows while this is true; when scrolling
+      // stops we drop the flag and force one reconcile pass so any mid-scroll
+      // height change is corrected.
+      isScrollingRef.current = true;
+      if (scrollIdleTimerRef.current !== null) {
+        clearTimeout(scrollIdleTimerRef.current);
+      }
+      scrollIdleTimerRef.current = setTimeout(() => {
+        scrollIdleTimerRef.current = null;
+        isScrollingRef.current = false;
+        // Force a real DOM re-read of the mounted rows. A row that changed
+        // height while we were skipping (image load, late highlight) had its
+        // change swallowed — its ResizeObserver already fired with the cached
+        // value and won't fire again. `virtualizer.measure()` alone would only
+        // recompute positions from the (now-stale) size cache, so we re-measure
+        // each mounted element explicitly; with the scroll gate now off these
+        // reads record real heights and reconcile any drift.
+        const node = parentRef.current;
+        if (node) {
+          node
+            .querySelectorAll<HTMLElement>("[data-message-id]")
+            .forEach((row) => virtualizer.measureElement(row));
+        }
+      }, 150);
+
       const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
       const isAtBottom = distance <= NEAR_BOTTOM_PX;
       scrollPositionCache.set(cacheKey, {
@@ -391,6 +446,18 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
         lastSeenLenRef.current = filteredLenRef.current;
         setNewCount((c) => (c === 0 ? c : 0));
       }
+      // Sample the top-of-viewport row for the nav rail, rAF-throttled so a fast
+      // flick coalesces to one update per frame and the tick only moves on real
+      // scroll — not on measurement-driven offset recomputes.
+      if (railRafRef.current === null) {
+        railRafRef.current = requestAnimationFrame(() => {
+          railRafRef.current = null;
+          const node = parentRef.current;
+          if (!node) return;
+          const top = virtualizer.getVirtualItemForOffset(node.scrollTop);
+          if (top) setRailTopVIndex((prev) => (prev === top.index ? prev : top.index));
+        });
+      }
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
@@ -401,6 +468,15 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
         isAtBottom: distance <= NEAR_BOTTOM_PX,
       });
       el.removeEventListener("scroll", onScroll);
+      if (railRafRef.current !== null) {
+        cancelAnimationFrame(railRafRef.current);
+        railRafRef.current = null;
+      }
+      if (scrollIdleTimerRef.current !== null) {
+        clearTimeout(scrollIdleTimerRef.current);
+        scrollIdleTimerRef.current = null;
+        isScrollingRef.current = false;
+      }
     };
   }, [cacheKey]);
 
@@ -607,10 +683,10 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     [messages],
   );
   // The active tick = the last user message at/above the top of the viewport.
-  const topOriginalIndex = (() => {
-    const items = virtualizer.getVirtualItems();
-    return items.length ? (indexMap[items[0].index] ?? 0) : 0;
-  })();
+  // `railTopVIndex` is the rAF-throttled top *filtered* index sampled in
+  // `onScroll`; map it to the original message index here with the live
+  // `indexMap` so it stays correct as the filter/thread changes.
+  const topOriginalIndex = indexMap[railTopVIndex] ?? 0;
   let activeAnchorIndex = -1;
   for (const a of userAnchors) {
     if (a.index <= topOriginalIndex) activeAnchorIndex = a.index;
