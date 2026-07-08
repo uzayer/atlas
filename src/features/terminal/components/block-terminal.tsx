@@ -84,7 +84,10 @@ const XTERM_THEME = {
   background: "#000000",
   foreground: "#cccccc",
   cursor: "#b3b3b3",
-  selectionBackground: "#303030",
+  // Translucent so it's clearly visible on the AMOLED-black surface without
+  // hiding the selected glyphs (opaque #303030 read as nearly invisible).
+  selectionBackground: "rgba(97,175,239,0.35)",
+  selectionInactiveBackground: "rgba(255,255,255,0.16)",
   black: "#1a1a1a", red: "#e06c75", green: "#98c379", yellow: "#e5c07b",
   blue: "#61afef", magenta: "#c678dd", cyan: "#56b6c2", white: "#cccccc",
   brightBlack: "#5c6370", brightRed: "#e06c75", brightGreen: "#98c379",
@@ -446,7 +449,7 @@ export function BlockTerminal({ isActive, onFocus, terminalKey }: BlockTerminalP
   }, []);
 
   return (
-    <div className="relative flex h-full w-full flex-col bg-[var(--bg-base)]" onClick={onFocus}>
+    <div data-block-terminal className="relative flex h-full w-full flex-col bg-[var(--bg-base)]" onClick={onFocus}>
       {/* Interactive surface — overlays the block list while an alt-screen app runs. */}
       <div
         ref={xtermHostRef}

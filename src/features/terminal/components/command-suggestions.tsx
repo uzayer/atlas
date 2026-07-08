@@ -116,7 +116,7 @@ export function CommandSuggestions({
         })}
       </div>
       <div className="border-t border-[var(--border-default)] px-2.5 h-[22px] flex items-center justify-end gap-2 text-[9px] uppercase tracking-wider text-[var(--text-tertiary)] shrink-0">
-        <span>⇥ cycle · ↵ run · ⎋</span>
+        <span>⇥ ↑↓ cycle · ↵ run · ⎋</span>
       </div>
     </div>,
     document.body,

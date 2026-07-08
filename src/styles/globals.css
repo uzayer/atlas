@@ -294,6 +294,15 @@
     color: var(--text-primary);
   }
 
+  /* The terminal renders command output/input on AMOLED black where the 6%
+     app-wide selection is nearly invisible. Scope a clearly-visible selection
+     to the block terminal (React blocks + command input), matching the xterm
+     surface's translucent-blue selection. */
+  [data-block-terminal] ::selection {
+    background: rgba(97, 175, 239, 0.35);
+    color: var(--text-primary);
+  }
+
   img, a {
     -webkit-user-drag: none;
   }
