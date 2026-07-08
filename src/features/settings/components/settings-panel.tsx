@@ -31,6 +31,7 @@ import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
 import { CodeEditorThemesSettings } from "./code-editor-themes-settings";
+import { AppAccentSettings } from "./app-accent-settings";
 import { SkillsAndPacks } from "./skills-and-packs";
 import { ModelsManager } from "./models-manager";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
@@ -161,11 +162,14 @@ export function SettingsPanel({ initialSection }: { initialSection?: string } = 
         <div className="flex-1 min-w-0 min-h-0">
           <ModelsManager />
         </div>
+      ) : activeSection === "appearance" ? (
+        <div className="flex-1 min-w-0 min-h-0">
+          <AppearanceSettings />
+        </div>
       ) : (
         <ScrollArea className="flex-1 p-6">
           <div className="max-w-[500px]">
             {activeSection === "general" && <GeneralSettings />}
-            {activeSection === "appearance" && <AppearanceSettings />}
             {activeSection === "layouts" && <LayoutsSettings />}
             {activeSection === "updates" && <UpdatesSettings />}
             {activeSection === "keybindings" && <KeybindingsSettings />}
@@ -338,39 +342,54 @@ function GeneralSettings() {
   );
 }
 
+type AppearanceTab = "theme" | "accent";
+
+const APPEARANCE_TABS: { id: AppearanceTab; label: string }[] = [
+  { id: "theme", label: "Editor Theme" },
+  { id: "accent", label: "App Accent" },
+];
+
 function AppearanceSettings() {
   const settings = useProjectStore.use.settings();
   const { updateSettings } = useProjectStore.use.actions();
+  const [tab, setTab] = useState<AppearanceTab>("theme");
 
   const scalePct = Math.round(settings.uiScale * 100);
   const setScale = (next: number) => updateSettings({ uiScale: clampScale(next) });
 
   return (
-    <div className="space-y-6">
-      <SectionTitle title="Appearance" subtitle="Visual preferences" />
-      <SettingRow
-        label="Interface zoom"
-        description="Scale the entire interface — text and layout — like browser zoom. Shortcuts: ⌘+ and ⌘- to adjust, ⌘0 to reset."
-      >
-        <div className="flex items-center gap-1">
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Header — Skills-style underline tabs (no title), zoom on the right. */}
+      <div className="flex h-[29px] shrink-0 items-center gap-1 border-b border-border-default px-2">
+        {APPEARANCE_TABS.map((t) => (
+          <UnderlineTab
+            key={t.id}
+            active={tab === t.id}
+            onClick={() => setTab(t.id)}
+            label={t.label}
+          />
+        ))}
+
+        {/* Interface zoom — right-aligned control (like Skills' scope control). */}
+        <div className="ml-auto flex items-center gap-1 pr-0.5" title="Interface zoom (⌘+ / ⌘- / ⌘0)">
           <button
             type="button"
             aria-label="Zoom out"
             onClick={() => setScale(settings.uiScale - SCALE_STEP)}
             disabled={settings.uiScale <= MIN_SCALE}
             className={cn(
-              "h-7 w-7 flex items-center justify-center rounded-md border border-border-default bg-bg-elevated",
-              "text-text-primary hover:bg-bg-hover transition-colors",
+              "flex h-6 w-6 items-center justify-center rounded-full border border-border-default text-text-secondary",
+              "hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer",
               "disabled:opacity-40 disabled:cursor-not-allowed",
             )}
           >
-            <Minus size={13} />
+            <Minus size={12} />
           </button>
           <button
             type="button"
             onClick={() => setScale(DEFAULT_SCALE)}
             title="Reset to 100%"
-            className="h-7 min-w-[52px] px-2 rounded-md text-[11px] tabular-nums font-medium text-text-primary hover:bg-bg-hover transition-colors"
+            className="h-6 min-w-[44px] rounded-md px-1.5 text-[11px] font-medium tabular-nums text-text-secondary hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer"
           >
             {scalePct}%
           </button>
@@ -380,19 +399,46 @@ function AppearanceSettings() {
             onClick={() => setScale(settings.uiScale + SCALE_STEP)}
             disabled={settings.uiScale >= MAX_SCALE}
             className={cn(
-              "h-7 w-7 flex items-center justify-center rounded-md border border-border-default bg-bg-elevated",
-              "text-text-primary hover:bg-bg-hover transition-colors",
+              "flex h-6 w-6 items-center justify-center rounded-full border border-border-default text-text-secondary",
+              "hover:bg-bg-hover hover:text-text-primary transition-colors cursor-pointer",
               "disabled:opacity-40 disabled:cursor-not-allowed",
             )}
           >
-            <Plus size={13} />
+            <Plus size={12} />
           </button>
         </div>
-      </SettingRow>
+      </div>
 
-      <div className="h-px bg-border-default" />
-      <CodeEditorThemesSettings />
+      <div className="min-h-0 flex-1">
+        {tab === "theme" ? <CodeEditorThemesSettings /> : <AppAccentSettings />}
+      </div>
     </div>
+  );
+}
+
+/** Underline tab — copied from the Skills header (`skills-and-packs.tsx`). */
+function UnderlineTab({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "flex h-[29px] items-center gap-1.5 px-2.5 text-[11px] font-medium transition-colors border-b-2 -mb-px cursor-pointer",
+        active
+          ? "text-text-primary border-b-[var(--accent-primary)]"
+          : "text-text-secondary hover:text-text-primary border-b-transparent",
+      )}
+    >
+      {label}
+    </button>
   );
 }
 

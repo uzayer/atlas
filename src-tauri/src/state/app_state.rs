@@ -188,6 +188,11 @@ pub struct AppSettings {
     /// the frontend; persisted so it survives relaunch.
     #[serde(default = "default_code_editor_theme")]
     pub code_editor_theme: String,
+    /// App-accent tone id (see `src/features/theme/accents`). Re-skins the UI
+    /// accent (`--accent-*`) on the frontend — independent of the editor theme;
+    /// persisted so it survives relaunch.
+    #[serde(default = "default_app_accent")]
+    pub app_accent: String,
     /// Auto-update master switch. When ON (default), every startup runs a
     /// non-blocking check against PostHog remote config and prompts if a newer
     /// version is available. See `crate::commands::updater`.
@@ -206,6 +211,11 @@ fn default_true() -> bool {
 /// Default code-editor theme — the historical monochrome "atlas" look.
 pub fn default_code_editor_theme() -> String {
     "atlas".to_string()
+}
+
+/// Default app-accent — the historical monochrome (white) UI accent.
+pub fn default_app_accent() -> String {
+    "monochrome".to_string()
 }
 
 /// Default embedding model — the historical `all-MiniLM-L6-v2` dir, so existing
@@ -234,6 +244,7 @@ impl Default for AppSettings {
             embedding_model_id: default_embedding_model(),
             llm_model_id: default_llm_model(),
             code_editor_theme: default_code_editor_theme(),
+            app_accent: default_app_accent(),
             auto_update: true,
             updater_ignored_version: None,
         }

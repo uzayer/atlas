@@ -19,6 +19,8 @@ import { persistHashOf } from "@/features/workspaces/lib/workspace-snapshot";
 import { applyUiScale, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
 import { applyEditorTheme } from "@/features/editor/themes/apply-editor-theme";
 import { DEFAULT_EDITOR_THEME_ID } from "@/features/editor/themes/themes";
+import { applyAppAccent } from "@/features/theme/apply-app-accent";
+import { DEFAULT_APP_ACCENT_ID } from "@/features/theme/accents";
 
 interface Project {
   name: string;
@@ -59,6 +61,11 @@ export interface AppSettings {
   /** Code-editor color theme id (see src/features/editor/themes). Drives the
    *  CodeMirror editor, the diff viewer and the source-control diff views. */
   codeEditorTheme: string;
+  /** App-accent tone id (see src/features/theme/accents). Re-skins the UI
+   *  accent (`--accent-*`) — active-tab underlines, primary buttons, focus
+   *  rings, mention chips — while keeping the AMOLED-black theme. Independent
+   *  of `codeEditorTheme`. */
+  appAccent: string;
   /** Adaptive next-step suggestion chips in the agent chat's per-turn card.
    *  "agent" (default) asks the coding agent to end each reply with a hidden
    *  `<next_steps>` block (uses the live session context, no BYOK); "off"
@@ -81,6 +88,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   embeddingModelId: "all-MiniLM-L6-v2",
   llmModelId: "qwen3-0.6b",
   codeEditorTheme: DEFAULT_EDITOR_THEME_ID,
+  appAccent: DEFAULT_APP_ACCENT_ID,
   adaptiveSuggestions: "agent",
   autoUpdate: true,
   updaterIgnoredVersion: null,
@@ -318,6 +326,7 @@ export const useProjectStore = createSelectors(
         }
         if (partial.uiScale !== undefined) applyUiScale(partial.uiScale);
         if (partial.codeEditorTheme !== undefined) applyEditorTheme(partial.codeEditorTheme);
+        if (partial.appAccent !== undefined) applyAppAccent(partial.appAccent);
       },
       hydrate: (payload: AppStateWire, opts?: { skipActiveSwitch?: boolean }) => {
         // Merge with defaults so older state.json files (written before a new
@@ -339,6 +348,9 @@ export const useProjectStore = createSelectors(
         // Re-apply the persisted code-editor theme (writes CSS custom
         // properties consumed by the editor/diff surfaces).
         applyEditorTheme(settings.codeEditorTheme);
+        // Re-apply the persisted app-accent (writes the `--accent-*` CSS custom
+        // properties that re-skin the UI accent).
+        applyAppAccent(settings.appAccent);
 
         // Hand the multi-workspace fields to the workspace store. We hydrate
         // with `activeWorkspaceId: null` and then `switchTo` the persisted id
