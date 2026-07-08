@@ -19,6 +19,10 @@ import type {
 import { splitAtlasContext } from "../lib/atlas-context";
 import { loadCachedAcpModes, saveCachedAcpModes } from "../lib/acp-modes-cache";
 import { loadCachedAcpModels, saveCachedAcpModels } from "../lib/acp-models-cache";
+import {
+  loadCachedContextUsage,
+  saveCachedContextUsage,
+} from "../lib/context-usage-cache";
 import { saveCerseiModelPref, saveCerseiEffort, saveCerseiCompress } from "../lib/cersei-model-pref";
 import { invoke } from "@tauri-apps/api/core";
 import { extractPlanMarkdown, type PlanRecord } from "../lib/plans";
@@ -910,6 +914,21 @@ export const useChatStore = createSelectors(
             // loaded tool calls — turnSummary is runtime-only, so without this a
             // resumed/switched session shows no adaptive card.
             reconstructTurnSummaries(session.messages);
+            // Restore the ACP context gauge (not in the on-disk transcript) and
+            // re-attach it to the trailing assistant message so its turn card
+            // shows the last-known context usage after a switch / restart.
+            if (session.acpSessionId) {
+              const cachedCtx = loadCachedContextUsage(session.acpSessionId);
+              if (cachedCtx) {
+                session.contextUsage = cachedCtx;
+                for (let i = session.messages.length - 1; i >= 0; i--) {
+                  if (session.messages[i].role === "assistant") {
+                    session.messages[i].contextUsage = { ...cachedCtx };
+                    break;
+                  }
+                }
+              }
+            }
             // Recompute the cached preview/count from the loaded transcript
             // so the sidebar doesn't have to scan messages on every chunk.
             session.firstUserContent =
@@ -1298,6 +1317,18 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
           }
         }
       }
+      // ACP agents (Claude Code / Codex) can't report a per-turn input/output
+      // split, but they stream a cumulative context-window gauge. Snapshot the
+      // latest onto the trailing assistant message so its turn card renders a
+      // context gauge in the same slot the native agent uses for per-turn usage.
+      if (session.contextUsage && session.agentType !== "cersei") {
+        for (let i = session.messages.length - 1; i >= 0; i--) {
+          if (session.messages[i].role === "assistant") {
+            session.messages[i].contextUsage = { ...session.contextUsage };
+            break;
+          }
+        }
+      }
       // Freeze the per-turn files-touched scratch onto the trailing assistant
       // message as `turnSummary` (mirrors the usage attach above). Only here at
       // turn end, so the adaptive card never appears mid-stream. `repoAtTurn` is
@@ -1478,6 +1509,20 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
     }
     case "usage_updated": {
       session.usage = env.usage;
+      return;
+    }
+    case "context_usage": {
+      session.contextUsage = {
+        used: env.used,
+        size: env.size,
+        cost: env.cost,
+      };
+      // Persist keyed by the stable transcript id so the gauge survives a
+      // session switch (messages reload from disk) and an app restart (store
+      // is gone). Restored in `replaceMessages`.
+      if (session.acpSessionId) {
+        saveCachedContextUsage(session.acpSessionId, session.contextUsage);
+      }
       return;
     }
     case "compaction": {

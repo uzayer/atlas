@@ -136,6 +136,10 @@ export interface ChatSession {
   /** Cumulative token/cost usage for the session (native agent surfaces it via
    *  `usage_updated` deltas; drives the composer's token/cost pill). */
   usage?: import("./agents").Usage;
+  /** Latest ACP context-window gauge (Claude Code / Codex) from `context_usage`
+   *  deltas — `used`/`size` tokens + cost. Snapshotted onto the trailing
+   *  assistant message at turn end (ACP agents have no per-turn in/out split). */
+  contextUsage?: { used: number; size: number; cost: number };
   /** True while the native agent is compacting its context window. */
   compacting?: boolean;
   /** Reasoning-effort level for the native agent ("" / low / medium / high /
@@ -204,6 +208,11 @@ export interface ChatMessage {
    *  finishes. Drives the end-of-message usage footer. `saved` = approx tokens
    *  RTK compression shaved off this turn (0 when compression was off). */
   usage?: { input: number; output: number; cost: number; saved?: number };
+  /** ACP context-window gauge (Claude Code / Codex) frozen onto the trailing
+   *  assistant message at turn end. These agents can't report a per-turn
+   *  input/output split, so the card shows this `used`/`size` context gauge in
+   *  the same slot the native agent uses for `usage`. */
+  contextUsage?: { used: number; size: number; cost: number };
   /** Adaptive per-turn footer, frozen onto the trailing assistant message at
    *  turn_finished (mirrors `usage` — never set mid-stream). Drives the
    *  TurnSummaryCard's files-read/modified accordion + action buttons. */

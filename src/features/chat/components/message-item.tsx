@@ -299,7 +299,9 @@ export const MessageItem = memo(function MessageItem({
               !streaming &&
               message.role === "assistant" &&
               tabId &&
-              (message.turnSummary || message.suggestions) && (
+              (message.turnSummary ||
+                message.suggestions ||
+                message.contextUsage) && (
                 <TurnSummaryCard message={message} tabId={tabId} />
               )}
           </div>

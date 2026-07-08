@@ -235,6 +235,29 @@ fn apply_session_update(
                 },
             });
         }
+        "usage_update" => {
+            // ACP context-window gauge (`used`/`size` tokens, optional cost).
+            // Cost is a `{ amount, currency }` object per ACP schema.
+            let used = v.get("used").and_then(|x| x.as_u64()).unwrap_or(0);
+            let size = v.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
+            let cost = v
+                .get("cost")
+                .and_then(|c| c.get("amount"))
+                .and_then(|a| a.as_f64())
+                .unwrap_or(0.0);
+            if used == 0 && size == 0 {
+                return;
+            }
+            let st = state.lock();
+            let sid = st.session_id.clone();
+            let agent_id = st.agent_id;
+            drop(st);
+            emitter.emit(SessionDeltaEnvelope {
+                agent_id,
+                session_id: sid,
+                delta: SessionDelta::ContextUsage { used, size, cost },
+            });
+        }
         "current_model_update" => {
             let Some(model_id) = v.get("currentModelId").and_then(|s| s.as_str()) else {
                 return;

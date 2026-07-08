@@ -107,6 +107,7 @@ export type AgentDelta =
   | { kind: "model_changed"; agent_id: AgentId; session_id: AcpSessionId; model_id: string }
   | { kind: "available_commands"; agent_id: AgentId; session_id: AcpSessionId; commands: unknown[] }
   | { kind: "usage_updated"; agent_id: AgentId; session_id: AcpSessionId; usage: Usage }
+  | { kind: "context_usage"; agent_id: AgentId; session_id: AcpSessionId; used: number; size: number; cost: number }
   | { kind: "compaction"; agent_id: AgentId; session_id: AcpSessionId; active: boolean }
   | { kind: "compression_saved"; agent_id: AgentId; session_id: AcpSessionId; saved_tokens: number }
   | {

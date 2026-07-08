@@ -6,11 +6,33 @@ import {
   Workflow,
   Loader2,
   Sparkles,
+  Gauge,
+  Clock,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { ChatMessage, TurnFile } from "@/types/agent";
+
+/** Compact token count: 1.2k / 42.1k / 1.0M. */
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return `${n}`;
+}
+
+/** "Jul 8, 2:58 PM" — the turn's timestamp, shown in the card's left slot when
+ *  there's no token/context data to display there. Empty on an invalid date. */
+function fmtTimestamp(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
 
 /** Git-standard status letter for a turn file: A(dded) / M(odified) / R(ead). */
 function FileStatusBadge({ file }: { file: TurnFile }) {
@@ -82,7 +104,9 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
   const totalAdded = edits.reduce((s, f) => s + f.added, 0);
   const totalRemoved = edits.reduce((s, f) => s + f.removed, 0);
 
-  if (files.length === 0 && chips.length === 0 && !loadingChips) return null;
+  const ctx = message.contextUsage;
+  if (files.length === 0 && chips.length === 0 && !loadingChips && !ctx)
+    return null;
 
   const saveToKb = async () => {
     const project = useProjectStore.getState().currentProject;
@@ -229,7 +253,7 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
       )}
 
       {chips.length > 0 && (
-        <div className="space-y-1">
+        <div className="space-y-1 py-3">
           <div className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-[var(--text-tertiary)]">
             <Sparkles size={10} className="text-[var(--accent-primary)]" />
             Suggestions
@@ -261,8 +285,32 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
         </div>
       )}
 
-      {/* Turn-level actions */}
-      <div className="flex flex-wrap items-center gap-1.5">
+      {/* Turn-level actions. Divider color matches the message's left rail
+          (`--border-subtle`); it bleeds left (`-ml-8`) to meet that rail. */}
+      <div className="-ml-8 mt-3 flex flex-wrap items-center justify-end gap-1.5 border-t border-[var(--border-subtle)] pt-3 pl-8">
+        {ctx && (ctx.used > 0 || ctx.size > 0) ? (
+          <span
+            className="mr-auto flex items-center gap-1 text-[10px] text-[var(--text-tertiary)] tabular-nums select-none"
+            title={`${ctx.used.toLocaleString()} of ${ctx.size.toLocaleString()} context tokens used${
+              ctx.cost > 0 ? ` · est. $${ctx.cost.toFixed(4)}` : ""
+            }`}
+          >
+            <Gauge size={10} className="text-[var(--text-tertiary)]" />
+            {fmtTokens(ctx.used)}
+            {ctx.size > 0 && ` / ${fmtTokens(ctx.size)}`}
+            {ctx.cost > 0 && ` · $${ctx.cost.toFixed(ctx.cost < 1 ? 4 : 2)}`}
+          </span>
+        ) : (
+          // No gauge (ACP) or token data — fall back to the turn timestamp so
+          // the left slot is never empty. Native-agent tokens live in the
+          // separate UsageFooter above the card, not this slot.
+          fmtTimestamp(message.timestamp) && (
+            <span className="mr-auto flex items-center gap-1 text-[10px] text-[var(--text-tertiary)] tabular-nums select-none">
+              <Clock size={10} className="text-[var(--text-tertiary)]" />
+              {fmtTimestamp(message.timestamp)}
+            </span>
+          )
+        )}
         <ActionButton
           icon={
             <span className="inline-block h-2 w-2 rounded-full bg-white" />

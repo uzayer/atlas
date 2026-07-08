@@ -27,11 +27,24 @@ export function CommitFlow({
   turnText: string;
 }) {
   const isRepo = useGitStore.use.isRepo();
+  const changedFiles = useGitStore.use.files();
   const [phase, setPhase] = useState<Phase>("idle");
   const [message, setMessage] = useState("");
   const [graph, setGraph] = useState<BuiltGraph | null>(null);
 
-  if (!isRepo || editedPaths.length === 0) return null;
+  // Only offer "Commit changes" when the turn's edited files are actually under
+  // source control — i.e. at least one shows up in `git status`. Turn paths are
+  // absolute; git status paths are repo-relative, so match on a path-segment
+  // suffix. Prevents the affordance appearing for edits outside the repo (e.g.
+  // files in an untracked/ignored dir, or a repo with nothing staged/changed).
+  const norm = (p: string) => p.replace(/\\/g, "/");
+  const changed = changedFiles.map((f) => norm(f.path));
+  const inSourceControl = editedPaths.some((ep) => {
+    const e = norm(ep);
+    return changed.some((c) => e === c || e.endsWith("/" + c));
+  });
+
+  if (!isRepo || editedPaths.length === 0 || !inSourceControl) return null;
 
   const open = async () => {
     setPhase("generating");

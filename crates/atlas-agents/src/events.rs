@@ -65,6 +65,15 @@ pub enum SessionDelta {
     UsageUpdated {
         usage: Usage,
     },
+    /// Cumulative context-window usage from an ACP `usage_update` notification:
+    /// `used`/`size` tokens (of the model's window) + optional cost. ACP agents
+    /// (Claude Code / Codex) can't give a per-turn input/output split like the
+    /// native agent, so this drives a context gauge in the turn card instead.
+    ContextUsage {
+        used: u64,
+        size: u64,
+        cost: f64,
+    },
     /// Context compaction is running (`active = true`) or just finished.
     Compaction {
         active: bool,
