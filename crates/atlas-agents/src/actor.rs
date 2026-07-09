@@ -8,18 +8,29 @@
 //!   the manager's event routing, AND the turn-completion signal (`TurnDone`)
 //!   pushed by the spawned prompt task when `AgentConnection::prompt` resolves.
 //!
-//! Because both the streamed events and the completion travel through the **same
-//! FIFO**, and (for ACP) the driver reads all of a turn's `session/update`
-//! frames before the `session/prompt` response frame, `TurnDone` is guaranteed
-//! to sit *behind* the last content event. So the actor finalizes the turn only
-//! after applying every streamed event — the idle/ordering race is gone **by
-//! construction**, with no `activity_seq` poll and no quiescence heuristic.
+//! Both the streamed events and the completion travel through the **same FIFO**,
+//! and (for ACP) the driver reads all of a turn's `session/update` frames before
+//! the `session/prompt` response frame — so ordinarily `TurnDone` sits *behind*
+//! the last content event and no `activity_seq` poll or quiescence heuristic is
+//! needed.
+//!
+//! That ordering is an assertion, not a guarantee: `TurnDone` is posted by the
+//! spawned prompt task while content events are routed from a *different* task,
+//! and Claude Code's bridge can resolve `session/prompt` (`end_turn`) while tool
+//! calls are still in flight. So finalization is additionally **gated on tool
+//! quiescence** — per the ACP contract that a turn only truly ends once no tool
+//! calls pend. If a `TurnDone` arrives with non-terminal tool calls, the result
+//! is stashed in `pending_finalize` and the terminal is deferred until the last
+//! `tool_call_update` reports done (a bounded [`FinalizeTimeout`] backstop keeps
+//! a never-terminating tool from hanging the turn). This closes the "idle while
+//! tools still spinning" race at the authoritative Rust layer.
 //!
 //! A monotonic [`TurnId`] + `is_same_turn` check makes preemption safe: a new
 //! `Send` bumps the id, so a superseded turn's late `TurnDone` is dropped and
 //! can't flip a fresh turn's status.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use atlas_acp::{AcpEvent, AgentId, PermissionDecision, Result as AcpResult, SessionId};
 use atlas_agentkit::{AgentConnection, TurnId};
@@ -29,7 +40,13 @@ use uuid::Uuid;
 
 use crate::apply::apply_event;
 use crate::events::{Emitter, SessionDelta, SessionDeltaEnvelope};
-use crate::session::{SessionState, SessionStatus, new_user_message};
+use crate::session::{SessionState, SessionStatus, ToolCall, ToolCallStatus, new_user_message};
+
+/// How long to wait for outstanding tool calls to report a terminal status
+/// after the `session/prompt` future has resolved, before force-sweeping them
+/// and finalizing anyway. A failsafe against a tool that never emits a terminal
+/// `tool_call_update` — NOT a completion heuristic (the prompt already resolved).
+const FINALIZE_BACKSTOP: Duration = Duration::from_secs(10);
 
 /// User intents routed to the actor. Unlike the legacy worker, `Cancel` and
 /// `RespondPermission` come through this same channel — the actor never blocks
@@ -59,6 +76,13 @@ pub enum ActorMsg {
         turn: TurnId,
         result: AcpResult<String>,
     },
+    /// Backstop fired for a turn whose `TurnDone` resolved while tool calls were
+    /// still in flight. Enqueued by a spawned timer; finalizes the deferred turn
+    /// even if a tool never reported terminal. Ignored if the turn already
+    /// finalized (tools quiesced first) or was superseded.
+    FinalizeTimeout {
+        turn: TurnId,
+    },
 }
 
 /// Handle held by the manager to talk to a running actor.
@@ -80,8 +104,14 @@ pub struct SessionActor {
     /// Cloned into each turn's prompt task so it can post `TurnDone`.
     stream_tx: mpsc::UnboundedSender<ActorMsg>,
     turn_id: TurnId,
-    /// The currently-running turn, if any. `None` between turns.
+    /// The currently-running turn, if any. `None` between turns. Stays `Some`
+    /// while a turn is deferred in `pending_finalize` (the turn is still live
+    /// until tool calls quiesce).
     running: Option<TurnId>,
+    /// A resolved `prompt` result awaiting tool-call quiescence before it can
+    /// finalize the turn. `Some` only when `running` is `Some` and the turn had
+    /// non-terminal tool calls when its `TurnDone` arrived.
+    pending_finalize: Option<AcpResult<String>>,
 }
 
 impl SessionActor {
@@ -106,6 +136,7 @@ impl SessionActor {
             stream_tx: stream_tx.clone(),
             turn_id: TurnId::default(),
             running: None,
+            pending_finalize: None,
         };
         tokio::spawn(actor.run());
         ActorHandle {
@@ -209,6 +240,9 @@ impl SessionActor {
         self.turn_id = self.turn_id.next();
         let turn = self.turn_id;
         self.running = Some(turn);
+        // A new send supersedes any turn still deferred awaiting tool quiescence
+        // — its stashed result (and its pending backstop) are now stale.
+        self.pending_finalize = None;
 
         // Append the user message for replay parity but do NOT emit
         // MessageAppended — the frontend already added it optimistically. Only
@@ -251,9 +285,22 @@ impl SessionActor {
         match msg {
             ActorMsg::Acp(event) => {
                 // Apply every event in FIFO order (same logic as the legacy
-                // dispatch path). Ordering vs. the terminal is guaranteed by the
-                // channel, so there is nothing to gate here.
+                // dispatch path).
                 apply_event(&self.emitter, &self.state, self.agent_id, event);
+                if self.pending_finalize.is_some() {
+                    // A finalize is deferred awaiting tool quiescence — did this
+                    // event drain the last outstanding tool call?
+                    if self.running.is_some() && !self.state.lock().has_inflight_tool_calls() {
+                        if let Some(result) = self.pending_finalize.take() {
+                            self.finalize(result);
+                        }
+                    }
+                } else if self.running.is_none() && self.state.lock().has_inflight_tool_calls() {
+                    // Late-event guard: after a turn has fully finalized (idle),
+                    // a stray `tool_call` frame must not resurrect a spinning
+                    // card. Sweep it to a terminal state immediately.
+                    self.sweep_inflight_tools(ToolCallStatus::Completed);
+                }
             }
             ActorMsg::TurnDone { turn, result } => {
                 // Drop a terminal from a superseded turn (a newer Send bumped the
@@ -261,44 +308,118 @@ impl SessionActor {
                 if self.running != Some(turn) {
                     return;
                 }
-                self.running = None;
-
-                let turn_seq = self.state.lock().turn_seq;
-                let (status, delta) = match result {
-                    Ok(stop_reason) => {
-                        // An out-of-band `TurnFailed` recorded by `apply_event`
-                        // wins over a nominal success (single terminal writer).
-                        match self.state.lock().pending_turn_error.take() {
-                            Some(error) => (
-                                SessionStatus::Error,
-                                SessionDelta::TurnFailed { error, turn_seq },
-                            ),
-                            None => (
-                                SessionStatus::Idle,
-                                SessionDelta::TurnFinished {
-                                    stop_reason,
-                                    turn_seq,
-                                },
-                            ),
-                        }
-                    }
-                    Err(e) => (
-                        SessionStatus::Error,
-                        SessionDelta::TurnFailed {
-                            error: e.to_string(),
-                            turn_seq,
-                        },
-                    ),
-                };
-                {
-                    let mut st = self.state.lock();
-                    st.status = status;
-                    st.touch();
+                // The prompt future resolved. If tool calls are still in flight,
+                // the turn hasn't truly ended (Claude Code can resolve `end_turn`
+                // with trailing tool frames still arriving) — defer the terminal
+                // until they quiesce, with a bounded backstop.
+                if self.state.lock().has_inflight_tool_calls() {
+                    self.pending_finalize = Some(result);
+                    let tx = self.stream_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(FINALIZE_BACKSTOP).await;
+                        let _ = tx.send(ActorMsg::FinalizeTimeout { turn });
+                    });
+                    return;
                 }
-                let sid = self.session_id_str();
-                self.emit_for(sid.clone(), delta);
-                self.emit_for(sid, SessionDelta::Status { status, turn_seq });
+                self.finalize(result);
             }
+            ActorMsg::FinalizeTimeout { turn } => {
+                // Fire only if still the current turn and still awaiting
+                // quiescence (tools may have drained first, or a newer send
+                // superseded this turn — either way `pending_finalize` is None).
+                if self.running == Some(turn) {
+                    if let Some(result) = self.pending_finalize.take() {
+                        self.finalize(result);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Emit the turn terminal (`TurnFinished`/`TurnFailed` + `Status`). Sweeps
+    /// any residual non-terminal tool call to a terminal state *first*, so the
+    /// frontend never observes an idle turn with a still-spinning card. The sole
+    /// terminal-status writer for a turn.
+    fn finalize(&mut self, result: AcpResult<String>) {
+        self.running = None;
+        self.pending_finalize = None;
+
+        let turn_seq = self.state.lock().turn_seq;
+        // An out-of-band `TurnFailed` recorded by `apply_event` wins over a
+        // nominal success (single terminal writer). Drain it either way.
+        let pending_err = self.state.lock().pending_turn_error.take();
+        let (status, delta, sweep_to) = match (result, pending_err) {
+            (Ok(_), Some(error)) => (
+                SessionStatus::Error,
+                SessionDelta::TurnFailed { error, turn_seq },
+                ToolCallStatus::Failed,
+            ),
+            (Ok(stop_reason), None) => {
+                let cancelled = stop_reason == "cancelled";
+                (
+                    SessionStatus::Idle,
+                    SessionDelta::TurnFinished { stop_reason, turn_seq },
+                    if cancelled {
+                        ToolCallStatus::Failed
+                    } else {
+                        ToolCallStatus::Completed
+                    },
+                )
+            }
+            (Err(e), _) => (
+                SessionStatus::Error,
+                SessionDelta::TurnFailed {
+                    error: e.to_string(),
+                    turn_seq,
+                },
+                ToolCallStatus::Failed,
+            ),
+        };
+
+        self.sweep_inflight_tools(sweep_to);
+        {
+            let mut st = self.state.lock();
+            st.status = status;
+            st.touch();
+        }
+        let sid = self.session_id_str();
+        self.emit_for(sid.clone(), delta);
+        self.emit_for(sid, SessionDelta::Status { status, turn_seq });
+    }
+
+    /// Flip every still-`Pending`/`Running` tool call to `to` and emit a
+    /// `ToolCallUpserted` for each — keeping Rust state authoritative and the
+    /// frontend consistent without relying on its own turn-end sweep.
+    fn sweep_inflight_tools(&self, to: ToolCallStatus) {
+        let swept: Vec<(String, ToolCall)> = {
+            let mut st = self.state.lock();
+            let mut swept = Vec::new();
+            for msg in st.messages.iter_mut() {
+                let msg_id = msg.id.clone();
+                for tc in msg.tool_calls.iter_mut() {
+                    if matches!(tc.status, ToolCallStatus::Pending | ToolCallStatus::Running) {
+                        tc.status = to;
+                        swept.push((msg_id.clone(), tc.clone()));
+                    }
+                }
+            }
+            if !swept.is_empty() {
+                st.touch();
+            }
+            swept
+        };
+        if swept.is_empty() {
+            return;
+        }
+        let sid = self.session_id_str();
+        for (message_id, tool_call) in swept {
+            self.emit_for(
+                sid.clone(),
+                SessionDelta::ToolCallUpserted {
+                    message_id,
+                    tool_call,
+                },
+            );
         }
     }
 
@@ -320,6 +441,7 @@ mod tests {
     use super::*;
     use crate::events::DeltaSink;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     use tokio::sync::oneshot;
 
     #[derive(Default)]
@@ -367,6 +489,47 @@ mod tests {
             session_id: agent_client_protocol::schema::v1::SessionId::new("s"),
             update,
         }
+    }
+
+    fn tool_call_event(id: &str, status: &str, is_update: bool) -> AcpEvent {
+        let kind = if is_update {
+            "tool_call_update"
+        } else {
+            "tool_call"
+        };
+        let update: agent_client_protocol::schema::v1::SessionUpdate = serde_json::from_value(
+            serde_json::json!({
+                "sessionUpdate": kind,
+                "toolCallId": id,
+                "title": "grep",
+                "kind": "search",
+                "status": status,
+            }),
+        )
+        .expect("valid tool_call session update");
+        AcpEvent::SessionUpdate {
+            session_id: agent_client_protocol::schema::v1::SessionId::new("s"),
+            update,
+        }
+    }
+
+    /// Latest `ToolCallUpserted` status for a given tool id, if any.
+    fn last_tool_status(
+        deltas: &[SessionDeltaEnvelope],
+        id: &str,
+    ) -> Option<crate::session::ToolCallStatus> {
+        deltas.iter().rev().find_map(|e| match &e.delta {
+            SessionDelta::ToolCallUpserted { tool_call, .. } if tool_call.id == id => {
+                Some(tool_call.status)
+            }
+            _ => None,
+        })
+    }
+
+    fn has_turn_finished(deltas: &[SessionDeltaEnvelope]) -> bool {
+        deltas
+            .iter()
+            .any(|e| matches!(e.delta, SessionDelta::TurnFinished { .. }))
     }
 
     fn setup() -> (
@@ -479,5 +642,87 @@ mod tests {
             })
             .count();
         assert_eq!(runnings, 2);
+    }
+
+    #[tokio::test]
+    async fn turn_defers_idle_until_tool_calls_terminal() {
+        let (handle, sink, gate_tx, _agent) = setup();
+        handle.control_tx.send(Control::Send("hi".into())).unwrap();
+        settle().await;
+        // A tool call is in flight during the turn.
+        handle
+            .stream_tx
+            .send(ActorMsg::Acp(tool_call_event("t1", "in_progress", false)))
+            .unwrap();
+        settle().await;
+        // The prompt future resolves `end_turn` WHILE the tool is still running.
+        gate_tx.send("end_turn".into()).unwrap();
+        settle().await;
+        // No terminal yet — finalization is deferred until the tool quiesces.
+        assert!(
+            !has_turn_finished(&sink.0.lock()),
+            "TurnFinished must be deferred while a tool call is in flight"
+        );
+        // The tool completes → the deferred finalize fires.
+        handle
+            .stream_tx
+            .send(ActorMsg::Acp(tool_call_event("t1", "completed", true)))
+            .unwrap();
+        settle().await;
+        assert!(
+            has_turn_finished(&sink.0.lock()),
+            "TurnFinished must fire once tool calls quiesce"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_finalize_backstop_sweeps_and_finalizes() {
+        let (handle, sink, gate_tx, _agent) = setup();
+        handle.control_tx.send(Control::Send("hi".into())).unwrap();
+        settle().await;
+        handle
+            .stream_tx
+            .send(ActorMsg::Acp(tool_call_event("stuck", "in_progress", false)))
+            .unwrap();
+        settle().await;
+        gate_tx.send("end_turn".into()).unwrap();
+        settle().await;
+        // Deferred; the tool never reports terminal. Advance past the backstop.
+        assert!(!has_turn_finished(&sink.0.lock()));
+        tokio::time::advance(FINALIZE_BACKSTOP + Duration::from_secs(1)).await;
+        settle().await;
+        let deltas = sink.0.lock();
+        assert_eq!(
+            last_tool_status(&deltas, "stuck"),
+            Some(ToolCallStatus::Completed),
+            "backstop must sweep the stuck tool to a terminal state"
+        );
+        assert!(
+            has_turn_finished(&deltas),
+            "backstop must finalize the turn even if a tool never terminates"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_tool_event_after_idle_does_not_spin() {
+        let (handle, sink, gate_tx, _agent) = setup();
+        handle.control_tx.send(Control::Send("hi".into())).unwrap();
+        settle().await;
+        // Turn completes cleanly with no tools in flight.
+        gate_tx.send("end_turn".into()).unwrap();
+        settle().await;
+        assert!(has_turn_finished(&sink.0.lock()));
+        // A stray tool_call arrives AFTER the turn finalized — it must not leave
+        // a card spinning forever.
+        handle
+            .stream_tx
+            .send(ActorMsg::Acp(tool_call_event("late", "in_progress", false)))
+            .unwrap();
+        settle().await;
+        assert_eq!(
+            last_tool_status(&sink.0.lock(), "late"),
+            Some(ToolCallStatus::Completed),
+            "a tool_call arriving after idle must be swept terminal, not left running"
+        );
     }
 }

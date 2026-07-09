@@ -544,7 +544,7 @@ export function WorkspaceSidebar() {
     addTab({ id: type === "mission-control" ? "mission-control" : type, type, title, closable: true, dirty: false, data: {} });
 
   return (
-    <aside className="flex flex-col h-screen w-[244px] shrink-0 border-r border-[var(--border-default)] bg-[var(--bg-secondary)]/80 backdrop-blur-xl" data-tauri-drag-region>
+    <aside className="flex flex-col h-screen w-[244px] shrink-0 border-r border-[var(--border-default)] bg-[var(--panel-rail-bg)]/80 backdrop-blur-xl" data-tauri-drag-region>
       {/* Top bar: aligned to the titlebar height (h-[30px] + border-b) so the
        *  line under the traffic lights matches the rest of the title bar.
        *  Buttons sit right to dodge the traffic lights — but in fullscreen the

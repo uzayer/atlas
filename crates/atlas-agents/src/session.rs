@@ -210,6 +210,21 @@ impl SessionState {
     pub fn touch(&mut self) {
         self.updated_at = Utc::now();
     }
+
+    /// True if any tool call in the session is still non-terminal
+    /// (`Pending`/`Running`). The actor uses this to hold turn finalization
+    /// until tool calls quiesce — the ACP contract is that a turn only truly
+    /// ends once no tool calls pend, but the `session/prompt` future can resolve
+    /// while trailing `tool_call_update` frames are still in flight. Because the
+    /// actor sweeps residual tools to terminal at every finalize, this only ever
+    /// reflects the current turn's tools.
+    pub fn has_inflight_tool_calls(&self) -> bool {
+        self.messages.iter().any(|m| {
+            m.tool_calls
+                .iter()
+                .any(|t| matches!(t.status, ToolCallStatus::Pending | ToolCallStatus::Running))
+        })
+    }
 }
 
 // ── Helpers reused by the manager + worker ───────────────────────────────────

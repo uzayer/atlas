@@ -24,8 +24,8 @@ use crate::error::{Error, Result};
 use crate::events::{DeltaSink, Emitter, SessionDelta, SessionDeltaEnvelope};
 use crate::plugin::{PluginSpec, TranscriptKind, builtin_plugins, find_plugin};
 use crate::session::{
-    Message, SessionModeInfo, SessionSnapshot, SessionState, ToolCall, ToolCallStatus,
-    new_assistant_text, new_assistant_thinking, new_assistant_tool,
+    Message, SessionModeInfo, SessionSnapshot, SessionState, SessionStatus, ToolCall,
+    ToolCallStatus, new_assistant_text, new_assistant_thinking, new_assistant_tool,
 };
 use crate::handle::SessionHandle;
 use crate::transcript;
@@ -518,6 +518,41 @@ impl AgentManager {
                     .map(|e| e.key().clone())
                     .collect();
                 for key in keys {
+                    // If a turn was live on this session, its in-flight `prompt`
+                    // future may never resolve now that the agent is gone — the
+                    // actor's `TurnDone` would never arrive, leaving the composer
+                    // stuck "running". Emit an explicit terminal before removing
+                    // the session so the UI always leaves the busy state.
+                    if let Some(entry) = self.inner.sessions.get(&key) {
+                        let (busy, turn_seq) = {
+                            let st = entry.value().state.lock();
+                            (
+                                matches!(
+                                    st.status,
+                                    SessionStatus::Running | SessionStatus::Waiting
+                                ),
+                                st.turn_seq,
+                            )
+                        };
+                        if busy {
+                            self.emit(SessionDeltaEnvelope {
+                                agent_id,
+                                session_id: key.session_id.clone(),
+                                delta: SessionDelta::TurnFailed {
+                                    error: format!("agent disconnected: {reason}"),
+                                    turn_seq,
+                                },
+                            });
+                            self.emit(SessionDeltaEnvelope {
+                                agent_id,
+                                session_id: key.session_id.clone(),
+                                delta: SessionDelta::Status {
+                                    status: SessionStatus::Error,
+                                    turn_seq,
+                                },
+                            });
+                        }
+                    }
                     self.emit(SessionDeltaEnvelope {
                         agent_id,
                         session_id: key.session_id.clone(),

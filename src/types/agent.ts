@@ -37,6 +37,20 @@ export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 export function isBusyAgentStatus(status: string | undefined): boolean {
   return status === "running" || status === "waiting";
 }
+
+/** True if any tool call in the session is still non-terminal (pending/running).
+ *  The composer stays "busy" while tools are in flight even if `status` has
+ *  (racily) flipped to idle, so it never re-enables ahead of a still-spinning
+ *  tool card. Rust is authoritative — it defers turn-end until tool calls
+ *  quiesce — this is the thin view-side guard against any residual race. */
+export function hasInFlightToolCalls(
+  session: { messages: ChatMessage[] } | undefined,
+): boolean {
+  if (!session) return false;
+  return session.messages.some((m) =>
+    m.toolCalls.some((tc) => tc.status === "pending" || tc.status === "running"),
+  );
+}
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 export type ClaudePermissionMode =
   | "default"

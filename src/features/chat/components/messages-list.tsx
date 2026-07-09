@@ -85,6 +85,11 @@ let heightCount = 0;
 const DEFAULT_ROW_ESTIMATE = 96;
 
 function recordHeight(id: string, h: number) {
+  // Never record a non-positive height. A real message row is never ~0px; a 0
+  // only comes from measuring while the subtree is `display:none` (backgrounded
+  // chat tab), and caching it collapses every downstream offset. Callers guard
+  // this too, but keep the cache-integrity invariant here as a backstop.
+  if (h < 1) return;
   const prev = measuredHeights.get(id);
   if (prev === h) return;
   if (prev === undefined) {
@@ -294,10 +299,26 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
             ) {
               return measuredHeights.get(id)!;
             }
+            // A row measured inside a `display:none` subtree reports height 0.
+            // The center panel keeps inactive tabs MOUNTED with `display:none`
+            // (fast tab-switch), so backgrounding this chat — e.g. the turn
+            // card's "Draw diagram" action opens the canvas tab — fires a 0×0
+            // ResizeObserver notification for every mounted row. Recording that
+            // 0 into the module-level height cache (and dragging down the
+            // running average) poisons every row's offset and collapses the
+            // whole thread into overlapping bubbles that survive until app
+            // restart. Treat any non-positive measurement as "not measurable
+            // right now": don't record it, and return the last known-good
+            // height (or the running estimate) so offsets stay stable. The real
+            // height is recorded again when the tab is shown and the row
+            // re-measures.
+            const raw = el?.getBoundingClientRect().height ?? 0;
+            if (raw < 1) {
+              return (id ? measuredHeights.get(id) : undefined) ?? averageHeight();
+            }
             // Round to an integer so re-measures of unchanged content return the
             // exact same value and the virtualizer treats them as no-ops (no
             // offset recompute, no scrollTop nudge).
-            const raw = el?.getBoundingClientRect().height ?? averageHeight();
             const h = Math.round(raw);
             if (id) recordHeight(id, h);
             return h;

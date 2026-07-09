@@ -1229,7 +1229,20 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       }
       // idle / error are terminal — drop one for an already-superseded turn.
       if (isStaleTurn(session, seq)) return;
-      session.status = env.status === "idle" ? "idle" : "error";
+      const terminal = env.status === "idle" ? "idle" : "error";
+      // Sweep any tool call still pending/running to a terminal state — a bare
+      // `status: idle` (one that arrives without an accompanying turn_finished)
+      // must not leave a phantom spinner. Mirrors the turn_finished sweep
+      // below. Rust also sweeps authoritatively before emitting the terminal;
+      // this is the view-side guard against any residual race.
+      for (const msg of session.messages) {
+        for (const tc of msg.toolCalls) {
+          if (tc.status === "pending" || tc.status === "running") {
+            tc.status = terminal === "error" ? "failed" : "completed";
+          }
+        }
+      }
+      session.status = terminal;
       return;
     }
     case "turn_finished": {
