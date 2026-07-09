@@ -98,7 +98,7 @@ export function Titlebar() {
     <div
       onMouseDown={handleDrag}
       onDoubleClick={handleDoubleClick}
-      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[#000] border-b border-border-default ${isFullscreen || sidebarOpen ? "pl-3" : "pl-[72px]"}`}
+      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[var(--bg-base)] border-b border-border-default ${isFullscreen || sidebarOpen ? "pl-3" : "pl-[72px]"}`}
     >
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
         <WorkspaceToggle />
@@ -154,7 +154,7 @@ function ProjectLabel({ name, path }: { name: string; path?: string }) {
     >
       <button
         onClick={copy}
-        className="block max-w-[260px] cursor-pointer truncate px-1 text-[12px] font-medium text-[#ccc] transition-colors hover:text-white"
+        className="block max-w-[260px] cursor-pointer truncate px-1 text-[12px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
       >
         {name}
       </button>
@@ -199,7 +199,7 @@ function WorkspaceToggle() {
     >
       <Layers size={14} />
       {count > 1 && (
-        <span className="absolute -bottom-0.5 -right-0.5 text-[7px] font-mono text-[var(--accent-primary)]">
+        <span className="absolute -bottom-0.5 -right-0.5 text-[7px] font-mono text-white">
           {count}
         </span>
       )}
@@ -306,7 +306,7 @@ function UpdateButton() {
       )}
       {ready && (
         <span
-          className="absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full bg-[var(--accent-primary)] ring-1 ring-[#000] pointer-events-none"
+          className="absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full bg-[var(--accent-primary)] ring-1 ring-[var(--bg-base)] pointer-events-none"
           aria-label="Update ready"
         />
       )}
@@ -335,7 +335,7 @@ function NotificationButton() {
       {hasUnread && (
         <span
           className={cn(
-            "absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full ring-1 ring-[#000] pointer-events-none",
+            "absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full ring-1 ring-[var(--bg-base)] pointer-events-none",
             hasError ? "bg-[var(--status-error)]" : "bg-white",
           )}
           aria-label="Unread notifications"

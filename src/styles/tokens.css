@@ -33,10 +33,9 @@
 
   /* Side-panel surface backgrounds — the workspace rail, the left file-tree
      panel and the right source-control panel. Defined as vars (defaults =
-     their historical near-black hexes) so the App Accent picker can tint them
-     with a dark shade of the accent, Slack-style, while the center content
-     stays AMOLED black. `applyAppAccent` overrides these at runtime; the
-     monochrome accent clears the overrides so these defaults apply verbatim. */
+     their historical near-black hexes) so the Atlas interface-theme picker can
+     recolor them per theme. `applyAtlasTheme` overrides these at runtime; the
+     Atlas Black theme clears the overrides so these defaults apply verbatim. */
   --panel-rail-bg: #0f0f0f;  /* workspace sidebar (<aside>, rendered at /80) */
   --panel-bg:      #060706;  /* left panel — file tree / explorer */
   --panel-bg-2:    #0d0e0d;  /* right panel — source control */

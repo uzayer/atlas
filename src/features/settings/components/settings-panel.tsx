@@ -31,7 +31,7 @@ import { AtlasIcon } from "@/components/atlas-icon";
 import { ProvidersSettings } from "./providers-settings";
 import { LayoutsSettings } from "./layouts-settings";
 import { CodeEditorThemesSettings } from "./code-editor-themes-settings";
-import { AppAccentSettings } from "./app-accent-settings";
+import { AtlasThemesSettings } from "./atlas-themes-settings";
 import { SkillsAndPacks } from "./skills-and-packs";
 import { ModelsManager } from "./models-manager";
 import { useDevFlagsStore } from "../stores/dev-flags-store";
@@ -345,14 +345,14 @@ function GeneralSettings() {
 type AppearanceTab = "theme" | "accent";
 
 const APPEARANCE_TABS: { id: AppearanceTab; label: string }[] = [
+  { id: "accent", label: "Interface Theme" },
   { id: "theme", label: "Editor Theme" },
-  { id: "accent", label: "App Accent" },
 ];
 
 function AppearanceSettings() {
   const settings = useProjectStore.use.settings();
   const { updateSettings } = useProjectStore.use.actions();
-  const [tab, setTab] = useState<AppearanceTab>("theme");
+  const [tab, setTab] = useState<AppearanceTab>("accent");
 
   const scalePct = Math.round(settings.uiScale * 100);
   const setScale = (next: number) => updateSettings({ uiScale: clampScale(next) });
@@ -410,7 +410,7 @@ function AppearanceSettings() {
       </div>
 
       <div className="min-h-0 flex-1">
-        {tab === "theme" ? <CodeEditorThemesSettings /> : <AppAccentSettings />}
+        {tab === "theme" ? <CodeEditorThemesSettings /> : <AtlasThemesSettings />}
       </div>
     </div>
   );
