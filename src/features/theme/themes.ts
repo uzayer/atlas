@@ -48,7 +48,8 @@ export type ThemeSpec = {
 export type AtlasTheme = {
   id: string;
   name: string;
-  /** Colors for the picker preview tile: [base, panel, accent, text]. */
+  /** One-line character sketch shown beside the preview in the picker. */
+  description: string;
   spec: ThemeSpec;
 };
 
@@ -58,6 +59,7 @@ export const ATLAS_THEMES: AtlasTheme[] = [
   {
     id: "atlas-black",
     name: "Atlas Black",
+    description: "Pure AMOLED black — maximum contrast, zero glare.",
     // Preview only — the applier CLEARS overrides for this id so the original
     // AMOLED tokens in tokens.css apply verbatim.
     spec: {
@@ -84,21 +86,24 @@ export const ATLAS_THEMES: AtlasTheme[] = [
     // Deep warm near-black + muted gold — cozy, very low glare.
     id: "chyral",
     name: "Chyral",
+    description: "Warm near-black with muted gold — cozy, low glare.",
     spec: {
-      base: "#080706",
-      panel: "#050403",
-      elevated: "#0b0a07",
-      overlay: "#100d0a",
-      input: "#050403",
-      tabActive: "#0d0b08",
-      textPrimary: "#e6e0d4",
-      textSecondary: "#a39b8a",
-      textTertiary: "#6b6455",
-      textGhost: "#1a1813",
-      textMuted: "#4a463b",
-      borderDefault: "#14120d",
-      borderSubtle: "#0d0b08",
-      borderStrong: "#1f1b15",
+      // Warm near-black base (darkest, like Atlas Black's #000) with a raised
+      // surface ladder + bright warm borders, so panes/cards stay distinct.
+      base: "#080604",
+      panel: "#100c07",
+      elevated: "#171109",
+      overlay: "#211a10",
+      input: "#0d0a06",
+      tabActive: "#1d1610",
+      textPrimary: "#ece5d5",
+      textSecondary: "#a99f8c",
+      textTertiary: "#6f6656",
+      textGhost: "#221c13",
+      textMuted: "#4c4636",
+      borderDefault: "#2a2114",
+      borderSubtle: "#1a140c",
+      borderStrong: "#473a22",
       accent: "#c9a35a",
       accentHover: "#d9b878",
       accentForeground: "#140f06",
@@ -108,21 +113,24 @@ export const ATLAS_THEMES: AtlasTheme[] = [
     // Deep neutral graphite + soft periwinkle — clean, restrained.
     id: "mirage",
     name: "Mirage",
+    description: "Neutral graphite with soft periwinkle — clean, restrained.",
     spec: {
-      base: "#09090b",
-      panel: "#060608",
-      elevated: "#0d0d10",
-      overlay: "#111114",
-      input: "#060608",
-      tabActive: "#0f0f12",
-      textPrimary: "#d7d8dc",
-      textSecondary: "#9a9ba2",
-      textTertiary: "#616269",
-      textGhost: "#171719",
-      textMuted: "#45464d",
-      borderDefault: "#131315",
-      borderSubtle: "#0c0c0e",
-      borderStrong: "#1d1d22",
+      // Cool graphite near-black base (darkest) with a raised surface ladder +
+      // bright cool borders, mirroring Atlas Black's depth structure.
+      base: "#08080a",
+      panel: "#0e0e12",
+      elevated: "#15151b",
+      overlay: "#1f1f27",
+      input: "#0b0b0f",
+      tabActive: "#1b1b22",
+      textPrimary: "#dcdde2",
+      textSecondary: "#9b9ca6",
+      textTertiary: "#63646d",
+      textGhost: "#1e1e24",
+      textMuted: "#484852",
+      borderDefault: "#28282f",
+      borderSubtle: "#17171c",
+      borderStrong: "#44444f",
       accent: "#8b9cf0",
       accentHover: "#a3b1f5",
       accentForeground: "#090a12",

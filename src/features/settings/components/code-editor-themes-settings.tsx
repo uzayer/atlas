@@ -51,8 +51,8 @@ export function CodeEditorThemesSettings() {
         )}
       </div>
 
-      <ScrollArea className="flex-1 p-6">
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
+      <ScrollArea className="flex-1 p-2">
+        <div className="grid grid-cols-2 gap-2">
           {themes.map((t) => {
             const selected = t.id === active;
             return (
@@ -63,20 +63,29 @@ export function CodeEditorThemesSettings() {
                   toast.success(`Applied “${t.name}” editor theme`);
                 }}
                 className={cn(
-                  "text-left rounded-xl border p-3 transition-colors outline-none",
+                  "group flex flex-col overflow-hidden rounded-lg border bg-bg-secondary text-left transition-colors outline-none",
                   selected
-                    ? "border-[var(--border-strong)] bg-bg-secondary"
-                    : "border-border-default bg-bg-secondary hover:border-[var(--border-strong)]",
+                    ? "border-[var(--border-strong)]"
+                    : "border-border-default hover:border-[var(--border-strong)]",
                 )}
               >
                 <CodeEditorThemeThumbnail theme={t} />
-                <div className="mt-2 flex items-center gap-1.5">
-                  <span className="text-[12px] font-medium text-text-primary">{t.name}</span>
-                  {selected && (
-                    <span className="text-[9px] font-medium text-text-tertiary">• Active</span>
-                  )}
+                <div className="flex flex-1 flex-col gap-1 px-2.5 py-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="truncate text-[12px] font-medium text-text-primary">
+                      {t.name}
+                    </span>
+                    {selected && (
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full bg-[#3fb950]"
+                        title="Active"
+                      />
+                    )}
+                  </div>
+                  <div className="text-[10.5px] leading-snug text-text-tertiary">
+                    {t.description}
+                  </div>
                 </div>
-                <div className="text-[10px] text-text-tertiary leading-snug">{t.description}</div>
               </button>
             );
           })}

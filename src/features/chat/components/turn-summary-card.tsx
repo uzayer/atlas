@@ -10,8 +10,12 @@ import {
   Clock,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { openFile } from "@/lib/open-file";
+import { openGitDiff } from "@/features/git/lib/git-diff-api";
+import { useGitStore, type GitFileStatus } from "@/features/git/stores/git-store";
 import type { ChatMessage, TurnFile } from "@/types/agent";
 
 /** Compact token count: 1.2k / 42.1k / 1.0M. */
@@ -97,6 +101,8 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
   const chips = message.suggestions?.chips ?? [];
   const loadingChips = message.suggestions?.status === "loading";
   const [filesOpen, setFilesOpen] = useState(false);
+  const repoPath = useGitStore.use.repoPath();
+  const gitFiles = useGitStore.use.files();
 
   const files = summary?.files ?? [];
   const reads = files.filter((f) => f.kind === "read");
@@ -216,29 +222,12 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
           {filesOpen && (
             <div className="border-t border-[var(--border-default)] px-3 py-1.5">
               {files.map((f) => (
-                <div
+                <FileRow
                   key={`${f.kind}:${f.path}`}
-                  className="flex items-center gap-2 py-0.5 text-[11px]"
-                >
-                  <FileStatusBadge file={f} />
-                  <span className="truncate text-[var(--text-secondary)]">
-                    {f.path}
-                  </span>
-                  {f.kind === "edit" && (f.added > 0 || f.removed > 0) && (
-                    <span className="ml-auto shrink-0 font-mono text-[10px]">
-                      {f.added > 0 && (
-                        <span className="text-[var(--status-success)]">
-                          +{f.added}
-                        </span>
-                      )}
-                      {f.removed > 0 && (
-                        <span className="ml-1 text-[var(--status-error)]">
-                          −{f.removed}
-                        </span>
-                      )}
-                    </span>
-                  )}
-                </div>
+                  file={f}
+                  repoPath={repoPath}
+                  gitFiles={gitFiles}
+                />
               ))}
             </div>
           )}
@@ -333,6 +322,91 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
     </div>
   );
 });
+
+/** One file the turn touched, with per-file open actions revealed on hover
+ *  (Zed/Linear style). Reads open in the editor or Finder; edits open in the
+ *  git diff when the file is under source control, else the editor / Finder. */
+function FileRow({
+  file,
+  repoPath,
+  gitFiles,
+}: {
+  file: TurnFile;
+  repoPath: string | null;
+  gitFiles: GitFileStatus[];
+}) {
+  const isEdit = file.kind === "edit";
+
+  // Resolve the file's path relative to the repo root, then find its git-status
+  // entry — an edit is "in source control" only when git actually tracks a
+  // change for it (so we can open the correct staged/worktree diff).
+  const rel =
+    repoPath && file.path.startsWith(repoPath + "/")
+      ? file.path.slice(repoPath.length + 1)
+      : null;
+  const scEntry = rel ? gitFiles.find((g) => g.path === rel) : undefined;
+  const inSourceControl = isEdit && !!scEntry && !!repoPath && !!rel;
+
+  const openInEditor = () => {
+    void openFile(file.path);
+  };
+  const openInFinder = async () => {
+    try {
+      await revealItemInDir(file.path);
+    } catch (err) {
+      toast.error(
+        `Couldn't reveal in Finder: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+  const openInDiff = () => {
+    if (repoPath && rel) openGitDiff(repoPath, rel, scEntry?.staged ?? false, null);
+  };
+
+  return (
+    <div className="group flex items-center gap-2 py-0.5 text-[11px]">
+      <FileStatusBadge file={file} />
+      <span className="truncate text-[var(--text-secondary)]">{file.path}</span>
+
+      {/* Actions — hidden until the row is hovered. */}
+      <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-2 opacity-0 transition-opacity group-hover:opacity-100">
+        {inSourceControl ? (
+          <FileAction label="Diff" onClick={openInDiff} />
+        ) : (
+          <FileAction label="Editor" onClick={openInEditor} />
+        )}
+        <FileAction label="Finder" onClick={openInFinder} />
+      </span>
+
+      {isEdit && (file.added > 0 || file.removed > 0) && (
+        <span className="shrink-0 font-mono text-[10px]">
+          {file.added > 0 && (
+            <span className="text-[var(--status-success)]">+{file.added}</span>
+          )}
+          {file.removed > 0 && (
+            <span className="ml-1 text-[var(--status-error)]">−{file.removed}</span>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** A tiny text link used for a per-file open action (underline on hover). */
+function FileAction({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className="cursor-pointer text-[10px] text-[var(--text-tertiary)] underline-offset-2 transition-colors hover:text-[var(--text-primary)] hover:underline"
+    >
+      {label}
+    </button>
+  );
+}
 
 function ActionButton({
   icon,
