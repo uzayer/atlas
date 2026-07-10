@@ -160,6 +160,10 @@ interface CanvasState {
   activePageId: string | null;
   /** Ids of currently-selected nodes (multi-select via marquee / shift-click). */
   selectedIds: string[];
+  /** A group whose AI thread the canvas panel should auto-open on mount — set by
+   *  external callers (e.g. "Draw diagram" from a chat turn) so the user sees the
+   *  generation loading state and can keep chatting. Consumed once. */
+  pendingAiThreadGroupId: string | null;
   fullscreen: boolean;
   activeTool: CanvasTool;
   /** Mirrors the module-level undo/redo stacks for toolbar button state. */
@@ -238,6 +242,11 @@ interface CanvasActions {
     moveGroup: (groupId: string, dx: number, dy: number) => void;
     /** Select all member nodes of a group. */
     selectGroup: (groupId: string) => void;
+    /** Ask the canvas panel to open a group's AI thread popover (surfaces the
+     *  loading state after an externally-triggered generation). */
+    requestOpenAiThread: (groupId: string) => void;
+    /** Clear a pending auto-open request (called once the panel has opened it). */
+    consumePendingAiThread: () => void;
   };
 }
 
@@ -407,6 +416,7 @@ export const useCanvasStore = createSelectors(
       tree: [],
       activePageId: null,
       selectedIds: [],
+      pendingAiThreadGroupId: null,
       fullscreen: false,
       activeTool: "select",
       canUndo: false,
@@ -956,6 +966,16 @@ export const useCanvasStore = createSelectors(
         selectGroup: (groupId) =>
           set((s) => {
             s.selectedIds = s.nodes.filter((n) => n.groupId === groupId).map((n) => n.id);
+          }),
+
+        requestOpenAiThread: (groupId) =>
+          set((s) => {
+            s.pendingAiThreadGroupId = groupId;
+          }),
+
+        consumePendingAiThread: () =>
+          set((s) => {
+            s.pendingAiThreadGroupId = null;
           }),
       },
       };

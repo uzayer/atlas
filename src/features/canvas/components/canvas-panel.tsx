@@ -96,6 +96,7 @@ function CanvasSurface({
   const activeTool = useCanvasStore.use.activeTool();
   const canUndo = useCanvasStore.use.canUndo();
   const canRedo = useCanvasStore.use.canRedo();
+  const pendingAiThreadGroupId = useCanvasStore.use.pendingAiThreadGroupId();
   const {
     loadProject,
     addNote,
@@ -113,6 +114,7 @@ function CanvasSurface({
     beginInteraction,
     undo,
     redo,
+    consumePendingAiThread,
   } = useCanvasStore.use.actions();
 
   // A create-tool (or Ask AI) is armed → the click overlay is active.
@@ -159,6 +161,27 @@ function CanvasSurface({
 
   const rf = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // An external caller (e.g. "Draw diagram" from a chat turn) asked us to open a
+  // group's AI thread so the user sees the live generation + can keep chatting.
+  // Center the view on the group and pop its thread panel, then consume.
+  useEffect(() => {
+    if (!pendingAiThreadGroupId) return;
+    const gid = pendingAiThreadGroupId;
+    const group = useCanvasStore.getState().aiGroups[gid];
+    consumePendingAiThread();
+    if (!group) return;
+    try {
+      rf.setCenter(group.anchor.x, group.anchor.y, { zoom: 0.9, duration: 400 });
+    } catch {
+      /* view not ready yet — the thread still opens below */
+    }
+    const rect = wrapperRef.current?.getBoundingClientRect();
+    const at = rect
+      ? { x: rect.left + rect.width / 2 - 170, y: rect.top + 96 }
+      : { x: 240, y: 120 };
+    setThreadFor({ groupId: gid, at });
+  }, [pendingAiThreadGroupId, rf, consumePendingAiThread]);
 
   // Project store data → xyflow shape. Node `type` = kind so xyflow routes to the
   // right renderer; `data` carries only what that renderer needs.

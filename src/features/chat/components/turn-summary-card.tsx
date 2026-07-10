@@ -64,17 +64,32 @@ function FileStatusBadge({ file }: { file: TurnFile }) {
 }
 import { useChatStore } from "../stores/chat-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useCanvasStore } from "@/features/canvas/stores/canvas-store";
 import { useCanvasAiStore } from "@/features/canvas/stores/canvas-ai-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { resolveByok } from "../lib/byok-resolve";
 import { stripNextSteps } from "../lib/next-steps";
+import { stripInjectedContext } from "../lib/atlas-context";
 import { CommitFlow } from "./commit-flow";
+
+/** The note title for a saved thread = the first message the user sent, cleaned
+ *  of injected context / next-steps and clamped to a sane length. */
+function threadTitle(sessionId: string): string {
+  const session = useChatStore.getState().sessions[sessionId];
+  const firstUser = session?.messages.find((m) => m.role === "user");
+  const raw = stripNextSteps(
+    stripInjectedContext(firstUser?.atlasProse ?? firstUser?.content ?? ""),
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  return raw.slice(0, 80) || "Agent chat";
+}
 
 function buildThreadMarkdown(sessionId: string): string | null {
   const session = useChatStore.getState().sessions[sessionId];
   if (!session) return null;
-  const lines: string[] = [`# Agent chat — ${session.title || "Untitled"}`, ""];
+  const lines: string[] = [`# ${threadTitle(sessionId)}`, ""];
   for (const m of session.messages) {
     if (m.role !== "user" && m.role !== "assistant") continue;
     const text = stripNextSteps(m.atlasProse ?? m.content ?? "").trim();
@@ -125,6 +140,7 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
       toast.error("Nothing to save yet");
       return;
     }
+    const title = threadTitle(tabId);
     const id = `chat/${new Date().toISOString().replace(/[:.]/g, "-")}-thread`;
     try {
       await invoke("save_knowledge_note", {
@@ -132,7 +148,18 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
         id,
         content: md,
       });
-      toast.success("Thread saved to knowledge base");
+      // Give the note a readable title (the first user message) in `_meta.json`
+      // — the KB tree shows the meta title, not the raw timestamp id.
+      await invoke("knowledge_meta_patch", {
+        projectPath: project.path,
+        entryId: id,
+        patch: { title },
+      }).catch(() => {});
+      // The raw `save_knowledge_note` doesn't emit a KB-changed event, so the
+      // list won't surface the new note until it's reloaded — every other
+      // working saver reloads entries right after writing.
+      await useKnowledgeStore.getState().actions.loadEntries(project.path);
+      toast.success(`Saved “${title}” to knowledge base`);
     } catch (e) {
       toast.error(`Failed to save: ${e}`);
     }
@@ -158,7 +185,11 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
     const canvas = useCanvasStore.getState().actions;
     canvas.createPage();
     const anchor = { x: 0, y: 0 };
+    // Create the "Ask AI" element (an AI group + thread) and hand it the diagram
+    // context. It generates with the default selected model — so the user sees
+    // the loading state and can keep chatting with the diagram afterward.
     const groupId = canvas.createAiGroup(anchor, byok.provider, byok.model);
+    canvas.requestOpenAiThread(groupId);
     void useCanvasAiStore
       .getState()
       .actions.generate({
