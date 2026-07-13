@@ -20,8 +20,7 @@ const PREFERRED: Record<string, string[]> = {
   ],
   openai: ["gpt-5.1", "gpt-5", "o4-mini", "gpt-4.1", "gpt-4o"],
   google: [
-    "gemini-3.1-pro",
-    "gemini-3.1-flash",
+    "gemini-3.1-pro-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
   ],

@@ -43,10 +43,14 @@ export const PlanDock = memo(function PlanDock({ tabId }: { tabId: string }) {
   if (!plan || plan.length === 0) return null;
 
   const completed = plan.filter((s) => s.status === "completed").length;
-  const done = completed === plan.length;
   const busy = isBusyAgentStatus(status ?? "idle");
-  // Auto-hide a finished plan once the turn is no longer active.
-  if (done && !busy) return null;
+  // The dock is a LIVE indicator pinned to the composer: hide it as soon as the
+  // turn is no longer active (idle / error) — a finished plan lives on in the
+  // thread, and a session switched to while idle must not show a stale plan.
+  // Combined with `livePlan` being reset on every (re)bind and re-derived from
+  // the snapshot on load, this gives per-session plan visibility: present only
+  // while THAT session is actively running/awaiting a plan.
+  if (!busy) return null;
 
   const current = planCurrentStep(plan);
 

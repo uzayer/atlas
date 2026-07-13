@@ -195,6 +195,7 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
     setSessionTitle,
     setTranscriptLoading,
     createSession,
+    hydrateSessionSnapshot,
   } = useChatStore.use.actions();
 
   const chatSidebar = useLayoutStore.use.chatSidebar();
@@ -756,6 +757,9 @@ export function SessionSidebar({ tabId }: SessionSidebarProps) {
 
       replaceMessages(targetTabId, snapshot.messages.map(snapshotMessageToWire));
       setAcpBinding(targetTabId, agent.agent_id, item.id, cwd);
+      // Restore live status + docked plan AFTER the bind (which clears the
+      // plan): switching back to a still-running session re-shows its plan.
+      hydrateSessionSnapshot(targetTabId, snapshot.status, snapshot.plan);
       // Seed the composer mode picker from the resumed session's advertised
       // modes (Codex). Claude ignores these in favour of its own pill.
       setAcpModes(targetTabId, snapshot.current_mode, snapshot.available_modes);

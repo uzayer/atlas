@@ -32,7 +32,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use atlas_acp::{AcpEvent, AgentId, PermissionDecision, Result as AcpResult, SessionId};
+use atlas_acp::{AcpError, AcpEvent, AgentId, PermissionDecision, Result as AcpResult, SessionId};
 use atlas_agentkit::{AgentConnection, TurnId};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -275,9 +275,29 @@ impl SessionActor {
         let conn = self.conn.clone();
         let session = self.session_id.clone();
         let tx = self.stream_tx.clone();
-        tokio::spawn(async move {
+        let done_tx = tx.clone();
+        let handle = tokio::spawn(async move {
             let result = conn.prompt(session, text).await;
-            let _ = tx.send(ActorMsg::TurnDone { turn, result });
+            let _ = done_tx.send(ActorMsg::TurnDone { turn, result });
+        });
+        // Supervisor: if the prompt task unwinds (panic) or is aborted before it
+        // posts `TurnDone`, synthesize a terminal so the turn can't strand the
+        // composer 'running'. The ACP path gets this guarantee from the
+        // `AgentDisconnected` terminal (manager.rs) when its subprocess dies; the
+        // in-process native (cersei) path has no such route — a panic inside
+        // `conn.prompt` (provider/tool/serde/`delegate`) would otherwise leave
+        // `running` set forever. Idempotent: a stranded turn that already
+        // finalized normally has `running == None`/a newer id, so the synthetic
+        // `TurnDone` is dropped by the stale-turn guard in `handle_stream`.
+        tokio::spawn(async move {
+            if let Err(join_err) = handle.await {
+                let _ = tx.send(ActorMsg::TurnDone {
+                    turn,
+                    result: Err(AcpError::other(format!(
+                        "agent turn ended abnormally: {join_err}"
+                    ))),
+                });
+            }
         });
     }
 

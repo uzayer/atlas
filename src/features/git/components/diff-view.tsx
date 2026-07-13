@@ -81,7 +81,7 @@ export function DiffView({
     getScrollElement: () => scrollRef.current,
     estimateSize: (i) => {
       const k = rows[i].kind;
-      if (k === "file-header") return 30;
+      if (k === "file-header") return 42;
       if (k === "file-footer") return 8;
       return 20;
     },
@@ -185,7 +185,7 @@ export function DiffView({
                     data-index={vr.index}
                     ref={virtualizer.measureElement}
                     style={base}
-                    className="flex items-center gap-1.5 px-2 rounded-t-md border border-border-default bg-[#0F0F0F] hover:bg-[#141414] cursor-pointer group"
+                    className="flex items-center gap-1.5 px-2 py-1.5 rounded-t-md border border-border-default bg-[#0F0F0F] hover:bg-[#141414] cursor-pointer group"
                     onClick={() => toggleFile(file.path)}
                   >
                     <ChevronRight

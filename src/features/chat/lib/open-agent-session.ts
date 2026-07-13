@@ -64,6 +64,7 @@ export async function openAgentSession({ acpSessionId, title, cwd }: OpenOpts): 
     clearSession,
     setTranscriptLoading,
     replaceMessages,
+    hydrateSessionSnapshot,
   } = chat.actions;
 
   // 1. Already open in a LIVE tab → focus it (covers re-clicks + running chats).
@@ -130,6 +131,8 @@ export async function openAgentSession({ acpSessionId, title, cwd }: OpenOpts): 
     const snapshot = await agents.snapshot(key);
     replaceMessages(targetTabId, snapshot.messages.map(snapshotMessageToWire));
     setAcpBinding(targetTabId, agent.agent_id, acpSessionId, cwd);
+    // Restore live status + docked plan AFTER the bind (which clears the plan).
+    hydrateSessionSnapshot(targetTabId, snapshot.status, snapshot.plan);
     setTranscriptLoading(targetTabId, false);
   } catch (err) {
     setTranscriptLoading(targetTabId, false);

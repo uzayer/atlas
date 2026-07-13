@@ -332,6 +332,16 @@ interface ChatActions {
         }>;
       }>
     ) => void;
+    /** Restore live (non-transcript) session state from a `session/load`
+     *  snapshot: the backend's current status and the current turn's live plan.
+     *  `replaceMessages` only restores the persisted thread; without this a
+     *  session switched-away-from and back shows idle + no plan even while its
+     *  backend turn is still running a plan. */
+    hydrateSessionSnapshot: (
+      tabId: string,
+      status: AgentStatus,
+      plan: Array<{ content: string; status: string }>,
+    ) => void;
     /** Mirror the composer's plain text into the per-tab draft slot. */
     setDraft: (tabId: string, text: string) => void;
     /** Set/patch the adaptive next-step suggestions on a turn's trailing
@@ -753,6 +763,12 @@ export const useChatStore = createSelectors(
               session.title = "New Chat";
               session.firstUserContent = undefined;
               session.userMessageCount = 0;
+              // Reset the turn-identity high-water mark + live per-turn scratch
+              // so the next bound session's fresh turn_seq (which restarts at 1)
+              // isn't rejected as stale by `isStaleTurn` (see `setAcpBinding`).
+              session.currentTurnSeq = 0;
+              session.livePlan = undefined;
+              session.turnScratch = undefined;
             }
             delete s.queues[sessionId];
           }),
@@ -943,6 +959,28 @@ export const useChatStore = createSelectors(
             // in the sidebar. Real activity (addMessage, applyAcpEvent's
             // streaming chunks, etc.) bumps it elsewhere.
           }),
+        hydrateSessionSnapshot: (tabId, status, plan) =>
+          set((s) => {
+            const session = s.sessions[tabId];
+            if (!session) return;
+            // Adopt the backend's live status (a still-running session switched
+            // back to must show as running, not idle). Live deltas from the
+            // still-attached backend take over from here.
+            session.status = status;
+            // Re-derive the docked live plan from the snapshot (same shape as
+            // the `plan_updated` delta). Cleared on the switch-away rebind, so
+            // this is what makes an active plan REAPPEAR when switching back.
+            session.livePlan =
+              plan.length > 0
+                ? plan.map((e, idx) => ({
+                    id: `plan-${idx}`,
+                    description: e.content,
+                    status:
+                      (e.status as "pending" | "in_progress" | "completed") ??
+                      "pending",
+                  }))
+                : undefined;
+          }),
         removeSession: (sessionId) =>
           set((s) => {
             delete s.sessions[sessionId];
@@ -1061,6 +1099,24 @@ export const useChatStore = createSelectors(
           set((s) => {
             const session = s.sessions[tabId];
             if (!session) return;
+            // A (re)bind points the tab at a DIFFERENT backend session — a
+            // freshly spawned SessionActor whose `turn_seq` counter restarts at
+            // 1 (turn_seq is not persisted; new / resumed / workspace-switched
+            // sessions all reconstruct it from 0). The frontend `currentTurnSeq`
+            // is a monotonic high-water mark that only ratchets UP (see the
+            // status handler), so a value retained from the PREVIOUS session —
+            // e.g. after ⌥N launches a new session in a new workspace, or "New
+            // Chat" resets the singleton tab in place — would make every
+            // terminal of the new session (idle / turn_finished at turn_seq 1)
+            // look stale via `isStaleTurn` and get dropped, stranding the
+            // composer 'running' forever. Reset the high-water mark (and the
+            // previous session's live per-turn scratch) whenever the bound
+            // session identity changes.
+            if (session.acpSessionId !== acpSessionId) {
+              session.currentTurnSeq = 0;
+              session.livePlan = undefined;
+              session.turnScratch = undefined;
+            }
             session.acpAgentId = agentId;
             session.acpSessionId = acpSessionId;
             // Stamp the session's project root the moment it's bound (the agent
@@ -1378,8 +1434,12 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
     }
     case "turn_failed": {
       if (isStaleTurn(session, env.turn_seq)) return;
+      // Don't hardcode "ACP error" — the native Atlas (cersei) agent is
+      // in-process and shares this error delta, so its provider errors (e.g. a
+      // Gemini HTTP 400) were being mislabeled as ACP failures. Use a neutral
+      // prefix.
       session.messages.push(
-        makeAssistantTextMessage(`ACP error: ${env.error}`)
+        makeAssistantTextMessage(`Error: ${env.error}`)
       );
       session.status = "error";
       return;
