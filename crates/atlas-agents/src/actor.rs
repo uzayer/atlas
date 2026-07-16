@@ -104,6 +104,24 @@ pub enum ActorMsg {
     CancelDeadline {
         turn: TurnId,
     },
+    /// A spawned SetMode/SetModel RPC resolved. The control loop never blocks
+    /// on these (a wedged `session/set_mode` used to freeze Cancel and all
+    /// streaming — H3); the optimistic state flip happens at dispatch and this
+    /// message rolls it back on error, keeping all state mutation single-owner.
+    SettingResult {
+        setting: Setting,
+        /// The value before the optimistic apply, restored on error.
+        prior: Option<String>,
+        requested: String,
+        result: AcpResult<()>,
+    },
+}
+
+/// Which session setting a [`ActorMsg::SettingResult`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    Mode,
+    Model,
 }
 
 /// Handle held by the manager to talk to a running actor.
@@ -286,25 +304,67 @@ impl SessionActor {
                 }
             }
             Control::SetMode(mode_id) => {
-                if let Some(modes) = self.conn.session_modes() {
-                    if let Err(e) = modes.set(&self.session_id, mode_id).await {
-                        tracing::warn!(target: "atlas_agents::actor", "set_mode failed: {e}");
-                    }
-                }
+                let Some(modes) = self.conn.session_modes() else {
+                    return;
+                };
+                // Optimistic apply + spawned RPC (Zed §2.4). The control loop
+                // must never await the network: a wedged adapter on
+                // `session/set_mode` froze Cancel and all streaming for the
+                // session (H3). The RPC result re-enters through the stream
+                // FIFO and rolls the flip back on error.
+                let prior = {
+                    let mut st = self.state.lock();
+                    let prior = st.current_mode.clone();
+                    st.current_mode = Some(mode_id.clone());
+                    st.touch();
+                    prior
+                };
+                self.emit_for(
+                    self.session_id_str(),
+                    SessionDelta::ModeChanged {
+                        mode_id: mode_id.clone(),
+                    },
+                );
+                let session = self.session_id.clone();
+                let tx = self.stream_tx.clone();
+                tokio::spawn(async move {
+                    let result = modes.set(&session, mode_id.clone()).await;
+                    let _ = tx.send(ActorMsg::SettingResult {
+                        setting: Setting::Mode,
+                        prior,
+                        requested: mode_id,
+                        result,
+                    });
+                });
             }
             Control::SetModel(model_id) => {
-                if let Some(sel) = self.conn.model_selector() {
-                    if let Err(e) = sel.select(&self.session_id, model_id.clone()).await {
-                        tracing::warn!(target: "atlas_agents::actor", "set_model failed: {e}");
-                    }
-                }
-                let sid = {
+                let Some(sel) = self.conn.model_selector() else {
+                    return;
+                };
+                let prior = {
                     let mut st = self.state.lock();
+                    let prior = st.current_model.clone();
                     st.current_model = Some(model_id.clone());
                     st.touch();
-                    st.session_id.clone()
+                    prior
                 };
-                self.emit_for(sid, SessionDelta::ModelChanged { model_id });
+                self.emit_for(
+                    self.session_id_str(),
+                    SessionDelta::ModelChanged {
+                        model_id: model_id.clone(),
+                    },
+                );
+                let session = self.session_id.clone();
+                let tx = self.stream_tx.clone();
+                tokio::spawn(async move {
+                    let result = sel.select(&session, model_id.clone()).await;
+                    let _ = tx.send(ActorMsg::SettingResult {
+                        setting: Setting::Model,
+                        prior,
+                        requested: model_id,
+                        result,
+                    });
+                });
             }
             Control::SetEffort(effort) => {
                 if let Some(ctl) = self.conn.effort_control() {
@@ -473,6 +533,37 @@ impl SessionActor {
                 if self.running == Some(turn) {
                     if let Some(result) = self.pending_finalize.take() {
                         self.finalize(result);
+                    }
+                }
+            }
+            ActorMsg::SettingResult {
+                setting,
+                prior,
+                requested,
+                result,
+            } => {
+                let Err(e) = result else { return };
+                tracing::warn!(
+                    target: "atlas_agents::actor",
+                    ?setting,
+                    requested,
+                    "setting RPC failed; rolling back: {e}"
+                );
+                // Roll the optimistic flip back and tell the UI, so the picker
+                // doesn't lie about a value the agent never accepted.
+                let sid = self.session_id_str();
+                match setting {
+                    Setting::Mode => {
+                        self.state.lock().current_mode = prior.clone();
+                        if let Some(mode_id) = prior {
+                            self.emit_for(sid, SessionDelta::ModeChanged { mode_id });
+                        }
+                    }
+                    Setting::Model => {
+                        self.state.lock().current_model = prior.clone();
+                        if let Some(model_id) = prior {
+                            self.emit_for(sid, SessionDelta::ModelChanged { model_id });
+                        }
                     }
                 }
             }
@@ -649,6 +740,36 @@ mod tests {
         cancels: AtomicUsize,
         /// Permission ids `sweep_permissions` will report as swept (drained).
         pending_perms: Mutex<Vec<Uuid>>,
+        /// Pluggable `SessionModes` capability (None = not advertised).
+        modes: Mutex<Option<Arc<TestModes>>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ModesBehavior {
+        Ok,
+        Wedge,
+        Fail,
+    }
+
+    struct TestModes {
+        behavior: Mutex<ModesBehavior>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl atlas_agentkit::SessionModes for TestModes {
+        async fn set(&self, _s: &SessionId, _m: String) -> AcpResult<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let behavior = *self.behavior.lock(); // don't hold the guard across .await
+            match behavior {
+                ModesBehavior::Ok => Ok(()),
+                ModesBehavior::Wedge => {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+                ModesBehavior::Fail => Err(AcpError::other("set_mode rejected by agent")),
+            }
+        }
     }
     #[async_trait::async_trait]
     impl AgentConnection for GatedConn {
@@ -669,6 +790,12 @@ mod tests {
         }
         fn sweep_permissions(&self, _s: &SessionId) -> Vec<Uuid> {
             std::mem::take(&mut *self.pending_perms.lock())
+        }
+        fn session_modes(&self) -> Option<Arc<dyn atlas_agentkit::SessionModes>> {
+            self.modes
+                .lock()
+                .clone()
+                .map(|m| m as Arc<dyn atlas_agentkit::SessionModes>)
         }
     }
 
@@ -768,6 +895,7 @@ mod tests {
             prompts: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
             pending_perms: Mutex::new(Vec::new()),
+            modes: Mutex::new(None),
         });
         let handle = SessionActor::spawn(
             state,
@@ -1207,5 +1335,73 @@ mod tests {
             .filter(|e| matches!(e.delta, SessionDelta::TurnFinished { .. }))
             .count();
         assert_eq!(terminals, 1, "double-Stop must produce exactly one terminal");
+    }
+
+    #[tokio::test]
+    async fn wedged_set_mode_does_not_starve_cancel() {
+        // H3: SetMode used to be awaited inline in the control loop — a wedged
+        // adapter froze Cancel (and all streaming) for the session forever.
+        let (handle, sink, mut gates, conn) = setup_gated(1);
+        let modes = Arc::new(TestModes {
+            behavior: Mutex::new(ModesBehavior::Wedge),
+            calls: AtomicUsize::new(0),
+        });
+        conn.modes.lock().replace(modes.clone());
+
+        handle.control_tx.send(Control::Send("hi".into())).unwrap();
+        settle().await;
+        handle.control_tx.send(Control::SetMode("plan".into())).unwrap();
+        settle().await;
+        assert_eq!(modes.calls.load(Ordering::SeqCst), 1, "RPC dispatched");
+        // The RPC never resolves — Cancel must still be processed.
+        handle.control_tx.send(Control::Cancel).unwrap();
+        settle().await;
+        assert_eq!(
+            conn.cancels.load(Ordering::SeqCst),
+            1,
+            "a wedged set_mode must not starve Cancel"
+        );
+        // And the turn still winds down normally.
+        gates.remove(0).send("cancelled".into()).unwrap();
+        settle().await;
+        assert!(has_turn_finished(&sink.0.lock()));
+    }
+
+    #[tokio::test]
+    async fn set_mode_rolls_back_on_rpc_error() {
+        let (handle, sink, _gates, conn) = setup_gated(1);
+        let modes = Arc::new(TestModes {
+            behavior: Mutex::new(ModesBehavior::Ok),
+            calls: AtomicUsize::new(0),
+        });
+        conn.modes.lock().replace(modes.clone());
+
+        // Seed a known mode via a successful set.
+        handle
+            .control_tx
+            .send(Control::SetMode("default".into()))
+            .unwrap();
+        settle().await;
+        // Now the agent rejects the next change.
+        *modes.behavior.lock() = ModesBehavior::Fail;
+        handle.control_tx.send(Control::SetMode("plan".into())).unwrap();
+        settle().await;
+
+        let mode_changes: Vec<String> = sink
+            .0
+            .lock()
+            .iter()
+            .filter_map(|e| match &e.delta {
+                SessionDelta::ModeChanged { mode_id } => Some(mode_id.clone()),
+                _ => None,
+            })
+            .collect();
+        // Optimistic flip to "plan", then rollback to "default" once the RPC
+        // fails — the picker must not lie about a value the agent rejected.
+        assert_eq!(
+            mode_changes,
+            vec!["default".to_string(), "plan".to_string(), "default".to_string()],
+            "expected optimistic apply then rollback"
+        );
     }
 }

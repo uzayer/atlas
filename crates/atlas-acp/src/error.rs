@@ -18,6 +18,8 @@ pub enum AcpError {
     Protocol(String),
     #[error("invalid agent command: {0}")]
     InvalidCommand(String),
+    #[error("{rpc} timed out after {secs}s (agent unresponsive)")]
+    Timeout { rpc: &'static str, secs: u64 },
     #[error("{0}")]
     Other(String),
 }

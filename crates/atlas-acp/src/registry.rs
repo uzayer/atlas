@@ -121,6 +121,28 @@ pub struct AgentRegistry {
     inner: Arc<DashMap<AgentId, AgentEntry>>,
 }
 
+/// Bound an ACP request so a wedged adapter can't hang its caller forever
+/// (H3): the actor's control ops and the host's session ops all resolve with
+/// a typed [`AcpError::Timeout`] instead. `session/prompt` is deliberately
+/// NOT bounded — turns are governed by the cancel machinery (CANCEL_GRACE).
+async fn rpc_timeout<T>(
+    rpc: &'static str,
+    secs: u64,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(res) => res,
+        Err(_) => Err(AcpError::Timeout { rpc, secs }),
+    }
+}
+
+/// Session-lifecycle RPCs (new/load/authenticate) — slow is plausible
+/// (adapter cold start, browser OAuth handoff), so generous.
+const LIFECYCLE_RPC_SECS: u64 = 30;
+/// Session-tuning RPCs (set_mode / set_config_option) — cheap state flips;
+/// anything past this is a wedged adapter.
+const TUNING_RPC_SECS: u64 = 10;
+
 impl AgentRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -198,10 +220,13 @@ impl AgentRegistry {
     /// gate inbound traffic on the session's lifecycle.
     pub async fn new_session(&self, agent_id: AgentId, cwd: PathBuf) -> Result<NewSessionInfo> {
         let connection = self.connection(agent_id)?;
-        let resp = connection
-            .send_request(NewSessionRequest::new(cwd))
-            .block_task()
-            .await?;
+        let resp = rpc_timeout("session/new", LIFECYCLE_RPC_SECS, async {
+            Ok(connection
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await?)
+        })
+        .await?;
         self.register_session(agent_id, resp.session_id.clone())?;
         let info: NewSessionInfo = resp.into();
         // Diagnostic: surface what the agent advertised for model selection, so a
@@ -229,10 +254,13 @@ impl AgentRegistry {
         cwd: PathBuf,
     ) -> Result<Option<serde_json::Value>> {
         let connection = self.connection(agent_id)?;
-        let resp = connection
-            .send_request(LoadSessionRequest::new(session_id.clone(), cwd))
-            .block_task()
-            .await?;
+        let resp = rpc_timeout("session/load", LIFECYCLE_RPC_SECS, async {
+            Ok(connection
+                .send_request(LoadSessionRequest::new(session_id.clone(), cwd))
+                .block_task()
+                .await?)
+        })
+        .await?;
         self.register_session(agent_id, session_id)?;
         // Project the (non_exhaustive, unstable-gated) `modes` blob to JSON the
         // same way `new_session` does, so the manager can seed the available
@@ -247,11 +275,18 @@ impl AgentRegistry {
     /// completes sign-in (credentials land in `~/.codex/auth.json`).
     pub async fn authenticate(&self, agent_id: AgentId, method_id: String) -> Result<()> {
         let connection = self.connection(agent_id)?;
-        connection
-            .send_request(AuthenticateRequest::new(method_id))
-            .block_task()
-            .await?;
-        Ok(())
+        // Bounded, but generously: this RPC legitimately waits on a HUMAN
+        // completing browser sign-in (see doc above), so the tight
+        // LIFECYCLE_RPC_SECS would break Codex ChatGPT login. 5 minutes turns
+        // "forever" into "eventually fails visibly" without racing the user.
+        rpc_timeout("authenticate", 300, async {
+            connection
+                .send_request(AuthenticateRequest::new(method_id))
+                .block_task()
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Install a lifecycle guard for a session. Idempotent — if a
@@ -345,14 +380,17 @@ impl AgentRegistry {
         mode_id: String,
     ) -> Result<()> {
         let connection = self.connection(agent_id)?;
-        connection
-            .send_request(SetSessionModeRequest::new(
-                session_id,
-                SessionModeId::new(mode_id),
-            ))
-            .block_task()
-            .await?;
-        Ok(())
+        rpc_timeout("session/set_mode", TUNING_RPC_SECS, async {
+            connection
+                .send_request(SetSessionModeRequest::new(
+                    session_id,
+                    SessionModeId::new(mode_id),
+                ))
+                .block_task()
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Set a session config option (`session/set_config_option`) — the current
@@ -366,15 +404,18 @@ impl AgentRegistry {
         value: String,
     ) -> Result<()> {
         let connection = self.connection(agent_id)?;
-        connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id,
-                config_id.to_string(),
-                SessionConfigOptionValue::value_id(value),
-            ))
-            .block_task()
-            .await?;
-        Ok(())
+        rpc_timeout("session/set_config_option", TUNING_RPC_SECS, async {
+            connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id,
+                    config_id.to_string(),
+                    SessionConfigOptionValue::value_id(value),
+                ))
+                .block_task()
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Cancel an in-flight prompt turn. Three things happen:
