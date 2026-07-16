@@ -58,6 +58,11 @@ anyhow = "1"
 atlas-agents = { path = "../crates/atlas-agents" }
 atlas-terminal = { path = "../crates/atlas-terminal" }
 atlas-acp = { path = "../crates/atlas-acp" }
+# Already in the tree transitively (via atlas-cersei → cersei). Promoted to a
+# direct dep ONLY so src/lib.rs can reference cersei_provider::utf8::
+# ATLAS_UTF8_PATCH — a compile-time guard that fails `cargo check` if the
+# [patch.crates-io] vendor override (end of this file) stops applying.
+cersei-provider = "0.2.6"
 atlas-embed = { path = "../crates/atlas-embed" }
 # On-device RAG/memory engine (MiniLM → usearch HNSW + manifest). The Tauri
 # layer owns the per-project engine registry + background indexer
@@ -142,8 +147,11 @@ atlas-embed = { path = "../crates/atlas-embed", features = ["metal"] }
 # (~30 s → ~60–90 s). Dev (`tauri dev`) is unaffected — these are
 # release-only settings.
 # ─── Cersei SDK ──────────────────────────────────────────────────────────────
-# cersei-* crates are sourced from crates.io (published 0.2.5); no [patch.crates-io]
-# override, so the build is portable for all contributors.
+# cersei-* crates are sourced from crates.io (0.2.6), EXCEPT cersei-provider,
+# which is patched to vendor/cersei-provider (see [patch.crates-io] at the end
+# of this file): the published SSE decoders corrupt multi-byte characters split
+# across HTTP chunk boundaries. Guard: the `_CERSEI_UTF8_PATCH_GUARD` const in
+# src/lib.rs fails to compile if the patch stops applying.
 
 [profile.release]
 codegen-units = 1   # Single codegen unit → better cross-function inlining
@@ -169,3 +177,10 @@ opt-level = 3       # Default for release, restated for clarity
 # runtime is no longer running unoptimized debug code.
 [profile.dev.package."*"]
 opt-level = 1
+
+[patch.crates-io]
+# ATLAS PATCH (Phase 0, plans/atlas-agent-stack-zed-parity.md): incremental
+# UTF-8 decoding in the SSE stream decoders — the published crate corrupts
+# multi-byte chars split across HTTP chunk boundaries (from_utf8_lossy on raw
+# chunks). Guard: cersei_provider::utf8::ATLAS_UTF8_PATCH (see src/lib.rs).
+cersei-provider = { path = "../vendor/cersei-provider" }

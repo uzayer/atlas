@@ -22,6 +22,12 @@ use parking_lot::Mutex;
 use state::{AppState, AppStateHandle};
 use tauri::Manager;
 
+// Compile-time guard: cersei-provider MUST resolve to the vendored, patched
+// crate ([patch.crates-io] → vendor/cersei-provider). The crates.io release
+// has no `utf8` module — if the patch stops applying, `cargo check` fails
+// here instead of shipping decoders that corrupt multi-byte streaming.
+const _CERSEI_UTF8_PATCH_GUARD: &str = cersei_provider::utf8::ATLAS_UTF8_PATCH;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install a tracing subscriber that prints `tracing::info!` etc. to

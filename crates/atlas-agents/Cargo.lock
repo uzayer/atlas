@@ -541,8 +541,6 @@ dependencies = [
 [[package]]
 name = "cersei-provider"
 version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1984b757c0f0ec8465d2b85638464cffd0b3efd4e2bffe85dde2aea571ef6bcd"
 dependencies = [
  "async-trait",
  "base64",

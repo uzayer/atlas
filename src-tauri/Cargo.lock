@@ -362,6 +362,7 @@ dependencies = [
  "atlas-review",
  "atlas-terminal",
  "base64 0.21.7",
+ "cersei-provider",
  "chrono",
  "dashmap",
  "dirs 6.0.0",
@@ -1139,8 +1140,6 @@ dependencies = [
 [[package]]
 name = "cersei-provider"
 version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1984b757c0f0ec8465d2b85638464cffd0b3efd4e2bffe85dde2aea571ef6bcd"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
