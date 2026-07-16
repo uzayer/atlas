@@ -217,6 +217,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "ignore",
+ "libc",
  "parking_lot",
  "serde",
  "serde_json",
@@ -378,8 +379,6 @@ dependencies = [
 [[package]]
 name = "cersei-agent"
 version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5b11413f2e360c43f5eb49a1fee95a9f8746d9a4ed50bd9a72b4a17ed3d3a3b"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -62,6 +62,10 @@ impl AgentConnection for BackendConnection {
             .respond_permission(self.agent_id, request_id, decision)
     }
 
+    fn sweep_permissions(&self, session: &SessionId) -> Vec<Uuid> {
+        self.backend.sweep_permissions(self.agent_id, session)
+    }
+
     fn model_selector(&self) -> Option<Arc<dyn ModelSelector>> {
         Some(self.caps())
     }

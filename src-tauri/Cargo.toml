@@ -184,3 +184,8 @@ opt-level = 1
 # multi-byte chars split across HTTP chunk boundaries (from_utf8_lossy on raw
 # chunks). Guard: cersei_provider::utf8::ATLAS_UTF8_PATCH (see src/lib.rs).
 cersei-provider = { path = "../vendor/cersei-provider" }
+# Phase 2: cersei-agent vendored for the tool-cancel race fix — the published
+# runner never raced tool.execute() against the cancel token (writes landed
+# after Stop) and left orphaned tool_use blocks in provider history on cancel.
+# Guard: cersei_agent::ATLAS_CANCEL_PATCH.
+cersei-agent = { path = "../vendor/cersei-agent" }

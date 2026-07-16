@@ -1307,6 +1307,10 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       }
       session.status = terminal;
       session.stopping = undefined;
+      // No permission modal survives its turn: the Rust finalize sweep emits
+      // permission_resolved for each, but a lost/raced delta must not leave a
+      // clickable modal on an idle turn (its click would strand the session).
+      delete s.pendingPermissions[env.session_id];
       return;
     }
     case "turn_finished": {
@@ -1368,6 +1372,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
           ? "idle"
           : "error";
       session.stopping = undefined;
+      delete s.pendingPermissions[env.session_id];
       // Per-turn usage footer (native agent): derive this turn's tokens/cost as
       // the delta from the previous turn's cumulative snapshot, and attach it to
       // the trailing assistant message so it renders at the end of the turn.
@@ -1452,6 +1457,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       );
       session.status = "error";
       session.stopping = undefined;
+      delete s.pendingPermissions[env.session_id];
       return;
     }
     case "text_chunk": {

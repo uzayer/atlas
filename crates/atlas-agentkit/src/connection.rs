@@ -33,6 +33,13 @@ pub trait AgentConnection: Send + Sync {
     /// Resolve a permission request the agent raised earlier.
     fn respond_permission(&self, request_id: Uuid, decision: PermissionDecision) -> Result<()>;
 
+    /// Resolve every permission request still pending for the session as
+    /// cancelled and return their ids. Called by the actor when a turn
+    /// finalizes so no permission modal survives its turn. Default: none.
+    fn sweep_permissions(&self, _session: &SessionId) -> Vec<Uuid> {
+        Vec::new()
+    }
+
     // ── Optional capabilities (Zed pattern: query once, have it or don't) ──────
 
     fn model_selector(&self) -> Option<Arc<dyn ModelSelector>> {

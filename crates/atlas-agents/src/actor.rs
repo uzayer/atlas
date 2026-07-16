@@ -48,6 +48,14 @@ use crate::session::{SessionState, SessionStatus, ToolCall, ToolCallStatus, new_
 /// `tool_call_update` — NOT a completion heuristic (the prompt already resolved).
 const FINALIZE_BACKSTOP: Duration = Duration::from_secs(10);
 
+/// How long a cancelled turn gets to deliver its own terminal (`TurnDone`
+/// with stop_reason "cancelled") before the actor force-finalizes it. Without
+/// this, a wedged adapter that ignores `CancelNotification` (or a native
+/// provider stream that never yields) kept the composer "stopping…" forever —
+/// cancel had no deadline at all. The turn's real `TurnDone`, if it ever
+/// arrives, is dropped by the stale-turn guard.
+const CANCEL_GRACE: Duration = Duration::from_secs(5);
+
 /// User intents routed to the actor. Unlike the legacy worker, `Cancel` and
 /// `RespondPermission` come through this same channel — the actor never blocks
 /// on `prompt` (it spawns the turn and returns to the `select!`), so there is no
@@ -87,6 +95,13 @@ pub enum ActorMsg {
     /// even if a tool never reported terminal. Ignored if the turn already
     /// finalized (tools quiesced first) or was superseded.
     FinalizeTimeout {
+        turn: TurnId,
+    },
+    /// [`CANCEL_GRACE`] expired for a cancelled turn that still hasn't
+    /// delivered its terminal. Force-finalizes it as cancelled. Ignored if the
+    /// turn already finalized or was superseded (idempotent — double-Stop arms
+    /// two timers, the second finds the turn gone).
+    CancelDeadline {
         turn: TurnId,
     },
 }
@@ -195,13 +210,8 @@ impl SessionActor {
                     // this send; `finalize` (the cancelled turn's terminal)
                     // drains it. Without this, the old turn's history write
                     // raced the new turn's (native: last-writer-wins data loss).
-                    //
-                    // TODO(phase-2): the queued send waits on the running
-                    // turn's terminal with no deadline — a wedged adapter that
-                    // ignores CancelNotification holds it until the
-                    // FINALIZE_BACKSTOP (which only arms after the prompt
-                    // resolves). Phase 2 adds the awaited-cancel grace deadline
-                    // that force-finalizes and releases the queue.
+                    // The CANCEL_GRACE deadline below bounds the wait, so a
+                    // wedged adapter can't hold the queued send hostage.
                     self.queued_sends.push_back(text);
                     if let Err(e) = self.conn.cancel(self.session_id.clone()) {
                         tracing::warn!(
@@ -209,6 +219,7 @@ impl SessionActor {
                             "cancel for superseding send failed: {e}"
                         );
                     }
+                    self.arm_cancel_deadline();
                 } else {
                     self.start_turn(text);
                 }
@@ -223,27 +234,56 @@ impl SessionActor {
                 if let Err(e) = self.conn.cancel(self.session_id.clone()) {
                     tracing::warn!(target: "atlas_agents::actor", "cancel failed: {e}");
                 }
+                self.arm_cancel_deadline();
             }
             Control::RespondPermission { request_id, decision } => {
-                let _ = self.conn.respond_permission(request_id, decision);
-                // The turn resumes — flip Waiting back to Running so the UI shows
-                // work again (a terminal will supersede this if the answer ended
-                // the turn). Mirrors `AgentManager::respond_permission`.
-                let (sid, turn_seq) = {
-                    let mut st = self.state.lock();
-                    if st.status == SessionStatus::Waiting {
-                        st.status = SessionStatus::Running;
+                let sid = self.session_id_str();
+                // Stale click: the turn already finalized (the finalize sweep
+                // resolved this request as cancelled). Responding would fail on
+                // the backend, and emitting `Running` here re-stranded the
+                // composer on a turn that will never produce a terminal (H6).
+                // Just make sure the modal clears.
+                if self.running.is_none() {
+                    tracing::debug!(
+                        target: "atlas_agents::actor",
+                        %request_id,
+                        "dropping permission response for a finished turn"
+                    );
+                    self.emit_for(sid, SessionDelta::PermissionResolved { request_id });
+                    return;
+                }
+                let responded = match self.conn.respond_permission(request_id, decision) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "atlas_agents::actor",
+                            %request_id,
+                            "respond_permission failed: {e}"
+                        );
+                        false
                     }
-                    (st.session_id.clone(), st.turn_seq)
                 };
                 self.emit_for(sid.clone(), SessionDelta::PermissionResolved { request_id });
-                self.emit_for(
-                    sid,
-                    SessionDelta::Status {
-                        status: SessionStatus::Running,
-                        turn_seq,
-                    },
-                );
+                // The turn resumes — flip Waiting back to Running so the UI
+                // shows work again (a terminal supersedes this if the answer
+                // ended the turn). Only when the respond actually applied to
+                // the live turn: a failed respond must not fake progress.
+                if responded {
+                    let turn_seq = {
+                        let mut st = self.state.lock();
+                        if st.status == SessionStatus::Waiting {
+                            st.status = SessionStatus::Running;
+                        }
+                        st.turn_seq
+                    };
+                    self.emit_for(
+                        self.session_id_str(),
+                        SessionDelta::Status {
+                            status: SessionStatus::Running,
+                            turn_seq,
+                        },
+                    );
+                }
             }
             Control::SetMode(mode_id) => {
                 if let Some(modes) = self.conn.session_modes() {
@@ -436,16 +476,53 @@ impl SessionActor {
                     }
                 }
             }
+            ActorMsg::CancelDeadline { turn } => {
+                // The cancelled turn never delivered its terminal within
+                // CANCEL_GRACE — force-finalize as cancelled so the UI's
+                // "stopping…" resolves and any queued send is released. The
+                // turn's real TurnDone, if the backend ever produces one, is
+                // dropped by the stale-turn guard; its stamped stragglers are
+                // dropped by the epoch gate.
+                if self.running == Some(turn) {
+                    tracing::warn!(
+                        target: "atlas_agents::actor",
+                        "cancel deadline expired; force-finalizing turn as cancelled"
+                    );
+                    self.pending_finalize = None;
+                    self.finalize(Ok("cancelled".into()));
+                }
+            }
         }
+    }
+
+    /// Arm the [`CANCEL_GRACE`] deadline for the currently-running turn (no-op
+    /// when idle). Idempotent: extra timers find the turn finalized/superseded.
+    fn arm_cancel_deadline(&self) {
+        let Some(turn) = self.running else { return };
+        let tx = self.stream_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(CANCEL_GRACE).await;
+            let _ = tx.send(ActorMsg::CancelDeadline { turn });
+        });
     }
 
     /// Emit the turn terminal (`TurnFinished`/`TurnFailed` + `Status`). Sweeps
     /// any residual non-terminal tool call to a terminal state *first*, so the
-    /// frontend never observes an idle turn with a still-spinning card. The sole
-    /// terminal-status writer for a turn.
+    /// frontend never observes an idle turn with a still-spinning card, and
+    /// resolves any permission request still pending as cancelled — no modal
+    /// survives its turn. The sole terminal-status writer for a turn.
     fn finalize(&mut self, result: AcpResult<String>) {
         self.running = None;
         self.pending_finalize = None;
+
+        // Permission hygiene (H6/M3): a request outstanding at turn end gets a
+        // clean `Cancelled` outcome on the backend, and the UI is told so the
+        // modal can't outlive the turn.
+        let swept = self.conn.sweep_permissions(&self.session_id);
+        for request_id in swept {
+            let sid = self.session_id_str();
+            self.emit_for(sid, SessionDelta::PermissionResolved { request_id });
+        }
 
         let turn_seq = self.state.lock().turn_seq;
         // An out-of-band `TurnFailed` recorded by `apply_event` wins over a
@@ -570,6 +647,8 @@ mod tests {
         epoch: AtomicU64,
         prompts: AtomicUsize,
         cancels: AtomicUsize,
+        /// Permission ids `sweep_permissions` will report as swept (drained).
+        pending_perms: Mutex<Vec<Uuid>>,
     }
     #[async_trait::async_trait]
     impl AgentConnection for GatedConn {
@@ -587,6 +666,9 @@ mod tests {
         }
         fn respond_permission(&self, _r: Uuid, _d: PermissionDecision) -> AcpResult<()> {
             Ok(())
+        }
+        fn sweep_permissions(&self, _s: &SessionId) -> Vec<Uuid> {
+            std::mem::take(&mut *self.pending_perms.lock())
         }
     }
 
@@ -685,6 +767,7 @@ mod tests {
             epoch: AtomicU64::new(0),
             prompts: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
+            pending_perms: Mutex::new(Vec::new()),
         });
         let handle = SessionActor::spawn(
             state,
@@ -982,5 +1065,147 @@ mod tests {
             Some(ToolCallStatus::Failed),
             "a tool_call arriving after idle must be swept to Failed (it never ran in a live turn)"
         );
+    }
+
+    fn permission_event(request_id: Uuid) -> AcpEvent {
+        let tool_call: agent_client_protocol::schema::v1::ToolCallUpdate = serde_json::from_value(
+            serde_json::json!({ "toolCallId": "p1", "title": "write", "kind": "edit" }),
+        )
+        .expect("valid tool call update");
+        AcpEvent::PermissionRequest {
+            request_id,
+            session_id: agent_client_protocol::schema::v1::SessionId::new("s"),
+            tool_call,
+            options: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_with_modal_open_resolves_permission_and_ignores_stale_click() {
+        let (handle, sink, mut gates, conn) = setup_gated(1);
+        handle.control_tx.send(Control::Send("hi".into())).unwrap();
+        settle().await;
+        // A permission request arrives (modal up, status Waiting) and is
+        // pending on the backend.
+        let req = Uuid::new_v4();
+        conn.pending_perms.lock().push(req);
+        handle
+            .stream_tx
+            .send(acp_stamped(permission_event(req), 1))
+            .unwrap();
+        settle().await;
+        // Stop; the turn winds down as cancelled.
+        handle.control_tx.send(Control::Cancel).unwrap();
+        settle().await;
+        gates.remove(0).send("cancelled".into()).unwrap();
+        settle().await;
+        {
+            let deltas = sink.0.lock();
+            // The finalize sweep resolved the pending permission…
+            assert!(
+                deltas.iter().any(|e| matches!(
+                    &e.delta,
+                    SessionDelta::PermissionResolved { request_id } if *request_id == req
+                )),
+                "finalize must resolve the outstanding permission"
+            );
+            assert!(has_turn_finished(&deltas));
+        }
+        // A stale click on the (already-resolved) modal after idle must NOT
+        // emit a Running status — that stranded the composer forever (H6).
+        let before_runnings = sink
+            .0
+            .lock()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.delta,
+                    SessionDelta::Status { status: SessionStatus::Running, .. }
+                )
+            })
+            .count();
+        handle
+            .control_tx
+            .send(Control::RespondPermission {
+                request_id: req,
+                decision: PermissionDecision::Cancelled,
+            })
+            .unwrap();
+        settle().await;
+        let after_runnings = sink
+            .0
+            .lock()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.delta,
+                    SessionDelta::Status { status: SessionStatus::Running, .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            before_runnings, after_runnings,
+            "a stale permission click must not emit Running after the turn ended"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wedged_cancel_force_finalizes_at_grace_deadline() {
+        let (handle, sink, gates, _conn) = setup_gated(1);
+        handle.control_tx.send(Control::Send("hi".into())).unwrap();
+        settle().await;
+        // Stop — but the adapter ignores the cancel (gate never fires).
+        handle.control_tx.send(Control::Cancel).unwrap();
+        settle().await;
+        assert!(!has_turn_finished(&sink.0.lock()));
+        tokio::time::advance(CANCEL_GRACE + Duration::from_millis(100)).await;
+        settle().await;
+        {
+            let deltas = sink.0.lock();
+            assert!(
+                deltas.iter().any(|e| matches!(
+                    &e.delta,
+                    SessionDelta::TurnFinished { stop_reason, .. } if stop_reason == "cancelled"
+                )),
+                "grace deadline must force-finalize the turn as cancelled"
+            );
+        }
+        // The wedged prompt finally resolves — its TurnDone must be dropped
+        // (the turn already finalized), producing no second terminal.
+        for g in gates {
+            let _ = g.send("end_turn".into());
+        }
+        settle().await;
+        let terminals = sink
+            .0
+            .lock()
+            .iter()
+            .filter(|e| matches!(e.delta, SessionDelta::TurnFinished { .. }))
+            .count();
+        assert_eq!(terminals, 1, "late TurnDone after force-finalize must be dropped");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn double_stop_is_idempotent() {
+        let (handle, sink, mut gates, conn) = setup_gated(1);
+        handle.control_tx.send(Control::Send("hi".into())).unwrap();
+        settle().await;
+        handle.control_tx.send(Control::Cancel).unwrap();
+        handle.control_tx.send(Control::Cancel).unwrap();
+        settle().await;
+        assert_eq!(conn.cancels.load(Ordering::SeqCst), 2);
+        // Turn delivers its cancelled terminal normally.
+        gates.remove(0).send("cancelled".into()).unwrap();
+        settle().await;
+        // Both armed deadlines fire later — each must find the turn gone.
+        tokio::time::advance(CANCEL_GRACE + Duration::from_secs(1)).await;
+        settle().await;
+        let terminals = sink
+            .0
+            .lock()
+            .iter()
+            .filter(|e| matches!(e.delta, SessionDelta::TurnFinished { .. }))
+            .count();
+        assert_eq!(terminals, 1, "double-Stop must produce exactly one terminal");
     }
 }

@@ -76,6 +76,11 @@ pub trait AgentBackend: Send + Sync {
         request_id: Uuid,
         decision: PermissionDecision,
     ) -> AcpResult<()>;
+    /// Resolve every pending permission for the session as cancelled,
+    /// returning their ids (turn finalized — no modal survives its turn).
+    fn sweep_permissions(&self, _agent_id: AgentId, _session_id: &SessionId) -> Vec<Uuid> {
+        Vec::new()
+    }
     fn register_session(&self, agent_id: AgentId, session_id: SessionId) -> AcpResult<()>;
     fn drop_session(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<()>;
     fn auth_methods(&self, agent_id: AgentId) -> AcpResult<Vec<AuthMethodWire>>;
@@ -168,6 +173,9 @@ impl AgentBackend for AcpBackend {
     ) -> AcpResult<()> {
         self.0.respond_permission(agent_id, request_id, decision)
     }
+    fn sweep_permissions(&self, agent_id: AgentId, session_id: &SessionId) -> Vec<Uuid> {
+        self.0.take_pending_permissions(agent_id, session_id)
+    }
     fn register_session(&self, agent_id: AgentId, session_id: SessionId) -> AcpResult<()> {
         self.0.register_session(agent_id, session_id)
     }
@@ -247,6 +255,9 @@ impl AgentBackend for CerseiBackend {
         decision: PermissionDecision,
     ) -> AcpResult<()> {
         self.0.respond_permission(agent_id, request_id, decision)
+    }
+    fn sweep_permissions(&self, agent_id: AgentId, session_id: &SessionId) -> Vec<Uuid> {
+        self.0.sweep_permissions(agent_id, &session_id_str(session_id))
     }
     fn register_session(&self, _agent_id: AgentId, _session_id: SessionId) -> AcpResult<()> {
         // The runtime registers sessions itself in new_session / load_session.

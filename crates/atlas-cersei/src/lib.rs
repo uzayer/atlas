@@ -39,6 +39,13 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+// Compile-time guard: cersei-agent MUST resolve to the vendored, patched
+// crate ([patch.crates-io] → vendor/cersei-agent). The crates.io release
+// never races tool execution against the cancel token — without the patch a
+// running Bash/Edit completes (and its writes land) after Stop, and a
+// cancelled tool round leaves orphaned tool_use blocks in provider history.
+const _CERSEI_CANCEL_PATCH_GUARD: &str = cersei_agent::ATLAS_CANCEL_PATCH;
 use uuid::Uuid;
 
 pub use store::SessionMeta;
@@ -160,11 +167,15 @@ struct SessionEntry {
     busy: AtomicBool,
 }
 
-/// Clears `SessionEntry::busy` on every exit path of `send_prompt`
-/// (success, error, panic-unwind through the actor's supervisor).
+/// Clears `SessionEntry::busy` AND the turn's cancel token on every exit
+/// path of `send_prompt` (success, error, panic-unwind through the actor's
+/// supervisor). The token must not outlive the turn: a later `cancel_turn`
+/// finding a dead turn's token would cancel nothing real, and the next
+/// turn installs a fresh one atomically.
 struct BusyGuard(Arc<SessionEntry>);
 impl Drop for BusyGuard {
     fn drop(&mut self) {
+        *self.0.cancel.lock() = None;
         self.0.busy.store(false, Ordering::SeqCst);
     }
 }
@@ -376,17 +387,45 @@ impl CerseiRuntime {
     /// (so any blocked `check()` resolves), and cancel the agent token.
     pub fn cancel_turn(&self, agent_id: AgentId, session_id: &str) -> Result<()> {
         let entry = self.session(agent_id, session_id)?;
-        entry.cancelled.store(true, Ordering::SeqCst);
+        // Flag + token under ONE lock scope, mirroring the atomic
+        // reset+install at the top of `send_prompt`: either this cancel runs
+        // first (the flag it sets belongs to the previous turn and is
+        // correctly reset by the new install) or it runs after (it finds the
+        // live token and interrupts the turn). No interleaving loses a cancel.
+        {
+            let guard = entry.cancel.lock();
+            entry.cancelled.store(true, Ordering::SeqCst);
+            if let Some(token) = guard.as_ref() {
+                token.cancel();
+            }
+        }
         let keys: Vec<Uuid> = entry.pending.iter().map(|e| *e.key()).collect();
         for k in keys {
             if let Some((_, tx)) = entry.pending.remove(&k) {
                 let _ = tx.send(CerseiDecision::Deny("cancelled".into()));
             }
         }
-        if let Some(token) = entry.cancel.lock().as_ref() {
-            token.cancel();
-        }
         Ok(())
+    }
+
+    /// Resolve every permission request still pending for a session as
+    /// cancelled, returning their ids so the caller can emit
+    /// `PermissionResolved` for each. Called by the session actor when a turn
+    /// finalizes: a permission outstanding at turn end must not leave a live
+    /// modal whose click strands the session (H6/M3).
+    pub fn sweep_permissions(&self, agent_id: AgentId, session_id: &str) -> Vec<Uuid> {
+        let Ok(entry) = self.session(agent_id, session_id) else {
+            return Vec::new();
+        };
+        let keys: Vec<Uuid> = entry.pending.iter().map(|e| *e.key()).collect();
+        let mut swept = Vec::new();
+        for k in keys {
+            if let Some((_, tx)) = entry.pending.remove(&k) {
+                let _ = tx.send(CerseiDecision::Deny("cancelled".into()));
+                swept.push(k);
+            }
+        }
+        swept
     }
 
     /// Resolve a pending permission request raised during a turn.
@@ -440,7 +479,18 @@ impl CerseiRuntime {
             turn,
         });
 
-        entry.cancelled.store(false, Ordering::SeqCst);
+        // Install this turn's cancel token BEFORE any await, atomically with
+        // the flag reset (one lock scope, paired with `cancel_turn`). The old
+        // order reset the flag at the top but installed the token only after
+        // provider/BYOK setup — a Stop landing in that window was erased by
+        // the reset or found no token to fire, and the turn ran to completion
+        // merely relabeled "cancelled" at the end.
+        let token = CancellationToken::new();
+        {
+            let mut guard = entry.cancel.lock();
+            *guard = Some(token.clone());
+            entry.cancelled.store(false, Ordering::SeqCst);
+        }
 
         // Resolve provider + key.
         let provider_id = entry.provider.lock().clone();
@@ -470,9 +520,6 @@ impl CerseiRuntime {
             mode,
         };
 
-        let token = CancellationToken::new();
-        *entry.cancel.lock() = Some(token.clone());
-
         // Coding tools + planning (EnterPlanMode / ExitPlanMode / TodoWrite) so
         // the agent can lay out and track a plan; TodoWrite calls are surfaced
         // as a live plan card (see the adapter below), not a raw tool card.
@@ -496,7 +543,10 @@ impl CerseiRuntime {
         let toolset_factory: ToolsetFactory = Arc::new(crate::tools::atlas_coding);
 
         let mut tools = {
-            let mut t = crate::tools::atlas_coding();
+            // Main turn: Bash gets the turn's cancel token so Stop kills the
+            // running command's process group (delegate children keep the
+            // plain set via `atlas_coding` in the factory below).
+            let mut t = crate::tools::atlas_coding_with(Some(token.clone()));
             t.extend(cersei::tools::planning());
             t.push(Box::new(
                 DelegateTool::new(provider_factory, toolset_factory).with_model(model.clone()),
@@ -600,7 +650,6 @@ impl CerseiRuntime {
                         stop = "cancelled".to_string();
                         break;
                     }
-                    *entry.cancel.lock() = None;
                     return Err(AcpError::other(e));
                 }
             }
@@ -648,7 +697,6 @@ impl CerseiRuntime {
             &now,
             &usage_snapshot,
         );
-        *entry.cancel.lock() = None;
         Ok(stop)
     }
 

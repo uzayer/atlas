@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use cersei::tools::{PermissionLevel, Tool, ToolCategory, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use super::{errors, truncate};
 
@@ -39,35 +40,73 @@ struct Input {
 enum Outcome {
     Done { code: i32, output: String },
     TimedOut { ms: u64, output: String },
+    /// The turn's cancel token fired: the process group was killed, its exit
+    /// awaited, and whatever output landed is returned as a REAL result — the
+    /// model (and history) see a settled tool call, not a dropped future.
+    Cancelled { output: String },
+}
+
+/// Kill the child's whole process group (the shell AND its descendants —
+/// `child.kill()` alone orphans grandchildren like `cargo build`'s rustc
+/// processes), then reap. Unix-only; falls back to killing the shell.
+fn kill_process_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // Negative pid = the process group created by `process_group(0)`.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Run `command` under `sh -c` in `cwd`, combining stdout+stderr into a temp
 /// file (so a full pipe buffer can never deadlock the poll loop) and enforcing
 /// a wall-clock timeout. Blocking — call inside `spawn_blocking`.
-fn run_blocking(command: &str, cwd: std::path::PathBuf, timeout_ms: u64) -> Result<Outcome, String> {
+fn run_blocking(
+    command: &str,
+    cwd: std::path::PathBuf,
+    timeout_ms: u64,
+    cancel: Option<CancellationToken>,
+) -> Result<Outcome, String> {
     let combined = std::env::temp_dir().join(format!("atlas-cersei-bash-{}.out", uuid::Uuid::new_v4()));
     let file = std::fs::File::create(&combined).map_err(|e| format!("temp file: {e}"))?;
     let err_handle = file.try_clone().map_err(|e| format!("temp file: {e}"))?;
 
-    let mut child = std::process::Command::new("sh")
-        .arg("-c")
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(&cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
-        .stderr(Stdio::from(err_handle))
-        .spawn()
-        .map_err(|e| format!("Failed to launch shell: {e}"))?;
+        .stderr(Stdio::from(err_handle));
+    // Own process group so cancel/timeout can kill the whole tree, and so the
+    // group keeps being reaped by THIS loop even if the runner's cancel race
+    // drops the async wrapper (spawn_blocking threads are not abortable —
+    // this loop always runs to completion and cleans up).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to launch shell: {e}"))?;
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut timed_out = false;
+    let mut cancelled = false;
     loop {
         match child.try_wait() {
             Ok(Some(_status)) => break,
             Ok(None) => {
+                if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    kill_process_group(&mut child);
+                    cancelled = true;
+                    break;
+                }
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_process_group(&mut child);
                     timed_out = true;
                     break;
                 }
@@ -80,6 +119,9 @@ fn run_blocking(command: &str, cwd: std::path::PathBuf, timeout_ms: u64) -> Resu
     let output = std::fs::read_to_string(&combined).unwrap_or_default();
     let _ = std::fs::remove_file(&combined);
 
+    if cancelled {
+        return Ok(Outcome::Cancelled { output });
+    }
     if timed_out {
         return Ok(Outcome::TimedOut { ms: timeout_ms, output });
     }
@@ -92,7 +134,20 @@ fn run_blocking(command: &str, cwd: std::path::PathBuf, timeout_ms: u64) -> Resu
     Ok(Outcome::Done { code, output })
 }
 
-pub struct BashTool;
+#[derive(Default)]
+pub struct BashTool {
+    /// The turn's cancel token. When set, a Stop kills the running command's
+    /// whole process group, awaits its exit, and returns the partial output
+    /// as a real (error) result. `None` = uncancellable (delegate children,
+    /// tests) — the wall-clock timeout still bounds it.
+    pub cancel: Option<CancellationToken>,
+}
+
+impl BashTool {
+    pub fn cancellable(token: CancellationToken) -> Self {
+        Self { cancel: Some(token) }
+    }
+}
 
 #[async_trait]
 impl Tool for BashTool {
@@ -133,8 +188,10 @@ impl Tool for BashTool {
         let timeout_ms = input.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
         let cwd = ctx.working_dir.clone();
         let cmd = input.command.clone();
+        let cancel = self.cancel.clone();
 
-        let result = tokio::task::spawn_blocking(move || run_blocking(&cmd, cwd, timeout_ms)).await;
+        let result =
+            tokio::task::spawn_blocking(move || run_blocking(&cmd, cwd, timeout_ms, cancel)).await;
 
         match result {
             Ok(Ok(Outcome::Done { code, output })) => {
@@ -158,6 +215,12 @@ impl Tool for BashTool {
                     ToolResult::success(format!("{body}\n\n(Command exited with code {code}.)"))
                 }
             }
+            Ok(Ok(Outcome::Cancelled { output })) => {
+                let body = truncate::truncate_output(output, truncate::MAX_OUTPUT_BYTES, "Bash output");
+                ToolResult::error(format!(
+                    "Command cancelled by user (process group killed). Partial output:\n{body}"
+                ))
+            }
             Ok(Ok(Outcome::TimedOut { ms, output })) => {
                 let body = truncate::truncate_output(output, truncate::MAX_OUTPUT_BYTES, "Bash output");
                 ToolResult::error(format!(
@@ -176,7 +239,7 @@ mod tests {
     use crate::tools::{test_ctx, TmpDir};
 
     async fn run(dir: &std::path::Path, args: Value) -> ToolResult {
-        BashTool.execute(args, &test_ctx(dir.to_path_buf())).await
+        BashTool::default().execute(args, &test_ctx(dir.to_path_buf())).await
     }
 
     #[tokio::test]
@@ -220,6 +283,43 @@ mod tests {
         let r = run(tmp.path(), serde_json::json!({"command": "echo oops 1>&2"})).await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("oops"));
+    }
+
+    #[tokio::test]
+    async fn cancel_kills_process_group_and_settles_with_partial_output() {
+        let tmp = TmpDir::new();
+        let token = CancellationToken::new();
+        let tool = BashTool::cancellable(token.clone());
+        // Emits early output, then sleeps, then would WRITE A FILE — the write
+        // must never land once the user cancels mid-sleep.
+        let ctx = test_ctx(tmp.path().to_path_buf());
+        let fut = tool.execute(
+            serde_json::json!({
+                "command": "echo started; sleep 20; echo late > after-cancel.txt",
+                "timeout": 60000
+            }),
+            &ctx,
+        );
+        let killer = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            killer.cancel();
+        });
+        let started = std::time::Instant::now();
+        let r = fut.await;
+        // Settled promptly (not after the 20s sleep), as a REAL result…
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(r.is_error, "{}", r.content);
+        assert!(r.content.contains("cancelled"), "{}", r.content);
+        // …carrying the partial output produced before the kill…
+        assert!(r.content.contains("started"), "{}", r.content);
+        // …and the whole process group is dead: the post-sleep write must
+        // never appear, even after giving any survivor time to reach it.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !tmp.path().join("after-cancel.txt").exists(),
+            "process group must be killed — no writes after the settled result"
+        );
     }
 
     #[tokio::test]

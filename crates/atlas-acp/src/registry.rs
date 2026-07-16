@@ -409,6 +409,32 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Drop every pending permission for a session, returning their ids.
+    /// Dropping the oneshot sender resolves the driver's `rx.await` as
+    /// `Cancelled`, so the agent gets a clean outcome for each in-flight
+    /// request (ACP spec). Called by the session actor when a turn
+    /// finalizes, so no modal survives its turn (H6/M3).
+    pub fn take_pending_permissions(
+        &self,
+        agent_id: AgentId,
+        session_id: &SessionId,
+    ) -> Vec<Uuid> {
+        let Some(entry) = self.inner.get(&agent_id) else {
+            return Vec::new();
+        };
+        let ids: Vec<Uuid> = entry
+            .runtime
+            .pending_permissions
+            .iter()
+            .filter(|e| e.value().session_id == *session_id)
+            .map(|e| *e.key())
+            .collect();
+        for id in &ids {
+            entry.runtime.pending_permissions.remove(id);
+        }
+        ids
+    }
+
     /// Resolve a permission request that the agent emitted earlier.
     pub fn respond_permission(
         &self,

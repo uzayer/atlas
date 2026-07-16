@@ -331,8 +331,6 @@ checksum = "4f4c707c6a209cbe82d10abd08e1ea8995e9ea937d2550646e02798948992be0"
 [[package]]
 name = "cersei-agent"
 version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5b11413f2e360c43f5eb49a1fee95a9f8746d9a4ed50bd9a72b4a17ed3d3a3b"
 dependencies = [
  "anyhow",
  "async-trait",
