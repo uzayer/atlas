@@ -80,6 +80,8 @@ interface MessageInputProps {
   onSend: (message: string, mentions: MentionData[]) => void;
   /** Stop the current generation. */
   onStop?: () => void;
+  /** Stop was clicked; awaiting the cancelled turn's terminal delta. */
+  stopping?: boolean;
   /** True while the agent is producing a response. */
   running?: boolean;
   /** Hard-disable the composer (e.g. Claude Code isn't installed/authed). */
@@ -473,6 +475,7 @@ export function MessageInput({
   onSend,
   onStop,
   running = false,
+  stopping = false,
   disabled = false,
   placeholder = "Message Atlas... (@ to mention, / for commands)",
 }: MessageInputProps) {
@@ -1169,14 +1172,21 @@ export function MessageInput({
                 )}
                 title={
                   mode === "stop"
-                    ? "Stop generation"
+                    ? stopping
+                      ? "Stopping… (waiting for the agent to wind down)"
+                      : "Stop generation"
                     : mode === "queue"
                     ? "Queue message (sends after current finishes)"
                     : "Send to agent (⌘↵)"
                 }
               >
                 {mode === "stop" ? (
-                  <Square size={11} strokeWidth={3} fill="currentColor" />
+                  <Square
+                    size={11}
+                    strokeWidth={3}
+                    fill="currentColor"
+                    className={stopping ? "animate-pulse" : undefined}
+                  />
                 ) : (
                   <ArrowUp size={14} strokeWidth={2.5} />
                 )}

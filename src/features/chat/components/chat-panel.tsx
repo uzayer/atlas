@@ -422,11 +422,14 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     const cs = useChatStore.getState();
     const s = cs.sessions[tabId];
     if (!s?.acpAgentId || !s.acpSessionId) return;
-    // Optimistic: flip the UI to idle now. The agent's `cancelled`
-    // stop_reason arrives shortly via the `atlas:agents` TurnFinished
-    // delta, which also sets idle — a no-op at that point. Zed-style
-    // instant feel.
-    cs.actions.updateSessionStatus(tabId, "idle");
+    // Do NOT flip to idle optimistically: the backend may still be winding
+    // tools down, and lying "idle" here let a new send race the still-live
+    // turn (interleaved deltas; native history loss). Mark stop-requested
+    // instead — the composer shows "Stopping…" and idle arrives with the
+    // turn's real terminal (`turn_finished` stop_reason=cancelled), which
+    // also clears the flag. Sends typed meanwhile queue exactly as they do
+    // during a running turn; the backend actor also queues defensively.
+    cs.actions.setStopping(tabId, true);
     cs.actions.clearQueue(tabId);
     // Drop any permission modal that was awaiting the user's click.
     // The Rust side has already resolved the in-flight request as
@@ -697,6 +700,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             onSend={handleSend}
             onStop={handleStop}
             running={isBusyAgentStatus(session.status) || hasInFlightToolCalls(session)}
+            stopping={!!session.stopping}
             showJumpToBottom={showJumpToBottom}
             jumpCount={jumpCount}
             onScrollToBottom={() => messagesListRef.current?.scrollToBottom()}
@@ -766,6 +770,7 @@ function ChatComposer({
   onSend,
   onStop,
   running,
+  stopping,
   showJumpToBottom,
   jumpCount,
   onScrollToBottom,
@@ -774,6 +779,7 @@ function ChatComposer({
   onSend: (message: string, mentions: MentionData[]) => void;
   onStop: () => void;
   running: boolean;
+  stopping: boolean;
   showJumpToBottom: boolean;
   jumpCount: number;
   onScrollToBottom: () => void;
@@ -899,6 +905,7 @@ function ChatComposer({
           onSend={onSend}
           onStop={onStop}
           running={running}
+          stopping={stopping}
           disabled={disabled}
           placeholder="Ask Atlas what to do…"
         />

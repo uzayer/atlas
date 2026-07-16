@@ -60,6 +60,14 @@ pub enum AcpEvent {
 
 /// Implemented by the Tauri host so the driver can fan events out without
 /// depending on `tauri` directly.
+///
+/// `turn` is the producing turn's identity — the epoch returned by
+/// `mark_turn_started` (ACP: `SessionGuard::turn_epoch`; native: the session's
+/// turn counter). `None` means turn-agnostic traffic: session replay during
+/// `session/load`, pre-first-turn notifications, and agent-level events like
+/// `AgentDisconnected`. The session actor drops turn-stamped events whose
+/// stamp doesn't match the live turn, so a superseded or cancelled turn's
+/// stragglers can't contaminate the next turn's transcript.
 pub trait EventSink: Send + Sync + 'static {
-    fn emit(&self, agent_id: AgentId, event: AcpEvent);
+    fn emit(&self, agent_id: AgentId, event: AcpEvent, turn: Option<u64>);
 }

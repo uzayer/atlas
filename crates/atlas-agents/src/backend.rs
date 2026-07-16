@@ -66,7 +66,9 @@ pub trait AgentBackend: Send + Sync {
     fn set_compress(&self, _agent_id: AgentId, _session_id: &SessionId, _on: bool) -> AcpResult<()> {
         Ok(())
     }
-    fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<()>;
+    /// Re-arm the session lifecycle guard for a new turn and return the new
+    /// turn epoch (the identity stamped onto this turn's events).
+    fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<u64>;
     fn cancel_turn(&self, agent_id: AgentId, session_id: SessionId) -> AcpResult<()>;
     fn respond_permission(
         &self,
@@ -152,7 +154,7 @@ impl AgentBackend for AcpBackend {
             .set_session_config_option(agent_id, session_id, "model", model_id)
             .await
     }
-    fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<()> {
+    fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<u64> {
         self.0.mark_turn_started(agent_id, session_id)
     }
     fn cancel_turn(&self, agent_id: AgentId, session_id: SessionId) -> AcpResult<()> {
@@ -232,8 +234,8 @@ impl AgentBackend for CerseiBackend {
     fn set_compress(&self, agent_id: AgentId, session_id: &SessionId, on: bool) -> AcpResult<()> {
         self.0.set_compress(agent_id, &session_id_str(session_id), on)
     }
-    fn mark_turn_started(&self, _agent_id: AgentId, _session_id: &SessionId) -> AcpResult<()> {
-        Ok(())
+    fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<u64> {
+        self.0.mark_turn_started(agent_id, &session_id_str(session_id))
     }
     fn cancel_turn(&self, agent_id: AgentId, session_id: SessionId) -> AcpResult<()> {
         self.0.cancel_turn(agent_id, &session_id_str(&session_id))

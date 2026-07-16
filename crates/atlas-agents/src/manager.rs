@@ -505,7 +505,7 @@ impl AgentManager {
         self.inner.emitter.emit(envelope);
     }
 
-    fn dispatch(&self, agent_id: AgentId, event: AcpEvent) {
+    fn dispatch(&self, agent_id: AgentId, event: AcpEvent, turn: Option<u64>) {
         // Agent-wide: fan the disconnect out to every one of the dead agent's
         // sessions (this stays in the manager because it spans sessions).
         let session_id = match &event {
@@ -576,14 +576,14 @@ impl AgentManager {
         // Per-session: push the event onto the target actor's FIFO, where it is
         // applied on the actor's task ordered before the turn terminal.
         if let Some(handle) = self.find_session_by_acp_id(agent_id, &session_id) {
-            handle.route_event(event);
+            handle.route_event(event, turn);
         }
     }
 }
 
 impl EventSink for AgentManager {
-    fn emit(&self, agent_id: AgentId, event: AcpEvent) {
-        self.dispatch(agent_id, event);
+    fn emit(&self, agent_id: AgentId, event: AcpEvent, turn: Option<u64>) {
+        self.dispatch(agent_id, event, turn);
     }
 }
 

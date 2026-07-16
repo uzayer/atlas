@@ -23,7 +23,7 @@ pub use memory::{MemDoc, MemorySearchFn, register_memory_search};
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use agent_client_protocol::schema::v1 as acp_schema;
 use async_trait::async_trait;
@@ -149,6 +149,37 @@ struct SessionEntry {
     /// Pending permission requests awaiting a UI decision.
     pending: DashMap<Uuid, oneshot::Sender<CerseiDecision>>,
     cancelled: AtomicBool,
+    /// Monotonic turn counter, bumped by `mark_turn_started`. Stamped onto
+    /// every event the turn emits so the session actor can drop stragglers
+    /// from a superseded turn. 0 = no turn has started yet (events unstamped).
+    turn_seq: AtomicU64,
+    /// True while a `send_prompt` turn is executing. A second concurrent
+    /// send is rejected instead of racing the first turn's history
+    /// clone/write (last-writer-wins silently lost the other turn's
+    /// messages from context and disk).
+    busy: AtomicBool,
+}
+
+/// Clears `SessionEntry::busy` on every exit path of `send_prompt`
+/// (success, error, panic-unwind through the actor's supervisor).
+struct BusyGuard(Arc<SessionEntry>);
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.busy.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Wraps the host sink and stamps every event emitted through it with the
+/// producing turn's identity, so the adapter helpers below don't have to
+/// thread the stamp through every call.
+struct TurnStampedSink {
+    inner: Arc<dyn EventSink>,
+    turn: Option<u64>,
+}
+impl EventSink for TurnStampedSink {
+    fn emit(&self, agent_id: AgentId, event: AcpEvent, turn: Option<u64>) {
+        self.inner.emit(agent_id, event, turn.or(self.turn));
+    }
 }
 
 impl CerseiRuntime {
@@ -205,6 +236,8 @@ impl CerseiRuntime {
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: AtomicBool::new(false),
+            turn_seq: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
         });
         agent.sessions.insert(session_id.clone(), entry);
         Ok(NewSessionInfo {
@@ -246,6 +279,8 @@ impl CerseiRuntime {
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: AtomicBool::new(false),
+            turn_seq: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
         });
         agent.sessions.insert(sid, entry);
         Ok(Some(modes_blob("default")))
@@ -329,6 +364,14 @@ impl CerseiRuntime {
             .clone()
     }
 
+    /// Bump the session's turn counter and return the new turn identity.
+    /// Called by the session actor right before `send_prompt`; the turn's
+    /// events are stamped with this value (see `TurnStampedSink`).
+    pub fn mark_turn_started(&self, agent_id: AgentId, session_id: &str) -> Result<u64> {
+        let entry = self.session(agent_id, session_id)?;
+        Ok(entry.turn_seq.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
     /// Cancel the in-flight turn: flip the flag, drop pending permissions
     /// (so any blocked `check()` resolves), and cancel the agent token.
     pub fn cancel_turn(&self, agent_id: AgentId, session_id: &str) -> Result<()> {
@@ -376,7 +419,26 @@ impl CerseiRuntime {
         let agent = self.agent(agent_id)?;
         let sid = session_id_str(&session_id);
         let entry = self.session(agent_id, &sid)?;
-        let sink = agent.sink.clone();
+        // Reject a second concurrent turn on this session: both would clone
+        // the same history and the last finisher's `history = msgs` + save
+        // would silently drop the other turn's messages. The actor serializes
+        // sends per session; this is the backstop for any other caller.
+        if entry.busy.swap(true, Ordering::SeqCst) {
+            return Err(AcpError::other(
+                "a turn is already running for this session; cancel it or wait for it to finish",
+            ));
+        }
+        let _busy = BusyGuard(entry.clone());
+        // Stamp every event this turn emits with its identity (0 = no
+        // mark_turn_started yet → unstamped, e.g. direct runtime callers).
+        let turn = {
+            let t = entry.turn_seq.load(Ordering::SeqCst);
+            (t > 0).then_some(t)
+        };
+        let sink: Arc<dyn EventSink> = Arc::new(TurnStampedSink {
+            inner: agent.sink.clone(),
+            turn,
+        });
 
         entry.cancelled.store(false, Ordering::SeqCst);
 
@@ -557,6 +619,7 @@ impl CerseiRuntime {
                     session_id: session_id.clone(),
                     saved_tokens,
                 },
+                None,
             );
         }
 
@@ -709,6 +772,7 @@ impl PermissionPolicy for UiPolicy {
                 tool_call: permission_tool_call(request),
                 options: permission_options(),
             },
+            None,
         );
         match rx.await {
             Ok(decision) => decision,
@@ -873,6 +937,7 @@ fn translate_event(
                     output_tokens,
                     cost: cumulative_cost,
                 },
+                None,
             );
             TurnStep::Continue
         }
@@ -883,6 +948,7 @@ fn translate_event(
                     session_id: session_id.clone(),
                     active: true,
                 },
+                None,
             );
             TurnStep::Continue
         }
@@ -893,6 +959,7 @@ fn translate_event(
                     session_id: session_id.clone(),
                     active: false,
                 },
+                None,
             );
             TurnStep::Continue
         }
@@ -985,6 +1052,7 @@ fn emit_session_update(
                 session_id: session_id.clone(),
                 update,
             },
+            None,
         ),
         Err(e) => tracing::warn!(target: "atlas_cersei::adapter", "session update decode failed: {e}"),
     }
@@ -1144,7 +1212,7 @@ mod tests {
         events: Mutex<Vec<AcpEvent>>,
     }
     impl EventSink for CollectingSink {
-        fn emit(&self, _agent_id: AgentId, event: AcpEvent) {
+        fn emit(&self, _agent_id: AgentId, event: AcpEvent, _turn: Option<u64>) {
             self.events.lock().push(event);
         }
     }
@@ -1447,6 +1515,8 @@ mod tests {
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: std::sync::atomic::AtomicBool::new(false),
+            turn_seq: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
         });
         UiPolicy {
             sink: s,

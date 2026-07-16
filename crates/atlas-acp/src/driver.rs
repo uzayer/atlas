@@ -34,12 +34,12 @@ use crate::registry::AgentId;
 /// rejects late inbound traffic at the protocol boundary and the
 /// frontend never knows it existed.
 ///
-/// `turn_epoch` is bumped on every `mark_turn_started` so future work
-/// (e.g. dropping events for a stale-but-not-cancelled prior turn)
-/// has a monotonic counter to compare against. Today only the
-/// `cancelled` flag is read at the gate; `turn_epoch` is kept for
-/// the upcoming multi-agent / multi-workspace use cases the user
-/// flagged (rapid Stop + new prompt on the same session, etc).
+/// `turn_epoch` is bumped on every `mark_turn_started` and stamped onto
+/// every event the driver emits for the session (`EventSink::emit`'s
+/// `turn` argument), so the session actor can drop stragglers from a
+/// stale-but-not-cancelled prior turn (rapid Stop + new prompt on the
+/// same session). Epoch 0 = no turn has ever started → events are
+/// emitted unstamped (`None`) so `session/load` replay flows through.
 pub struct SessionGuard {
     pub turn_epoch: AtomicU64,
     pub cancelled: AtomicBool,
@@ -66,10 +66,20 @@ impl SessionGuard {
 
     /// Called by the registry on `mark_turn_started`. Re-arms the
     /// guard so subsequent inbound events for this session flow
-    /// through again.
-    pub fn mark_turn_started(&self) {
-        self.turn_epoch.fetch_add(1, Ordering::AcqRel);
+    /// through again. Returns the new turn epoch — the actor keeps it
+    /// to match against the stamps on inbound events.
+    pub fn mark_turn_started(&self) -> u64 {
+        let epoch = self.turn_epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.cancelled.store(false, Ordering::Release);
+        epoch
+    }
+
+    /// The current turn's epoch, or `None` if no turn has ever started
+    /// (events emitted then are replay / pre-turn traffic and must not
+    /// be gated on turn identity).
+    pub fn current_turn(&self) -> Option<u64> {
+        let epoch = self.turn_epoch.load(Ordering::Acquire);
+        (epoch > 0).then_some(epoch)
     }
 }
 
@@ -227,7 +237,7 @@ pub async fn spawn_agent(
             Ok(()) => "driver exited cleanly".to_string(),
             Err(e) => format!("driver error: {e}"),
         };
-        sink_for_task.emit(agent_id, AcpEvent::AgentDisconnected { reason });
+        sink_for_task.emit(agent_id, AcpEvent::AgentDisconnected { reason }, None);
         result
     });
 
@@ -318,6 +328,7 @@ async fn run_driver(
                 // guard may not be installed yet when those land.
                 // Guards only exist to BLOCK; absence means "no
                 // opinion, let it through."
+                let mut turn = None;
                 if let Some(guard) = guards_for_notif.get(&notification.session_id) {
                     if guard.is_blocked() {
                         tracing::debug!(
@@ -328,6 +339,7 @@ async fn run_driver(
                         );
                         return Ok(());
                     }
+                    turn = guard.current_turn();
                 }
                 sink_notif.emit(
                     agent_id,
@@ -335,6 +347,7 @@ async fn run_driver(
                         session_id: notification.session_id,
                         update: notification.update,
                     },
+                    turn,
                 );
                 Ok(())
             },
@@ -376,6 +389,9 @@ async fn run_driver(
                     },
                 );
 
+                let turn = guards_for_perm
+                    .get(&request.session_id)
+                    .and_then(|g| g.current_turn());
                 sink_perm.emit(
                     agent_id,
                     AcpEvent::PermissionRequest {
@@ -384,6 +400,7 @@ async fn run_driver(
                         tool_call: request.tool_call.clone(),
                         options: request.options.clone(),
                     },
+                    turn,
                 );
 
                 let outcome = rx.await.unwrap_or_else(|_| {

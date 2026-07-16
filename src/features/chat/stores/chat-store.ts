@@ -266,6 +266,8 @@ interface ChatActions {
     ) => void;
     updateLastAssistantMessage: (sessionId: string, content: string) => void;
     updateSessionStatus: (sessionId: string, status: AgentStatus) => void;
+    /** Mark a session as stop-requested (Stop clicked, terminal not yet in). */
+    setStopping: (sessionId: string, on: boolean) => void;
     setSessionTitle: (sessionId: string, title: string) => void;
     setTranscriptLoading: (sessionId: string, loading: boolean) => void;
     clearSession: (sessionId: string) => void;
@@ -740,6 +742,11 @@ export const useChatStore = createSelectors(
           set((s) => {
             const session = s.sessions[sessionId];
             if (session) session.status = status;
+          }),
+        setStopping: (sessionId, on) =>
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.stopping = on || undefined;
           }),
         setSessionTitle: (sessionId, title) =>
           set((s) => {
@@ -1299,6 +1306,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
         }
       }
       session.status = terminal;
+      session.stopping = undefined;
       return;
     }
     case "turn_finished": {
@@ -1359,6 +1367,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
         env.stop_reason === "cancelled"
           ? "idle"
           : "error";
+      session.stopping = undefined;
       // Per-turn usage footer (native agent): derive this turn's tokens/cost as
       // the delta from the previous turn's cumulative snapshot, and attach it to
       // the trailing assistant message so it renders at the end of the turn.
@@ -1442,6 +1451,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
         makeAssistantTextMessage(`Error: ${env.error}`)
       );
       session.status = "error";
+      session.stopping = undefined;
       return;
     }
     case "text_chunk": {

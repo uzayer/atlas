@@ -286,28 +286,32 @@ impl AgentRegistry {
     /// Re-arm the session's guard before starting a new turn. Bumps
     /// the turn epoch and clears the `cancelled` flag so inbound
     /// notifications / permission requests for this turn flow
-    /// through. Called by the worker right before `send_prompt`.
+    /// through. Called by the actor right before `send_prompt`.
+    /// Returns the new turn epoch — the driver stamps it onto every
+    /// event it emits for this session, and the actor matches the
+    /// stamps against this value to drop stale-turn stragglers.
     pub fn mark_turn_started(
         &self,
         agent_id: AgentId,
         session_id: &SessionId,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let entry = self
             .inner
             .get(&agent_id)
             .ok_or(AcpError::UnknownAgent)?;
         if let Some(guard) = entry.runtime.session_guards.get(session_id) {
-            guard.mark_turn_started();
-        } else {
-            // Race: send arrived before register_session finished, or
-            // the session was just dropped. Install a fresh guard so
-            // the turn isn't auto-blocked.
-            entry
-                .runtime
-                .session_guards
-                .insert(session_id.clone(), Arc::new(SessionGuard::new()));
+            return Ok(guard.mark_turn_started());
         }
-        Ok(())
+        // Race: send arrived before register_session finished, or
+        // the session was just dropped. Install a fresh guard so
+        // the turn isn't auto-blocked.
+        let guard = Arc::new(SessionGuard::new());
+        let epoch = guard.mark_turn_started();
+        entry
+            .runtime
+            .session_guards
+            .insert(session_id.clone(), guard);
+        Ok(epoch)
     }
 
     /// Send a single text prompt. Resolves with the turn's `StopReason` when

@@ -64,8 +64,9 @@ impl SessionHandle {
     }
 
     /// Push an inbound agent event onto the actor's FIFO, where it is applied in
-    /// wire order (ahead of the turn terminal).
-    pub fn route_event(&self, event: AcpEvent) {
-        let _ = self.actor.stream_tx.send(ActorMsg::Acp(event));
+    /// wire order (ahead of the turn terminal). `turn` is the producing turn's
+    /// stamp from the emitting backend (None = turn-agnostic, e.g. replay).
+    pub fn route_event(&self, event: AcpEvent, turn: Option<u64>) {
+        let _ = self.actor.stream_tx.send(ActorMsg::Acp { event, turn });
     }
 }

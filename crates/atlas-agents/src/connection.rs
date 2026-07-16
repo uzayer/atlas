@@ -49,7 +49,7 @@ impl AgentConnection for BackendConnection {
         self.backend.send_prompt(self.agent_id, session, text).await
     }
 
-    fn mark_turn_started(&self, session: &SessionId) -> Result<()> {
+    fn mark_turn_started(&self, session: &SessionId) -> Result<u64> {
         self.backend.mark_turn_started(self.agent_id, session)
     }
 

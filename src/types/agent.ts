@@ -90,6 +90,13 @@ export interface ChatSession {
   agentType: AgentType;
   model: string;
   status: AgentStatus;
+  /** True between the user clicking Stop and the cancelled turn's terminal
+   *  delta arriving. The UI must NOT flip to idle optimistically on Stop —
+   *  the backend may still be winding tools down, and an "idle" lie here let
+   *  the user start a second turn while the first was live (the interleave /
+   *  history-loss race). Cleared by every terminal (idle/error/turn_finished/
+   *  turn_failed). */
+  stopping?: boolean;
   /** Turn identity of this session's current/most-recent turn, taken from the
    *  Rust `turn_seq` on status/terminal deltas. Used to reject a stale terminal
    *  (idle/error) belonging to a turn already superseded by a newer send —

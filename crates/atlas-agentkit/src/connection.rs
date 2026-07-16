@@ -21,8 +21,10 @@ pub trait AgentConnection: Send + Sync {
     async fn prompt(&self, session: SessionId, text: String) -> Result<String>;
 
     /// Re-arm the session lifecycle guard before a new turn (clears a prior
-    /// cancel so this turn's events flow). No-op for the native agent.
-    fn mark_turn_started(&self, session: &SessionId) -> Result<()>;
+    /// cancel so this turn's events flow). Returns the new turn epoch — the
+    /// identity the backend will stamp onto this turn's events, which the
+    /// actor matches to drop stale-turn stragglers.
+    fn mark_turn_started(&self, session: &SessionId) -> Result<u64>;
 
     /// Cancel the in-flight turn. The turn's own terminal event still flows
     /// through the stream (stop_reason = "cancelled").
@@ -92,8 +94,8 @@ mod tests {
         async fn prompt(&self, _s: SessionId, _t: String) -> Result<String> {
             Ok("end_turn".into())
         }
-        fn mark_turn_started(&self, _s: &SessionId) -> Result<()> {
-            Ok(())
+        fn mark_turn_started(&self, _s: &SessionId) -> Result<u64> {
+            Ok(1)
         }
         fn cancel(&self, _s: SessionId) -> Result<()> {
             Ok(())
@@ -119,8 +121,8 @@ mod tests {
         async fn prompt(&self, _s: SessionId, _t: String) -> Result<String> {
             Ok("end_turn".into())
         }
-        fn mark_turn_started(&self, _s: &SessionId) -> Result<()> {
-            Ok(())
+        fn mark_turn_started(&self, _s: &SessionId) -> Result<u64> {
+            Ok(1)
         }
         fn cancel(&self, _s: SessionId) -> Result<()> {
             Ok(())
