@@ -97,6 +97,22 @@ export interface ChatSession {
    *  history-loss race). Cleared by every terminal (idle/error/turn_finished/
    *  turn_failed). */
   stopping?: boolean;
+  /** The agent process backing this session died (agent_disconnected). The
+   *  binding fields are kept for resume — the next send (or the Restart
+   *  affordance) respawns the agent and load_session-resumes where the
+   *  transcript kind supports it. Never auto-restarted silently. */
+  disconnected?: boolean;
+  /** Live retry countdown (native agent): a transient provider failure is
+   *  being retried after a backoff. Cleared when content resumes flowing or
+   *  the turn ends. */
+  retryStatus?: {
+    attempt: number;
+    maxAttempts: number;
+    delayMs: number;
+    lastError: string;
+    /** ms epoch when this retry status arrived (for the countdown). */
+    receivedAt: number;
+  };
   /** Turn identity of this session's current/most-recent turn, taken from the
    *  Rust `turn_seq` on status/terminal deltas. Used to reject a stale terminal
    *  (idle/error) belonging to a turn already superseded by a newer send —

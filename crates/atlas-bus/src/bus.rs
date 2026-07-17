@@ -46,6 +46,54 @@ impl<E: Clone + Send + 'static> EventBus<E> {
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
     }
+
+    /// Subscribe with lag accounting: a slow consumer that falls more than
+    /// the ring capacity behind LOSES events (broadcast semantics — the
+    /// producer must never block), but the loss is logged and counted
+    /// instead of silent (L4). `name` identifies the consumer in logs.
+    pub fn subscribe_counted(&self, name: &'static str) -> CountedReceiver<E> {
+        CountedReceiver {
+            rx: self.tx.subscribe(),
+            name,
+            dropped: 0,
+        }
+    }
+}
+
+/// A subscriber wrapper that surfaces lag drops. See
+/// [`EventBus::subscribe_counted`].
+pub struct CountedReceiver<E: Clone + Send + 'static> {
+    rx: broadcast::Receiver<E>,
+    name: &'static str,
+    dropped: u64,
+}
+
+impl<E: Clone + Send + 'static> CountedReceiver<E> {
+    /// Receive the next event. On lag, logs + counts the skipped events and
+    /// continues with the next available one (never errors on lag).
+    pub async fn recv(&mut self) -> Option<E> {
+        loop {
+            match self.rx.recv().await {
+                Ok(e) => return Some(e),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    self.dropped += n;
+                    tracing::warn!(
+                        target: "atlas_bus",
+                        consumer = self.name,
+                        skipped = n,
+                        total_dropped = self.dropped,
+                        "bus subscriber lagged; events were dropped"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    }
+
+    /// Total events this subscriber has lost to lag.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
 }
 
 impl<E: Clone + Send + 'static> Clone for EventBus<E> {
@@ -81,6 +129,24 @@ mod tests {
         let bus: EventBus<u32> = EventBus::new();
         // No receivers → 0 reached, no panic, no error.
         assert_eq!(bus.publish(1), 0);
+    }
+
+    #[tokio::test]
+    async fn counted_receiver_logs_and_counts_lag_drops() {
+        let bus: EventBus<u32> = EventBus::with_capacity(4);
+        let mut rx = bus.subscribe_counted("test");
+        // Overflow the ring: 10 events into capacity 4 → the oldest are lost.
+        for i in 0..10 {
+            bus.publish(i);
+        }
+        // First recv reports the lag (counted), then yields the oldest
+        // retained event; everything still flows afterwards.
+        let first = rx.recv().await.unwrap();
+        assert!(first >= 6, "oldest retained after overflow, got {first}");
+        assert!(rx.dropped() >= 6, "lag must be counted, got {}", rx.dropped());
+        drop(bus);
+        // Channel closed → None (not an error loop).
+        while rx.recv().await.is_some() {}
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ pub mod delegate_tool;
 pub mod effort;
 pub mod events;
 pub mod reporters;
+pub mod retry;
 mod runner;
 pub mod session_memory;
 pub mod system_prompt;

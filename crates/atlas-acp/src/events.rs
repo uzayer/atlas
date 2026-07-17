@@ -31,12 +31,6 @@ pub enum AcpEvent {
         tool_call: acp_schema::ToolCallUpdate,
         options: Vec<acp_schema::PermissionOption>,
     },
-    /// A prompt-turn failed before stop_reason (process died, protocol error).
-    TurnFailed {
-        session_id: acp_schema::SessionId,
-        turn_id: Uuid,
-        error: String,
-    },
     /// Cumulative token usage + estimated cost for the session. Emitted by the
     /// in-process native agent (ACP agents surface usage via their own updates).
     Usage {
@@ -55,6 +49,15 @@ pub enum AcpEvent {
     CompressionSaved {
         session_id: acp_schema::SessionId,
         saved_tokens: u64,
+    },
+    /// A transient model-call failure is being retried after a backoff.
+    /// Native-only today (ACP agents own their retries in-process).
+    Retry {
+        session_id: acp_schema::SessionId,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        last_error: String,
     },
 }
 

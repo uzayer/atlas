@@ -257,7 +257,7 @@ mod tests {
     }
 
     fn factories() -> (ProviderFactory, ToolsetFactory) {
-        let pf: ProviderFactory = Arc::new(|| Box::new(EchoProvider));
+        let pf: ProviderFactory = Arc::new(|| Ok(Box::new(EchoProvider)));
         let tf: ToolsetFactory = Arc::new(|| Vec::new());
         (pf, tf)
     }

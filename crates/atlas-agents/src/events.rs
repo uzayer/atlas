@@ -56,6 +56,14 @@ pub enum SessionDelta {
     ModeChanged {
         mode_id: String,
     },
+    /// A transient model-call failure is being retried after a backoff
+    /// (native agent). Additive: old frontends ignore unknown kinds.
+    RetryStatus {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        last_error: String,
+    },
     ModelChanged {
         model_id: String,
     },
@@ -104,6 +112,11 @@ pub enum SessionDelta {
         error: String,
         #[serde(default)]
         turn_seq: u64,
+        /// Failure class ("auth" routes the frontend to the sign-in flow;
+        /// "transient"/"fatal"/"process_dead"/"unknown" are informational).
+        /// Additive: absent on old payloads.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
     },
     /// Underlying ACP agent process died.
     AgentDisconnected {

@@ -202,6 +202,16 @@ impl AgentRegistry {
         Ok(info)
     }
 
+    /// Tear down every spawned agent (app quit): dropping each runtime's
+    /// `shutdown_tx` lets the SDK close the subprocess's stdin and reap it —
+    /// no orphaned `node`/`npx` processes after the app exits (M7).
+    pub fn kill_all(&self) {
+        let ids: Vec<AgentId> = self.inner.iter().map(|e| *e.key()).collect();
+        for id in ids {
+            let _ = self.kill(id);
+        }
+    }
+
     pub fn kill(&self, agent_id: AgentId) -> Result<()> {
         let mut entry = self
             .inner

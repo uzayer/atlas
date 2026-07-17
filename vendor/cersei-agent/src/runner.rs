@@ -12,18 +12,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-// ─── Retry jitter ────────────────────────────────────────────────────────────
-
-/// Simple pseudo-random jitter for retry delays (no external crate needed).
-fn rand_jitter() -> u64 {
-    use std::time::SystemTime;
-    let seed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as u64;
-    seed ^ (seed >> 16) ^ (seed << 7)
-}
-
 // ─── Tool result size management ─────────────────────────────────────────────
 
 /// Maximum number of lines to keep in a tool result before truncation.
@@ -320,91 +308,120 @@ pub async fn run_agent_streaming(
             })
             .await;
 
-        // Send to provider with automatic retry on transient errors
-        let mut retry_count = 0u32;
-        const MAX_RETRIES: u32 = 5;
-
-        let (mut rx, mut accumulator) = loop {
-            let req_clone = request.clone();
-            match agent.provider.complete(req_clone).await {
+        // ATLAS PATCH (retry-classified-v1): ONE classified attempt loop for
+        // both failure surfaces. `provider.complete()` errors (connection /
+        // DNS / TLS) were retried before, but HTTP 429/529/503 never reached
+        // that path — the SSE task reports a non-success status as a
+        // `StreamEvent::Error` INSIDE the stream, which used to fail the whole
+        // turn instantly. Both now flow into `crate::retry::schedule_for`
+        // (Zed's table), the backoff races the cancel token (a Stop during
+        // backoff resolves immediately), and each attempt continues from the
+        // SAME `agent.messages` history — resume, not replay. The per-call
+        // counter resets naturally on any successful call, so a completed
+        // tool round restores the full retry budget.
+        enum CallOutcome {
+            Done(cersei_provider::CompletionResponse),
+            Failed(String),
+        }
+        let mut attempt: u32 = 0;
+        let response = loop {
+            let outcome = match agent.provider.complete(request.clone()).await {
+                Err(e) => CallOutcome::Failed(e.to_string()),
                 Ok(stream) => {
-                    break (stream.into_receiver(), StreamAccumulator::new());
-                }
-                Err(e) if e.is_retryable() && retry_count < MAX_RETRIES => {
-                    retry_count += 1;
-                    let delay_ms = (1000 * 2u64.pow(retry_count - 1)).min(30_000); // 1s, 2s, 4s, 8s, 16s
-                    let jitter = (delay_ms / 4) as u64;
-                    let actual_delay = delay_ms + (rand_jitter() % jitter.max(1));
-                    tracing::warn!(
-                        "Provider error (retryable, attempt {}/{}): {}. Retrying in {}ms...",
-                        retry_count,
-                        MAX_RETRIES,
-                        e,
-                        actual_delay
-                    );
+                    let mut rx = stream.into_receiver();
+                    let mut accumulator = StreamAccumulator::new();
                     let _ = event_tx
-                        .send(AgentEvent::Status(format!(
-                            "Rate limited. Retrying in {:.1}s... ({}/{})",
-                            actual_delay as f64 / 1000.0,
-                            retry_count,
-                            MAX_RETRIES
-                        )))
+                        .send(AgentEvent::ModelResponseStart {
+                            turn,
+                            model: model.clone(),
+                        })
                         .await;
-                    agent.emit(AgentEvent::Status(format!(
-                        "Retrying in {:.1}s ({}/{})",
-                        actual_delay as f64 / 1000.0,
-                        retry_count,
-                        MAX_RETRIES
-                    )));
-                    tokio::time::sleep(std::time::Duration::from_millis(actual_delay)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        };
 
-        let _ = event_tx
-            .send(AgentEvent::ModelResponseStart {
-                turn,
-                model: model.clone(),
-            })
-            .await;
-
-        // Process stream events (with cancellation support)
-        loop {
-            tokio::select! {
-                event = rx.recv() => {
-                    match event {
-                        Some(event) => {
-                            match &event {
-                                StreamEvent::TextDelta { text, .. } => {
-                                    let _ = event_tx.send(AgentEvent::TextDelta(text.clone())).await;
-                                    agent.emit(AgentEvent::TextDelta(text.clone()));
+                    // Process stream events (with cancellation support)
+                    let mut stream_error: Option<String> = None;
+                    loop {
+                        tokio::select! {
+                            event = rx.recv() => {
+                                match event {
+                                    Some(event) => {
+                                        match &event {
+                                            StreamEvent::TextDelta { text, .. } => {
+                                                let _ = event_tx.send(AgentEvent::TextDelta(text.clone())).await;
+                                                agent.emit(AgentEvent::TextDelta(text.clone()));
+                                            }
+                                            StreamEvent::ThinkingDelta { thinking, .. } => {
+                                                let _ = event_tx
+                                                    .send(AgentEvent::ThinkingDelta(thinking.clone()))
+                                                    .await;
+                                                agent.emit(AgentEvent::ThinkingDelta(thinking.clone()));
+                                            }
+                                            StreamEvent::Error { message } => {
+                                                stream_error = Some(message.clone());
+                                                break;
+                                            }
+                                            _ => {}
+                                        }
+                                        accumulator.process_event(event);
+                                    }
+                                    None => break, // Stream ended
                                 }
-                                StreamEvent::ThinkingDelta { thinking, .. } => {
-                                    let _ = event_tx
-                                        .send(AgentEvent::ThinkingDelta(thinking.clone()))
-                                        .await;
-                                    agent.emit(AgentEvent::ThinkingDelta(thinking.clone()));
-                                }
-                                StreamEvent::Error { message } => {
-                                    return Err(CerseiError::Provider(message.clone()));
-                                }
-                                _ => {}
                             }
-                            accumulator.process_event(event);
+                            _ = agent.cancel_token.cancelled() => {
+                                return Err(CerseiError::Cancelled);
+                            }
                         }
-                        None => break, // Stream ended
+                    }
+
+                    match stream_error {
+                        Some(msg) => CallOutcome::Failed(msg),
+                        None => match accumulator.into_response() {
+                            Ok(r) => CallOutcome::Done(r),
+                            Err(e) => {
+                                CallOutcome::Failed(format!("failed to decode response: {e}"))
+                            }
+                        },
                     }
                 }
-                _ = agent.cancel_token.cancelled() => {
-                    return Err(CerseiError::Cancelled);
+            };
+
+            match outcome {
+                CallOutcome::Done(r) => break r,
+                CallOutcome::Failed(msg) => {
+                    attempt += 1;
+                    let Some(schedule) = crate::retry::schedule_for(&msg) else {
+                        // Auth / fatal / unrecognized: surface immediately.
+                        return Err(CerseiError::Provider(msg));
+                    };
+                    if attempt >= schedule.max_attempts {
+                        return Err(CerseiError::Provider(format!(
+                            "{msg} (gave up after {attempt} attempts)"
+                        )));
+                    }
+                    let delay = schedule.delay(attempt);
+                    tracing::warn!(
+                        "Provider error (attempt {}/{}): {}. Retrying in {:?}...",
+                        attempt,
+                        schedule.max_attempts,
+                        msg,
+                        delay
+                    );
+                    let retry_ev = AgentEvent::Retry {
+                        attempt,
+                        max_attempts: schedule.max_attempts,
+                        delay_ms: delay.as_millis() as u64,
+                        last_error: msg,
+                    };
+                    let _ = event_tx.send(retry_ev.clone()).await;
+                    agent.emit(retry_ev);
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = agent.cancel_token.cancelled() => {
+                            return Err(CerseiError::Cancelled);
+                        }
+                    }
                 }
             }
-        }
-
-        // Convert accumulated response
-        let response = accumulator.into_response()?;
+        };
         last_stop_reason = response.stop_reason.clone();
         _last_usage = response.usage.clone();
 

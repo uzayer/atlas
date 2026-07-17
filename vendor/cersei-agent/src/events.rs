@@ -16,6 +16,16 @@ pub enum AgentEvent {
     TextDelta(String),
     ThinkingDelta(String),
 
+    /// ATLAS PATCH (retry-classified-v1): a transient model-call failure is
+    /// being retried after a backoff. `attempt` is the retry number (1-based),
+    /// `delay_ms` the backoff before it fires.
+    Retry {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        last_error: String,
+    },
+
     // Tool lifecycle
     ToolStart {
         name: String,

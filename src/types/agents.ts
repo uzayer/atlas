@@ -120,5 +120,6 @@ export type AgentDelta =
     }
   | { kind: "permission_resolved"; agent_id: AgentId; session_id: AcpSessionId; request_id: string }
   | { kind: "turn_finished"; agent_id: AgentId; session_id: AcpSessionId; stop_reason: string; turn_seq?: number }
-  | { kind: "turn_failed"; agent_id: AgentId; session_id: AcpSessionId; error: string; turn_seq?: number }
+  | { kind: "turn_failed"; agent_id: AgentId; session_id: AcpSessionId; error: string; turn_seq?: number; error_kind?: "auth" | "transient" | "fatal" | "process_dead" | "unknown" }
+  | { kind: "retry_status"; agent_id: AgentId; session_id: AcpSessionId; attempt: number; max_attempts: number; delay_ms: number; last_error: string }
   | { kind: "agent_disconnected"; agent_id: AgentId; session_id: AcpSessionId; reason: string };

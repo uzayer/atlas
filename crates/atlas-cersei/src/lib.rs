@@ -299,9 +299,28 @@ impl CerseiRuntime {
 
     /// UI-facing transcript for a stored session (for replay on resume).
     pub fn replay_session(&self, cwd: &str, session_id: &str) -> Vec<ReplayItem> {
-        match store::load(&self.inner.config_dir, cwd, session_id) {
-            Some(doc) => messages_to_replay(&doc.messages),
-            None => Vec::new(),
+        match store::load_checked(&self.inner.config_dir, cwd, session_id) {
+            store::LoadOutcome::Loaded(doc) => {
+                let mut items = messages_to_replay(&doc.messages);
+                // The stored session's last turn failed: resume shows the
+                // failed turn's history AND why it ended (M1), matching the
+                // live `turn_failed` rendering ("Error: …").
+                if let Some(err) = &doc.turn_error {
+                    items.push(ReplayItem::Assistant {
+                        text: format!("Error: {err}"),
+                    });
+                }
+                items
+            }
+            store::LoadOutcome::Missing => Vec::new(),
+            // Damaged file: backed up, surfaced, never silently empty (M2).
+            store::LoadOutcome::Corrupt { backup_path } => vec![ReplayItem::Assistant {
+                text: format!(
+                    "⚠ This session's saved transcript was damaged and could not be \
+                     read. The original file was backed up to `{backup_path}`; the \
+                     session continues fresh from here."
+                ),
+            }],
         }
     }
 
@@ -373,6 +392,31 @@ impl CerseiRuntime {
             })
             .await
             .clone()
+    }
+
+    /// Cancel every in-flight turn across every session (app quit): flips the
+    /// flags, fires the tokens (tool process groups die), and drains pending
+    /// permissions. In-process, so nothing can orphan — this just stops work
+    /// fast so quit isn't held up by a running Bash command.
+    pub fn cancel_all(&self) {
+        for agent in self.inner.agents.iter() {
+            for session in agent.sessions.iter() {
+                let entry = session.value();
+                {
+                    let guard = entry.cancel.lock();
+                    entry.cancelled.store(true, Ordering::SeqCst);
+                    if let Some(token) = guard.as_ref() {
+                        token.cancel();
+                    }
+                }
+                let keys: Vec<Uuid> = entry.pending.iter().map(|e| *e.key()).collect();
+                for k in keys {
+                    if let Some((_, tx)) = entry.pending.remove(&k) {
+                        let _ = tx.send(CerseiDecision::Deny("cancelled".into()));
+                    }
+                }
+            }
+        }
     }
 
     /// Bump the session's turn counter and return the new turn identity.
@@ -533,11 +577,10 @@ impl CerseiRuntime {
             let pid = provider_id.clone();
             let key = api_key.clone();
             let m = model.clone();
-            Arc::new(move || {
-                // Safe to unwrap: the parent provider built successfully above
-                // from the same (provider, key, model), so a rebuild won't fail.
-                provider::build_provider(&pid, &key, &m).expect("delegate provider rebuild")
-            })
+            // Fallible: a rebuild error becomes a per-task delegate error
+            // (rendered in the tool card) instead of a panic that aborted the
+            // whole parent turn through the actor's supervisor (L3).
+            Arc::new(move || provider::build_provider(&pid, &key, &m).map_err(|e| e.to_string()))
         };
         // Sub-agents (delegate) get the same Atlas-owned coding toolset.
         let toolset_factory: ToolsetFactory = Arc::new(crate::tools::atlas_coding);
@@ -637,10 +680,32 @@ impl CerseiRuntime {
         } else {
             cersei_compression::CompressionLevel::Off
         });
+        let mut turn_error: Option<String> = None;
         while let Some(ev) = stream.next().await {
             match translate_event(ev, &sink, agent_id, &session_id, &mut todo_ids, &mut acct) {
                 TurnStep::Continue => {}
-                TurnStep::SetStop(s) => stop = s,
+                TurnStep::SetStop(s) => {
+                    stop = s;
+                    // Incremental persistence at a message boundary: each
+                    // completed model round (assistant flush + settled tool
+                    // results) hits disk, so an app crash mid-turn loses at
+                    // most the round in flight — matching the incremental
+                    // JSONL behavior of the Claude path. Cheap: small JSON,
+                    // once per model round, atomic rename (store::save).
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let usage_now = entry.usage.lock().clone();
+                    store::save(
+                        &self.inner.config_dir,
+                        &entry.cwd,
+                        &sid,
+                        &provider_id,
+                        &model,
+                        &built.messages(),
+                        &now,
+                        &usage_now,
+                        None,
+                    );
+                }
                 TurnStep::Done(s) => {
                     stop = s;
                     break;
@@ -650,7 +715,13 @@ impl CerseiRuntime {
                         stop = "cancelled".to_string();
                         break;
                     }
-                    return Err(AcpError::other(e));
+                    // Do NOT return yet: fall through to the persistence
+                    // section so the failed turn's history (user message +
+                    // partial assistant + settled tool results) is written
+                    // with an error marker (M1 — it used to vanish from both
+                    // context and disk).
+                    turn_error = Some(e);
+                    break;
                 }
             }
         }
@@ -683,7 +754,10 @@ impl CerseiRuntime {
             u.clone()
         };
 
-        // Persist the updated conversation for resume + context continuation.
+        // Persist the updated conversation for resume + context continuation —
+        // for FAILED turns too: the user message and any partial progress stay
+        // in runtime history (next turn keeps context) and on disk (resume
+        // shows the failed turn with its error marker).
         let msgs = built.messages();
         *entry.history.lock() = msgs.clone();
         let now = chrono::Utc::now().to_rfc3339();
@@ -696,7 +770,11 @@ impl CerseiRuntime {
             &msgs,
             &now,
             &usage_snapshot,
+            turn_error.as_deref(),
         );
+        if let Some(e) = turn_error {
+            return Err(AcpError::other(e));
+        }
         Ok(stop)
     }
 
@@ -1006,6 +1084,25 @@ fn translate_event(
                 AcpEvent::Compaction {
                     session_id: session_id.clone(),
                     active: false,
+                },
+                None,
+            );
+            TurnStep::Continue
+        }
+        E::Retry {
+            attempt,
+            max_attempts,
+            delay_ms,
+            last_error,
+        } => {
+            sink.emit(
+                agent_id,
+                AcpEvent::Retry {
+                    session_id: session_id.clone(),
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    last_error,
                 },
                 None,
             );
@@ -1684,5 +1781,66 @@ mod tests {
             }
             other => panic!("expected Tool replay item, got {other:?}"),
         }
+    }
+
+    // ── Phase 6: history integrity (M1/M2) ─────────────────────────────────
+
+    fn temp_cfg() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "atlas-cersei-libtest-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn failed_turn_survives_reload_with_error_marker() {
+        let cfg = temp_cfg();
+        let rt = CerseiRuntime::new(cfg.clone());
+        let msgs = vec![
+            cersei::types::Message::user("refactor the parser"),
+            cersei::types::Message::assistant("Started, then the provider died…"),
+        ];
+        store::save(
+            &cfg, "/proj/x", "s1", "anthropic", "m", &msgs, "t1",
+            &store::StoredUsage::default(),
+            Some("HTTP 529: overloaded (gave up after 4 attempts)"),
+        );
+        let items = rt.replay_session("/proj/x", "s1");
+        // The failed turn's history is present…
+        assert!(matches!(&items[0], ReplayItem::User { text } if text.contains("refactor")));
+        assert!(items.len() >= 3, "user + partial assistant + error marker");
+        // …and the resume surfaces WHY it ended, like the live turn_failed does.
+        let ReplayItem::Assistant { text } = items.last().unwrap() else {
+            panic!("last replay item must be the error marker");
+        };
+        assert!(text.starts_with("Error:"), "{text}");
+        assert!(text.contains("HTTP 529"));
+    }
+
+    #[test]
+    fn corrupt_session_resumes_with_notice_not_silently_empty() {
+        let cfg = temp_cfg();
+        let rt = CerseiRuntime::new(cfg.clone());
+        store::save(
+            &cfg, "/proj/y", "s1", "anthropic", "m",
+            &[cersei::types::Message::user("q")], "t1",
+            &store::StoredUsage::default(), None,
+        );
+        // Truncate the file (pre-M2 crash artifact).
+        let path = store::project_sessions_dir(&cfg, "/proj/y").join("s1.json");
+        std::fs::write(&path, "{\"session_id\": \"s1").unwrap();
+
+        let items = rt.replay_session("/proj/y", "s1");
+        assert_eq!(items.len(), 1);
+        let ReplayItem::Assistant { text } = &items[0] else {
+            panic!("corrupt session must surface a notice item");
+        };
+        assert!(text.contains("damaged"), "{text}");
+        assert!(text.contains(".corrupt-"), "notice names the backup: {text}");
+        // Subsequent replay: file was moved aside → clean fresh session.
+        assert!(rt.replay_session("/proj/y", "s1").is_empty());
     }
 }

@@ -221,6 +221,14 @@ pub async fn spawn_agent(
     let sink_for_task = sink.clone();
     let command_for_task = command.clone();
 
+    // Trailing stderr from the agent process (ring buffer, newest last). When
+    // the driver dies, the tail rides on the AgentDisconnected reason so the
+    // user sees WHY the process exited (panic message, missing module, OOM
+    // note) instead of a bare "driver exited".
+    let stderr_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let stderr_for_task = stderr_tail.clone();
+
     let driver_handle = tokio::spawn(async move {
         let result = run_driver(
             agent_id,
@@ -228,15 +236,22 @@ pub async fn spawn_agent(
             sink_for_task.clone(),
             pending_for_task,
             guards_for_task,
+            stderr_for_task.clone(),
             ready_tx,
             shutdown_rx,
         )
         .await;
 
-        let reason = match &result {
+        let mut reason = match &result {
             Ok(()) => "driver exited cleanly".to_string(),
             Err(e) => format!("driver error: {e}"),
         };
+        if let Ok(tail) = stderr_for_task.lock() {
+            if !tail.is_empty() {
+                let joined: Vec<&str> = tail.iter().map(String::as_str).collect();
+                reason = format!("{reason}\nrecent stderr:\n{}", joined.join("\n"));
+            }
+        }
         sink_for_task.emit(agent_id, AcpEvent::AgentDisconnected { reason }, None);
         result
     });
@@ -283,17 +298,27 @@ async fn run_driver(
     sink: Arc<dyn EventSink>,
     pending: Arc<PendingPermissions>,
     guards: Arc<SessionGuards>,
+    stderr_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
     ready_tx: oneshot::Sender<Result<InitializedAgent>>,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
+    /// Trailing stderr lines kept for the disconnect reason.
+    const STDERR_TAIL_LINES: usize = 20;
     let sink_dbg = sink.clone();
     let agent = AcpAgent::from_str(&command)?.with_debug(move |line, direction| {
         // Stderr lines from the agent process are the most useful for
         // post-mortem debugging — surface them through `tracing` so the host
-        // can subscribe with the regular logging machinery.
+        // can subscribe with the regular logging machinery, and keep a small
+        // tail for the AgentDisconnected reason.
         match direction {
             LineDirection::Stderr => {
                 tracing::warn!(target: "atlas_acp::agent_stderr", agent = ?agent_id, "{line}");
+                if let Ok(mut tail) = stderr_tail.lock() {
+                    if tail.len() >= STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line.trim_end().to_string());
+                }
             }
             LineDirection::Stdin => {
                 tracing::trace!(target: "atlas_acp::stdin", agent = ?agent_id, "{line}");

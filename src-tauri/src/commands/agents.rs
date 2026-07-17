@@ -360,10 +360,11 @@ pub async fn agents_send(
         serde_json::json!({ "agent_kind": key.agent_id.0.to_string() }),
     );
 
-    // Resolve the project cwd. Unknown session → just send as-is (don't fail
-    // the turn on a snapshot miss).
+    // Resolve the project cwd. Unknown session → fail with the SAME error
+    // shape `manager.send` produces, without attempting a send that would
+    // skip memory injection (one condition, one behavior — L5).
     let Ok(snapshot) = manager.snapshot(&key) else {
-        return manager.send(&key, text).map_err(|e| e.to_string());
+        return Err(atlas_agents::Error::UnknownSession.to_string());
     };
     let cwd = snapshot.cwd;
 
@@ -494,6 +495,18 @@ async fn build_injection(
 #[tauri::command]
 pub fn agents_cancel(key: SessionKey, manager: State<'_, AgentManager>) -> Result<(), String> {
     manager.cancel(&key).map_err(|e| e.to_string())
+}
+
+/// Tear down a session's backend state (actor + driver-side guard) when its
+/// tab closes or the project switches. Idempotent; UI state is the frontend's.
+#[tauri::command]
+pub fn agents_drop_session(
+    manager: tauri::State<'_, AgentManager>,
+    agent_id: AgentId,
+    session_id: String,
+) -> Result<(), String> {
+    let key = SessionKey { agent_id, session_id };
+    manager.drop_session(&key).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -365,6 +365,28 @@ impl AgentManager {
         self.handle_for(key)?.set_compress(on)
     }
 
+    /// Tear down one session (tab close / project switch): removing the
+    /// handle drops the actor's control channel (its task exits) and the
+    /// backend drops the driver-side session guard — the documented cleanup
+    /// that previously never ran (M6: guards leaked for the process lifetime).
+    pub fn drop_session(&self, key: &SessionKey) -> Result<()> {
+        let Some((_, handle)) = self.inner.sessions.remove(key) else {
+            return Ok(()); // already gone — idempotent
+        };
+        if let Ok(backend) = self.backend_for(key.agent_id) {
+            let _ = backend.drop_session(key.agent_id, &handle.acp_session_id);
+        }
+        Ok(())
+    }
+
+    /// App-quit sweep (M7): stop native work and tear down every ACP
+    /// subprocess. Bounded by the caller.
+    pub fn shutdown(&self) {
+        self.inner.cersei.cancel_all();
+        self.inner.acp.kill_all();
+        self.inner.sessions.clear();
+    }
+
     /// Resolve a pending permission request.
     ///
     /// MUST bypass the worker's command queue. The worker spends an
@@ -518,48 +540,15 @@ impl AgentManager {
                     .map(|e| e.key().clone())
                     .collect();
                 for key in keys {
-                    // If a turn was live on this session, its in-flight `prompt`
-                    // future may never resolve now that the agent is gone — the
-                    // actor's `TurnDone` would never arrive, leaving the composer
-                    // stuck "running". Emit an explicit terminal before removing
-                    // the session so the UI always leaves the busy state.
+                    // Route the death through the session's actor FIFO (M5):
+                    // the terminal (TurnFailed for a live turn) and the
+                    // AgentDisconnected delta are emitted by the single-owner
+                    // actor, ordered BEHIND any content events already queued
+                    // — the old direct emit from this (driver) task could
+                    // overtake them at teardown.
                     if let Some(entry) = self.inner.sessions.get(&key) {
-                        let (busy, turn_seq) = {
-                            let st = entry.value().state.lock();
-                            (
-                                matches!(
-                                    st.status,
-                                    SessionStatus::Running | SessionStatus::Waiting
-                                ),
-                                st.turn_seq,
-                            )
-                        };
-                        if busy {
-                            self.emit(SessionDeltaEnvelope {
-                                agent_id,
-                                session_id: key.session_id.clone(),
-                                delta: SessionDelta::TurnFailed {
-                                    error: format!("agent disconnected: {reason}"),
-                                    turn_seq,
-                                },
-                            });
-                            self.emit(SessionDeltaEnvelope {
-                                agent_id,
-                                session_id: key.session_id.clone(),
-                                delta: SessionDelta::Status {
-                                    status: SessionStatus::Error,
-                                    turn_seq,
-                                },
-                            });
-                        }
+                        entry.value().route_disconnect(reason.clone());
                     }
-                    self.emit(SessionDeltaEnvelope {
-                        agent_id,
-                        session_id: key.session_id.clone(),
-                        delta: SessionDelta::AgentDisconnected {
-                            reason: reason.clone(),
-                        },
-                    });
                     self.inner.sessions.remove(&key);
                 }
                 self.inner.agent_plugins.remove(&agent_id);
@@ -567,10 +556,10 @@ impl AgentManager {
             }
             AcpEvent::SessionUpdate { session_id, .. }
             | AcpEvent::PermissionRequest { session_id, .. }
-            | AcpEvent::TurnFailed { session_id, .. }
             | AcpEvent::Usage { session_id, .. }
             | AcpEvent::Compaction { session_id, .. }
-            | AcpEvent::CompressionSaved { session_id, .. } => session_id.clone(),
+            | AcpEvent::CompressionSaved { session_id, .. }
+            | AcpEvent::Retry { session_id, .. } => session_id.clone(),
         };
 
         // Per-session: push the event onto the target actor's FIFO, where it is

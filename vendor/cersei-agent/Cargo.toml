@@ -45,6 +45,10 @@ name = "general_agent_bench"
 path = "benchmarks/general_agent_bench.rs"
 
 [[test]]
+name = "retry_e2e"
+path = "tests/retry_e2e.rs"
+
+[[test]]
 name = "e2e_openai_compression"
 path = "tests/e2e_openai_compression.rs"
 
@@ -124,6 +128,10 @@ version = "0.1"
 [dependencies.uuid]
 version = "1"
 features = ["v4"]
+
+[dev-dependencies.tokio]
+version = "1.44"
+features = ["full", "test-util"]
 
 [dev-dependencies.cersei-embeddings]
 version = "0.2.6"

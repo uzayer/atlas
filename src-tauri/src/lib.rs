@@ -434,6 +434,7 @@ pub fn run() {
             commands::agents::agents_list_auth_methods,
             commands::agents::agents_run_auth_method,
             commands::agents::agents_authenticate,
+            commands::agents::agents_drop_session,
             commands::agents::codex_status,
             commands::cersei::cersei_list_sessions,
             commands::cersei::cersei_session_transcript,
@@ -541,8 +542,25 @@ pub fn run() {
         .run(|app_handle, event| {
             // Apply-on-quit: if the user chose "Later" for a staged update, swap
             // it in on the way out so the next launch is the new version.
-            if let tauri::RunEvent::Exit = event {
-                commands::updater::apply_on_exit(app_handle);
+            match event {
+                tauri::RunEvent::ExitRequested { .. } => {
+                    // Quit sweep (M7): stop native turns (cancel tokens kill
+                    // tool process groups) and tear down every ACP subprocess
+                    // (dropping each driver's shutdown channel closes the
+                    // child's stdin; the SDK reaps it). `process::exit` skips
+                    // Drop impls, so this must happen before the exit — with a
+                    // short bounded grace for the async teardown to run.
+                    if let Some(manager) =
+                        app_handle.try_state::<atlas_agents::AgentManager>()
+                    {
+                        manager.shutdown();
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
+                tauri::RunEvent::Exit => {
+                    commands::updater::apply_on_exit(app_handle);
+                }
+                _ => {}
             }
         });
 }

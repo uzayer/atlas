@@ -69,4 +69,11 @@ impl SessionHandle {
     pub fn route_event(&self, event: AcpEvent, turn: Option<u64>) {
         let _ = self.actor.stream_tx.send(ActorMsg::Acp { event, turn });
     }
+
+    /// Post the agent-death terminal onto the actor's FIFO (ordered behind any
+    /// in-flight content events). The actor fails the live turn and emits the
+    /// AgentDisconnected delta itself (M5 — single terminal writer).
+    pub fn route_disconnect(&self, reason: String) {
+        let _ = self.actor.stream_tx.send(ActorMsg::Disconnect { reason });
+    }
 }

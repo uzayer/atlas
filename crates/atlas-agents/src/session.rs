@@ -156,11 +156,6 @@ pub struct SessionState {
     /// already been superseded by a newer send. Not serialised into the
     /// snapshot.
     pub turn_seq: u64,
-    /// Set by `apply_event` when the agent reports a turn failure out-of-band
-    /// (an `AcpEvent::TurnFailed` that isn't already surfaced as the `prompt`
-    /// `Err`). The actor drains it when emitting terminal state so terminal
-    /// status has a single writer. Not serialised.
-    pub pending_turn_error: Option<String>,
 }
 
 impl SessionState {
@@ -183,7 +178,6 @@ impl SessionState {
             created_at: now,
             updated_at: now,
             turn_seq: 0,
-            pending_turn_error: None,
         }
     }
 

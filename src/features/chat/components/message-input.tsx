@@ -45,6 +45,7 @@ import type {
 import { commandRequiresArgs } from "./slash-command-picker";
 import { CodexLoginDialog } from "./codex-login-dialog";
 import { PlanDock } from "./plan-dock";
+import { RetryPill } from "./retry-pill";
 import type { MentionFile } from "../lib/mentions";
 import { useComposerFileDrop } from "../hooks/use-composer-file-drop";
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -720,6 +721,21 @@ export function MessageInput({
   slashTriggerRef.current = slashTrigger;
   const { openLoginDialog } = useClaudeSetupStore.use.actions();
 
+  // An auth-classified turn failure routes to the sign-in flow (P15) instead
+  // of dying as a generic banner. Claude sessions open the login dialog; the
+  // Codex sign-in pill is handled in ChatComposer (it owns that probe state).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId?: string; agentType?: string }>).detail;
+      if (detail?.agentType !== "claude-code") return;
+      const sess = useChatStore.getState().sessions[tabId];
+      if (!sess?.acpSessionId || sess.acpSessionId !== detail.sessionId) return;
+      openLoginDialog();
+    };
+    window.addEventListener("atlas:auth-required", handler);
+    return () => window.removeEventListener("atlas:auth-required", handler);
+  }, [tabId, openLoginDialog]);
+
   const handleMentionSelect = useCallback(
     (mention: MentionData) => {
       const t = triggerRef.current;
@@ -1039,6 +1055,9 @@ export function MessageInput({
             </div>
           </div>
         )}
+
+        {/* Transient-failure retry countdown (native agent). */}
+        <RetryPill tabId={tabId} />
 
         {/* Live plan docked on top of the input bar (JetBrains-Air style). */}
         <PlanDock tabId={tabId} />

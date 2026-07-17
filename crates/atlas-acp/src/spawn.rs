@@ -8,8 +8,9 @@
 //! that hard-won logic; the registry/catalog resolves an agent to a bare
 //! command and then runs it through [`resolve_command`] here before spawning.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use crate::error::AcpError;
 use crate::registry::AgentSpec;
@@ -22,11 +23,14 @@ use crate::registry::AgentSpec;
 static MANAGED_NODE_BIN: RwLock<Option<PathBuf>> = RwLock::new(None);
 
 /// Register the bin dir of an Atlas-managed Node install (e.g.
-/// `<NVM_DIR>/versions/node/vXX/bin`). Prepends it to the process PATH (so even
-/// code paths that don't go through `resolve_program_abs` find it) and records
-/// it as the preferred toolchain for agent spawns.
+/// `<NVM_DIR>/versions/node/vXX/bin`) as the preferred toolchain for agent
+/// spawns. Deliberately does NOT mutate the process PATH: this runs post-boot
+/// from a Tauri worker thread, and env mutation off the main thread is racy
+/// (M8). Spawns pick the managed toolchain up per-command instead —
+/// `resolve_command` emits a JSON stdio spec whose env prepends this dir to
+/// PATH, so the agent AND its children (npx → node) resolve the managed Node
+/// without a global mutation.
 pub fn register_managed_node_bin(bin_dir: PathBuf) {
-    prepend_to_path(&[bin_dir.to_string_lossy().into_owned()]);
     if let Ok(mut guard) = MANAGED_NODE_BIN.write() {
         *guard = Some(bin_dir);
     }
@@ -51,34 +55,71 @@ fn resolve_program_abs(program: &str) -> Option<String> {
     }
     // Prefer the Atlas-managed Node toolchain (bundled-nvm install) when set —
     // it's a known-good version and must beat an incompatible system Node.
+    // Checked BEFORE the cache: a toolchain registered mid-session must win
+    // over a stale cached resolution.
     if let Some(bin) = managed_node_bin() {
         let candidate = bin.join(program);
         if candidate.is_file() {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
+    // Once-per-app cache: the login-shell probe costs up to 5s and used to run
+    // (and leak a thread + shell child on timeout) on EVERY agent spawn (M8).
+    static PROBE_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let cache = PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(program).cloned()) {
+        return hit;
+    }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let prog = program.to_string();
+    let resolved = probe_shell(
+        &shell,
+        &format!("command -v {program} 2>/dev/null"),
+        std::time::Duration::from_secs(5),
+    )
+    .and_then(|out| {
+        if !out.status.success() {
+            return None;
+        }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // Accept only a real absolute path (not a shell function/alias name).
+        (p.starts_with('/') && std::path::Path::new(&p).exists()).then_some(p)
+    });
+    if let Ok(mut c) = cache.lock() {
+        c.insert(program.to_string(), resolved.clone());
+    }
+    resolved
+}
+
+/// Run `$SHELL -lic <script>` with an OWNED timeout: on expiry the probe child
+/// is killed (so its reader thread exits promptly) instead of being abandoned
+/// to run forever — the old `recv_timeout`-only pattern leaked one thread AND
+/// one login shell per timed-out probe.
+fn probe_shell(
+    shell: &str,
+    script: &str,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    let child = std::process::Command::new(shell)
+        .args(["-lic", script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let out = std::process::Command::new(&shell)
-            .args(["-lic", &format!("command -v {prog} 2>/dev/null")])
-            .output();
-        let _ = tx.send(out);
+        let _ = tx.send(child.wait_with_output());
     });
-    let out = rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // Accept only a real absolute path (not a shell function/alias name).
-    if p.starts_with('/') && std::path::Path::new(&p).exists() {
-        Some(p)
-    } else {
-        None
+    match rx.recv_timeout(timeout) {
+        Ok(out) => out.ok(),
+        Err(_) => {
+            // Kill the probe so the reader thread unblocks and both clean up.
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+            None
+        }
     }
 }
 
@@ -95,8 +136,40 @@ pub(crate) fn resolve_command(command: &str) -> String {
         None => (trimmed, ""),
     };
     match resolve_program_abs(program) {
-        Some(abs) if rest.is_empty() => shell_quote(&abs),
-        Some(abs) => format!("{} {rest}", shell_quote(&abs)),
+        Some(abs) => {
+            // With an Atlas-managed Node toolchain registered, hand the SDK a
+            // JSON stdio spec whose env prepends the managed bin dir to PATH —
+            // per-command env instead of a global mutation. This is what makes
+            // the agent's CHILDREN (npx → `#!/usr/bin/env node`) resolve the
+            // managed Node too; the absolute program path alone doesn't.
+            if let Some(bin) = managed_node_bin() {
+                let path = format!(
+                    "{}:{}",
+                    bin.to_string_lossy(),
+                    std::env::var("PATH").unwrap_or_default()
+                );
+                // AgentSpec commands are simple space-separated tokens (no
+                // quoting), so whitespace splitting matches what the SDK's
+                // shell_words split would have produced.
+                let args: Vec<&str> = rest.split_whitespace().collect();
+                let spec = serde_json::json!({
+                    "type": "stdio",
+                    "name": std::path::Path::new(&abs)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "agent".into()),
+                    "command": abs,
+                    "args": args,
+                    "env": [{ "name": "PATH", "value": path }],
+                });
+                return spec.to_string();
+            }
+            if rest.is_empty() {
+                shell_quote(&abs)
+            } else {
+                format!("{} {rest}", shell_quote(&abs))
+            }
+        }
         None => command.to_string(),
     }
 }
@@ -202,7 +275,7 @@ fn enrich_path() {
     //    shell probe fails or times out.
     apply_cheap_path_extras();
     merge_login_shell_path();
-    spawn_nvm_path_walk();
+    nvm_path_walk();
 }
 
 /// Query the user's login+interactive shell for its `PATH` and merge it into
@@ -212,18 +285,14 @@ fn enrich_path() {
 fn merge_login_shell_path() {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
-    // Run the probe on a worker thread and wait with a timeout. `-lic` loads
-    // the user's full login + interactive config (where nvm/fnm/etc. mutate
-    // PATH). `command -v node` is a harmless warm-up; we only consume $PATH.
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let out = std::process::Command::new(&shell)
-            .args(["-lic", "printf '%s' \"$PATH\""])
-            .output();
-        let _ = tx.send(out);
-    });
-
-    let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(3)) else {
+    // `-lic` loads the user's full login + interactive config (where
+    // nvm/fnm/etc. mutate PATH). Owned timeout: the probe child is killed on
+    // expiry instead of leaking (see `probe_shell`).
+    let Some(out) = probe_shell(
+        &shell,
+        "printf '%s' \"$PATH\"",
+        std::time::Duration::from_secs(3),
+    ) else {
         return;
     };
     if !out.status.success() {
@@ -261,36 +330,38 @@ fn apply_cheap_path_extras() {
     prepend_to_path(&extras);
 }
 
-fn spawn_nvm_path_walk() {
+/// Synchronous at boot (a readdir over `~/.nvm/versions/node` is microseconds)
+/// so ALL process-env mutation is confined to `sanitize_host_env` on the main
+/// thread before any child processes spawn — the old background-thread version
+/// mutated PATH mid-flight (M8).
+fn nvm_path_walk() {
     let home = match std::env::var("HOME") {
         Ok(h) if !h.is_empty() => h,
         _ => return,
     };
-    std::thread::spawn(move || {
-        let nvm_root = std::path::PathBuf::from(&home)
-            .join(".nvm")
-            .join("versions")
-            .join("node");
-        let Ok(entries) = std::fs::read_dir(&nvm_root) else {
-            return;
-        };
-        let mut versions: Vec<_> = entries
-            .flatten()
-            .map(|e| e.path().join("bin"))
-            .filter(|p| p.is_dir())
-            .collect();
-        // Newest version first (lexicographic — fine for vMAJOR.MINOR.PATCH).
-        versions.sort();
-        versions.reverse();
-        let extras: Vec<String> = versions
-            .into_iter()
-            .map(|v| v.to_string_lossy().into_owned())
-            .collect();
-        if extras.is_empty() {
-            return;
-        }
-        prepend_to_path(&extras);
-    });
+    let nvm_root = std::path::PathBuf::from(&home)
+        .join(".nvm")
+        .join("versions")
+        .join("node");
+    let Ok(entries) = std::fs::read_dir(&nvm_root) else {
+        return;
+    };
+    let mut versions: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path().join("bin"))
+        .filter(|p| p.is_dir())
+        .collect();
+    // Newest version first (lexicographic — fine for vMAJOR.MINOR.PATCH).
+    versions.sort();
+    versions.reverse();
+    let extras: Vec<String> = versions
+        .into_iter()
+        .map(|v| v.to_string_lossy().into_owned())
+        .collect();
+    if extras.is_empty() {
+        return;
+    }
+    prepend_to_path(&extras);
 }
 
 fn prepend_to_path(extras: &[String]) {
@@ -310,11 +381,10 @@ fn prepend_to_path(extras: &[String]) {
     }
 
     let new_path = path_parts.join(":");
-    // SAFETY: see `sanitize_host_env` — env mutation is racy in a multithreaded
-    // program. The background thread runs only after `sanitize_host_env` has
-    // returned and Tauri has started; any concurrent child-process spawn will
-    // either see the pre-nvm PATH (Homebrew node, fine) or the post-nvm PATH
-    // (nvm-managed node). Both are valid PATH values.
+    // SAFETY: every caller runs at boot on the main thread, inside
+    // `sanitize_host_env`, before any threads spawn child processes — the
+    // post-boot mutators were removed (managed-node registration now injects
+    // PATH per-command via the JSON stdio spec instead).
     unsafe {
         std::env::set_var("PATH", new_path);
     }

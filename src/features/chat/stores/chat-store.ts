@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { agents } from "../lib/agents-api";
 import { immer } from "zustand/middleware/immer";
 import { createSelectors } from "@/lib/create-selectors";
 import type {
@@ -268,6 +269,8 @@ interface ChatActions {
     updateSessionStatus: (sessionId: string, status: AgentStatus) => void;
     /** Mark a session as stop-requested (Stop clicked, terminal not yet in). */
     setStopping: (sessionId: string, on: boolean) => void;
+    /** Flag/clear "the backing agent process died" (drives Restart + rebind). */
+    setDisconnected: (sessionId: string, on: boolean) => void;
     setSessionTitle: (sessionId: string, title: string) => void;
     setTranscriptLoading: (sessionId: string, loading: boolean) => void;
     clearSession: (sessionId: string) => void;
@@ -743,6 +746,11 @@ export const useChatStore = createSelectors(
             const session = s.sessions[sessionId];
             if (session) session.status = status;
           }),
+        setDisconnected: (sessionId, on) =>
+          set((s) => {
+            const session = s.sessions[sessionId];
+            if (session) session.disconnected = on || undefined;
+          }),
         setStopping: (sessionId, on) =>
           set((s) => {
             const session = s.sessions[sessionId];
@@ -988,7 +996,8 @@ export const useChatStore = createSelectors(
                   }))
                 : undefined;
           }),
-        removeSession: (sessionId) =>
+        removeSession: (sessionId) => {
+          dropBackendSession(get().sessions[sessionId]);
           set((s) => {
             delete s.sessions[sessionId];
             delete s.drafts[sessionId];
@@ -996,8 +1005,10 @@ export const useChatStore = createSelectors(
               const keys = Object.keys(s.sessions);
               s.activeSessionId = keys.length > 0 ? keys[0] : null;
             }
-          }),
-        removeSessions: (sessionIds) =>
+          });
+        },
+        removeSessions: (sessionIds) => {
+          for (const id of sessionIds) dropBackendSession(get().sessions[id]);
           set((s) => {
             for (const id of sessionIds) {
               delete s.sessions[id];
@@ -1006,7 +1017,8 @@ export const useChatStore = createSelectors(
               delete s.pendingPermissions[id];
               if (s.activeSessionId === id) s.activeSessionId = null;
             }
-          }),
+          });
+        },
         resetSessions: () =>
           set((s) => {
             s.sessions = {};
@@ -1264,6 +1276,16 @@ function appendThoughtToDraft(s: ChatDraft, acpSessionId: string, text: string):
  *  send already superseded it (the parallel / queued / wake premature-"done"
  *  class). A missing or 0 `turn_seq` (native cersei agent) is treated as
  *  current, so nothing regresses there. */
+/** Fire-and-forget backend teardown for a closed tab's session: the manager
+ *  drops the actor + the driver-side guard (M6 — these used to leak for the
+ *  whole process lifetime). UI state removal proceeds regardless. */
+function dropBackendSession(session: ChatSession | undefined): void {
+  if (!session?.acpAgentId || !session.acpSessionId || session.disconnected) return;
+  void agents
+    .dropSession(session.acpAgentId, session.acpSessionId)
+    .catch(() => {});
+}
+
 function isStaleTurn(session: ChatSession, turnSeq: number | undefined): boolean {
   if (!turnSeq) return false;
   return turnSeq < (session.currentTurnSeq ?? 0);
@@ -1307,6 +1329,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       }
       session.status = terminal;
       session.stopping = undefined;
+      session.retryStatus = undefined;
       // No permission modal survives its turn: the Rust finalize sweep emits
       // permission_resolved for each, but a lost/raced delta must not leave a
       // clickable modal on an idle turn (its click would strand the session).
@@ -1372,6 +1395,7 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
           ? "idle"
           : "error";
       session.stopping = undefined;
+      session.retryStatus = undefined;
       delete s.pendingPermissions[env.session_id];
       // Per-turn usage footer (native agent): derive this turn's tokens/cost as
       // the delta from the previous turn's cumulative snapshot, and attach it to
@@ -1457,7 +1481,39 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       );
       session.status = "error";
       session.stopping = undefined;
+      session.retryStatus = undefined;
+      // Auth failures route to the agent's sign-in flow (P15) instead of
+      // dying as a generic banner. The composer components listen for this
+      // (Claude → login dialog, Codex → sign-in pill); native/BYOK keys are
+      // covered by the error text pointing at Settings → API Keys.
+      if (env.error_kind === "auth") {
+        window.dispatchEvent(
+          new CustomEvent("atlas:auth-required", {
+            detail: { sessionId: env.session_id, agentType: session.agentType },
+          }),
+        );
+      }
       delete s.pendingPermissions[env.session_id];
+      return;
+    }
+    case "agent_disconnected": {
+      // The backing process died. Rust already emitted TurnFailed + Status
+      // (error) for busy sessions; here we flag the session so the composer
+      // offers Restart and the next send rebinds (respawn + resume). Binding
+      // fields stay — acpSessionId IS the on-disk id resume needs (P14).
+      session.disconnected = true;
+      session.stopping = undefined;
+      session.retryStatus = undefined;
+      return;
+    }
+    case "retry_status": {
+      session.retryStatus = {
+        attempt: env.attempt,
+        maxAttempts: env.max_attempts,
+        delayMs: env.delay_ms,
+        lastError: env.last_error,
+        receivedAt: Date.now(),
+      };
       return;
     }
     case "text_chunk": {
@@ -1465,10 +1521,12 @@ function applyDeltaToDraft(s: ChatDraft, env: AgentDelta): void {
       // delta stream get the SAME "find last renderable message" logic the
       // narration bucket used — skipping empty placeholder/thinking markers
       // so one continuous narration never splits into broken fragments.
+      session.retryStatus = undefined; // content resumed — the retry succeeded
       appendTextToDraft(s, env.session_id, env.delta);
       return;
     }
     case "thinking_chunk": {
+      session.retryStatus = undefined;
       appendThoughtToDraft(s, env.session_id, env.delta);
       return;
     }

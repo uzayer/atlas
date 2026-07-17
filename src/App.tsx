@@ -15,7 +15,7 @@ import {
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import {
   listenAgents,
-  resetDefaultAgent,
+  resetAgentByAgentId,
 } from "@/features/chat/lib/agents-api";
 import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta } from "@/types/agents";
@@ -717,13 +717,20 @@ export function App() {
           }
           flush();
           actions.clearPermissionsForAgent(env.agent_id);
-          resetDefaultAgent();
+          // Reset the spawn cache for the plugin that actually died — the old
+          // resetDefaultAgent() only ever cleared claude-code-ts, so a crashed
+          // Codex adapter stayed cached-dead until app restart (H4).
+          resetAgentByAgentId(env.agent_id);
+          // Let the reducer flag the affected session (drives the Restart
+          // affordance + rebind-on-next-send).
+          bufferDelta(env);
+          schedule();
           logEvent({
             source: "atlas",
             kind: "agent-disconnected",
-            summary: "Agent process disconnected; default agent handle reset",
+            summary: "Agent process disconnected; its spawn cache was reset",
             status: "failure",
-            payload: { agentId: env.agent_id },
+            payload: { agentId: env.agent_id, reason: env.reason },
           });
           return;
         case "turn_finished":

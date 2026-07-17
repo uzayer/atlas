@@ -28,7 +28,12 @@ use std::sync::Arc;
 /// Function that constructs a fresh provider for each child. Needed because
 /// `Provider` trait objects aren't cloneable — each delegated child needs
 /// its own provider instance.
-pub type ProviderFactory = Arc<dyn Fn() -> Box<dyn Provider + Send + Sync> + Send + Sync>;
+/// ATLAS PATCH (delegate-fallible-factory): the factory is fallible so a
+/// provider rebuild error becomes a per-task DelegateResult error instead of
+/// a panic that aborts the WHOLE parent turn (the old `.expect(...)` at the
+/// call site rode the panic supervisor).
+pub type ProviderFactory =
+    Arc<dyn Fn() -> std::result::Result<Box<dyn Provider + Send + Sync>, String> + Send + Sync>;
 
 /// Function that constructs a fresh toolset for each child. Same reason as
 /// `ProviderFactory` — `Box<dyn Tool>` isn't cloneable.
@@ -170,9 +175,25 @@ pub async fn run_batch(cfg: DelegateConfig) -> Result<Vec<DelegateResult>> {
     let provider_factory = cfg.provider_factory.clone();
     let toolset_factory = cfg.toolset_factory.clone();
 
+    let mut failed_upfront: Vec<(usize, DelegateResult)> = Vec::new();
     for (i, task) in cfg.tasks.into_iter().enumerate() {
         let permit = sem.clone().acquire_owned().await.unwrap();
-        let provider = (provider_factory)();
+        // A rebuild failure fails THIS task, not the parent turn.
+        let provider = match (provider_factory)() {
+            Ok(p) => p,
+            Err(e) => {
+                failed_upfront.push((
+                    i,
+                    DelegateResult {
+                        goal: task.goal,
+                        summary: String::new(),
+                        error: Some(format!("delegate provider rebuild failed: {e}")),
+                        turns: 0,
+                    },
+                ));
+                continue;
+            }
+        };
         let tools_raw = (toolset_factory)();
         let blocked = blocked.clone();
         let model = model.clone();
@@ -191,7 +212,7 @@ pub async fn run_batch(cfg: DelegateConfig) -> Result<Vec<DelegateResult>> {
         });
     }
 
-    let mut collected: Vec<(usize, DelegateResult)> = Vec::new();
+    let mut collected: Vec<(usize, DelegateResult)> = failed_upfront;
     while let Some(joined) = set.join_next().await {
         let (i, goal, res) = joined.map_err(|e| {
             cersei_types::CerseiError::Config(format!("delegate join: {e}"))

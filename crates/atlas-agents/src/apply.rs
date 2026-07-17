@@ -71,15 +71,24 @@ pub fn apply_event(emitter: &Emitter, state: &Mutex<SessionState>, agent_id: Age
                 },
             });
         }
-        AcpEvent::TurnFailed {
+        AcpEvent::Retry {
             session_id: _,
-            turn_id: _,
-            error,
+            attempt,
+            max_attempts,
+            delay_ms,
+            last_error,
         } => {
-            // Single terminal-status writer = the worker/actor. Record the error
-            // so the terminal emit reports it, rather than racing a second
-            // terminal delta here.
-            state.lock().pending_turn_error = Some(error);
+            let sid = state.lock().session_id.clone();
+            emitter.emit(SessionDeltaEnvelope {
+                agent_id,
+                session_id: sid,
+                delta: SessionDelta::RetryStatus {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    last_error,
+                },
+            });
         }
         AcpEvent::Usage {
             session_id: _,

@@ -104,6 +104,14 @@ pub enum ActorMsg {
     CancelDeadline {
         turn: TurnId,
     },
+    /// The agent process backing this session died (routed from the manager
+    /// through THIS FIFO, ordered behind any in-flight content events — the
+    /// old direct emit from the driver task could overtake them at teardown,
+    /// the one ordering hole in the single-owner design — M5). Fails the live
+    /// turn (if any) and emits the AgentDisconnected delta.
+    Disconnect {
+        reason: String,
+    },
     /// A spawned SetMode/SetModel RPC resolved. The control loop never blocks
     /// on these (a wedged `session/set_mode` used to freeze Cancel and all
     /// streaming — H3); the optimistic state flip happens at dispatch and this
@@ -204,8 +212,17 @@ impl SessionActor {
                 ctrl = self.control_rx.recv() => {
                     match ctrl {
                         Some(c) => self.handle_control(c).await,
-                        // Control channel closed = the session handle was dropped.
-                        None => break,
+                        // Control channel closed = the session handle was
+                        // dropped (teardown). Drain anything already queued on
+                        // the stream — e.g. the Disconnect terminal the manager
+                        // posts right before removing the session — so the
+                        // last deltas still reach the UI, then exit.
+                        None => {
+                            while let Ok(m) = self.stream_rx.try_recv() {
+                                self.handle_stream(m);
+                            }
+                            break;
+                        }
                     }
                 }
                 msg = self.stream_rx.recv() => {
@@ -398,7 +415,6 @@ impl SessionActor {
             let mut st = self.state.lock();
             st.messages.push(new_user_message(text.clone()));
             st.turn_seq = st.turn_seq.wrapping_add(1);
-            st.pending_turn_error = None;
             st.status = SessionStatus::Running;
             st.touch();
             st.turn_seq
@@ -536,6 +552,19 @@ impl SessionActor {
                     }
                 }
             }
+            ActorMsg::Disconnect { reason } => {
+                // Queued sends can't run against a dead backend (and must not
+                // spin a respawn-error loop from the finalize drain).
+                self.queued_sends.clear();
+                if self.running.is_some() {
+                    self.pending_finalize = None;
+                    self.finalize(Err(AcpError::other(format!(
+                        "agent disconnected: {reason}"
+                    ))));
+                }
+                let sid = self.session_id_str();
+                self.emit_for(sid, SessionDelta::AgentDisconnected { reason });
+            }
             ActorMsg::SettingResult {
                 setting,
                 prior,
@@ -616,16 +645,8 @@ impl SessionActor {
         }
 
         let turn_seq = self.state.lock().turn_seq;
-        // An out-of-band `TurnFailed` recorded by `apply_event` wins over a
-        // nominal success (single terminal writer). Drain it either way.
-        let pending_err = self.state.lock().pending_turn_error.take();
-        let (status, delta, sweep_to) = match (result, pending_err) {
-            (Ok(_), Some(error)) => (
-                SessionStatus::Error,
-                SessionDelta::TurnFailed { error, turn_seq },
-                ToolCallStatus::Failed,
-            ),
-            (Ok(stop_reason), None) => {
+        let (status, delta, sweep_to) = match result {
+            Ok(stop_reason) => {
                 let cancelled = stop_reason == "cancelled";
                 (
                     SessionStatus::Idle,
@@ -637,11 +658,12 @@ impl SessionActor {
                     },
                 )
             }
-            (Err(e), _) => (
+            Err(e) => (
                 SessionStatus::Error,
                 SessionDelta::TurnFailed {
                     error: e.to_string(),
                     turn_seq,
+                    error_kind: Some(e.class().wire_token().to_string()),
                 },
                 ToolCallStatus::Failed,
             ),
@@ -1402,6 +1424,55 @@ mod tests {
             mode_changes,
             vec!["default".to_string(), "plan".to_string(), "default".to_string()],
             "expected optimistic apply then rollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_routes_through_fifo_behind_content_and_fails_live_turn() {
+        // M5: the death terminal must be ordered BEHIND already-queued content
+        // events, fail the live turn as process_dead, and still emit the
+        // AgentDisconnected delta even though the handle is dropped right
+        // after (teardown drain).
+        let (handle, sink, _gates, _conn) = setup_gated(1);
+        handle.control_tx.send(Control::Send("hi".into())).unwrap();
+        settle().await;
+        handle
+            .stream_tx
+            .send(acp_stamped(text_chunk_event("streamed before death"), 1))
+            .unwrap();
+        handle
+            .stream_tx
+            .send(ActorMsg::Disconnect {
+                reason: "process exited\nrecent stderr:\nboom".into(),
+            })
+            .unwrap();
+        // Manager teardown: the handle is dropped immediately after posting.
+        drop(handle);
+        settle().await;
+
+        let deltas = sink.0.lock();
+        let text_pos = deltas
+            .iter()
+            .position(|e| matches!(
+                e.delta,
+                SessionDelta::TextChunk { .. } | SessionDelta::MessageAppended { .. }
+            ))
+            .expect("content delta applied");
+        let failed_pos = deltas
+            .iter()
+            .position(|e| matches!(
+                &e.delta,
+                SessionDelta::TurnFailed { error_kind: Some(k), .. } if k == "process_dead"
+            ))
+            .expect("live turn failed as process_dead");
+        let disc_pos = deltas
+            .iter()
+            .position(|e| matches!(e.delta, SessionDelta::AgentDisconnected { .. }))
+            .expect("disconnect delta emitted");
+        assert!(
+            text_pos < failed_pos && failed_pos < disc_pos,
+            "order must be content < TurnFailed < AgentDisconnected \
+             (got {text_pos}, {failed_pos}, {disc_pos})"
         );
     }
 }
