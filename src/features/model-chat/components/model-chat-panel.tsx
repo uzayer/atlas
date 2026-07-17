@@ -186,8 +186,8 @@ function Conversation({
   const messages = useMemo(() => session?.messages ?? [], [session]);
 
   // Virtualize the thread so a long BYOK chat doesn't mount every MessageItem
-  // (each pulling CachedMarkdown) at once. Reuses the agent chat's height-cache
-  // technique via a module-level map keyed by message id.
+  // (each rendering block-level `StreamingMarkdown`) at once. Reuses the agent
+  // chat's height-cache technique via a module-level map keyed by message id.
   const virtualizer = useVirtualizer({
     count: messages.length,
     getScrollElement: () => scrollRef.current,

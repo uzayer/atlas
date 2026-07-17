@@ -50,6 +50,9 @@ export interface SessionMessage {
   thinking?: string;
   tool_calls: ToolCall[];
   plan?: PlanEntry[];
+  /** Model that produced this assistant message (stamped live or recovered
+   *  from the transcript on replay). Absent for user messages / old records. */
+  model?: string | null;
   timestamp: string;
 }
 
@@ -104,6 +107,7 @@ export type AgentDelta =
   | { kind: "model_changed"; agent_id: AgentId; session_id: AcpSessionId; model_id: string }
   | { kind: "available_commands"; agent_id: AgentId; session_id: AcpSessionId; commands: unknown[] }
   | { kind: "usage_updated"; agent_id: AgentId; session_id: AcpSessionId; usage: Usage }
+  | { kind: "context_usage"; agent_id: AgentId; session_id: AcpSessionId; used: number; size: number; cost: number }
   | { kind: "compaction"; agent_id: AgentId; session_id: AcpSessionId; active: boolean }
   | { kind: "compression_saved"; agent_id: AgentId; session_id: AcpSessionId; saved_tokens: number }
   | {
@@ -116,5 +120,6 @@ export type AgentDelta =
     }
   | { kind: "permission_resolved"; agent_id: AgentId; session_id: AcpSessionId; request_id: string }
   | { kind: "turn_finished"; agent_id: AgentId; session_id: AcpSessionId; stop_reason: string; turn_seq?: number }
-  | { kind: "turn_failed"; agent_id: AgentId; session_id: AcpSessionId; error: string; turn_seq?: number }
+  | { kind: "turn_failed"; agent_id: AgentId; session_id: AcpSessionId; error: string; turn_seq?: number; error_kind?: "auth" | "transient" | "fatal" | "process_dead" | "unknown" }
+  | { kind: "retry_status"; agent_id: AgentId; session_id: AcpSessionId; attempt: number; max_attempts: number; delay_ms: number; last_error: string }
   | { kind: "agent_disconnected"; agent_id: AgentId; session_id: AcpSessionId; reason: string };

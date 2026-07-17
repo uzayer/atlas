@@ -1,10 +1,11 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
+import { appendNextStepsDirective } from "../lib/next-steps";
 import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
 import { loadCachedAcpModes } from "../lib/acp-modes-cache";
 import { warmAcpModels, otherAcpAgent } from "../lib/warm-acp-models";
 import type { SessionKey } from "@/types/agents";
-import { isBusyAgentStatus } from "@/types/agent";
+import { hasInFlightToolCalls, isBusyAgentStatus } from "@/types/agent";
 import {
   composePrompt,
   type MentionData,
@@ -64,6 +65,7 @@ import { logEvent } from "@/features/log/lib/log";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { loadCachedAcpModels } from "../lib/acp-models-cache";
 
 interface ChatPanelProps {
   tabId: string;
@@ -71,6 +73,49 @@ interface ChatPanelProps {
 
 // Once-per-app-session guard for the background Codex pre-warm (below).
 let codexPrewarmStarted = false;
+
+/** Rebind a session whose agent process died: respawn the plugin (its spawn
+ *  cache was reset on disconnect) and RESUME the same session id where the
+ *  transcript kind supports it (Claude JSONL, Codex engine-side) — falling
+ *  back to a fresh session if the resume fails. Never runs unprompted: only
+ *  the next Send or the explicit Restart affordance calls this (no silent
+ *  auto-restart loops). */
+async function rebindDisconnectedSession(tabId: string): Promise<boolean> {
+  const cs = useChatStore.getState();
+  const sess = cs.sessions[tabId];
+  if (!sess) return false;
+  const pluginId =
+    sess.agentType === "codex"
+      ? CODEX_PLUGIN_ID
+      : sess.agentType === "cersei"
+        ? CERSEI_PLUGIN_ID
+        : DEFAULT_PLUGIN_ID;
+  try {
+    const agent = await ensureAgent(pluginId);
+    const cwd =
+      sess.workingDirectory ||
+      useProjectStore.getState().currentProject?.path ||
+      "/";
+    let key: SessionKey;
+    if (sess.acpSessionId) {
+      try {
+        key = await agents.loadSession(agent.agent_id, sess.acpSessionId, cwd);
+      } catch (err) {
+        console.warn("resume after disconnect failed; starting fresh:", err);
+        key = await agents.newSession(agent.agent_id, cwd);
+      }
+    } else {
+      key = await agents.newSession(agent.agent_id, cwd);
+    }
+    const actions = useChatStore.getState().actions;
+    actions.setAcpBinding(tabId, agent.agent_id, key.session_id, cwd);
+    actions.setDisconnected(tabId, false);
+    return true;
+  } catch (err) {
+    console.warn("agent restart failed:", err);
+    return false;
+  }
+}
 
 export function ChatPanel({ tabId }: ChatPanelProps) {
   // Subscribe to ONLY this tab's session. Streaming chunks on other tabs
@@ -270,6 +315,22 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         });
         if (models.length > 0) {
           useChatStore.getState().actions.setAcpModels(tabId, snap.current_model, models);
+        } else {
+          // ACP `session/load` doesn't re-advertise models, so resumed
+          // sessions get an empty snapshot. Fall back to the per-agent cache —
+          // same agent, so no cross-agent leak — which also seeds
+          // `acpCurrentModel` (when unset) so new assistant messages get a
+          // model stamp/badge again in resumed sessions.
+          // Re-read the agent type from the store — the closed-over `session`
+          // is the render-time value and can be stale after the await.
+          const at =
+            useChatStore.getState().sessions[tabId]?.agentType ?? "claude-code";
+          const cached = loadCachedAcpModels(at);
+          if (cached && cached.availableModels.length > 0) {
+            useChatStore
+              .getState()
+              .actions.setAcpModels(tabId, cached.currentModel, cached.availableModels);
+          }
         }
       } catch {
         // best-effort backfill
@@ -334,7 +395,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   // fast path for freshly-created sessions.
 
   // Pre-warm the Codex agent in the background. The ~3-4s a fresh switch to
-  // Codex pays is dominated by spawning `npx @zed-industries/codex-acp` + the
+  // Codex pays is dominated by spawning `npx @agentclientprotocol/codex-acp` + the
   // ACP initialize handshake; `ensureAgent` does exactly that (deduped/cached,
   // no session, no auth), so paying it ahead of time makes the actual switch
   // fast. Gated on the user having used Codex before (a persisted modes cache
@@ -382,7 +443,21 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
         Promise.resolve().then(() => handleSendRef.current?.(next, []));
       }
     }
+    // Next-step chips are extracted from the agent's own `<next_steps>` block in
+    // the chat-store `turn_finished` reducer — nothing to do here.
   }, [session?.status, session?.acpSessionId, tabId]);
+
+  // Suggestion chips (and other adaptive affordances) send as the next message.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ text?: string }>).detail;
+      if (detail?.text && handleSendRef.current) {
+        handleSendRef.current(detail.text, []);
+      }
+    };
+    window.addEventListener("atlas:chat-send", handler);
+    return () => window.removeEventListener("atlas:chat-send", handler);
+  }, []);
 
   if (!session) return null;
 
@@ -390,11 +465,14 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     const cs = useChatStore.getState();
     const s = cs.sessions[tabId];
     if (!s?.acpAgentId || !s.acpSessionId) return;
-    // Optimistic: flip the UI to idle now. The agent's `cancelled`
-    // stop_reason arrives shortly via the `atlas:agents` TurnFinished
-    // delta, which also sets idle — a no-op at that point. Zed-style
-    // instant feel.
-    cs.actions.updateSessionStatus(tabId, "idle");
+    // Do NOT flip to idle optimistically: the backend may still be winding
+    // tools down, and lying "idle" here let a new send race the still-live
+    // turn (interleaved deltas; native history loss). Mark stop-requested
+    // instead — the composer shows "Stopping…" and idle arrives with the
+    // turn's real terminal (`turn_finished` stop_reason=cancelled), which
+    // also clears the flag. Sends typed meanwhile queue exactly as they do
+    // during a running turn; the backend actor also queues defensively.
+    cs.actions.setStopping(tabId, true);
     cs.actions.clearQueue(tabId);
     // Drop any permission modal that was awaiting the user's click.
     // The Rust side has already resolved the in-flight request as
@@ -419,7 +497,21 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     // prompt and let the drain effect above flush it once `acpSessionId`
     // appears. The MessageInput's queued-messages strip already shows the
     // pending text as a chip — same UX as "type while running".
-    const bound = useChatStore.getState().sessions[tabId];
+    let bound = useChatStore.getState().sessions[tabId];
+    // Dead agent process: respawn + resume first, then send (H4). Explicitly
+    // user-initiated — this is the "next send lazily rebinds" path.
+    if (bound?.disconnected) {
+      const ok = await rebindDisconnectedSession(tabId);
+      if (!ok) {
+        addMessage(
+          tabId,
+          "assistant",
+          "The agent could not be restarted. Check its runtime (Node/npx) and try again.",
+        );
+        return;
+      }
+      bound = useChatStore.getState().sessions[tabId];
+    }
     if (!bound?.acpAgentId || !bound.acpSessionId) {
       useChatStore.getState().actions.enqueueMessage(tabId, actualContent);
       return;
@@ -454,6 +546,14 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     } catch (err) {
       console.warn("composePrompt failed, sending raw text:", err);
       wirePrompt = actualContent;
+    }
+
+    // Ask the agent to end its reply with a hidden `<next_steps>` block — it has
+    // the live session context, so the suggestions are better than a separate
+    // model's. Appended to the WIRE prompt only (not the visible message); the
+    // directive + the block are stripped from the thread. Gated on the setting.
+    if (useProjectStore.getState().settings.adaptiveSuggestions !== "off") {
+      wirePrompt = appendNextStepsDirective(wirePrompt);
     }
 
     // Best-effort, invisible: record that this turn applied one or more skills
@@ -656,7 +756,8 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
             tabId={tabId}
             onSend={handleSend}
             onStop={handleStop}
-            running={isBusyAgentStatus(session.status)}
+            running={isBusyAgentStatus(session.status) || hasInFlightToolCalls(session)}
+            stopping={!!session.stopping}
             showJumpToBottom={showJumpToBottom}
             jumpCount={jumpCount}
             onScrollToBottom={() => messagesListRef.current?.scrollToBottom()}
@@ -703,6 +804,36 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   );
 }
 
+/** Shown when the session's agent process died: one explicit affordance to
+ *  respawn + resume. Sending a message does the same thing implicitly. */
+function DisconnectedBanner({ tabId }: { tabId: string }) {
+  const disconnected = useChatStore((s) => !!s.sessions[tabId]?.disconnected);
+  const [restarting, setRestarting] = useState(false);
+  if (!disconnected) return null;
+  return (
+    <div className="max-w-[720px] mx-auto mb-2 flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-[var(--border-default)] bg-[var(--bg-elevated)] text-[12px]">
+      <span className="text-[var(--text-secondary)]">
+        The agent process exited. Your conversation is safe — restart to
+        continue where you left off.
+      </span>
+      <button
+        disabled={restarting}
+        onClick={async () => {
+          setRestarting(true);
+          try {
+            await rebindDisconnectedSession(tabId);
+          } finally {
+            setRestarting(false);
+          }
+        }}
+        className="shrink-0 px-2.5 h-6 rounded-md bg-[var(--text-primary)] text-[var(--bg-primary)] text-[11px] font-medium hover:bg-[var(--text-secondary)] disabled:opacity-50 cursor-pointer"
+      >
+        {restarting ? "Restarting…" : "Restart agent"}
+      </button>
+    </div>
+  );
+}
+
 function LoadingTranscriptState() {
   // Structural skeleton over a centered transcript-width column, so opening a
   // historical chat reads as "loading messages" instead of a blank spinner.
@@ -726,6 +857,7 @@ function ChatComposer({
   onSend,
   onStop,
   running,
+  stopping,
   showJumpToBottom,
   jumpCount,
   onScrollToBottom,
@@ -734,6 +866,7 @@ function ChatComposer({
   onSend: (message: string, mentions: MentionData[]) => void;
   onStop: () => void;
   running: boolean;
+  stopping: boolean;
   showJumpToBottom: boolean;
   jumpCount: number;
   onScrollToBottom: () => void;
@@ -748,6 +881,20 @@ function ChatComposer({
 
   // Codex sign-in state (only for Codex sessions). `null` = still probing.
   const [codexAuthed, setCodexAuthed] = useState<boolean | null>(null);
+  // Auth-classified turn failure on a Codex session → surface the sign-in
+  // pill (the probe state below) instead of a generic error banner.
+  useEffect(() => {
+    if (isClaude) return;
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId?: string; agentType?: string }>).detail;
+      if (detail?.agentType !== "codex") return;
+      const sess = useChatStore.getState().sessions[tabId];
+      if (!sess?.acpSessionId || sess.acpSessionId !== detail.sessionId) return;
+      setCodexAuthed(false);
+    };
+    window.addEventListener("atlas:auth-required", handler);
+    return () => window.removeEventListener("atlas:auth-required", handler);
+  }, [isClaude, tabId]);
   const [codexSigningIn, setCodexSigningIn] = useState(false);
   useEffect(() => {
     if (isClaude) return;
@@ -854,11 +1001,13 @@ function ChatComposer({
             </div>
           </div>
         )}
+        <DisconnectedBanner tabId={tabId} />
         <MessageInput
           tabId={tabId}
           onSend={onSend}
           onStop={onStop}
           running={running}
+          stopping={stopping}
           disabled={disabled}
           placeholder="Ask Atlas what to do…"
         />

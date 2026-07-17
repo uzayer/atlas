@@ -114,25 +114,56 @@ export type AiOp =
   | { op: "connect"; from: string; to: string }
   | { op: "delete_edge"; id: string };
 
-/** Persisted file schema. v3 adds `aiGroups` (AI-generated groups + threads). */
-interface CanvasFile {
-  version: 3;
+/** One page's canvas data (Figma-style pages). Name/icon live in the tree entry. */
+export interface CanvasPage {
+  id: string;
   viewport: CanvasViewport;
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   aiGroups: Record<string, CanvasAiGroup>;
 }
 
+/** An entry in the pages file tree — a page (has canvas data) or an organizing
+ *  folder. `id` of a page entry matches its `CanvasPage.id`. */
+export interface PageTreeEntry {
+  id: string;
+  kind: "page" | "folder";
+  parentId: string | null;
+  name: string;
+  icon?: string;
+  order: number;
+}
+
+/** Persisted file schema. v4 = multiple pages + a folder tree (Figma-style). */
+interface CanvasFile {
+  version: 4;
+  pages: CanvasPage[];
+  tree: PageTreeEntry[];
+  activePageId: string;
+}
+
 interface CanvasState {
   projectPath: string | null;
   loaded: boolean;
+  // The top-level nodes/edges/aiGroups/viewport are the ACTIVE page's live working
+  // copy — every action + selector reads/writes these. Inactive pages live in
+  // `pages`; `syncActiveIntoPages` folds the working copy back before save/switch.
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   /** AI-generated groups (member nodes carry `groupId`), keyed by group id. */
   aiGroups: Record<string, CanvasAiGroup>;
   viewport: CanvasViewport;
+  /** All pages' persisted data, keyed by id (active page is also mirrored above). */
+  pages: Record<string, CanvasPage>;
+  /** The pages/folders tree (names, emojis, order, nesting). */
+  tree: PageTreeEntry[];
+  activePageId: string | null;
   /** Ids of currently-selected nodes (multi-select via marquee / shift-click). */
   selectedIds: string[];
+  /** A group whose AI thread the canvas panel should auto-open on mount — set by
+   *  external callers (e.g. "Draw diagram" from a chat turn) so the user sees the
+   *  generation loading state and can keep chatting. Consumed once. */
+  pendingAiThreadGroupId: string | null;
   fullscreen: boolean;
   activeTool: CanvasTool;
   /** Mirrors the module-level undo/redo stacks for toolbar button state. */
@@ -184,6 +215,19 @@ interface CanvasActions {
     beginInteraction: () => void;
     undo: () => void;
     redo: () => void;
+    // ── Pages ──
+    /** Create a new empty page (optionally inside a folder); makes it active. */
+    createPage: (parentId?: string | null) => string;
+    /** Create a new folder (optionally nested). */
+    createPageFolder: (parentId?: string | null) => string;
+    /** Switch the active page: fold the current working copy back into `pages`,
+     *  then load the target page's data into the working fields. */
+    setActivePage: (id: string) => void;
+    renameTreeEntry: (id: string, name: string) => void;
+    setTreeEntryIcon: (id: string, icon: string | null) => void;
+    /** Delete a page or folder (folders cascade to descendant pages). Never
+     *  removes the last remaining page. */
+    deleteTreeEntry: (id: string) => void;
     // ── AI groups ──
     /** Create an empty AI group anchored at `at`; returns its id. */
     createAiGroup: (at: { x: number; y: number }, provider?: string, model?: string) => string;
@@ -198,10 +242,15 @@ interface CanvasActions {
     moveGroup: (groupId: string, dx: number, dy: number) => void;
     /** Select all member nodes of a group. */
     selectGroup: (groupId: string) => void;
+    /** Ask the canvas panel to open a group's AI thread popover (surfaces the
+     *  loading state after an externally-triggered generation). */
+    requestOpenAiThread: (groupId: string) => void;
+    /** Clear a pending auto-open request (called once the panel has opened it). */
+    consumePendingAiThread: () => void;
   };
 }
 
-function genId(prefix: "n" | "e" | "g"): string {
+function genId(prefix: "n" | "e" | "g" | "p" | "f"): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
@@ -210,6 +259,23 @@ function nowIso(): string {
 }
 
 const emptyViewport: CanvasViewport = { x: 0, y: 0, zoom: 1 };
+
+function emptyPage(id: string): CanvasPage {
+  return { id, viewport: { ...emptyViewport }, nodes: [], edges: [], aiGroups: {} };
+}
+
+/** Fold the active page's live working copy (top-level fields) back into `pages`
+ *  so the persisted map + a page switch never lose the current edits. */
+function activePageSnapshot(s: CanvasState): CanvasPage | null {
+  if (!s.activePageId) return null;
+  return {
+    id: s.activePageId,
+    viewport: s.viewport,
+    nodes: s.nodes,
+    edges: s.edges,
+    aiGroups: s.aiGroups,
+  };
+}
 
 // Debounce save per project; cleared whenever we load a different project.
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -220,13 +286,15 @@ function scheduleSave() {
   saveTimer = setTimeout(async () => {
     saveTimer = null;
     const s = useCanvasStore.getState();
-    if (!s.projectPath || !s.loaded) return;
+    if (!s.projectPath || !s.loaded || !s.activePageId) return;
+    // Fold the live active page into the pages map for a complete snapshot.
+    const active = activePageSnapshot(s);
+    const pages = Object.values({ ...s.pages, ...(active ? { [active.id]: active } : {}) });
     const payload: CanvasFile = {
-      version: 3,
-      viewport: s.viewport,
-      nodes: s.nodes,
-      edges: s.edges,
-      aiGroups: s.aiGroups,
+      version: 4,
+      pages,
+      tree: s.tree,
+      activePageId: s.activePageId,
     };
     try {
       await saveCanvas(s.projectPath, JSON.stringify(payload));
@@ -256,27 +324,69 @@ function resetHistory() {
   future = [];
 }
 
+/** Normalize a raw nodes array (v1→v2 shape fixups). */
+function normalizeNodes(raw: unknown): CanvasNode[] {
+  return (Array.isArray(raw) ? raw : []).map((n) => ({
+    ...(n as CanvasNode),
+    kind: (n as CanvasNode).kind ?? "note",
+    title: (n as CanvasNode).title ?? "",
+    body: (n as CanvasNode).body ?? "",
+  }));
+}
+
+/** A brand-new file with a single empty "Page 1". */
+function freshFile(): CanvasFile {
+  const id = genId("p");
+  return {
+    version: 4,
+    pages: [emptyPage(id)],
+    tree: [{ id, kind: "page", parentId: null, name: "Page 1", order: 0 }],
+    activePageId: id,
+  };
+}
+
 function parseFile(raw: string): CanvasFile {
   try {
-    const parsed = JSON.parse(raw) as Partial<CanvasFile>;
-    // Migrate v1 → v2: legacy nodes had no `kind`; they were all notes.
-    const nodes = (Array.isArray(parsed.nodes) ? parsed.nodes : []).map((n) => ({
-      ...(n as CanvasNode),
-      kind: (n as CanvasNode).kind ?? "note",
-      title: (n as CanvasNode).title ?? "",
-      body: (n as CanvasNode).body ?? "",
-    }));
-    return {
-      version: 3,
-      viewport: parsed.viewport ?? emptyViewport,
-      nodes,
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+    // v4: already multi-page. Sanitize + guarantee at least one page.
+    if (parsed.version === 4 && Array.isArray(parsed.pages)) {
+      const pages = (parsed.pages as CanvasPage[]).map((p) => ({
+        id: p.id,
+        viewport: p.viewport ?? { ...emptyViewport },
+        nodes: normalizeNodes(p.nodes),
+        edges: Array.isArray(p.edges) ? p.edges : [],
+        aiGroups: p.aiGroups && typeof p.aiGroups === "object" ? p.aiGroups : {},
+      }));
+      if (pages.length === 0) return freshFile();
+      const tree = Array.isArray(parsed.tree) ? (parsed.tree as PageTreeEntry[]) : [];
+      const activePageId =
+        typeof parsed.activePageId === "string" && pages.some((p) => p.id === parsed.activePageId)
+          ? (parsed.activePageId as string)
+          : pages[0].id;
+      return { version: 4, pages, tree, activePageId };
+    }
+
+    // v1/v2/v3 → v4: wrap the single board as "Page 1".
+    const id = genId("p");
+    const page: CanvasPage = {
+      id,
+      viewport: (parsed.viewport as CanvasViewport) ?? { ...emptyViewport },
+      nodes: normalizeNodes(parsed.nodes),
       edges: Array.isArray(parsed.edges) ? (parsed.edges as CanvasEdge[]) : [],
-      // v2→v3: no AI groups existed before.
       aiGroups:
-        parsed.aiGroups && typeof parsed.aiGroups === "object" ? parsed.aiGroups : {},
+        parsed.aiGroups && typeof parsed.aiGroups === "object"
+          ? (parsed.aiGroups as Record<string, CanvasAiGroup>)
+          : {},
+    };
+    return {
+      version: 4,
+      pages: [page],
+      tree: [{ id, kind: "page", parentId: null, name: "Page 1", order: 0 }],
+      activePageId: id,
     };
   } catch {
-    return { version: 3, viewport: emptyViewport, nodes: [], edges: [], aiGroups: {} };
+    return freshFile();
   }
 }
 
@@ -302,7 +412,11 @@ export const useCanvasStore = createSelectors(
       edges: [],
       aiGroups: {},
       viewport: emptyViewport,
+      pages: {},
+      tree: [],
+      activePageId: null,
       selectedIds: [],
+      pendingAiThreadGroupId: null,
       fullscreen: false,
       activeTool: "select",
       canUndo: false,
@@ -319,6 +433,9 @@ export const useCanvasStore = createSelectors(
             s.nodes = [];
             s.edges = [];
             s.aiGroups = {};
+            s.pages = {};
+            s.tree = [];
+            s.activePageId = null;
             s.selectedIds = [];
             s.viewport = emptyViewport;
           });
@@ -328,10 +445,17 @@ export const useCanvasStore = createSelectors(
             resetHistory();
             set((s) => {
               if (s.projectPath !== path) return; // user switched projects mid-load
-              s.nodes = parsed.nodes;
-              s.edges = parsed.edges;
-              s.aiGroups = parsed.aiGroups;
-              s.viewport = parsed.viewport;
+              const pagesMap: Record<string, CanvasPage> = {};
+              for (const p of parsed.pages) pagesMap[p.id] = p;
+              s.pages = pagesMap;
+              s.tree = parsed.tree;
+              s.activePageId = parsed.activePageId;
+              // Mirror the active page into the working fields.
+              const active = pagesMap[parsed.activePageId];
+              s.nodes = active?.nodes ?? [];
+              s.edges = active?.edges ?? [];
+              s.aiGroups = active?.aiGroups ?? {};
+              s.viewport = active?.viewport ?? { ...emptyViewport };
               s.loaded = true;
               s.canUndo = false;
               s.canRedo = false;
@@ -565,6 +689,123 @@ export const useCanvasStore = createSelectors(
           scheduleSave();
         },
 
+        // ── Pages ──────────────────────────────────────────────────────────
+        createPage: (parentId = null) => {
+          const id = genId("p");
+          set((s) => {
+            s.pages[id] = emptyPage(id);
+            const order = s.tree.filter((e) => e.parentId === parentId).length;
+            s.tree.push({ id, kind: "page", parentId, name: "Untitled", order });
+            // Fold the outgoing page back, then switch to the new (empty) page.
+            const active = activePageSnapshot(s);
+            if (active) s.pages[active.id] = active;
+            s.activePageId = id;
+            s.nodes = [];
+            s.edges = [];
+            s.aiGroups = {};
+            s.viewport = { ...emptyViewport };
+            s.selectedIds = [];
+          });
+          resetHistory();
+          set((s) => {
+            s.canUndo = false;
+            s.canRedo = false;
+          });
+          scheduleSave();
+          logEvent({ source: "canvas", kind: "page-add", summary: "New page", payload: { id } });
+          return id;
+        },
+
+        createPageFolder: (parentId = null) => {
+          const id = genId("f");
+          set((s) => {
+            const order = s.tree.filter((e) => e.parentId === parentId).length;
+            s.tree.push({ id, kind: "folder", parentId, name: "New folder", order });
+          });
+          scheduleSave();
+          return id;
+        },
+
+        setActivePage: (id) => {
+          if (get().activePageId === id) return;
+          set((s) => {
+            const target = s.pages[id];
+            if (!target) return;
+            // Fold the current working copy back into pages, then load the target.
+            const active = activePageSnapshot(s);
+            if (active) s.pages[active.id] = active;
+            s.activePageId = id;
+            s.nodes = target.nodes;
+            s.edges = target.edges;
+            s.aiGroups = target.aiGroups;
+            s.viewport = target.viewport;
+            s.selectedIds = [];
+          });
+          resetHistory();
+          set((s) => {
+            s.canUndo = false;
+            s.canRedo = false;
+          });
+          scheduleSave();
+        },
+
+        renameTreeEntry: (id, name) =>
+          set((s) => {
+            const e = s.tree.find((t) => t.id === id);
+            if (!e) return;
+            e.name = name;
+            scheduleSave();
+          }),
+
+        setTreeEntryIcon: (id, icon) =>
+          set((s) => {
+            const e = s.tree.find((t) => t.id === id);
+            if (!e) return;
+            e.icon = icon ?? undefined;
+            scheduleSave();
+          }),
+
+        deleteTreeEntry: (id) => {
+          set((s) => {
+            // Collect the entry + all descendants (folders cascade).
+            const toRemove = new Set<string>([id]);
+            let grew = true;
+            while (grew) {
+              grew = false;
+              for (const e of s.tree) {
+                if (e.parentId && toRemove.has(e.parentId) && !toRemove.has(e.id)) {
+                  toRemove.add(e.id);
+                  grew = true;
+                }
+              }
+            }
+            const removedPageIds = s.tree
+              .filter((e) => toRemove.has(e.id) && e.kind === "page")
+              .map((e) => e.id);
+            const remainingPages = s.tree.filter(
+              (e) => e.kind === "page" && !toRemove.has(e.id),
+            );
+            // Never delete the last page.
+            if (remainingPages.length === 0) return;
+
+            s.tree = s.tree.filter((e) => !toRemove.has(e.id));
+            for (const pid of removedPageIds) delete s.pages[pid];
+
+            // If the active page was removed, switch to another page.
+            if (s.activePageId && removedPageIds.includes(s.activePageId)) {
+              const next = remainingPages[0];
+              const target = s.pages[next.id];
+              s.activePageId = next.id;
+              s.nodes = target?.nodes ?? [];
+              s.edges = target?.edges ?? [];
+              s.aiGroups = target?.aiGroups ?? {};
+              s.viewport = target?.viewport ?? { ...emptyViewport };
+              s.selectedIds = [];
+            }
+            scheduleSave();
+          });
+        },
+
         // ── AI groups ──────────────────────────────────────────────────────
         createAiGroup: (at, provider, model) => {
           const id = genId("g");
@@ -725,6 +966,16 @@ export const useCanvasStore = createSelectors(
         selectGroup: (groupId) =>
           set((s) => {
             s.selectedIds = s.nodes.filter((n) => n.groupId === groupId).map((n) => n.id);
+          }),
+
+        requestOpenAiThread: (groupId) =>
+          set((s) => {
+            s.pendingAiThreadGroupId = groupId;
+          }),
+
+        consumePendingAiThread: () =>
+          set((s) => {
+            s.pendingAiThreadGroupId = null;
           }),
       },
       };

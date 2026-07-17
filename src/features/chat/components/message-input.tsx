@@ -20,6 +20,7 @@ import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL } from "@/types/agent";
 import { AgentMark } from "@/components/agent-mark";
 import { ProviderModelPills } from "./provider-model-pills";
 import { loadCerseiEffort, loadCerseiCompress } from "../lib/cersei-model-pref";
+import { loadCachedAcpModels } from "../lib/acp-models-cache";
 // `ChatInput` pulls in CodeMirror (~870 KB) via `cm-mention-extension`.
 // We import it dynamically so the chunk is not in the initial preload set.
 // The import is kicked off at module-evaluation time (below, outside the
@@ -43,6 +44,8 @@ import type {
 } from "./slash-command-picker";
 import { commandRequiresArgs } from "./slash-command-picker";
 import { CodexLoginDialog } from "./codex-login-dialog";
+import { PlanDock } from "./plan-dock";
+import { RetryPill } from "./retry-pill";
 import type { MentionFile } from "../lib/mentions";
 import { useComposerFileDrop } from "../hooks/use-composer-file-drop";
 import { useProjectStore } from "@/features/project/stores/project-store";
@@ -78,6 +81,8 @@ interface MessageInputProps {
   onSend: (message: string, mentions: MentionData[]) => void;
   /** Stop the current generation. */
   onStop?: () => void;
+  /** Stop was clicked; awaiting the cancelled turn's terminal delta. */
+  stopping?: boolean;
   /** True while the agent is producing a response. */
   running?: boolean;
   /** Hard-disable the composer (e.g. Claude Code isn't installed/authed). */
@@ -357,6 +362,7 @@ function modelLabel(m: { id: string; name: string }): string {
 function AcpModelPicker({ tabId }: { tabId: string }) {
   const currentModel = useChatStore((s) => s.sessions[tabId]?.acpCurrentModel);
   const availableModels = useChatStore((s) => s.sessions[tabId]?.acpAvailableModels);
+  const agentType = useChatStore((s) => s.sessions[tabId]?.agentType ?? "claude-code");
   const { setAcpModel } = useChatStore.use.actions();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -371,20 +377,29 @@ function AcpModelPicker({ tabId }: { tabId: string }) {
     return () => window.removeEventListener("mousedown", onDown);
   }, [open]);
 
+  // Self-heal: ACP `session/load` doesn't re-advertise models, so a resumed /
+  // re-bound session can hold an empty list even though the agent has one —
+  // and hiding the picker on empty is exactly the "model selector disappears
+  // mid-session" bug. Fall back to the persisted per-agent cache (the mode
+  // picker self-heals the same way).
+  const models = useMemo(() => {
+    if (availableModels && availableModels.length > 0) return availableModels;
+    return loadCachedAcpModels(agentType)?.availableModels ?? [];
+  }, [availableModels, agentType]);
+
   const filtered = useMemo(() => {
-    const list = availableModels ?? [];
     const s = q.trim().toLowerCase();
-    if (!s) return list;
-    return list.filter(
+    if (!s) return models;
+    return models.filter(
       (m) =>
         m.name.toLowerCase().includes(s) ||
         m.id.toLowerCase().includes(s) ||
         (m.description ?? "").toLowerCase().includes(s),
     );
-  }, [availableModels, q]);
+  }, [models, q]);
 
-  if (!availableModels || availableModels.length === 0) return null;
-  const current = availableModels.find((m) => m.id === currentModel);
+  if (models.length === 0) return null;
+  const current = models.find((m) => m.id === currentModel);
 
   return (
     <div ref={ref} className="relative">
@@ -461,6 +476,7 @@ export function MessageInput({
   onSend,
   onStop,
   running = false,
+  stopping = false,
   disabled = false,
   placeholder = "Message Atlas... (@ to mention, / for commands)",
 }: MessageInputProps) {
@@ -704,6 +720,21 @@ export function MessageInput({
   const slashTriggerRef = useRef<SlashTrigger | null>(null);
   slashTriggerRef.current = slashTrigger;
   const { openLoginDialog } = useClaudeSetupStore.use.actions();
+
+  // An auth-classified turn failure routes to the sign-in flow (P15) instead
+  // of dying as a generic banner. Claude sessions open the login dialog; the
+  // Codex sign-in pill is handled in ChatComposer (it owns that probe state).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ sessionId?: string; agentType?: string }>).detail;
+      if (detail?.agentType !== "claude-code") return;
+      const sess = useChatStore.getState().sessions[tabId];
+      if (!sess?.acpSessionId || sess.acpSessionId !== detail.sessionId) return;
+      openLoginDialog();
+    };
+    window.addEventListener("atlas:auth-required", handler);
+    return () => window.removeEventListener("atlas:auth-required", handler);
+  }, [tabId, openLoginDialog]);
 
   const handleMentionSelect = useCallback(
     (mention: MentionData) => {
@@ -1025,11 +1056,19 @@ export function MessageInput({
           </div>
         )}
 
+        {/* Transient-failure retry countdown (native agent). */}
+        <RetryPill tabId={tabId} />
+
+        {/* Live plan docked on top of the input bar (JetBrains-Air style). */}
+        <PlanDock tabId={tabId} />
+
         <div
           ref={composerRef}
           data-chat-composer
           className={cn(
-            "relative rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)]",
+            // `z-10` so the composer paints over — and visually tucks — the
+            // PlanDock's bottom edge (the attached-panel recipe).
+            "relative z-10 rounded-xl border border-[var(--border-default)] bg-[var(--bg-secondary)]",
             "shadow-[0_8px_24px_rgba(0,0,0,0.35)]",
             // Soft macOS-style "active field" glow on focus — a faint
             // accent ring on top of the border shift (the border alone is
@@ -1152,14 +1191,21 @@ export function MessageInput({
                 )}
                 title={
                   mode === "stop"
-                    ? "Stop generation"
+                    ? stopping
+                      ? "Stopping… (waiting for the agent to wind down)"
+                      : "Stop generation"
                     : mode === "queue"
                     ? "Queue message (sends after current finishes)"
                     : "Send to agent (⌘↵)"
                 }
               >
                 {mode === "stop" ? (
-                  <Square size={11} strokeWidth={3} fill="currentColor" />
+                  <Square
+                    size={11}
+                    strokeWidth={3}
+                    fill="currentColor"
+                    className={stopping ? "animate-pulse" : undefined}
+                  />
                 ) : (
                   <ArrowUp size={14} strokeWidth={2.5} />
                 )}

@@ -1,4 +1,4 @@
-use agent_client_protocol::schema as acp_schema;
+use agent_client_protocol::schema::v1 as acp_schema;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -31,12 +31,6 @@ pub enum AcpEvent {
         tool_call: acp_schema::ToolCallUpdate,
         options: Vec<acp_schema::PermissionOption>,
     },
-    /// A prompt-turn failed before stop_reason (process died, protocol error).
-    TurnFailed {
-        session_id: acp_schema::SessionId,
-        turn_id: Uuid,
-        error: String,
-    },
     /// Cumulative token usage + estimated cost for the session. Emitted by the
     /// in-process native agent (ACP agents surface usage via their own updates).
     Usage {
@@ -56,10 +50,27 @@ pub enum AcpEvent {
         session_id: acp_schema::SessionId,
         saved_tokens: u64,
     },
+    /// A transient model-call failure is being retried after a backoff.
+    /// Native-only today (ACP agents own their retries in-process).
+    Retry {
+        session_id: acp_schema::SessionId,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        last_error: String,
+    },
 }
 
 /// Implemented by the Tauri host so the driver can fan events out without
 /// depending on `tauri` directly.
+///
+/// `turn` is the producing turn's identity — the epoch returned by
+/// `mark_turn_started` (ACP: `SessionGuard::turn_epoch`; native: the session's
+/// turn counter). `None` means turn-agnostic traffic: session replay during
+/// `session/load`, pre-first-turn notifications, and agent-level events like
+/// `AgentDisconnected`. The session actor drops turn-stamped events whose
+/// stamp doesn't match the live turn, so a superseded or cancelled turn's
+/// stragglers can't contaminate the next turn's transcript.
 pub trait EventSink: Send + Sync + 'static {
-    fn emit(&self, agent_id: AgentId, event: AcpEvent);
+    fn emit(&self, agent_id: AgentId, event: AcpEvent, turn: Option<u64>);
 }

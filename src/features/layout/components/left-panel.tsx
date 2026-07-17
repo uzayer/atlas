@@ -60,7 +60,7 @@ export function LeftPanel() {
   const usageLoading = useUsageReport((s) => s.loadingCwd === cwd);
 
   return (
-    <div className="atlas-vibrant-panel h-full flex flex-col bg-[#060706]">
+    <div className="atlas-vibrant-panel h-full flex flex-col bg-[var(--panel-bg)]">
       {/* Icon-only tabs (horizontal, like VS Code) */}
       <div className="flex items-center border-b border-border-default px-2 h-[29px] shrink-0 gap-1.5">
         {sections.map((s) => (

@@ -37,6 +37,20 @@ export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 export function isBusyAgentStatus(status: string | undefined): boolean {
   return status === "running" || status === "waiting";
 }
+
+/** True if any tool call in the session is still non-terminal (pending/running).
+ *  The composer stays "busy" while tools are in flight even if `status` has
+ *  (racily) flipped to idle, so it never re-enables ahead of a still-spinning
+ *  tool card. Rust is authoritative — it defers turn-end until tool calls
+ *  quiesce — this is the thin view-side guard against any residual race. */
+export function hasInFlightToolCalls(
+  session: { messages: ChatMessage[] } | undefined,
+): boolean {
+  if (!session) return false;
+  return session.messages.some((m) =>
+    m.toolCalls.some((tc) => tc.status === "pending" || tc.status === "running"),
+  );
+}
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 export type ClaudePermissionMode =
   | "default"
@@ -58,6 +72,17 @@ export const CLAUDE_PERMISSION_MODE_LABEL: Record<ClaudePermissionMode, string> 
   bypassPermissions: "Bypass Permissions",
 };
 
+/** One file a turn read or modified, with edit line counts (0 for reads). */
+export interface TurnFile {
+  path: string;
+  kind: "read" | "edit";
+  added: number;
+  removed: number;
+  /** For edits only: the file was created new (all edit ops had empty `old`) →
+   *  git-status "A"; otherwise "M". Undefined for reads. */
+  created?: boolean;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
@@ -65,12 +90,49 @@ export interface ChatSession {
   agentType: AgentType;
   model: string;
   status: AgentStatus;
+  /** True between the user clicking Stop and the cancelled turn's terminal
+   *  delta arriving. The UI must NOT flip to idle optimistically on Stop —
+   *  the backend may still be winding tools down, and an "idle" lie here let
+   *  the user start a second turn while the first was live (the interleave /
+   *  history-loss race). Cleared by every terminal (idle/error/turn_finished/
+   *  turn_failed). */
+  stopping?: boolean;
+  /** The agent process backing this session died (agent_disconnected). The
+   *  binding fields are kept for resume — the next send (or the Restart
+   *  affordance) respawns the agent and load_session-resumes where the
+   *  transcript kind supports it. Never auto-restarted silently. */
+  disconnected?: boolean;
+  /** Live retry countdown (native agent): a transient provider failure is
+   *  being retried after a backoff. Cleared when content resumes flowing or
+   *  the turn ends. */
+  retryStatus?: {
+    attempt: number;
+    maxAttempts: number;
+    delayMs: number;
+    lastError: string;
+    /** ms epoch when this retry status arrived (for the countdown). */
+    receivedAt: number;
+  };
   /** Turn identity of this session's current/most-recent turn, taken from the
    *  Rust `turn_seq` on status/terminal deltas. Used to reject a stale terminal
    *  (idle/error) belonging to a turn already superseded by a newer send —
    *  the guard against premature "done" under parallel / queued / wake timing.
    *  Absent (or 0) for the native cersei agent, which is treated as current. */
   currentTurnSeq?: number;
+  /** The current turn's live plan (ACP `plan` / TodoWrite), mirrored here from
+   *  the trailing assistant message so the docked plan panel above the composer
+   *  can select it with one narrow read instead of scanning `messages` every
+   *  streaming frame. Set on `plan_updated`, reset at each turn start. The dock
+   *  hides itself when this is empty or fully completed while idle. */
+  livePlan?: PlanStep[];
+  /** Per-turn scratch: files the current turn has read/edited, keyed by tool
+   *  call id so repeated pending→completed upserts are idempotent (no message
+   *  rescans). Reset at turn start, frozen into the trailing message's
+   *  `turnSummary` at turn_finished, then cleared. */
+  turnScratch?: {
+    seq: number;
+    tools: Record<string, TurnFile>;
+  };
   workingDirectory: string;
   tasks: AgentTask[];
   createdAt: string;
@@ -111,6 +173,10 @@ export interface ChatSession {
   /** Cumulative token/cost usage for the session (native agent surfaces it via
    *  `usage_updated` deltas; drives the composer's token/cost pill). */
   usage?: import("./agents").Usage;
+  /** Latest ACP context-window gauge (Claude Code / Codex) from `context_usage`
+   *  deltas — `used`/`size` tokens + cost. Snapshotted onto the trailing
+   *  assistant message at turn end (ACP agents have no per-turn in/out split). */
+  contextUsage?: { used: number; size: number; cost: number };
   /** True while the native agent is compacting its context window. */
   compacting?: boolean;
   /** Reasoning-effort level for the native agent ("" / low / medium / high /
@@ -179,6 +245,34 @@ export interface ChatMessage {
    *  finishes. Drives the end-of-message usage footer. `saved` = approx tokens
    *  RTK compression shaved off this turn (0 when compression was off). */
   usage?: { input: number; output: number; cost: number; saved?: number };
+  /** ACP context-window gauge (Claude Code / Codex) frozen onto the trailing
+   *  assistant message at turn end. These agents can't report a per-turn
+   *  input/output split, so the card shows this `used`/`size` context gauge in
+   *  the same slot the native agent uses for `usage`. */
+  contextUsage?: { used: number; size: number; cost: number };
+  /** Adaptive per-turn footer, frozen onto the trailing assistant message at
+   *  turn_finished (mirrors `usage` — never set mid-stream). Drives the
+   *  TurnSummaryCard's files-read/modified accordion + action buttons. */
+  turnSummary?: {
+    turnSeq: number;
+    files: TurnFile[];
+    /** Whether the workspace was a git repo when the turn ended (gates commit). */
+    repoAtTurn: boolean;
+  };
+  /** Agent-suggested next steps for this turn's footer. Generated once at
+   *  turn end (parse-first, optional BYOK). `turnSeq` guards against a stale
+   *  async result landing after a newer turn started. */
+  suggestions?: {
+    turnSeq: number;
+    status: "idle" | "loading" | "ready" | "error";
+    chips: string[];
+  };
+  /** Model that produced this assistant message, stamped when the message is
+   *  created (and backstopped at turn end). The badge renders ONLY this —
+   *  never live session state — so a later model or agent switch can't
+   *  relabel messages produced by a different model. Unstamped messages
+   *  (pre-fix history, disk-hydrated transcripts) render no badge. */
+  model?: string;
 }
 
 export interface ToolCallDisplay {

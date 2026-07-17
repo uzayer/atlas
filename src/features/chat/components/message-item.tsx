@@ -26,8 +26,15 @@ import { toast } from "sonner";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { CachedMarkdown } from "@/lib/markdown-cache";
+import { StreamingMarkdown } from "./streaming-markdown";
 
-const FILE_PATH_KEYS = ["file_path", "path", "filename", "filePath"];
+import {
+  getFilePathFromInput,
+  getEditParts,
+  type EditPart,
+} from "../lib/tool-files";
+import { TurnSummaryCard } from "./turn-summary-card";
+import { stripNextSteps } from "../lib/next-steps";
 
 // User prompts composed via the @-mention picker carry a heavy
 // "Atlas context" suffix. The split + block count are computed ONCE
@@ -53,13 +60,6 @@ function getAtlasSplit(message: ChatMessage): SplitContext {
   return splitAtlasContext(message.content);
 }
 
-function getFilePathFromInput(input: Record<string, unknown>): string | null {
-  for (const k of FILE_PATH_KEYS) {
-    const v = input[k];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return null;
-}
 
 function openFileInEditor(filePath: string) {
   useLayoutStore.getState().actions.addTab({
@@ -80,10 +80,14 @@ export const MessageItem = memo(function MessageItem({
   isLastInGroup = true,
   model,
   timeGapAbove,
+  tabId,
 }: {
   message: ChatMessage;
   streaming?: boolean;
   dividerAbove?: boolean;
+  /** The chat tab this message belongs to — used by the adaptive turn card
+   *  for thread-level actions (save-to-KB, diagram). */
+  tabId?: string;
   /** Session model (e.g. "claude-opus-4-7") — shown as a subtle badge on
    *  the assistant turn header so multi-model sessions are legible. */
   model?: string | null;
@@ -115,12 +119,15 @@ export const MessageItem = memo(function MessageItem({
   // chat-store on insert) and falls back to a one-time regex parse
   // for legacy messages — no regex per render in the hot path.
   const {
-    prose,
+    prose: rawProse,
     context,
     blockCount: contextBlockCount,
   } = isUser
     ? getAtlasSplit(message)
     : { prose: message.content, context: null, blockCount: 0 };
+  // Hide the agent's `<next_steps>` block (rendered as chips) and, on resume,
+  // our injected directive — from what the user reads.
+  const prose = stripNextSteps(rawProse);
 
   return (
     <div
@@ -232,17 +239,16 @@ export const MessageItem = memo(function MessageItem({
               />
             )}
 
-            {/* Markdown text — render plain pre while streaming for speed; markdown once settled */}
-            {prose && streaming ? (
-              <pre className="text-sm text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words select-text font-sans">
-                {prose}
-                {/* Blinking caret so a live turn reads like a terminal
-                  cursor — the clearest "this is generating now" cue. */}
-                <span className="atlas-stream-caret" aria-hidden />
-              </pre>
-            ) : null}
-            {prose && !streaming && (
-              <CachedMarkdown source={prose} className="text-sm" />
+            {/* Block-level markdown, formatted LIVE while streaming: only the
+                trailing block re-parses per frame; completed blocks are
+                source-keyed cache hits. Same renderer streaming + settled, so
+                there's no plain-text→markdown "pop" or reflow at turn end. */}
+            {prose && (
+              <StreamingMarkdown
+                source={prose}
+                streaming={streaming}
+                className="text-sm"
+              />
             )}
 
             {/* Heavy @-mention bodies (files / folders / repo READMEs / notes /
@@ -287,6 +293,17 @@ export const MessageItem = memo(function MessageItem({
             {message.usage && message.usage.input + message.usage.output > 0 && (
               <UsageFooter usage={message.usage} model={model ?? null} />
             )}
+            {/* Adaptive per-turn footer (files touched + next-step chips) —
+                only on the trailing message of a completed turn. */}
+            {isLastInGroup &&
+              !streaming &&
+              message.role === "assistant" &&
+              tabId &&
+              (message.turnSummary ||
+                message.suggestions ||
+                message.contextUsage) && (
+                <TurnSummaryCard message={message} tabId={tabId} />
+              )}
           </div>
         </div>
       </div>
@@ -496,60 +513,6 @@ const ThinkingAccordion = memo(function ThinkingAccordion({
 // Agent file edits arrive as tool arguments (Claude Code: Edit →
 // old_string/new_string, Write → content, MultiEdit → edits[]). We render
 // the diff straight from those args — no file read, no backend.
-const EDIT_TOOLS = new Set([
-  "edit",
-  "write",
-  "multiedit",
-  "create_file",
-  "create",
-  "str_replace",
-  "str_replace_editor",
-  "apply_patch",
-]);
-
-interface EditPart {
-  old: string;
-  neu: string;
-}
-
-const asStr = (v: unknown): string | null => (typeof v === "string" ? v : null);
-
-function getEditParts(
-  toolName: string,
-  args: Record<string, unknown>,
-): EditPart[] {
-  const parts: EditPart[] = [];
-  const edits = args.edits;
-  if (Array.isArray(edits)) {
-    for (const e of edits) {
-      if (e && typeof e === "object") {
-        const o = e as Record<string, unknown>;
-        const old =
-          asStr(o.old_string) ?? asStr(o.oldString) ?? asStr(o.old_str) ?? "";
-        const neu =
-          asStr(o.new_string) ?? asStr(o.newString) ?? asStr(o.new_str) ?? "";
-        if (old || neu) parts.push({ old, neu });
-      }
-    }
-    if (parts.length) return parts;
-  }
-  const old =
-    asStr(args.old_string) ?? asStr(args.oldString) ?? asStr(args.old_str);
-  const neu =
-    asStr(args.new_string) ?? asStr(args.newString) ?? asStr(args.new_str);
-  if (old != null || neu != null) return [{ old: old ?? "", neu: neu ?? "" }];
-  // Whole-file write/create — only when the tool is actually an editor.
-  if (EDIT_TOOLS.has(toolName.toLowerCase())) {
-    const content =
-      asStr(args.content) ??
-      asStr(args.new_content) ??
-      asStr(args.text) ??
-      asStr(args.file_text);
-    if (content != null) return [{ old: "", neu: content }];
-  }
-  return parts;
-}
-
 interface DiffRow {
   type: "context" | "add" | "remove";
   text: string;
@@ -595,10 +558,16 @@ function EditDiffView({ parts }: { parts: EditPart[] }) {
               key={j}
               className={cn(
                 "flex font-mono text-[11px] leading-[18px]",
-                r.type === "add" && "bg-[#0d2211]",
-                r.type === "remove" && "bg-[#220d0d]",
                 r.type === "context" && "text-[var(--text-tertiary)]",
               )}
+              style={{
+                background:
+                  r.type === "add"
+                    ? "var(--diff-add-line-bg)"
+                    : r.type === "remove"
+                      ? "var(--diff-remove-line-bg)"
+                      : undefined,
+              }}
             >
               <span className="w-4 shrink-0 text-center select-none text-[var(--text-tertiary)]">
                 {r.type === "add" ? "+" : r.type === "remove" ? "−" : ""}

@@ -17,6 +17,10 @@ import {
 import { registerFlush } from "@/features/workspaces/lib/flush-registry";
 import { persistHashOf } from "@/features/workspaces/lib/workspace-snapshot";
 import { applyUiScale, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
+import { applyEditorTheme } from "@/features/editor/themes/apply-editor-theme";
+import { DEFAULT_EDITOR_THEME_ID } from "@/features/editor/themes/themes";
+import { applyAtlasTheme } from "@/features/theme/apply-atlas-theme";
+import { DEFAULT_ATLAS_THEME_ID } from "@/features/theme/themes";
 
 interface Project {
   name: string;
@@ -54,6 +58,25 @@ export interface AppSettings {
   embeddingModelId: string;
   /** Selected on-device LLM model id (== dir name). */
   llmModelId: string;
+  /** Code-editor color theme id (see src/features/editor/themes). Drives the
+   *  CodeMirror editor, the diff viewer and the source-control diff views. */
+  codeEditorTheme: string;
+  /** Atlas interface-theme id (see src/features/theme/themes). Swaps the whole
+   *  dark UI palette — background, panels, text, borders and accent — while
+   *  keeping dark-theme primitives. Independent of `codeEditorTheme` (which only
+   *  themes code syntax). Default "atlas-black" = original AMOLED look. */
+  atlasTheme: string;
+  /** Adaptive next-step suggestion chips in the agent chat's per-turn card.
+   *  "agent" (default) asks the coding agent to end each reply with a hidden
+   *  `<next_steps>` block (uses the live session context, no BYOK); "off"
+   *  disables it. (Legacy "parse"/"llm" values are treated as enabled.) */
+  adaptiveSuggestions: "off" | "agent";
+  /** Auto-update master switch. ON (default) → every startup checks PostHog
+   *  remote config and prompts when a newer signed DMG is available. */
+  autoUpdate: boolean;
+  /** A version the user chose to "Ignore" in the update prompt; the startup
+   *  check won't re-prompt for exactly this version. */
+  updaterIgnoredVersion: string | null;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -64,6 +87,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   shareTelemetry: true,
   embeddingModelId: "all-MiniLM-L6-v2",
   llmModelId: "qwen3-0.6b",
+  codeEditorTheme: DEFAULT_EDITOR_THEME_ID,
+  atlasTheme: DEFAULT_ATLAS_THEME_ID,
+  adaptiveSuggestions: "agent",
+  autoUpdate: true,
+  updaterIgnoredVersion: null,
 };
 
 /**
@@ -297,6 +325,8 @@ export const useProjectStore = createSelectors(
           void useExplorerStore.getState().actions.refresh();
         }
         if (partial.uiScale !== undefined) applyUiScale(partial.uiScale);
+        if (partial.codeEditorTheme !== undefined) applyEditorTheme(partial.codeEditorTheme);
+        if (partial.atlasTheme !== undefined) applyAtlasTheme(partial.atlasTheme);
       },
       hydrate: (payload: AppStateWire, opts?: { skipActiveSwitch?: boolean }) => {
         // Merge with defaults so older state.json files (written before a new
@@ -315,6 +345,12 @@ export const useProjectStore = createSelectors(
         // Re-apply the persisted interface zoom (needs the Tauri WebView API,
         // so it can only run here, not in the pre-mount boot path).
         applyUiScale(settings.uiScale);
+        // Re-apply the persisted code-editor theme (writes CSS custom
+        // properties consumed by the editor/diff surfaces).
+        applyEditorTheme(settings.codeEditorTheme);
+        // Re-apply the persisted Atlas interface theme (writes the palette CSS
+        // custom properties that re-skin the whole dark UI).
+        applyAtlasTheme(settings.atlasTheme);
 
         // Hand the multi-workspace fields to the workspace store. We hydrate
         // with `activeWorkspaceId: null` and then `switchTo` the persisted id

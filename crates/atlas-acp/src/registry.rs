@@ -1,12 +1,11 @@
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use agent_client_protocol::schema::{
-    AuthenticateRequest, CancelNotification, ContentBlock, LoadSessionRequest, ModelId,
-    NewSessionRequest, NewSessionResponse, PermissionOptionId, PromptRequest,
-    RequestPermissionOutcome, SelectedPermissionOutcome, SessionConfigOptionValue, SessionId,
-    SessionModeId, SetSessionConfigOptionRequest, SetSessionModelRequest, SetSessionModeRequest,
-    StopReason, TextContent,
+use agent_client_protocol::schema::v1::{
+    AuthenticateRequest, CancelNotification, ContentBlock, LoadSessionRequest, NewSessionRequest,
+    PermissionOptionId, PromptRequest, RequestPermissionOutcome, SelectedPermissionOutcome,
+    SessionConfigOptionValue, SessionId, SessionModeId, SetSessionConfigOptionRequest,
+    SetSessionModeRequest, StopReason, TextContent,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -15,6 +14,8 @@ use uuid::Uuid;
 use crate::driver::{self, AgentRuntime, AuthMethodWire, SessionGuard};
 use crate::error::{AcpError, Result};
 use crate::events::EventSink;
+use crate::schema::NewSessionInfo;
+use crate::spawn::{explain_spawn_failure, resolve_command};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentId(pub Uuid);
@@ -60,16 +61,25 @@ impl AgentSpec {
         }
     }
 
-    /// Codex ACP bridge — Zed Industries' `codex-acp`, which embeds the Codex
-    /// engine and speaks ACP over stdio. Launched via `npx` (mirrors
-    /// `claude_code_ts`); the npm package ships a `codex-acp` bin launcher.
+    /// Codex ACP bridge — speaks ACP over stdio around the Codex engine.
+    /// Launched via `npx` (mirrors `claude_code_ts`); ships a `codex-acp` bin.
     /// Auth is inherited from the host env / `~/.codex` (ChatGPT login or
     /// `OPENAI_API_KEY`) — see `sanitize_host_env`.
+    ///
+    /// Uses `@agentclientprotocol/codex-acp` (the maintained replacement for the
+    /// deprecated `@zed-industries/codex-acp`). CRITICAL: the old package shipped
+    /// the Codex engine as a platform-specific **optional dependency**
+    /// (`@zed-industries/codex-acp-darwin-arm64`); after an npm/npx cache clear
+    /// npx would silently fail to reinstall that optional binary, and the agent
+    /// crashed on launch with `ERR_MODULE_NOT_FOUND`. The new package has no
+    /// optional platform binary — it depends on `@openai/codex` as a regular
+    /// dependency + a pure-JS `dist/index.js`, so a clean/cold cache installs it
+    /// reliably. Do NOT revert to `@zed-industries/codex-acp`.
     pub fn codex() -> Self {
         Self {
             spec_id: "codex".into(),
             display_name: "Codex (ACP)".into(),
-            command: "npx -y @zed-industries/codex-acp".into(),
+            command: "npx -y @agentclientprotocol/codex-acp".into(),
         }
     }
 
@@ -100,94 +110,6 @@ pub struct AgentInfo {
     pub display_name: String,
 }
 
-/// Public view of a newly created session — what gets returned to the UI.
-/// `NewSessionResponse` from the schema is `#[non_exhaustive]`, so we project
-/// the bits we actually want to expose.
-#[derive(Debug, Clone, Serialize)]
-pub struct NewSessionInfo {
-    pub session_id: SessionId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub modes: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub models: Option<serde_json::Value>,
-}
-
-impl From<NewSessionResponse> for NewSessionInfo {
-    fn from(resp: NewSessionResponse) -> Self {
-        // Round-trip via serde_json so we don't have to hand-port every nested
-        // schema type (modes / models / config_options are all `non_exhaustive`
-        // and gated on unstable features). The TS side already speaks JSON.
-        let modes = resp.modes.as_ref().and_then(|m| serde_json::to_value(m).ok());
-        // Model selection arrives two ways depending on the agent/version:
-        //  1. the dedicated `models` blob (`SessionModelState`), or
-        //  2. a `config_options` entry with id/category "model" — the shape the
-        //     current Claude Code (`claude-agent-acp`) + Codex adapters use, since
-        //     model selection moved into `SessionConfigOption`.
-        // Normalise (2) into the (1) shape so the rest of the pipeline + the UI
-        // are agnostic. Selection is then pushed via `session/set_config_option`.
-        let models = resp
-            .models
-            .as_ref()
-            .and_then(|m| serde_json::to_value(m).ok())
-            .filter(|v| !v.is_null())
-            .or_else(|| {
-                let co = serde_json::to_value(&resp.config_options).ok()?;
-                model_blob_from_config_options(&co)
-            });
-        Self {
-            session_id: resp.session_id,
-            modes,
-            models,
-        }
-    }
-}
-
-/// Normalise a `config_options` array into a `SessionModelState`-shaped JSON
-/// blob (`{ currentModelId, availableModels: [{modelId,name,description}] }`) by
-/// finding the `select` option with id/category "model". Returns `None` if
-/// there's no model option (so the caller falls through to "no models"). Handles
-/// both ungrouped and grouped option lists.
-fn model_blob_from_config_options(config_options: &serde_json::Value) -> Option<serde_json::Value> {
-    let arr = config_options.as_array()?;
-    let opt = arr.iter().find(|o| {
-        o.get("id").and_then(|v| v.as_str()) == Some("model")
-            || o.get("category").and_then(|v| v.as_str()) == Some("model")
-    })?;
-    let current = opt.get("currentValue").and_then(|v| v.as_str())?.to_string();
-    // `options` is either an array of `{value,name,description}` (ungrouped) or
-    // an array of `{group,name,options:[...]}` (grouped) — flatten both.
-    let raw = opt.get("options").and_then(|v| v.as_array())?;
-    let mut available: Vec<serde_json::Value> = Vec::new();
-    for item in raw {
-        let leaves = if item.get("value").is_some() {
-            std::slice::from_ref(item).to_vec()
-        } else if let Some(group) = item.get("options").and_then(|v| v.as_array()) {
-            group.clone()
-        } else {
-            Vec::new()
-        };
-        for o in leaves {
-            let Some(value) = o.get("value").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let name = o.get("name").and_then(|v| v.as_str()).unwrap_or(value);
-            let description = o.get("description").and_then(|v| v.as_str());
-            available.push(serde_json::json!({
-                "modelId": value,
-                "name": name,
-                "description": description,
-            }));
-        }
-    }
-    if available.is_empty() {
-        return None;
-    }
-    Some(serde_json::json!({
-        "currentModelId": current,
-        "availableModels": available,
-    }))
-}
-
 struct AgentEntry {
     spec: AgentSpec,
     runtime: AgentRuntime,
@@ -198,6 +120,28 @@ struct AgentEntry {
 pub struct AgentRegistry {
     inner: Arc<DashMap<AgentId, AgentEntry>>,
 }
+
+/// Bound an ACP request so a wedged adapter can't hang its caller forever
+/// (H3): the actor's control ops and the host's session ops all resolve with
+/// a typed [`AcpError::Timeout`] instead. `session/prompt` is deliberately
+/// NOT bounded — turns are governed by the cancel machinery (CANCEL_GRACE).
+async fn rpc_timeout<T>(
+    rpc: &'static str,
+    secs: u64,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), fut).await {
+        Ok(res) => res,
+        Err(_) => Err(AcpError::Timeout { rpc, secs }),
+    }
+}
+
+/// Session-lifecycle RPCs (new/load/authenticate) — slow is plausible
+/// (adapter cold start, browser OAuth handoff), so generous.
+const LIFECYCLE_RPC_SECS: u64 = 30;
+/// Session-tuning RPCs (set_mode / set_config_option) — cheap state flips;
+/// anything past this is a wedged adapter.
+const TUNING_RPC_SECS: u64 = 10;
 
 impl AgentRegistry {
     pub fn new() -> Self {
@@ -258,6 +202,16 @@ impl AgentRegistry {
         Ok(info)
     }
 
+    /// Tear down every spawned agent (app quit): dropping each runtime's
+    /// `shutdown_tx` lets the SDK close the subprocess's stdin and reap it —
+    /// no orphaned `node`/`npx` processes after the app exits (M7).
+    pub fn kill_all(&self) {
+        let ids: Vec<AgentId> = self.inner.iter().map(|e| *e.key()).collect();
+        for id in ids {
+            let _ = self.kill(id);
+        }
+    }
+
     pub fn kill(&self, agent_id: AgentId) -> Result<()> {
         let mut entry = self
             .inner
@@ -276,10 +230,13 @@ impl AgentRegistry {
     /// gate inbound traffic on the session's lifecycle.
     pub async fn new_session(&self, agent_id: AgentId, cwd: PathBuf) -> Result<NewSessionInfo> {
         let connection = self.connection(agent_id)?;
-        let resp = connection
-            .send_request(NewSessionRequest::new(cwd))
-            .block_task()
-            .await?;
+        let resp = rpc_timeout("session/new", LIFECYCLE_RPC_SECS, async {
+            Ok(connection
+                .send_request(NewSessionRequest::new(cwd))
+                .block_task()
+                .await?)
+        })
+        .await?;
         self.register_session(agent_id, resp.session_id.clone())?;
         let info: NewSessionInfo = resp.into();
         // Diagnostic: surface what the agent advertised for model selection, so a
@@ -307,10 +264,13 @@ impl AgentRegistry {
         cwd: PathBuf,
     ) -> Result<Option<serde_json::Value>> {
         let connection = self.connection(agent_id)?;
-        let resp = connection
-            .send_request(LoadSessionRequest::new(session_id.clone(), cwd))
-            .block_task()
-            .await?;
+        let resp = rpc_timeout("session/load", LIFECYCLE_RPC_SECS, async {
+            Ok(connection
+                .send_request(LoadSessionRequest::new(session_id.clone(), cwd))
+                .block_task()
+                .await?)
+        })
+        .await?;
         self.register_session(agent_id, session_id)?;
         // Project the (non_exhaustive, unstable-gated) `modes` blob to JSON the
         // same way `new_session` does, so the manager can seed the available
@@ -325,11 +285,18 @@ impl AgentRegistry {
     /// completes sign-in (credentials land in `~/.codex/auth.json`).
     pub async fn authenticate(&self, agent_id: AgentId, method_id: String) -> Result<()> {
         let connection = self.connection(agent_id)?;
-        connection
-            .send_request(AuthenticateRequest::new(method_id))
-            .block_task()
-            .await?;
-        Ok(())
+        // Bounded, but generously: this RPC legitimately waits on a HUMAN
+        // completing browser sign-in (see doc above), so the tight
+        // LIFECYCLE_RPC_SECS would break Codex ChatGPT login. 5 minutes turns
+        // "forever" into "eventually fails visibly" without racing the user.
+        rpc_timeout("authenticate", 300, async {
+            connection
+                .send_request(AuthenticateRequest::new(method_id))
+                .block_task()
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Install a lifecycle guard for a session. Idempotent — if a
@@ -364,28 +331,32 @@ impl AgentRegistry {
     /// Re-arm the session's guard before starting a new turn. Bumps
     /// the turn epoch and clears the `cancelled` flag so inbound
     /// notifications / permission requests for this turn flow
-    /// through. Called by the worker right before `send_prompt`.
+    /// through. Called by the actor right before `send_prompt`.
+    /// Returns the new turn epoch — the driver stamps it onto every
+    /// event it emits for this session, and the actor matches the
+    /// stamps against this value to drop stale-turn stragglers.
     pub fn mark_turn_started(
         &self,
         agent_id: AgentId,
         session_id: &SessionId,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let entry = self
             .inner
             .get(&agent_id)
             .ok_or(AcpError::UnknownAgent)?;
         if let Some(guard) = entry.runtime.session_guards.get(session_id) {
-            guard.mark_turn_started();
-        } else {
-            // Race: send arrived before register_session finished, or
-            // the session was just dropped. Install a fresh guard so
-            // the turn isn't auto-blocked.
-            entry
-                .runtime
-                .session_guards
-                .insert(session_id.clone(), Arc::new(SessionGuard::new()));
+            return Ok(guard.mark_turn_started());
         }
-        Ok(())
+        // Race: send arrived before register_session finished, or
+        // the session was just dropped. Install a fresh guard so
+        // the turn isn't auto-blocked.
+        let guard = Arc::new(SessionGuard::new());
+        let epoch = guard.mark_turn_started();
+        entry
+            .runtime
+            .session_guards
+            .insert(session_id.clone(), guard);
+        Ok(epoch)
     }
 
     /// Send a single text prompt. Resolves with the turn's `StopReason` when
@@ -419,34 +390,17 @@ impl AgentRegistry {
         mode_id: String,
     ) -> Result<()> {
         let connection = self.connection(agent_id)?;
-        connection
-            .send_request(SetSessionModeRequest::new(
-                session_id,
-                SessionModeId::new(mode_id),
-            ))
-            .block_task()
-            .await?;
-        Ok(())
-    }
-
-    /// Select the session's model (ACP `session/set_model`). The agent confirms
-    /// by emitting a `current_model_update` session notification, which the
-    /// manager folds into `SessionState.current_model`.
-    pub async fn set_session_model(
-        &self,
-        agent_id: AgentId,
-        session_id: SessionId,
-        model_id: String,
-    ) -> Result<()> {
-        let connection = self.connection(agent_id)?;
-        connection
-            .send_request(SetSessionModelRequest::new(
-                session_id,
-                ModelId::new(model_id),
-            ))
-            .block_task()
-            .await?;
-        Ok(())
+        rpc_timeout("session/set_mode", TUNING_RPC_SECS, async {
+            connection
+                .send_request(SetSessionModeRequest::new(
+                    session_id,
+                    SessionModeId::new(mode_id),
+                ))
+                .block_task()
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Set a session config option (`session/set_config_option`) — the current
@@ -460,15 +414,18 @@ impl AgentRegistry {
         value: String,
     ) -> Result<()> {
         let connection = self.connection(agent_id)?;
-        connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id,
-                config_id.to_string(),
-                SessionConfigOptionValue::value_id(value),
-            ))
-            .block_task()
-            .await?;
-        Ok(())
+        rpc_timeout("session/set_config_option", TUNING_RPC_SECS, async {
+            connection
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session_id,
+                    config_id.to_string(),
+                    SessionConfigOptionValue::value_id(value),
+                ))
+                .block_task()
+                .await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Cancel an in-flight prompt turn. Three things happen:
@@ -501,6 +458,32 @@ impl AgentRegistry {
         connection
             .send_notification(CancelNotification::new(session_id))?;
         Ok(())
+    }
+
+    /// Drop every pending permission for a session, returning their ids.
+    /// Dropping the oneshot sender resolves the driver's `rx.await` as
+    /// `Cancelled`, so the agent gets a clean outcome for each in-flight
+    /// request (ACP spec). Called by the session actor when a turn
+    /// finalizes, so no modal survives its turn (H6/M3).
+    pub fn take_pending_permissions(
+        &self,
+        agent_id: AgentId,
+        session_id: &SessionId,
+    ) -> Vec<Uuid> {
+        let Some(entry) = self.inner.get(&agent_id) else {
+            return Vec::new();
+        };
+        let ids: Vec<Uuid> = entry
+            .runtime
+            .pending_permissions
+            .iter()
+            .filter(|e| e.value().session_id == *session_id)
+            .map(|e| *e.key())
+            .collect();
+        for id in &ids {
+            entry.runtime.pending_permissions.remove(id);
+        }
+        ids
     }
 
     /// Resolve a permission request that the agent emitted earlier.
@@ -563,310 +546,4 @@ impl AgentRegistry {
 pub enum PermissionDecision {
     Selected { option_id: String },
     Cancelled,
-}
-
-/// Turn a raw spawn failure into an actionable message. The driver now
-/// surfaces the underlying error (instead of the old "driver task panicked
-/// before initialize" mask), but a bare "No such file or directory (os error
-/// 2)" still doesn't tell the user that the missing thing is the runtime the
-/// agent needs. The default agents launch via `npx`, so an ENOENT almost always
-/// means Node.js isn't installed (or isn't on the GUI app's PATH).
-/// Resolve a bare program name (e.g. `npx`) to an absolute path the way the
-/// user's login+interactive shell would — covering nvm / fnm / volta / asdf /
-/// Homebrew / custom npm prefixes. macOS GUI apps inherit only a minimal PATH,
-/// so this is what makes a Finder-launched app find the same binaries the
-/// terminal does. Bounded by a timeout so a slow/hanging shell rc can't block
-/// the agent spawn. Returns `None` (caller keeps the bare name) if the probe
-/// fails, times out, or the program isn't found.
-/// A Node toolchain Atlas installed itself (via the bundled nvm) when the
-/// machine had no usable Node. Set by `register_managed_node_bin` after a
-/// successful install. When present it WINS over whatever the login shell would
-/// resolve — that's what makes the "incompatible system Node" case work: we
-/// prefer our known-good version instead of the user's old one.
-static MANAGED_NODE_BIN: RwLock<Option<PathBuf>> = RwLock::new(None);
-
-/// Register the bin dir of an Atlas-managed Node install (e.g.
-/// `<NVM_DIR>/versions/node/vXX/bin`). Prepends it to the process PATH (so even
-/// code paths that don't go through `resolve_program_abs` find it) and records
-/// it as the preferred toolchain for agent spawns.
-pub fn register_managed_node_bin(bin_dir: PathBuf) {
-    prepend_to_path(&[bin_dir.to_string_lossy().into_owned()]);
-    if let Ok(mut guard) = MANAGED_NODE_BIN.write() {
-        *guard = Some(bin_dir);
-    }
-}
-
-/// The currently-registered managed Node bin dir, if any.
-pub fn managed_node_bin() -> Option<PathBuf> {
-    MANAGED_NODE_BIN.read().ok().and_then(|g| g.clone())
-}
-
-fn resolve_program_abs(program: &str) -> Option<String> {
-    // Already absolute → use as-is.
-    if program.starts_with('/') {
-        return Some(program.to_string());
-    }
-    // Prefer the Atlas-managed Node toolchain (bundled-nvm install) when set —
-    // it's a known-good version and must beat an incompatible system Node.
-    if let Some(bin) = managed_node_bin() {
-        let candidate = bin.join(program);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let prog = program.to_string();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let out = std::process::Command::new(&shell)
-            .args(["-lic", &format!("command -v {prog} 2>/dev/null")])
-            .output();
-        let _ = tx.send(out);
-    });
-    let out = rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // Accept only a real absolute path (not a shell function/alias name).
-    if p.starts_with('/') && std::path::Path::new(&p).exists() {
-        Some(p)
-    } else {
-        None
-    }
-}
-
-/// Rewrite a `shell-words`-style command so its program (first token) is an
-/// absolute path resolved via the login shell. No-op for JSON specs (`{…}`) and
-/// when resolution fails (keeps the bare command → process-PATH resolution).
-fn resolve_command(command: &str) -> String {
-    let trimmed = command.trim_start();
-    if trimmed.starts_with('{') {
-        return command.to_string(); // JSON stdio spec — leave untouched.
-    }
-    let (program, rest) = match trimmed.split_once(char::is_whitespace) {
-        Some((p, r)) => (p, r),
-        None => (trimmed, ""),
-    };
-    match resolve_program_abs(program) {
-        Some(abs) if rest.is_empty() => shell_quote(&abs),
-        Some(abs) => format!("{} {rest}", shell_quote(&abs)),
-        None => command.to_string(),
-    }
-}
-
-/// POSIX single-quote a token so the downstream `shell_words::split` in
-/// `AcpAgent::from_str` reassembles it as ONE argument even when it contains
-/// spaces. The Atlas-managed Node toolchain lives under
-/// `~/Library/Application Support/dev.atlas.ide/...` — a path WITH A SPACE — so
-/// resolving `npx` to its absolute managed path and then splicing it back into a
-/// space-joined command string made `shell_words` split the path in two
-/// (`…/Library/Application` + `Support/…`). The spawn then failed with
-/// `ENOENT` / "No such file or directory" even though `npx` was perfectly
-/// available. Single-quoting the program path keeps it intact through the split.
-fn shell_quote(s: &str) -> String {
-    // Wrap in single quotes; escape any embedded single quote the POSIX way.
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-fn explain_spawn_failure(spec: &AgentSpec, err: AcpError) -> AcpError {
-    let raw = err.to_string();
-    let looks_missing = raw.contains("os error 2")
-        || raw.contains("No such file or directory")
-        || raw.contains("ENOENT")
-        || raw.contains("not found");
-    if !looks_missing {
-        return err;
-    }
-
-    // First whitespace-separated token of the command is the executable.
-    let program = spec
-        .command
-        .split_whitespace()
-        .next()
-        .unwrap_or(&spec.command);
-
-    let hint = if program == "npx" || program == "node" {
-        "Node.js (which provides `npx`) was not found. Install Node.js \
-         (https://nodejs.org) and relaunch Atlas. If it is installed, make sure \
-         it is on your login shell's PATH."
-    } else {
-        "the agent's runtime executable was not found on PATH"
-    };
-
-    AcpError::other(format!(
-        "Could not start {}: `{}` is not available — {hint} (underlying error: {raw})",
-        spec.display_name, program
-    ))
-}
-
-/// Startup-time host environment fix-ups for the ACP agent process.
-///
-/// Two concrete problems this addresses:
-///
-/// 1. **`CLAUDECODE` env var leak.** The canonical
-///    `@zed-industries/claude-code-acp` agent refuses to start when it sees
-///    `CLAUDECODE` set in its env (anti-nesting guard). If Atlas itself was
-///    launched from a parent Claude Code shell that var leaks into every
-///    spawned child. Strip it.
-///
-/// 2. **Minimal PATH in macOS GUI apps.** When Atlas is launched from
-///    Finder/the Dock the process PATH is only
-///    `/usr/bin:/bin:/usr/sbin:/sbin` — `npx` (used to fetch the canonical
-///    ACP agent), `node`, `bun`, `claude`, Homebrew binaries, etc. are all
-///    missing. Without this enrichment `acp_spawn_agent` fails with ENOENT
-///    in the bundled app even though everything works from a terminal.
-pub fn sanitize_host_env() {
-    // SAFETY: called once at startup before any threads spawn child processes.
-    // remove_var/set_var are unsafe on the 2024 edition because mutating env
-    // in a multithreaded program is racy; we accept that risk here at boot.
-    unsafe {
-        std::env::remove_var("CLAUDECODE");
-    }
-    enrich_path();
-}
-
-fn enrich_path() {
-    // Three passes, cheapest first:
-    //
-    // 1. The cheap, deterministic prepends (~$HOME/.local/bin, .bun, .cargo,
-    //    /opt/homebrew/{bin,sbin}, /usr/local/{bin,sbin}, /usr/{bin,sbin})
-    //    happen synchronously so the very first `acp_spawn_agent` call can
-    //    already resolve `npx`/`node` from a Homebrew install.
-    //
-    // 2. The user's REAL interactive-shell PATH, queried synchronously via
-    //    `$SHELL -lic 'echo $PATH'` (bounded by a short timeout). This is the
-    //    authoritative fix: macOS GUI apps launched from Finder/the Dock only
-    //    inherit `/usr/bin:/bin:/usr/sbin:/sbin`, so `npx`/`node` installed via
-    //    nvm/fnm/volta/asdf or a custom npm prefix are invisible — the hardcoded
-    //    guesses in pass 1 can't cover every version manager. The login shell
-    //    resolves PATH exactly the way the user's terminal does (which is why
-    //    `tauri dev` from a terminal "just works" but the bundled app didn't).
-    //    Mirrors `commands::claude_setup::resolve_cli`, but applied process-wide
-    //    so the ACP agent spawn — not just `claude_status` — benefits.
-    //
-    // 3. The `~/.nvm/versions/node/*` enumeration on a background thread, kept
-    //    as a belt-and-suspenders fallback for the rare case where the login
-    //    shell probe fails or times out.
-    apply_cheap_path_extras();
-    merge_login_shell_path();
-    spawn_nvm_path_walk();
-}
-
-/// Query the user's login+interactive shell for its `PATH` and merge it into
-/// the process environment. Bounded by a 3s timeout so a slow shell rc (conda
-/// init, etc.) can't hang app startup — on timeout we fall back to the
-/// hardcoded extras already applied in `apply_cheap_path_extras`.
-fn merge_login_shell_path() {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-
-    // Run the probe on a worker thread and wait with a timeout. `-lic` loads
-    // the user's full login + interactive config (where nvm/fnm/etc. mutate
-    // PATH). `command -v node` is a harmless warm-up; we only consume $PATH.
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let out = std::process::Command::new(&shell)
-            .args(["-lic", "printf '%s' \"$PATH\""])
-            .output();
-        let _ = tx.send(out);
-    });
-
-    let Ok(Ok(out)) = rx.recv_timeout(std::time::Duration::from_secs(3)) else {
-        return;
-    };
-    if !out.status.success() {
-        return;
-    }
-
-    let raw = String::from_utf8_lossy(&out.stdout);
-    let entries: Vec<String> = raw
-        .trim()
-        .split(':')
-        .filter(|s| !s.is_empty() && s.starts_with('/'))
-        .map(String::from)
-        .collect();
-    if !entries.is_empty() {
-        // Prepend so the login-shell PATH wins over the hardcoded guesses,
-        // matching what the user's terminal would resolve first.
-        prepend_to_path(&entries);
-    }
-}
-
-fn apply_cheap_path_extras() {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut extras: Vec<String> = Vec::new();
-    if !home.is_empty() {
-        extras.push(format!("{home}/.local/bin"));
-        extras.push(format!("{home}/.bun/bin"));
-        extras.push(format!("{home}/.cargo/bin"));
-    }
-    extras.push("/opt/homebrew/bin".into());
-    extras.push("/opt/homebrew/sbin".into());
-    extras.push("/usr/local/bin".into());
-    extras.push("/usr/local/sbin".into());
-    extras.push("/usr/bin".into());
-    extras.push("/bin".into());
-    prepend_to_path(&extras);
-}
-
-fn spawn_nvm_path_walk() {
-    let home = match std::env::var("HOME") {
-        Ok(h) if !h.is_empty() => h,
-        _ => return,
-    };
-    std::thread::spawn(move || {
-        let nvm_root = std::path::PathBuf::from(&home)
-            .join(".nvm")
-            .join("versions")
-            .join("node");
-        let Ok(entries) = std::fs::read_dir(&nvm_root) else {
-            return;
-        };
-        let mut versions: Vec<_> = entries
-            .flatten()
-            .map(|e| e.path().join("bin"))
-            .filter(|p| p.is_dir())
-            .collect();
-        // Newest version first (lexicographic — fine for vMAJOR.MINOR.PATCH).
-        versions.sort();
-        versions.reverse();
-        let extras: Vec<String> = versions
-            .into_iter()
-            .map(|v| v.to_string_lossy().into_owned())
-            .collect();
-        if extras.is_empty() {
-            return;
-        }
-        prepend_to_path(&extras);
-    });
-}
-
-fn prepend_to_path(extras: &[String]) {
-    let base = std::env::var("PATH").unwrap_or_default();
-    let mut path_parts: Vec<String> = if base.is_empty() {
-        Vec::new()
-    } else {
-        base.split(':').map(String::from).collect()
-    };
-
-    // Prepend extras (in reverse so the first listed wins after all inserts),
-    // skipping anything already on PATH.
-    for extra in extras.iter().rev() {
-        if !path_parts.iter().any(|p| p == extra) {
-            path_parts.insert(0, extra.clone());
-        }
-    }
-
-    let new_path = path_parts.join(":");
-    // SAFETY: see `sanitize_host_env` — env mutation is racy in a multithreaded
-    // program. The background thread runs only after `sanitize_host_env` has
-    // returned and Tauri has started; any concurrent child-process spawn will
-    // either see the pre-nvm PATH (Homebrew node, fine) or the post-nvm PATH
-    // (nvm-managed node). Both are valid PATH values.
-    unsafe {
-        std::env::set_var("PATH", new_path);
-    }
 }

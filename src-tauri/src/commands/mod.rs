@@ -60,4 +60,5 @@ pub mod sessions_watch;
 pub mod skills;
 pub mod telemetry;
 pub mod terminal;
+pub mod updater;
 pub mod window;

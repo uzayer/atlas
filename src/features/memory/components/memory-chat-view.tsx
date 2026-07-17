@@ -14,6 +14,7 @@ import {
   Cloud,
   KeyRound,
   Boxes,
+  Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/time-ago";
@@ -476,6 +477,28 @@ function InstallButton() {
   );
 }
 
+/** Tiny indicator of the local model's inference backend (Metal GPU vs CPU). CPU
+ *  means candle's Metal kernels couldn't compile on this OS and we fell back —
+ *  the chat still works, just slower. */
+function BackendPill() {
+  const backend = useMemoryChatStore.use.backend();
+  if (!backend) return null;
+  const metal = backend === "metal";
+  return (
+    <span
+      title={
+        metal
+          ? "Running on the Apple-Silicon GPU (Metal)"
+          : "Running on CPU — the GPU (Metal) kernels aren’t available on this machine, so generation is slower"
+      }
+      className="inline-flex items-center gap-1 h-[26px] px-2 rounded-full border border-border-default bg-bg-elevated text-[10px] font-medium text-text-tertiary"
+    >
+      {metal ? <Zap size={11} className="text-text-secondary" /> : <Cpu size={11} />}
+      {metal ? "Metal" : "CPU"}
+    </span>
+  );
+}
+
 function Composer({
   sessionId,
   running,
@@ -559,6 +582,7 @@ function Composer({
                 onModel={(m) => setModel(sessionId, m)}
               />
             )}
+            {mode === "local" && localReady && <BackendPill />}
           </div>
           {needsInstall ? (
             <InstallButton />

@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use atlas_codeindex::{compose_text, scan, structural_text, CodebaseDoc, CodebaseIndex, ScannedFile};
-use atlas_embed::chat::{build_qwen_prompt, QuantizedChatModel};
+use atlas_embed::chat::build_qwen_prompt;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
@@ -243,10 +243,12 @@ async fn local_summaries(
         .collect();
 
     let chat_arc = state.chat_model();
+    let app_bg = app.clone();
     let summaries: Vec<(usize, String)> = tokio::task::spawn_blocking(move || {
         let mut guard = chat_arc.lock();
         if guard.is_none() {
-            match QuantizedChatModel::load(&gguf, &tok) {
+            // Shared resilient loader: Metal→CPU fallback + persisted marker.
+            match super::memory_chat::load_chat_model(&app_bg, &gguf, &tok) {
                 Ok(m) => *guard = Some(m),
                 Err(_) => return Vec::new(),
             }

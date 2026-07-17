@@ -6,9 +6,13 @@
 //! window-event emitter — and also fan out through a per-session
 //! `tokio::sync::broadcast::Sender` for in-process subscribers.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 
 use atlas_acp::AgentId;
+use atlas_bus::EventBus;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::session::{Message, PlanEntry, SessionStatus, ToolCall, Usage};
@@ -52,6 +56,14 @@ pub enum SessionDelta {
     ModeChanged {
         mode_id: String,
     },
+    /// A transient model-call failure is being retried after a backoff
+    /// (native agent). Additive: old frontends ignore unknown kinds.
+    RetryStatus {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        last_error: String,
+    },
     ModelChanged {
         model_id: String,
     },
@@ -60,6 +72,15 @@ pub enum SessionDelta {
     },
     UsageUpdated {
         usage: Usage,
+    },
+    /// Cumulative context-window usage from an ACP `usage_update` notification:
+    /// `used`/`size` tokens (of the model's window) + optional cost. ACP agents
+    /// (Claude Code / Codex) can't give a per-turn input/output split like the
+    /// native agent, so this drives a context gauge in the turn card instead.
+    ContextUsage {
+        used: u64,
+        size: u64,
+        cost: f64,
     },
     /// Context compaction is running (`active = true`) or just finished.
     Compaction {
@@ -91,6 +112,11 @@ pub enum SessionDelta {
         error: String,
         #[serde(default)]
         turn_seq: u64,
+        /// Failure class ("auth" routes the frontend to the sign-in flow;
+        /// "transient"/"fatal"/"process_dead"/"unknown" are informational).
+        /// Additive: absent on old payloads.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
     },
     /// Underlying ACP agent process died.
     AgentDisconnected {
@@ -110,4 +136,46 @@ pub struct SessionDeltaEnvelope {
 /// Implemented by the Tauri host to fan deltas out to the renderer.
 pub trait DeltaSink: Send + Sync + 'static {
     fn emit(&self, envelope: SessionDeltaEnvelope);
+}
+
+/// The single outbound fan-out point for every session delta.
+///
+/// The manager and the per-session worker both funnel their emits through one
+/// `Emitter` so there is exactly one place that sees every event. It publishes
+/// to the global [`EventBus`] (the cloud-ready seam — a UI fan-out task and, in
+/// future, a cloud streamer subscribe to it) and then delivers to the host
+/// [`DeltaSink`] (window emit + telemetry + memory-ingest). Publishing to the
+/// bus is non-blocking and drops for lagging subscribers, so the streaming hot
+/// path is never held up by a slow consumer.
+pub struct Emitter {
+    sink: Arc<dyn DeltaSink>,
+    bus: EventBus<SessionDeltaEnvelope>,
+}
+
+impl Emitter {
+    pub fn new(sink: Arc<dyn DeltaSink>) -> Self {
+        Self {
+            sink,
+            bus: EventBus::new(),
+        }
+    }
+
+    /// The global event bus. Subscribe here for an in-process (or cloud) tap on
+    /// every delta without going through the host sink.
+    pub fn bus(&self) -> &EventBus<SessionDeltaEnvelope> {
+        &self.bus
+    }
+
+    /// Convenience: a fresh subscription to the bus.
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionDeltaEnvelope> {
+        self.bus.subscribe()
+    }
+
+    /// Fan one delta out to the bus and the host sink.
+    pub fn emit(&self, envelope: SessionDeltaEnvelope) {
+        // Bus first (cheap, non-blocking) so an in-process/cloud subscriber sees
+        // the event even if the host sink does heavier work.
+        self.bus.publish(envelope.clone());
+        self.sink.emit(envelope);
+    }
 }

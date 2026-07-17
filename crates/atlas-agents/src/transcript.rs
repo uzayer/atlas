@@ -74,12 +74,21 @@ fn replay_claude_jsonl(cwd: &str, session_id: &str) -> Result<Vec<Message>> {
                         thinking: String::new(),
                         tool_calls: Vec::new(),
                         plan: None,
+                        model: None,
                         timestamp,
                     });
                 }
             }
             "assistant" => {
                 let (text, tool_calls) = extract_assistant_blocks(&v);
+                // Claude Code records the producing model on every assistant
+                // JSONL entry — carry it through so the UI's per-message badge
+                // survives session reloads.
+                let model = v
+                    .get("message")
+                    .and_then(|m| m.get("model"))
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string);
                 if !tool_calls.is_empty() {
                     for tc in tool_calls {
                         out.push(Message {
@@ -90,6 +99,7 @@ fn replay_claude_jsonl(cwd: &str, session_id: &str) -> Result<Vec<Message>> {
                             thinking: String::new(),
                             tool_calls: vec![tc],
                             plan: None,
+                            model: model.clone(),
                             timestamp,
                         });
                     }
@@ -103,6 +113,7 @@ fn replay_claude_jsonl(cwd: &str, session_id: &str) -> Result<Vec<Message>> {
                         thinking: String::new(),
                         tool_calls: Vec::new(),
                         plan: None,
+                        model,
                         timestamp,
                     });
                 }

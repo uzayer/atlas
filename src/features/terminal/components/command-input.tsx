@@ -343,7 +343,18 @@ export const CommandInput = forwardRef<CommandInputHandle, CommandInputProps>(
         return;
       }
 
-      // ↑/↓ ALWAYS drive history (never the picker) — terminal muscle memory.
+      // ↑/↓ cycle the suggestion picker WHILE it's open (matches Tab/Shift+Tab);
+      // once closed they fall through to history — terminal muscle memory.
+      if (e.key === "ArrowUp" && open) {
+        e.preventDefault();
+        cycleTab(-1);
+        return;
+      }
+      if (e.key === "ArrowDown" && open) {
+        e.preventDefault();
+        cycleTab(1);
+        return;
+      }
       if (e.key === "ArrowUp") {
         const onFirstLine = !value.slice(0, ta.selectionStart).includes("\n");
         if (!onFirstLine) return;

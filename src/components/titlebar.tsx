@@ -3,10 +3,13 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
-import { PanelLeft, PanelRight, Bell, Layers } from "lucide-react";
+import { PanelLeft, PanelRight, Bell, Layers, ArrowDownToLine, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { invoke } from "@tauri-apps/api/core";
+import { toast } from "sonner";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
+import { useUpdaterStore } from "@/features/updater/stores/updater-store";
+import { updater } from "@/features/updater/lib/updater-api";
 
 function useTauriWindow() {
   const windowRef = useRef<TauriWindow | null>(null);
@@ -95,7 +98,7 @@ export function Titlebar() {
     <div
       onMouseDown={handleDrag}
       onDoubleClick={handleDoubleClick}
-      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[#000] border-b border-border-default ${isFullscreen || sidebarOpen ? "pl-3" : "pl-[72px]"}`}
+      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[var(--bg-base)] border-b border-border-default ${isFullscreen || sidebarOpen ? "pl-3" : "pl-[72px]"}`}
     >
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
         <WorkspaceToggle />
@@ -106,6 +109,7 @@ export function Titlebar() {
 
       {currentProject && (
         <div className="flex items-center gap-1.5">
+          <UpdateButton />
           <NotificationButton />
           <RightPanelToggle />
         </div>
@@ -150,7 +154,7 @@ function ProjectLabel({ name, path }: { name: string; path?: string }) {
     >
       <button
         onClick={copy}
-        className="block max-w-[260px] cursor-pointer truncate px-1 text-[12px] font-medium text-[#ccc] transition-colors hover:text-white"
+        className="block max-w-[260px] cursor-pointer truncate px-1 text-[12px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
       >
         {name}
       </button>
@@ -195,7 +199,7 @@ function WorkspaceToggle() {
     >
       <Layers size={14} />
       {count > 1 && (
-        <span className="absolute -bottom-0.5 -right-0.5 text-[7px] font-mono text-[var(--accent-primary)]">
+        <span className="absolute -bottom-0.5 -right-0.5 text-[7px] font-mono text-white">
           {count}
         </span>
       )}
@@ -214,6 +218,98 @@ function LeftPanelToggle() {
       title={leftPanel.visible ? "Hide left panel" : "Show left panel"}
     >
       <PanelLeft size={14} className={leftPanel.visible ? "" : "opacity-40"} />
+    </button>
+  );
+}
+
+/** Tiny determinate ring for the titlebar download indicator. */
+function ArcProgress({ value }: { value: number }) {
+  const r = 6;
+  const c = 2 * Math.PI * r;
+  const off = c * (1 - Math.max(0, Math.min(1, value)));
+  return (
+    <svg width={14} height={14} viewBox="0 0 16 16" className="-rotate-90">
+      <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeOpacity={0.25} strokeWidth={2} />
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeDasharray={c}
+        strokeDashoffset={off}
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Titlebar auto-update indicator. Idle → a down-arrow that triggers a manual
+ * "check for updates". While the backend checks → spinner. While the update
+ * downloads in the background → an arc showing progress. Once staged and ready
+ * → a badge dot; clicking reopens the "Restart to update" prompt. All state is
+ * driven by the `atlas:update-*` events → updater store (fully non-blocking).
+ */
+function UpdateButton() {
+  const checking = useUpdaterStore.use.checking();
+  const phase = useUpdaterStore.use.phase();
+  const progress = useUpdaterStore.use.progress();
+  const { openModal } = useUpdaterStore.use.actions();
+
+  const downloading = phase === "downloading";
+  const ready = phase === "ready" || phase === "applying";
+
+  const onClick = () => {
+    if (checking || downloading) return;
+    if (ready) {
+      openModal();
+      return;
+    }
+    void updater
+      .checkNow()
+      .then((status) => {
+        if (!status.available) {
+          toast.success(`You're on the latest version (${status.currentVersion}).`);
+        }
+      })
+      .catch((e) => toast.error(`Update check failed: ${e instanceof Error ? e.message : String(e)}`));
+  };
+
+  const title = checking
+    ? "Checking for updates…"
+    : downloading
+      ? progress != null
+        ? `Downloading update… ${Math.round(progress * 100)}%`
+        : "Preparing update…"
+      : ready
+        ? "Update ready — click to restart"
+        : "Check for updates";
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={checking || downloading}
+      className={cn(
+        "relative flex items-center justify-center w-6 h-6 rounded hover:bg-[#ffffff08] transition-all duration-150 outline-none focus:outline-none",
+        ready || downloading ? "text-[#ccc]" : "text-[#555] hover:text-[#aaa]",
+      )}
+      title={title}
+    >
+      {checking ? (
+        <Loader2 size={14} className="animate-spin" />
+      ) : downloading ? (
+        progress != null ? <ArcProgress value={progress} /> : <Loader2 size={14} className="animate-spin" />
+      ) : (
+        <ArrowDownToLine size={14} />
+      )}
+      {ready && (
+        <span
+          className="absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full bg-[var(--accent-primary)] ring-1 ring-[var(--bg-base)] pointer-events-none"
+          aria-label="Update ready"
+        />
+      )}
     </button>
   );
 }
@@ -239,7 +335,7 @@ function NotificationButton() {
       {hasUnread && (
         <span
           className={cn(
-            "absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full ring-1 ring-[#000] pointer-events-none",
+            "absolute -top-[1px] -right-[1px] w-[7px] h-[7px] rounded-full ring-1 ring-[var(--bg-base)] pointer-events-none",
             hasError ? "bg-[var(--status-error)]" : "bg-white",
           )}
           aria-label="Unread notifications"

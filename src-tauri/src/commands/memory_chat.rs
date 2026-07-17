@@ -12,7 +12,7 @@
 //! retrieval, and the Qwen GGUF for generation. Both are user-triggered.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -91,6 +91,36 @@ fn chat_model_dir(app: &AppHandle) -> Result<PathBuf, String> {
     super::models::model_dir_for(app, &super::models::selected_llm_id(app))
 }
 
+/// Marker written in the selected model's dir when candle's Metal kernels fail to
+/// compile on this machine, so subsequent loads skip the (panicking) Metal
+/// attempt and go straight to CPU. Per-model: switching models re-tries Metal,
+/// deleting the model dir clears it.
+fn metal_incompatible_marker(app: &AppHandle) -> Option<PathBuf> {
+    chat_model_dir(app).ok().map(|d| d.join(".metal_incompatible"))
+}
+
+/// Load the selected local LLM with the Metal→CPU fallback, honouring the
+/// persisted "Metal incompatible" marker and writing it the first time a Metal
+/// attempt falls back. Returns the loaded model. Blocking — call under
+/// `spawn_blocking`. `force_cpu` is derived here from the marker. Shared with the
+/// codebase indexer so both users of the cached model get the same resilience.
+pub(crate) fn load_chat_model(
+    app: &AppHandle,
+    gguf_path: &Path,
+    tok_path: &Path,
+) -> Result<QuantizedChatModel, String> {
+    let marker = metal_incompatible_marker(app);
+    let force_cpu = marker.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let (model, fell_back) = QuantizedChatModel::load_with(gguf_path, tok_path, force_cpu)
+        .map_err(|e| format!("load chat model: {e}"))?;
+    if fell_back {
+        if let Some(p) = &marker {
+            let _ = std::fs::write(p, b"metal kernel compile failed; using cpu\n");
+        }
+    }
+    Ok(model)
+}
+
 // ── Model download / status ──────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -149,24 +179,36 @@ pub async fn memory_chat_model_download(app: AppHandle) -> Result<(), String> {
 /// Warm-load the downloaded chat model into the cached state. Used by the
 /// "Install model" flow to surface a "Loading Model" step (and to make the first
 /// message instant). No-op if already loaded; errors if not downloaded.
+/// Warm-load the model and return which backend it runs on (`"metal"` / `"cpu"`).
 #[tauri::command]
 pub async fn memory_chat_model_load(
     app: AppHandle,
     state: State<'_, MemoryChatState>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let (gguf_path, tok_path) = local_model_paths(&app)?;
     let chat_arc = state.chat.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
+    let app_bg = app.clone();
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
         let mut guard = chat_arc.lock();
         if guard.is_none() {
-            let m = QuantizedChatModel::load(&gguf_path, &tok_path)
-                .map_err(|e| format!("load chat model: {e}"))?;
+            let m = load_chat_model(&app_bg, &gguf_path, &tok_path)?;
             *guard = Some(m);
         }
-        Ok(())
+        Ok(guard.as_ref().unwrap().backend().as_str().to_string())
     })
     .await
     .map_err(|e| format!("model load join: {e}"))?
+}
+
+/// Backend of the currently cached model, or `None` if not loaded yet. Lets the
+/// UI render the Metal/CPU pill without starting a stream.
+#[tauri::command]
+pub fn memory_chat_backend(state: State<'_, MemoryChatState>) -> Option<String> {
+    state
+        .chat
+        .lock()
+        .as_ref()
+        .map(|m| m.backend().as_str().to_string())
 }
 
 // ── Chat streaming ───────────────────────────────────────────────────────────
@@ -202,6 +244,7 @@ struct SourceRef {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChatEvent {
     Sources { sources: Vec<SourceRef> },
+    Backend { backend: String },
     TextDelta { delta: String },
     Done,
     Error { message: String },
@@ -399,15 +442,16 @@ pub async fn memory_chat_send(
 
         let mut guard = chat_arc.lock();
         if guard.is_none() {
-            match QuantizedChatModel::load(&gguf_path, &tok_path) {
+            match load_chat_model(&app_bg, &gguf_path, &tok_path) {
                 Ok(m) => *guard = Some(m),
                 Err(e) => {
-                    emit(&app_bg, &sid, ChatEvent::Error { message: format!("load chat model: {e}") });
+                    emit(&app_bg, &sid, ChatEvent::Error { message: e });
                     return;
                 }
             }
         }
         let model = guard.as_mut().unwrap();
+        emit(&app_bg, &sid, ChatEvent::Backend { backend: model.backend().as_str().to_string() });
         let cancel_chk = cancel.clone();
         let app_tok = app_bg.clone();
         let sid_tok = sid.clone();

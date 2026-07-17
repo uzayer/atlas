@@ -12,19 +12,12 @@ edition = "2024"
 # command bodies, streaming chunks after the rejected one) is dropped on
 # the floor. Keep this list in sync with whatever the vendored adapter at
 # `third-party/claude-agent-acp/` actually sends.
-agent-client-protocol = { version = "0.11", features = [
-    "unstable_auth_methods",
-    "unstable_boolean_config",
-    "unstable_logout",
-    "unstable_message_id",
-    "unstable_session_additional_directories",
-    "unstable_session_close",
-    "unstable_session_fork",
-    "unstable_session_model",
-    "unstable_session_resume",
-    "unstable_session_usage",
-] }
-agent-client-protocol-tokio = "0.11"
+# ACP 1.x: the `unstable` feature turns on the message-id / model / usage /
+# resume / close / fork / logout / additional-directories schema variants the
+# claude-agent-acp + codex-acp adapters emit (previously a list of `unstable_*`
+# flags on 0.11). The `agent-client-protocol-tokio` helper is gone (never moved
+# past 0.11); the stdio transport + client wiring lives in driver.rs now.
+agent-client-protocol = { version = "1.2", features = ["unstable"] }
 tokio = { version = "1.52", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

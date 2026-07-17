@@ -362,12 +362,16 @@ function relTime(ms: number): string {
 }
 
 function ChatRow({ chat, running, onOpen }: { chat: RecentChat; running: boolean; onOpen: () => void }) {
+  // Cersei (the Atlas native agent) gets its own brand mark — falling through
+  // to the Claude icon mislabeled Atlas chats in this panel.
   const AgentIcon = chat.agentType === "codex" ? AgentIcons.Codex : AgentIcons.Claude;
   return (
     <div data-hint onClick={onOpen} style={{ height: CHAT_CARD, paddingLeft: 6 }}
       className="group relative flex items-start gap-2 pr-1.5 py-1.5 border-b border-[var(--border-subtle)] cursor-pointer hover:bg-[var(--bg-hover)] transform-gpu [backface-visibility:hidden]" title={chat.projectPath}>
       {running ? (
         <AtlasLoader size={11} className="mt-0.5 shrink-0 text-[var(--accent-primary)]" />
+      ) : chat.agentType === "cersei" ? (
+        <AtlasIcon size={14} className="mt-0.5 shrink-0" />
       ) : (
         <AgentIcon className="mt-0.5 size-3.5 shrink-0" />
       )}
@@ -540,7 +544,7 @@ export function WorkspaceSidebar() {
     addTab({ id: type === "mission-control" ? "mission-control" : type, type, title, closable: true, dirty: false, data: {} });
 
   return (
-    <aside className="flex flex-col h-screen w-[244px] shrink-0 border-r border-[var(--border-default)] bg-[var(--bg-secondary)]/80 backdrop-blur-xl" data-tauri-drag-region>
+    <aside className="flex flex-col h-screen w-[244px] shrink-0 border-r border-[var(--border-default)] bg-[var(--panel-rail-bg)]/80 backdrop-blur-xl" data-tauri-drag-region>
       {/* Top bar: aligned to the titlebar height (h-[30px] + border-b) so the
        *  line under the traffic lights matches the rest of the title bar.
        *  Buttons sit right to dodge the traffic lights — but in fullscreen the

@@ -34,6 +34,15 @@ use cwd::CwdTool;
 /// As the SDK closes its gaps, the Atlas-owned set shrinks (Grep/Glob/Write
 /// already handed off).
 pub fn atlas_coding() -> Vec<Box<dyn Tool>> {
+    atlas_coding_with(None)
+}
+
+/// Like [`atlas_coding`], but with the turn's cancel token injected into the
+/// tools that manage their own subprocesses (Bash), so Stop kills the process
+/// group instead of letting the command run to completion after cancel.
+pub fn atlas_coding_with(
+    cancel: Option<tokio_util::sync::CancellationToken>,
+) -> Vec<Box<dyn Tool>> {
     use cersei::tools as t;
     vec![
         // ── Atlas-owned basic tools (resolve cwd internally — no wrapper) ─
@@ -65,7 +74,7 @@ pub fn atlas_coding() -> Vec<Box<dyn Tool>> {
         // `List` stays Atlas-owned (no SDK equivalent) but is now also rg-free —
         // it walks via the `ignore` crate directly. cwd-aware internally.
         Box::new(list::ListTool),
-        Box::new(bash::BashTool),
+        Box::new(bash::BashTool { cancel }),
         // ── Retained SDK tools (not reimplemented) ───────────────────────
         Box::new(t::web_fetch::WebFetchTool),
         Box::new(t::web_search::WebSearchTool),

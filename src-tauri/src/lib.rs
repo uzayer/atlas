@@ -22,6 +22,12 @@ use parking_lot::Mutex;
 use state::{AppState, AppStateHandle};
 use tauri::Manager;
 
+// Compile-time guard: cersei-provider MUST resolve to the vendored, patched
+// crate ([patch.crates-io] → vendor/cersei-provider). The crates.io release
+// has no `utf8` module — if the patch stops applying, `cargo check` fails
+// here instead of shipping decoders that corrupt multi-byte streaming.
+const _CERSEI_UTF8_PATCH_GUARD: &str = cersei_provider::utf8::ATLAS_UTF8_PATCH;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install a tracing subscriber that prints `tracing::info!` etc. to
@@ -161,6 +167,13 @@ pub fn run() {
             // Silent background refresh of model pricing from models.dev — first
             // launch populates the cache; later launches update only on change.
             commands::models_pricing::refresh_in_background(&app.handle());
+            // Auto-update: clean up any staged update that already took effect,
+            // then run a non-blocking background check + a periodic re-check. The
+            // download/verify/stage happens silently; the user is only prompted
+            // once it's ready to restart. See `commands::updater`.
+            commands::updater::init_on_startup(&app.handle());
+            commands::updater::check_in_background(&app.handle());
+            commands::updater::spawn_periodic(&app.handle());
 
             // Background memory indexer (Step 4): a single owned Tokio task drains
             // a bounded queue and indexes each open project's corpus into its
@@ -202,6 +215,7 @@ pub fn run() {
         .manage(commands::memory_chat::MemoryChatState::new())
         .manage(commands::memory_sharing::MemorySharingState::new())
         .manage(commands::shared_memory::SharedMemoryStore::new())
+        .manage(commands::updater::UpdaterState::new())
         // Drop a window's per-window index + mention caches when it closes, so
         // its file watcher stops and memory is freed (these states are keyed by
         // webview label for multi-window project scoping).
@@ -387,6 +401,10 @@ pub fn run() {
             commands::telemetry::telemetry_config,
             commands::telemetry::telemetry_set_enabled,
             commands::telemetry::telemetry_capture,
+            commands::updater::update_check_now,
+            commands::updater::update_apply,
+            commands::updater::update_state,
+            commands::updater::update_ignore,
             commands::compose_prompt::compose_prompt,
             commands::cli::cli_status,
             commands::cli::cli_install_helper,
@@ -416,6 +434,7 @@ pub fn run() {
             commands::agents::agents_list_auth_methods,
             commands::agents::agents_run_auth_method,
             commands::agents::agents_authenticate,
+            commands::agents::agents_drop_session,
             commands::agents::codex_status,
             commands::cersei::cersei_list_sessions,
             commands::cersei::cersei_session_transcript,
@@ -475,6 +494,7 @@ pub fn run() {
             commands::memory_chat::memory_chat_model_status,
             commands::memory_chat::memory_chat_model_download,
             commands::memory_chat::memory_chat_model_load,
+            commands::memory_chat::memory_chat_backend,
             commands::memory_chat::memory_chat_send,
             commands::memory_chat::memory_chat_cancel,
             commands::memory_chat::memory_chat_retrieve,
@@ -517,6 +537,30 @@ pub fn run() {
             commands::skills::pack_projections,
             commands::skills::pack_components_list,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Atlas");
+        .build(tauri::generate_context!())
+        .expect("error while building Atlas")
+        .run(|app_handle, event| {
+            // Apply-on-quit: if the user chose "Later" for a staged update, swap
+            // it in on the way out so the next launch is the new version.
+            match event {
+                tauri::RunEvent::ExitRequested { .. } => {
+                    // Quit sweep (M7): stop native turns (cancel tokens kill
+                    // tool process groups) and tear down every ACP subprocess
+                    // (dropping each driver's shutdown channel closes the
+                    // child's stdin; the SDK reaps it). `process::exit` skips
+                    // Drop impls, so this must happen before the exit — with a
+                    // short bounded grace for the async teardown to run.
+                    if let Some(manager) =
+                        app_handle.try_state::<atlas_agents::AgentManager>()
+                    {
+                        manager.shutdown();
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
+                tauri::RunEvent::Exit => {
+                    commands::updater::apply_on_exit(app_handle);
+                }
+                _ => {}
+            }
+        });
 }

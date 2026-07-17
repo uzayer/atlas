@@ -14,17 +14,17 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, TextContent,
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
+    ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, TextContent,
 };
-use agent_client_protocol::{Agent, ConnectionTo};
-// `AcpAgent` (the subprocess + line-framed JSON-RPC transport) and the
-// `LineDirection` enum used by the debug callback live in the tokio-flavored
-// runtime crate, not the protocol's root. The driver in `src/driver.rs`
-// imports them the same way.
-use agent_client_protocol_tokio::{AcpAgent, LineDirection};
+// ACP 1.x folds the subprocess + line-framed JSON-RPC transport (`AcpAgent`) and
+// the debug-callback `LineDirection` enum into the protocol crate root (they
+// used to live in the separate `agent-client-protocol-tokio` helper). The driver
+// in `src/driver.rs` imports them the same way.
+use agent_client_protocol::{AcpAgent, Agent, ConnectionTo, LineDirection};
 
 const DEFAULT_COMMAND: &str = "npx -y @agentclientprotocol/claude-agent-acp";
 const DEFAULT_PROMPT: &str = "Say hello in exactly one short sentence.";

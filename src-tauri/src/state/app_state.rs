@@ -183,10 +183,39 @@ pub struct AppSettings {
     /// `memory_chat::chat_model_dir` (RAG chat generation + code-index summaries).
     #[serde(default = "default_llm_model")]
     pub llm_model_id: String,
+    /// Code-editor color theme id (see `src/features/editor/themes`). Drives the
+    /// CodeMirror editor, the diff viewer and the source-control diff views on
+    /// the frontend; persisted so it survives relaunch.
+    #[serde(default = "default_code_editor_theme")]
+    pub code_editor_theme: String,
+    /// Atlas interface-theme id (see `src/features/theme/themes`). Swaps the
+    /// whole dark UI palette on the frontend — independent of the editor syntax
+    /// theme; persisted so it survives relaunch.
+    #[serde(default = "default_atlas_theme")]
+    pub atlas_theme: String,
+    /// Auto-update master switch. When ON (default), every startup runs a
+    /// non-blocking check against PostHog remote config and prompts if a newer
+    /// version is available. See `crate::commands::updater`.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// A version the user chose to "Ignore" in the update prompt — the startup
+    /// check won't re-prompt for exactly this version. `None` = nothing ignored.
+    #[serde(default)]
+    pub updater_ignored_version: Option<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Default code-editor theme — the historical monochrome "atlas" look.
+pub fn default_code_editor_theme() -> String {
+    "atlas".to_string()
+}
+
+/// Default Atlas interface theme — the historical AMOLED-black look.
+pub fn default_atlas_theme() -> String {
+    "atlas-black".to_string()
 }
 
 /// Default embedding model — the historical `all-MiniLM-L6-v2` dir, so existing
@@ -214,6 +243,10 @@ impl Default for AppSettings {
             share_telemetry: true,
             embedding_model_id: default_embedding_model(),
             llm_model_id: default_llm_model(),
+            code_editor_theme: default_code_editor_theme(),
+            atlas_theme: default_atlas_theme(),
+            auto_update: true,
+            updater_ignored_version: None,
         }
     }
 }

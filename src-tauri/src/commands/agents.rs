@@ -15,8 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atlas_agents::{
-    AgentId, AgentInfo, AgentManager, AuthMethodWire, DeltaSink, PermissionDecision, PluginSpec,
-    SessionDelta, SessionDeltaEnvelope, SessionId, SessionKey, SessionSnapshot,
+    AgentId, AgentInfo, AgentManager, AuthMethodWire, DeltaSink, OutboundMiddleware,
+    OutboundPipeline, PermissionDecision, PluginSpec, SessionDelta, SessionDeltaEnvelope, SessionId,
+    SessionKey, SessionSnapshot,
 };
 
 use super::memory_chat::MemoryChatState;
@@ -33,63 +34,101 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as AsyncCommand;
 use uuid::Uuid;
 
-/// Bridge atlas-agents deltas to a single Tauri window event channel.
+/// Bridge atlas-agents deltas to the Tauri host's outbound concerns.
+///
+/// The sink body is decomposed into an ordered [`OutboundPipeline`] of small,
+/// independently-testable middleware (window broadcast → telemetry → memory
+/// ingest) instead of one monolithic `emit`. The atlas-agents `Emitter` also
+/// publishes every delta to the global event bus (`manager.subscribe()`) before
+/// reaching this sink, so a cloud streamer can tap the same stream without
+/// touching any of this.
 pub struct TauriDeltaSink {
-    app: AppHandle,
+    pipeline: OutboundPipeline<SessionDeltaEnvelope>,
 }
 
 impl TauriDeltaSink {
     pub fn new(app: AppHandle) -> Self {
-        Self { app }
+        let pipeline = OutboundPipeline::new()
+            // Broadcast first so the UI updates before any heavier work.
+            .with(Arc::new(BroadcastMiddleware { app: app.clone() }))
+            .with(Arc::new(TelemetryMiddleware { app: app.clone() }))
+            .with(Arc::new(MemoryIngestMiddleware { app }));
+        Self { pipeline }
     }
 }
 
 impl DeltaSink for TauriDeltaSink {
     fn emit(&self, envelope: SessionDeltaEnvelope) {
-        if let Err(e) = self.app.emit("atlas:agents", &envelope) {
+        self.pipeline.run(&envelope);
+    }
+}
+
+/// Fan every delta to the single `atlas:agents` window event channel.
+struct BroadcastMiddleware {
+    app: AppHandle,
+}
+
+impl OutboundMiddleware<SessionDeltaEnvelope> for BroadcastMiddleware {
+    fn on_event(&self, envelope: &SessionDeltaEnvelope) {
+        if let Err(e) = self.app.emit("atlas:agents", envelope) {
             tracing::error!(target: "atlas_agents::emit", "failed to emit atlas:agents event: {e}");
         }
+    }
+}
 
-        // Opt-in telemetry (metadata only — no message text, no paths). The
-        // sink is the one place that sees every agent's turn end, so usage /
-        // finish / failure are captured here. No-op unless the user opted in.
-        {
-            let tel = self
-                .app
-                .state::<Arc<crate::telemetry::TelemetryClient>>();
-            match &envelope.delta {
-                SessionDelta::UsageUpdated { usage } => {
-                    // Cumulative numeric counters only; stamped onto the next
-                    // `agent_turn_finished` for this session.
-                    tel.note_usage(
-                        &envelope.session_id,
-                        serde_json::to_value(usage).unwrap_or(serde_json::Value::Null),
-                    );
-                }
-                SessionDelta::TurnFinished { stop_reason, .. } => {
-                    let usage = tel.take_usage(&envelope.session_id);
-                    tel.capture(
-                        "agent_turn_finished",
-                        serde_json::json!({
-                            "agent_kind": envelope.agent_id.0.to_string(),
-                            "stop_reason": stop_reason,
-                            "usage": usage,
-                        }),
-                    );
-                }
-                SessionDelta::TurnFailed { error, .. } => {
-                    tel.capture(
-                        "agent_turn_failed",
-                        serde_json::json!({
-                            "agent_kind": envelope.agent_id.0.to_string(),
-                            "error_summary": crate::telemetry::redact_message(error, 160),
-                        }),
-                    );
-                }
-                _ => {}
+/// Opt-in telemetry (metadata only — no message text, no paths). The sink is
+/// the one place that sees every agent's turn end, so usage / finish / failure
+/// are captured here. No-op unless the user opted in.
+struct TelemetryMiddleware {
+    app: AppHandle,
+}
+
+impl OutboundMiddleware<SessionDeltaEnvelope> for TelemetryMiddleware {
+    fn on_event(&self, envelope: &SessionDeltaEnvelope) {
+        let tel = self.app.state::<Arc<crate::telemetry::TelemetryClient>>();
+        match &envelope.delta {
+            SessionDelta::UsageUpdated { usage } => {
+                // Cumulative numeric counters only; stamped onto the next
+                // `agent_turn_finished` for this session.
+                tel.note_usage(
+                    &envelope.session_id,
+                    serde_json::to_value(usage).unwrap_or(serde_json::Value::Null),
+                );
             }
+            SessionDelta::TurnFinished { stop_reason, .. } => {
+                let usage = tel.take_usage(&envelope.session_id);
+                tel.capture(
+                    "agent_turn_finished",
+                    serde_json::json!({
+                        "agent_kind": envelope.agent_id.0.to_string(),
+                        "stop_reason": stop_reason,
+                        "usage": usage,
+                    }),
+                );
+            }
+            SessionDelta::TurnFailed { error, .. } => {
+                tel.capture(
+                    "agent_turn_failed",
+                    serde_json::json!({
+                        "agent_kind": envelope.agent_id.0.to_string(),
+                        "error_summary": crate::telemetry::redact_message(error, 160),
+                    }),
+                );
+            }
+            _ => {}
         }
+    }
+}
 
+/// Shared cross-agent memory ingest + finished-turn extraction/reindex. All
+/// disk work is offloaded off the emit thread so the streaming hot path never
+/// blocks.
+struct MemoryIngestMiddleware {
+    app: AppHandle,
+}
+
+impl OutboundMiddleware<SessionDeltaEnvelope> for MemoryIngestMiddleware {
+    fn on_event(&self, envelope: &SessionDeltaEnvelope) {
         // Resolve this session's project cwd once via the in-memory session map
         // (cheap; no disk I/O). A delta before the session's first `agents_send`
         // has no meta yet → every memory action below is a silent no-op.
@@ -109,6 +148,7 @@ impl DeltaSink for TauriDeltaSink {
         // background `MemoryIndexer` (Step 4), never synchronously on a delta.
         {
             let app = self.app.clone();
+            let envelope = envelope.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 let store = app.state::<SharedMemoryStore>();
                 super::memory_delta::ingest(&envelope, store.inner());
@@ -320,10 +360,11 @@ pub async fn agents_send(
         serde_json::json!({ "agent_kind": key.agent_id.0.to_string() }),
     );
 
-    // Resolve the project cwd. Unknown session → just send as-is (don't fail
-    // the turn on a snapshot miss).
+    // Resolve the project cwd. Unknown session → fail with the SAME error
+    // shape `manager.send` produces, without attempting a send that would
+    // skip memory injection (one condition, one behavior — L5).
     let Ok(snapshot) = manager.snapshot(&key) else {
-        return manager.send(&key, text).map_err(|e| e.to_string());
+        return Err(atlas_agents::Error::UnknownSession.to_string());
     };
     let cwd = snapshot.cwd;
 
@@ -454,6 +495,18 @@ async fn build_injection(
 #[tauri::command]
 pub fn agents_cancel(key: SessionKey, manager: State<'_, AgentManager>) -> Result<(), String> {
     manager.cancel(&key).map_err(|e| e.to_string())
+}
+
+/// Tear down a session's backend state (actor + driver-side guard) when its
+/// tab closes or the project switches. Idempotent; UI state is the frontend's.
+#[tauri::command]
+pub fn agents_drop_session(
+    manager: tauri::State<'_, AgentManager>,
+    agent_id: AgentId,
+    session_id: String,
+) -> Result<(), String> {
+    let key = SessionKey { agent_id, session_id };
+    manager.drop_session(&key).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

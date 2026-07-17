@@ -15,7 +15,7 @@ import {
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import {
   listenAgents,
-  resetDefaultAgent,
+  resetAgentByAgentId,
 } from "@/features/chat/lib/agents-api";
 import type { PendingPermission } from "@/types/acp";
 import type { AgentDelta } from "@/types/agents";
@@ -52,7 +52,17 @@ import { logEvent } from "@/features/log/lib/log";
 import { warmMarkdownWorker } from "@/lib/markdown-cache";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
 import { NotificationPanel } from "@/features/notifications/components/notification-panel";
-import { Toaster } from "sonner";
+import { UpdateAvailableModal } from "@/features/updater/components/update-available-modal";
+import { useUpdaterStore } from "@/features/updater/stores/updater-store";
+import {
+  updater,
+  listenUpdateProgress,
+  listenUpdateReady,
+  listenUpdateApplied,
+  listenUpdateError,
+  listenUpdateChecking,
+} from "@/features/updater/lib/updater-api";
+import { Toaster, toast } from "sonner";
 import { clampScale, SCALE_STEP, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
 
 // Interface-zoom helpers (⌘+/⌘-/⌘0). They read + write the persisted
@@ -124,6 +134,36 @@ export function App() {
     });
     return () => {
       void unlisten.then((off) => off());
+    };
+  }, []);
+
+  // Auto-update: route the Rust updater events into the updater store, which
+  // drives the titlebar arc/badge and the <UpdateAvailableModal />. The
+  // check/download/verify/stage all run in Rust; here we just reflect the phase.
+  // See src/features/updater + commands::updater.
+  useEffect(() => {
+    const a = useUpdaterStore.getState().actions;
+    const offs: Array<Promise<() => void>> = [
+      listenUpdateProgress((e) => a.setDownloading(e.version, e.downloaded, e.total, e.phase)),
+      listenUpdateReady((e) => a.setReady(e.version)),
+      listenUpdateApplied((e) => {
+        a.reset();
+        toast.success(`Updated to Atlas ${e.version}.`);
+      }),
+      listenUpdateError((e) => a.setError(e.message)),
+      listenUpdateChecking((e) => a.setChecking(e.checking)),
+    ];
+    // Hydrate from the current backend state (e.g. staged before this mount).
+    // Show the titlebar badge but don't pop the modal on launch — the live
+    // `atlas:update-ready` event opens it; hydration is badge-only.
+    void updater.state().then((s) => {
+      if (s.phase === "ready" && s.version) {
+        a.setReady(s.version);
+        a.dismissModal();
+      }
+    });
+    return () => {
+      for (const p of offs) void p.then((off) => off());
     };
   }, []);
 
@@ -677,13 +717,20 @@ export function App() {
           }
           flush();
           actions.clearPermissionsForAgent(env.agent_id);
-          resetDefaultAgent();
+          // Reset the spawn cache for the plugin that actually died — the old
+          // resetDefaultAgent() only ever cleared claude-code-ts, so a crashed
+          // Codex adapter stayed cached-dead until app restart (H4).
+          resetAgentByAgentId(env.agent_id);
+          // Let the reducer flag the affected session (drives the Restart
+          // affordance + rebind-on-next-send).
+          bufferDelta(env);
+          schedule();
           logEvent({
             source: "atlas",
             kind: "agent-disconnected",
-            summary: "Agent process disconnected; default agent handle reset",
+            summary: "Agent process disconnected; its spawn cache was reset",
             status: "failure",
-            payload: { agentId: env.agent_id },
+            payload: { agentId: env.agent_id, reason: env.reason },
           });
           return;
         case "turn_finished":
@@ -1173,6 +1220,7 @@ export function App() {
       <FilePicker open={filePickerOpen} onOpenChange={setFilePickerOpen} />
       <HintOverlay />
       <NotificationPanel />
+      <UpdateAvailableModal />
       <BrowserOverlayWatcher />
       <Toaster
         position="bottom-right"

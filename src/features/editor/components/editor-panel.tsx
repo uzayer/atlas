@@ -1,16 +1,17 @@
 import { useEffect, useRef, useCallback } from "react";
 import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from "@codemirror/view";
-import { EditorState, type Extension } from "@codemirror/state";
+import { EditorState, Compartment, Transaction, type Extension } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, HighlightStyle } from "@codemirror/language";
+import { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
-import { tags } from "@lezer/highlight";
+import { getEditorTheme } from "../themes/themes";
+import { buildEditorChromeTheme, buildHighlightStyle } from "../themes/build-cm-theme";
 import { useEditorStore } from "../stores/editor-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, RefreshCw } from "lucide-react";
 import { logEvent } from "@/features/log/lib/log";
 import { diffGutter, applyDiffStatus } from "../lib/diff-gutter";
 import { gitDiffLineStatus } from "@/features/git/lib/git-diff-api";
@@ -18,93 +19,15 @@ import { gitDiffLineStatus } from "@/features/git/lib/git-diff-api";
 const TOOLBAR_HEIGHT = 32;
 const DIRTY_CHECK_DEBOUNCE = 300; // ms — only check dirty state, not sync content
 
-// Atlas dark theme — editor chrome
-const atlasTheme = EditorView.theme(
-  {
-    "&": {
-      backgroundColor: "#000000",
-      color: "#b3b3b3",
-      height: "100%",
-    },
-    ".cm-content": {
-      fontFamily: "JetBrains Mono, SF Mono, Fira Code, monospace",
-      fontSize: "14px",
-      lineHeight: "18px",
-      caretColor: "#b3b3b3",
-      padding: "4px 0",
-    },
-    ".cm-cursor, .cm-dropCursor": {
-      borderLeftColor: "#b3b3b3",
-      borderLeftWidth: "2px",
-    },
-    ".cm-gutters": {
-      backgroundColor: "#000000",
-      color: "#222222",
-      border: "none",
-      minWidth: "40px",
-    },
-    ".cm-activeLineGutter": {
-      color: "#777777",
-      backgroundColor: "transparent",
-    },
-    ".cm-activeLine": {
-      backgroundColor: "#ffffff0a",
-    },
-    ".cm-selectionBackground, ::selection": {
-      backgroundColor: "#303030 !important",
-    },
-    ".cm-focused .cm-selectionBackground": {
-      backgroundColor: "#303030 !important",
-    },
-    ".cm-matchingBracket": {
-      backgroundColor: "#2d2d2d",
-      outline: "1px solid #3d3d3d",
-    },
-    ".cm-foldGutter .cm-gutterElement": {
-      color: "#333",
-      fontSize: "12px",
-    },
-    ".cm-foldPlaceholder": {
-      backgroundColor: "#1a1a1a",
-      border: "1px solid #2a2a2a",
-      color: "#555",
-    },
-    "&.cm-focused": {
-      outline: "none",
-    },
-    ".cm-scroller": {
-      overflow: "auto",
-      scrollbarWidth: "none",
-      "&::-webkit-scrollbar": { display: "none" },
-    },
-    ".cm-line": {
-      padding: "0 4px",
-    },
-  },
-  { dark: true }
-);
+// Editor theme — live-swappable via a Compartment. The concrete colors come
+// from the theme registry (src/features/editor/themes), keyed by the persisted
+// `settings.codeEditorTheme`.
+const themeCompartment = new Compartment();
 
-// Atlas syntax highlighting
-const atlasHighlightStyle = HighlightStyle.define([
-  { tag: tags.comment, color: "#555555", fontStyle: "italic" },
-  { tag: tags.keyword, color: "#585858", fontStyle: "italic" },
-  { tag: [tags.string, tags.special(tags.string)], color: "#aaaaaa" },
-  { tag: tags.number, color: "#aaaaaa" },
-  { tag: [tags.typeName, tags.className], color: "#cccccc" },
-  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: "#FFFF00" },
-  { tag: tags.variableName, color: "#ffffff" },
-  { tag: tags.operator, color: "#B3B3B3" },
-  { tag: tags.punctuation, color: "#B3B3B3" },
-  { tag: tags.tagName, color: "#cccccc" },
-  { tag: tags.attributeName, color: "#777777" },
-  { tag: [tags.constant(tags.variableName), tags.standard(tags.variableName)], color: "#aaaaaa" },
-  { tag: tags.regexp, color: "#999999" },
-  { tag: tags.escape, color: "#999999" },
-  { tag: tags.definition(tags.variableName), color: "#ffffff" },
-  { tag: tags.propertyName, color: "#b3b3b3" },
-  { tag: tags.bool, color: "#aaaaaa" },
-  { tag: tags.null, color: "#aaaaaa" },
-]);
+function themeExtensions(themeId: string | undefined | null): Extension {
+  const theme = getEditorTheme(themeId);
+  return [buildEditorChromeTheme(theme), syntaxHighlighting(buildHighlightStyle(theme))];
+}
 
 // Language extension loader — lazy imports for tree-shaking
 async function getLanguageExtension(lang: string): Promise<Extension> {
@@ -180,7 +103,8 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   const path = filePath ?? "";
   const isUntitled = path.startsWith("untitled:");
   const buffer = useEditorStore((s) => s.buffers[path]);
-  const { openBuffer, setDirty, markSaved } = useEditorStore.use.actions();
+  const { openBuffer, setDirty, markSaved, reloadBuffer, markExternallyChanged } =
+    useEditorStore.use.actions();
   const projectPath = useProjectStore.use.currentProject()?.path ?? "";
   const layoutActions = useLayoutStore.use.actions();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -199,9 +123,15 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       openBuffer(path, "");
       return;
     }
-    invoke<string>("read_file_content", { path })
-      .then((content) => openBuffer(path, content))
-      .catch(() => openBuffer(path, `// Failed to read: ${path}`));
+    void (async () => {
+      try {
+        const content = await invoke<string>("read_file_content", { path });
+        const mtime = await invoke<number>("file_mtime_ms", { path }).catch(() => 0);
+        openBuffer(path, content, mtime);
+      } catch {
+        openBuffer(path, `// Failed to read: ${path}`);
+      }
+    })();
   }, [path, buffer, openBuffer, isUntitled]);
 
   // Save: read content directly from CodeMirror, not from store.
@@ -223,9 +153,10 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
         if (!chosen) return; // user cancelled
         const newPath = chosen as string;
         await invoke("write_file_content", { path: newPath, content });
+        const mtime = await invoke<number>("file_mtime_ms", { path: newPath }).catch(() => 0);
         // Carry the freshly-saved content over to the new buffer key.
-        openBuffer(newPath, content);
-        markSaved(newPath, content);
+        openBuffer(newPath, content, mtime);
+        markSaved(newPath, content, mtime);
         // Swap the tab in place: close untitled, open real-path tab
         // with the same activation behavior addTab gives.
         layoutActions.closeTab(tabId);
@@ -250,7 +181,8 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
     }
     try {
       await invoke("write_file_content", { path, content });
-      markSaved(path, content);
+      const mtime = await invoke<number>("file_mtime_ms", { path }).catch(() => 0);
+      markSaved(path, content, mtime);
       logEvent({
         source: "editor",
         kind: "save",
@@ -292,6 +224,70 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   }, [path, projectPath, isUntitled]);
   refreshGutterRef.current = refreshDiffGutter;
 
+  // Re-seed the live CodeMirror view from a string without polluting undo
+  // history (external reload, not a user edit).
+  const replaceViewDoc = useCallback((content: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (view.state.doc.toString() === content) return;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: content },
+      annotations: Transaction.addToHistory.of(false),
+    });
+  }, []);
+
+  // Reconcile this buffer with disk when the file may have changed externally
+  // (agent/CLI edits). mtime-gated so unchanged files cost one cheap IPC. When
+  // the buffer is clean we reload silently; when it has unsaved edits we only
+  // flag it (`externallyChanged`) so the user can reload via the toolbar.
+  const revalidate = useCallback(async () => {
+    if (!path || isUntitled) return;
+    const buf = useEditorStore.getState().buffers[path];
+    if (!buf) return;
+    const mtime = await invoke<number>("file_mtime_ms", { path }).catch(() => 0);
+    if (!mtime || mtime <= buf.diskMtimeMs) return;
+    let content: string;
+    try {
+      content = await invoke<string>("read_file_content", { path });
+    } catch {
+      return;
+    }
+    // Re-read the buffer: it may have changed (dirty/gone) during the awaits.
+    const cur = useEditorStore.getState().buffers[path];
+    if (!cur) return;
+    const liveDoc = viewRef.current?.state.doc.toString() ?? cur.originalContent;
+    if (content === liveDoc) {
+      // Content matches what's shown (e.g. our own save) — just record mtime.
+      reloadBuffer(path, content, mtime);
+      return;
+    }
+    if (cur.dirty) {
+      markExternallyChanged(path, mtime);
+      return;
+    }
+    reloadBuffer(path, content, mtime);
+    replaceViewDoc(content);
+    refreshDiffGutter();
+  }, [path, isUntitled, reloadBuffer, markExternallyChanged, replaceViewDoc, refreshDiffGutter]);
+  const revalidateRef = useRef(revalidate);
+  revalidateRef.current = revalidate;
+
+  // User-initiated reload from the "changed on disk" toolbar affordance —
+  // discards unsaved edits (the user explicitly chose disk).
+  const forceReload = useCallback(async () => {
+    if (!path || isUntitled) return;
+    let content: string;
+    try {
+      content = await invoke<string>("read_file_content", { path });
+    } catch {
+      return;
+    }
+    const mtime = await invoke<number>("file_mtime_ms", { path }).catch(() => 0);
+    reloadBuffer(path, content, mtime);
+    replaceViewDoc(content);
+    refreshDiffGutter();
+  }, [path, isUntitled, reloadBuffer, replaceViewDoc, refreshDiffGutter]);
+
   // Repaint the gutter when the working tree changes elsewhere (commits,
   // stage/unstage, external edits) — same event the git store listens to.
   useEffect(() => {
@@ -300,6 +296,24 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       un.then((u) => u());
     };
   }, [refreshDiffGutter]);
+
+  // Reconcile with disk on the signals that indicate an external edit:
+  //  • buffer mount (fixes close-then-reopen showing a stale cached buffer),
+  //  • the recursive working-tree watcher (`atlas:explorer:changed`) for live
+  //    updates while the tab is open,
+  //  • native window focus regain (`atlas:window-active`) — the reported flow
+  //    of editing in the Claude Code CLI and switching back to Atlas.
+  useEffect(() => {
+    if (!buffer || isUntitled) return;
+    void revalidateRef.current();
+    const un = listen("atlas:explorer:changed", () => void revalidateRef.current());
+    const onActive = () => void revalidateRef.current();
+    window.addEventListener("atlas:window-active", onActive);
+    return () => {
+      un.then((u) => u());
+      window.removeEventListener("atlas:window-active", onActive);
+    };
+  }, [path, !!buffer, isUntitled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-paint when inputs settle (e.g. the project path resolves AFTER the view
   // was created, or the buffer swaps). The in-view-creation call covers the
@@ -312,7 +326,10 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   useEffect(() => {
     if (!buffer || !containerRef.current) return;
 
-    const originalContent = buffer.originalContent;
+    // Seed from the freshest store content — a disk revalidation may have
+    // reloaded the buffer between mount and this (async) view creation.
+    const originalContent =
+      useEditorStore.getState().buffers[path]?.originalContent ?? buffer.originalContent;
     let cancelled = false;
 
     (async () => {
@@ -322,8 +339,7 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       const view = new EditorView({
         doc: originalContent,
         extensions: [
-          atlasTheme,
-          syntaxHighlighting(atlasHighlightStyle),
+          themeCompartment.of(themeExtensions(useProjectStore.getState().settings.codeEditorTheme)),
           langExt,
           lineNumbers(),
           diffGutter(),
@@ -363,6 +379,10 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       }
 
       viewRef.current = view;
+      // A revalidation that landed while the view was being built updates only
+      // the store; sync the view to it now (idempotent — no-op when equal).
+      const latest = useEditorStore.getState().buffers[path]?.originalContent;
+      if (latest !== undefined) replaceViewDoc(latest);
       refreshDiffGutter();
     })();
 
@@ -375,6 +395,15 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       }
     };
   }, [path, !!buffer]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live-reskin the editor when the persisted theme changes — reconfigure the
+  // theme compartment in place so the buffer/undo history survive.
+  const codeEditorTheme = useProjectStore.use.settings().codeEditorTheme;
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: themeCompartment.reconfigure(themeExtensions(codeEditorTheme)) });
+  }, [codeEditorTheme]);
 
   if (!buffer) {
     return (
@@ -398,6 +427,16 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
         <Breadcrumbs filePath={path} projectPath={projectPath} />
         {buffer.dirty && (
           <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0 ml-2" />
+        )}
+        {buffer.externallyChanged && (
+          <button
+            type="button"
+            onClick={() => void forceReload()}
+            title="This file changed on disk. Reload discards your unsaved edits."
+            className="ml-auto inline-flex items-center gap-1 h-[20px] px-2 rounded-full border border-border-default bg-bg-elevated text-[10px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors shrink-0"
+          >
+            <RefreshCw size={10} /> Disk changed · Reload
+          </button>
         )}
       </div>
 

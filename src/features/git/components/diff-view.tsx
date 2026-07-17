@@ -81,7 +81,7 @@ export function DiffView({
     getScrollElement: () => scrollRef.current,
     estimateSize: (i) => {
       const k = rows[i].kind;
-      if (k === "file-header") return 30;
+      if (k === "file-header") return 42;
       if (k === "file-footer") return 8;
       return 20;
     },
@@ -152,21 +152,28 @@ export function DiffView({
   ) : null;
 
   return (
-    <div className={cn("flex flex-col min-h-0", className)}>
+    // `min-w-0` is load-bearing: the virtualized rows below use `width:
+    // max-content` so long lines can scroll horizontally. Without it, that
+    // intrinsic width propagates up the flex chain and the whole panel grows
+    // past its bounds (the diff bg bleeds outside) instead of scrolling.
+    <div className={cn("flex flex-col min-h-0 min-w-0", className)}>
       {header}
       {files.length === 0 ? (
         <div className="px-3 py-8 text-center text-[11px] text-text-tertiary">{emptyLabel}</div>
       ) : (
-        <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto hide-scrollbar px-3 py-2">
+        <div ref={scrollRef} className="flex-1 min-h-0 min-w-0 overflow-auto hide-scrollbar px-3 py-2">
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((vr) => {
               const row = rows[vr.index];
+              // No fixed `height` — rows are MEASURED (`measureElement` below),
+              // so a file-header/content line that renders taller than its
+              // estimate never overlaps the next row (the source-control diff
+              // overlap bug). `estimateSize` is just the initial guess.
               const base = {
                 position: "absolute" as const,
                 top: 0,
                 transform: `translateY(${vr.start}px)`,
                 width: "100%",
-                height: vr.size,
               };
 
               if (row.kind === "file-header") {
@@ -175,8 +182,10 @@ export function DiffView({
                 return (
                   <div
                     key={vr.index}
+                    data-index={vr.index}
+                    ref={virtualizer.measureElement}
                     style={base}
-                    className="flex items-center gap-1.5 px-2 rounded-t-md border border-border-default bg-[#0F0F0F] hover:bg-[#141414] cursor-pointer group"
+                    className="flex items-center gap-1.5 px-2 py-1.5 rounded-t-md border border-border-default bg-[#0F0F0F] hover:bg-[#141414] cursor-pointer group"
                     onClick={() => toggleFile(file.path)}
                   >
                     <ChevronRight
@@ -225,8 +234,11 @@ export function DiffView({
                 return (
                   <div
                     key={vr.index}
-                    style={base}
-                    className="border-x border-b border-border-default rounded-b-md bg-[#0a0a0a]"
+                    data-index={vr.index}
+                    ref={virtualizer.measureElement}
+                    // Empty spacer — keep an explicit height so it measures 8px.
+                    style={{ ...base, height: 8, backgroundColor: "var(--diff-context-bg, #0a0a0a)" }}
+                    className="border-x border-b border-border-default rounded-b-md"
                   />
                 );
               }
@@ -235,16 +247,23 @@ export function DiffView({
               return (
                 <div
                   key={vr.index}
-                  // `max-content` + `minWidth: 100%` lets long lines grow past the
-                  // viewport (one horizontal scrollbar on the outer container)
-                  // while short lines still fill the width.
-                  style={{ ...base, width: "max-content", minWidth: "100%" }}
-                  className={cn(
-                    "flex text-[11px] font-mono leading-[20px] select-text border-x border-border-default",
-                    line.type === "add" && "bg-[#0d2211]",
-                    line.type === "remove" && "bg-[#220d0d]",
-                    line.type === "context" && "bg-[#0a0a0a]",
-                  )}
+                  data-index={vr.index}
+                  ref={virtualizer.measureElement}
+                  // Clip long lines to the viewport width (no horizontal scroll,
+                  // no row overflow/overlap). Users open the full diff view to
+                  // read a truncated line in its entirety.
+                  style={{
+                    ...base,
+                    width: "100%",
+                    overflow: "hidden",
+                    backgroundColor:
+                      line.type === "add"
+                        ? "var(--diff-add-line-bg, #0d2211)"
+                        : line.type === "remove"
+                          ? "var(--diff-remove-line-bg, #220d0d)"
+                          : "var(--diff-context-bg, #0a0a0a)",
+                  }}
+                  className="flex text-[11px] font-mono leading-[20px] select-text border-x border-border-default"
                 >
                   <span
                     className={cn(
@@ -280,13 +299,13 @@ function DiffCode({ content, language }: { content: string; language: string }) 
   const tokens = highlightDiffLine(language, content);
   if (!tokens) {
     return (
-      <span className="flex-1 whitespace-pre pr-3 text-text-secondary">
+      <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-pre pr-3 text-text-secondary">
         {content}
       </span>
     );
   }
   return (
-    <span className="diff-syntax flex-1 whitespace-pre pr-3 text-text-secondary">
+    <span className="diff-syntax flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-pre pr-3 text-text-secondary">
       {tokens.map((t, i) => (
         <span key={i} className={t.cls ?? undefined}>
           {t.text}

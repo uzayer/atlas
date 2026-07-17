@@ -56,6 +56,10 @@ export const agents = {
   send: (key: SessionKey, text: string) =>
     invoke<void>("agents_send", { key, text }),
   cancel: (key: SessionKey) => invoke<void>("agents_cancel", { key }),
+  /** Tear down a session's backend state (actor + driver guard) on tab close
+   *  or project switch. Idempotent; fire-and-forget from UI paths. */
+  dropSession: (agentId: AgentId, sessionId: AcpSessionId) =>
+    invoke<void>("agents_drop_session", { agentId, sessionId }),
 
   setMode: (key: SessionKey, modeId: string) =>
     invoke<void>("agents_set_mode", { key, modeId }),
@@ -149,6 +153,20 @@ export function getAgentSync(pluginId: string): AgentInfo | null {
 }
 
 /** Drop a cached agent (or all) so the next ensure re-spawns. */
+/** Reset the spawn cache for whichever plugin owns `agentId` — used when THAT
+ *  agent's process dies, so only the dead agent respawns (the old code reset
+ *  the default plugin regardless of which agent crashed, leaving a crashed
+ *  Codex adapter cached-dead until app restart — H4). */
+export function resetAgentByAgentId(agentId: string): void {
+  for (const [pluginId, info] of cachedAgents) {
+    if (info.agent_id === agentId) {
+      cachedAgents.delete(pluginId);
+      agentPromises.delete(pluginId);
+      return;
+    }
+  }
+}
+
 export function resetAgent(pluginId?: string): void {
   if (pluginId) {
     agentPromises.delete(pluginId);

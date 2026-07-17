@@ -100,7 +100,7 @@ async fn scripted_read_edit_grep_bash_task() {
     }
 
     // 4. BASH run in the project root (a real command, deterministic output).
-    let r = run(&BashTool, dir, json!({"command": "echo built-ok"})).await;
+    let r = run(&BashTool::default(), dir, json!({"command": "echo built-ok"})).await;
     if !r.is_error && r.content.contains("built-ok") {
         score += 1;
     } else {

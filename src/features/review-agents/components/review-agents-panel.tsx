@@ -182,7 +182,7 @@ export function ReviewAgentsPanel() {
   }
 
   return (
-    <div className="atlas-vibrant-panel h-full flex flex-col bg-[#0D0E0D] text-[11px]">
+    <div className="atlas-vibrant-panel h-full flex flex-col bg-[var(--panel-bg)] text-[11px]">
       {/* Controls */}
       <div className="border-b border-border-default p-2 flex flex-col gap-2 shrink-0">
         <div className="flex gap-0.5">
@@ -370,7 +370,7 @@ function RecordView({
 }) {
   return (
     <div>
-      <div className="flex items-center gap-2 px-2 py-1.5 border-b border-border-default sticky top-0 bg-[#0D0E0D]/90 backdrop-blur-sm z-10">
+      <div className="flex items-center gap-2 px-2 py-1.5 border-b border-border-default sticky top-0 bg-[var(--panel-bg)]/90 backdrop-blur-sm z-10">
         {onBack && (
           <button
             onClick={onBack}

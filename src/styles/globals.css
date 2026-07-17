@@ -294,6 +294,15 @@
     color: var(--text-primary);
   }
 
+  /* The terminal renders command output/input on AMOLED black where the 6%
+     app-wide selection is nearly invisible. Scope a clearly-visible selection
+     to the block terminal (React blocks + command input), matching the xterm
+     surface's translucent-blue selection. */
+  [data-block-terminal] ::selection {
+    background: rgba(97, 175, 239, 0.35);
+    color: var(--text-primary);
+  }
+
   img, a {
     -webkit-user-drag: none;
   }
@@ -348,8 +357,8 @@
      always win when the runtime fails, and harmlessly co-exist when it
      succeeds. Match colors with `atlasTheme` in editor-panel.tsx. */
   .cm-editor {
-    background-color: #000;
-    color: #b3b3b3;
+    background-color: var(--cm-bg, #000);
+    color: var(--cm-fg, #b3b3b3);
     /* `font-size` + `line-height` live on the editor so both .cm-content
        and .cm-gutters measure the SAME row height — CodeMirror reads the
        computed line-height off the content via ResizeObserver to position
@@ -361,39 +370,39 @@
     line-height: 18px;
   }
   .cm-content {
-    color: #b3b3b3;
-    caret-color: #b3b3b3;
+    color: var(--cm-fg, #b3b3b3);
+    caret-color: var(--cm-caret, #b3b3b3);
   }
   .cm-gutters {
-    background-color: #000;
-    color: #222;
+    background-color: var(--cm-gutter-bg, #000);
+    color: var(--cm-gutter-fg, #222);
     border: none;
   }
   .cm-activeLineGutter {
-    color: #777;
+    color: var(--cm-active-gutter-fg, #777);
     background-color: transparent;
   }
   .cm-activeLine {
-    background-color: rgba(255, 255, 255, 0.04);
+    background-color: var(--cm-active-line-bg, rgba(255, 255, 255, 0.04));
   }
   .cm-selectionBackground,
   .cm-focused .cm-selectionBackground,
   .cm-content ::selection {
-    background-color: #303030 !important;
+    background-color: var(--cm-selection-bg, #303030) !important;
   }
   .cm-cursor,
   .cm-dropCursor {
-    border-left-color: #b3b3b3;
+    border-left-color: var(--cm-caret, #b3b3b3);
     border-left-width: 2px;
   }
   .cm-matchingBracket {
-    background-color: #2d2d2d;
-    outline: 1px solid #3d3d3d;
+    background-color: var(--cm-bracket-bg, #2d2d2d);
+    outline: 1px solid var(--cm-bracket-outline, #3d3d3d);
   }
   .cm-foldPlaceholder {
-    background-color: #1a1a1a;
-    border: 1px solid #2a2a2a;
-    color: #555;
+    background-color: var(--cm-fold-bg, #1a1a1a);
+    border: 1px solid var(--cm-fold-border, #2a2a2a);
+    color: var(--cm-fold-fg, #555);
   }
 
 

@@ -369,7 +369,7 @@ fn fallback_models(provider: &str) -> Vec<&'static str> {
         "perplexity" => vec!["sonar", "sonar-pro", "sonar-reasoning", "sonar-reasoning-pro"],
         "anthropic" => vec!["claude-opus-4-1", "claude-sonnet-4-5", "claude-3-5-haiku-latest"],
         "openai" => vec!["gpt-4o", "gpt-4o-mini", "o3", "o4-mini"],
-        "google" => vec!["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+        "google" => vec!["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
         "cohere" => vec!["command-a-03-2025", "command-r-plus", "command-r"],
         _ => vec![],
     }

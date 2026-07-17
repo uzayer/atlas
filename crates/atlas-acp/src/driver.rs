@@ -2,12 +2,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use agent_client_protocol::schema::{
-    ClientCapabilities, InitializeRequest, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionId, SessionNotification,
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::schema::v1::{
+    ClientCapabilities, InitializeRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SessionId, SessionNotification,
 };
-use agent_client_protocol::{Agent, ConnectionTo};
-use agent_client_protocol_tokio::{AcpAgent, LineDirection};
+use agent_client_protocol::{AcpAgent, Agent, ConnectionTo, LineDirection};
 use dashmap::DashMap;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -34,12 +34,12 @@ use crate::registry::AgentId;
 /// rejects late inbound traffic at the protocol boundary and the
 /// frontend never knows it existed.
 ///
-/// `turn_epoch` is bumped on every `mark_turn_started` so future work
-/// (e.g. dropping events for a stale-but-not-cancelled prior turn)
-/// has a monotonic counter to compare against. Today only the
-/// `cancelled` flag is read at the gate; `turn_epoch` is kept for
-/// the upcoming multi-agent / multi-workspace use cases the user
-/// flagged (rapid Stop + new prompt on the same session, etc).
+/// `turn_epoch` is bumped on every `mark_turn_started` and stamped onto
+/// every event the driver emits for the session (`EventSink::emit`'s
+/// `turn` argument), so the session actor can drop stragglers from a
+/// stale-but-not-cancelled prior turn (rapid Stop + new prompt on the
+/// same session). Epoch 0 = no turn has ever started → events are
+/// emitted unstamped (`None`) so `session/load` replay flows through.
 pub struct SessionGuard {
     pub turn_epoch: AtomicU64,
     pub cancelled: AtomicBool,
@@ -66,10 +66,20 @@ impl SessionGuard {
 
     /// Called by the registry on `mark_turn_started`. Re-arms the
     /// guard so subsequent inbound events for this session flow
-    /// through again.
-    pub fn mark_turn_started(&self) {
-        self.turn_epoch.fetch_add(1, Ordering::AcqRel);
+    /// through again. Returns the new turn epoch — the actor keeps it
+    /// to match against the stamps on inbound events.
+    pub fn mark_turn_started(&self) -> u64 {
+        let epoch = self.turn_epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.cancelled.store(false, Ordering::Release);
+        epoch
+    }
+
+    /// The current turn's epoch, or `None` if no turn has ever started
+    /// (events emitted then are replay / pre-turn traffic and must not
+    /// be gated on turn identity).
+    pub fn current_turn(&self) -> Option<u64> {
+        let epoch = self.turn_epoch.load(Ordering::Acquire);
+        (epoch > 0).then_some(epoch)
     }
 }
 
@@ -211,6 +221,14 @@ pub async fn spawn_agent(
     let sink_for_task = sink.clone();
     let command_for_task = command.clone();
 
+    // Trailing stderr from the agent process (ring buffer, newest last). When
+    // the driver dies, the tail rides on the AgentDisconnected reason so the
+    // user sees WHY the process exited (panic message, missing module, OOM
+    // note) instead of a bare "driver exited".
+    let stderr_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let stderr_for_task = stderr_tail.clone();
+
     let driver_handle = tokio::spawn(async move {
         let result = run_driver(
             agent_id,
@@ -218,16 +236,23 @@ pub async fn spawn_agent(
             sink_for_task.clone(),
             pending_for_task,
             guards_for_task,
+            stderr_for_task.clone(),
             ready_tx,
             shutdown_rx,
         )
         .await;
 
-        let reason = match &result {
+        let mut reason = match &result {
             Ok(()) => "driver exited cleanly".to_string(),
             Err(e) => format!("driver error: {e}"),
         };
-        sink_for_task.emit(agent_id, AcpEvent::AgentDisconnected { reason });
+        if let Ok(tail) = stderr_for_task.lock() {
+            if !tail.is_empty() {
+                let joined: Vec<&str> = tail.iter().map(String::as_str).collect();
+                reason = format!("{reason}\nrecent stderr:\n{}", joined.join("\n"));
+            }
+        }
+        sink_for_task.emit(agent_id, AcpEvent::AgentDisconnected { reason }, None);
         result
     });
 
@@ -273,17 +298,27 @@ async fn run_driver(
     sink: Arc<dyn EventSink>,
     pending: Arc<PendingPermissions>,
     guards: Arc<SessionGuards>,
+    stderr_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
     ready_tx: oneshot::Sender<Result<InitializedAgent>>,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
+    /// Trailing stderr lines kept for the disconnect reason.
+    const STDERR_TAIL_LINES: usize = 20;
     let sink_dbg = sink.clone();
     let agent = AcpAgent::from_str(&command)?.with_debug(move |line, direction| {
         // Stderr lines from the agent process are the most useful for
         // post-mortem debugging — surface them through `tracing` so the host
-        // can subscribe with the regular logging machinery.
+        // can subscribe with the regular logging machinery, and keep a small
+        // tail for the AgentDisconnected reason.
         match direction {
             LineDirection::Stderr => {
                 tracing::warn!(target: "atlas_acp::agent_stderr", agent = ?agent_id, "{line}");
+                if let Ok(mut tail) = stderr_tail.lock() {
+                    if tail.len() >= STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line.trim_end().to_string());
+                }
             }
             LineDirection::Stdin => {
                 tracing::trace!(target: "atlas_acp::stdin", agent = ?agent_id, "{line}");
@@ -318,6 +353,7 @@ async fn run_driver(
                 // guard may not be installed yet when those land.
                 // Guards only exist to BLOCK; absence means "no
                 // opinion, let it through."
+                let mut turn = None;
                 if let Some(guard) = guards_for_notif.get(&notification.session_id) {
                     if guard.is_blocked() {
                         tracing::debug!(
@@ -328,6 +364,7 @@ async fn run_driver(
                         );
                         return Ok(());
                     }
+                    turn = guard.current_turn();
                 }
                 sink_notif.emit(
                     agent_id,
@@ -335,6 +372,7 @@ async fn run_driver(
                         session_id: notification.session_id,
                         update: notification.update,
                     },
+                    turn,
                 );
                 Ok(())
             },
@@ -376,6 +414,9 @@ async fn run_driver(
                     },
                 );
 
+                let turn = guards_for_perm
+                    .get(&request.session_id)
+                    .and_then(|g| g.current_turn());
                 sink_perm.emit(
                     agent_id,
                     AcpEvent::PermissionRequest {
@@ -384,6 +425,7 @@ async fn run_driver(
                         tool_call: request.tool_call.clone(),
                         options: request.options.clone(),
                     },
+                    turn,
                 );
 
                 let outcome = rx.await.unwrap_or_else(|_| {

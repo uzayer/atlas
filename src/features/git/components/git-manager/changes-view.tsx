@@ -233,7 +233,7 @@ export function ChangesView() {
   const canCommit = (staged.length > 0 || amend) && summary.trim().length > 0;
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col min-w-0">
       {inProgressLabel && (
         <div className="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-[var(--status-warning)]/30 bg-[var(--status-warning)]/10 text-[11px]">
           <AlertTriangle size={12} className="text-[var(--status-warning)] shrink-0" />

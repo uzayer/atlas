@@ -26,6 +26,7 @@ import { GroupFrameNode } from "./group-frame-node";
 import { CanvasToolbar } from "./canvas-toolbar";
 import { CanvasHeader } from "./canvas-header";
 import { CanvasExportToolbar } from "./canvas-export-toolbar";
+import { PagesPanel } from "./pages-panel";
 import { NoteEditorPanel } from "./note-editor-panel";
 import { AiInputFloat } from "./ai-input-float";
 import { AiGroupMarkers } from "./ai-group-marker";
@@ -88,11 +89,14 @@ function CanvasSurface({
   const nodes = useCanvasStore.use.nodes();
   const edges = useCanvasStore.use.edges();
   const aiGroups = useCanvasStore.use.aiGroups();
+  const tree = useCanvasStore.use.tree();
+  const activePageId = useCanvasStore.use.activePageId();
   const selectedIds = useCanvasStore.use.selectedIds();
   const loaded = useCanvasStore.use.loaded();
   const activeTool = useCanvasStore.use.activeTool();
   const canUndo = useCanvasStore.use.canUndo();
   const canRedo = useCanvasStore.use.canRedo();
+  const pendingAiThreadGroupId = useCanvasStore.use.pendingAiThreadGroupId();
   const {
     loadProject,
     addNote,
@@ -110,6 +114,7 @@ function CanvasSurface({
     beginInteraction,
     undo,
     redo,
+    consumePendingAiThread,
   } = useCanvasStore.use.actions();
 
   // A create-tool (or Ask AI) is armed → the click overlay is active.
@@ -125,6 +130,26 @@ function CanvasSurface({
   // AI: floating composer position (after an "Ask AI" click) + open thread.
   const [aiInput, setAiInput] = useState<{ screen: { x: number; y: number }; flow: { x: number; y: number } } | null>(null);
   const [threadFor, setThreadFor] = useState<{ groupId: string; at: { x: number; y: number } } | null>(null);
+  const [pagesOpen, setPagesOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("atlas:canvas:pagesOpen") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const togglePages = () =>
+    setPagesOpen((o) => {
+      const next = !o;
+      try {
+        localStorage.setItem("atlas:canvas:pagesOpen", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  const activeEntry = tree.find((e) => e.id === activePageId);
+  const pageName = activeEntry?.name ?? "Spaces";
+  const pageIcon = activeEntry?.icon ?? null;
 
   // Load when the project changes.
   useEffect(() => {
@@ -136,6 +161,27 @@ function CanvasSurface({
 
   const rf = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // An external caller (e.g. "Draw diagram" from a chat turn) asked us to open a
+  // group's AI thread so the user sees the live generation + can keep chatting.
+  // Center the view on the group and pop its thread panel, then consume.
+  useEffect(() => {
+    if (!pendingAiThreadGroupId) return;
+    const gid = pendingAiThreadGroupId;
+    const group = useCanvasStore.getState().aiGroups[gid];
+    consumePendingAiThread();
+    if (!group) return;
+    try {
+      rf.setCenter(group.anchor.x, group.anchor.y, { zoom: 0.9, duration: 400 });
+    } catch {
+      /* view not ready yet — the thread still opens below */
+    }
+    const rect = wrapperRef.current?.getBoundingClientRect();
+    const at = rect
+      ? { x: rect.left + rect.width / 2 - 170, y: rect.top + 96 }
+      : { x: 240, y: 120 };
+    setThreadFor({ groupId: gid, at });
+  }, [pendingAiThreadGroupId, rf, consumePendingAiThread]);
 
   // Project store data → xyflow shape. Node `type` = kind so xyflow routes to the
   // right renderer; `data` carries only what that renderer needs.
@@ -434,7 +480,9 @@ function CanvasSurface({
   }
 
   return (
-    <div ref={wrapperRef} className="h-full min-h-0 relative bg-bg-base">
+    <div className="flex h-full min-h-0">
+      {pagesOpen && <PagesPanel />}
+      <div ref={wrapperRef} className="relative min-h-0 min-w-0 flex-1 bg-bg-base">
       {!loaded && (
         <div className="absolute inset-0 flex items-center justify-center text-[11px] text-text-tertiary z-30">
           Loading…
@@ -491,7 +539,10 @@ function CanvasSurface({
 
       {/* Floating overlays (Miro-style) */}
       <CanvasHeader
-        noteCount={nodes.length}
+        pageName={pageName}
+        pageIcon={pageIcon}
+        pagesOpen={pagesOpen}
+        onTogglePages={togglePages}
         fullscreen={fullscreen}
         onFit={handleFit}
         onToggleFullscreen={onToggleFullscreen}
@@ -539,6 +590,7 @@ function CanvasSurface({
           onClose={() => setThreadFor(null)}
         />
       )}
+      </div>
     </div>
   );
 }

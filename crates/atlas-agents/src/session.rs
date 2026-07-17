@@ -8,7 +8,7 @@
 //! `SessionSnapshot` is the serialisable wire shape — produced on demand for
 //! tab-activate, never streamed.
 
-use agent_client_protocol::schema as acp_schema;
+use agent_client_protocol::schema::v1 as acp_schema;
 use atlas_acp::AgentId;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -80,6 +80,12 @@ pub struct Message {
     pub tool_calls: Vec<ToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<Vec<PlanEntry>>,
+    /// Model that produced this assistant message — the session's current
+    /// model at creation time, or the transcript's recorded model on replay.
+    /// Lets the UI's per-message badge survive session reloads instead of
+    /// deriving it from live state (which mislabels after model switches).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -144,25 +150,12 @@ pub struct SessionState {
     pub usage: Usage,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// Monotonic counter bumped each time an inbound agent update is applied
-    /// (text/thinking chunk, tool call, plan, …). The worker samples it after
-    /// `send_prompt` returns to detect when the ACP notification stream has
-    /// gone quiet before flipping the turn to idle — closing the cross-task
-    /// race where the prompt response resolves a beat before the agent's final
-    /// streamed chunk lands. Not part of the serialised snapshot.
-    pub activity_seq: u64,
-    /// Monotonic turn identity, bumped at the START of every turn (worker's
-    /// `handle_send`). Stamped onto every emitted delta so the frontend can
+    /// Monotonic turn identity, bumped at the START of every turn (the actor's
+    /// `start_turn`). Stamped onto every emitted delta so the frontend can
     /// reject a stale terminal (idle/error) delta belonging to a turn that has
-    /// already been superseded by a newer send — the real safety net against
-    /// premature-idle under parallel / queued / wake-timing races. Not
-    /// serialised into the snapshot.
+    /// already been superseded by a newer send. Not serialised into the
+    /// snapshot.
     pub turn_seq: u64,
-    /// Set by the manager's ACP dispatch when the agent reports a turn failure
-    /// out-of-band (an `AcpEvent::TurnFailed` that isn't already surfaced as the
-    /// `send_prompt` `Err`). The worker drains it when emitting terminal state
-    /// so terminal status has a single writer (the worker). Not serialised.
-    pub pending_turn_error: Option<String>,
 }
 
 impl SessionState {
@@ -184,9 +177,7 @@ impl SessionState {
             usage: Usage::default(),
             created_at: now,
             updated_at: now,
-            activity_seq: 0,
             turn_seq: 0,
-            pending_turn_error: None,
         }
     }
 
@@ -213,6 +204,21 @@ impl SessionState {
     pub fn touch(&mut self) {
         self.updated_at = Utc::now();
     }
+
+    /// True if any tool call in the session is still non-terminal
+    /// (`Pending`/`Running`). The actor uses this to hold turn finalization
+    /// until tool calls quiesce — the ACP contract is that a turn only truly
+    /// ends once no tool calls pend, but the `session/prompt` future can resolve
+    /// while trailing `tool_call_update` frames are still in flight. Because the
+    /// actor sweeps residual tools to terminal at every finalize, this only ever
+    /// reflects the current turn's tools.
+    pub fn has_inflight_tool_calls(&self) -> bool {
+        self.messages.iter().any(|m| {
+            m.tool_calls
+                .iter()
+                .any(|t| matches!(t.status, ToolCallStatus::Pending | ToolCallStatus::Running))
+        })
+    }
 }
 
 // ── Helpers reused by the manager + worker ───────────────────────────────────
@@ -230,6 +236,7 @@ pub fn new_assistant_text(content: String) -> Message {
         thinking: String::new(),
         tool_calls: Vec::new(),
         plan: None,
+        model: None,
         timestamp: Utc::now(),
     }
 }
@@ -243,6 +250,7 @@ pub fn new_assistant_thinking(thinking: String) -> Message {
         thinking,
         tool_calls: Vec::new(),
         plan: None,
+        model: None,
         timestamp: Utc::now(),
     }
 }
@@ -256,6 +264,7 @@ pub fn new_assistant_tool(tool_call: ToolCall) -> Message {
         thinking: String::new(),
         tool_calls: vec![tool_call],
         plan: None,
+        model: None,
         timestamp: Utc::now(),
     }
 }
@@ -269,6 +278,7 @@ pub fn new_user_message(content: String) -> Message {
         thinking: String::new(),
         tool_calls: Vec::new(),
         plan: None,
+        model: None,
         timestamp: Utc::now(),
     }
 }

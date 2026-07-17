@@ -23,9 +23,9 @@ pub use memory::{MemDoc, MemorySearchFn, register_memory_search};
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use agent_client_protocol::schema as acp_schema;
+use agent_client_protocol::schema::v1 as acp_schema;
 use async_trait::async_trait;
 use atlas_acp::{AcpError, AcpEvent, AgentId, AgentInfo, EventSink, NewSessionInfo, Result, SessionId};
 use cersei::prelude::{PermissionDecision as CerseiDecision, PermissionPolicy, PermissionRequest};
@@ -39,6 +39,13 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+// Compile-time guard: cersei-agent MUST resolve to the vendored, patched
+// crate ([patch.crates-io] → vendor/cersei-agent). The crates.io release
+// never races tool execution against the cancel token — without the patch a
+// running Bash/Edit completes (and its writes land) after Stop, and a
+// cancelled tool round leaves orphaned tool_use blocks in provider history.
+const _CERSEI_CANCEL_PATCH_GUARD: &str = cersei_agent::ATLAS_CANCEL_PATCH;
 use uuid::Uuid;
 
 pub use store::SessionMeta;
@@ -149,6 +156,41 @@ struct SessionEntry {
     /// Pending permission requests awaiting a UI decision.
     pending: DashMap<Uuid, oneshot::Sender<CerseiDecision>>,
     cancelled: AtomicBool,
+    /// Monotonic turn counter, bumped by `mark_turn_started`. Stamped onto
+    /// every event the turn emits so the session actor can drop stragglers
+    /// from a superseded turn. 0 = no turn has started yet (events unstamped).
+    turn_seq: AtomicU64,
+    /// True while a `send_prompt` turn is executing. A second concurrent
+    /// send is rejected instead of racing the first turn's history
+    /// clone/write (last-writer-wins silently lost the other turn's
+    /// messages from context and disk).
+    busy: AtomicBool,
+}
+
+/// Clears `SessionEntry::busy` AND the turn's cancel token on every exit
+/// path of `send_prompt` (success, error, panic-unwind through the actor's
+/// supervisor). The token must not outlive the turn: a later `cancel_turn`
+/// finding a dead turn's token would cancel nothing real, and the next
+/// turn installs a fresh one atomically.
+struct BusyGuard(Arc<SessionEntry>);
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        *self.0.cancel.lock() = None;
+        self.0.busy.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Wraps the host sink and stamps every event emitted through it with the
+/// producing turn's identity, so the adapter helpers below don't have to
+/// thread the stamp through every call.
+struct TurnStampedSink {
+    inner: Arc<dyn EventSink>,
+    turn: Option<u64>,
+}
+impl EventSink for TurnStampedSink {
+    fn emit(&self, agent_id: AgentId, event: AcpEvent, turn: Option<u64>) {
+        self.inner.emit(agent_id, event, turn.or(self.turn));
+    }
 }
 
 impl CerseiRuntime {
@@ -205,6 +247,8 @@ impl CerseiRuntime {
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: AtomicBool::new(false),
+            turn_seq: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
         });
         agent.sessions.insert(session_id.clone(), entry);
         Ok(NewSessionInfo {
@@ -246,6 +290,8 @@ impl CerseiRuntime {
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: AtomicBool::new(false),
+            turn_seq: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
         });
         agent.sessions.insert(sid, entry);
         Ok(Some(modes_blob("default")))
@@ -253,9 +299,28 @@ impl CerseiRuntime {
 
     /// UI-facing transcript for a stored session (for replay on resume).
     pub fn replay_session(&self, cwd: &str, session_id: &str) -> Vec<ReplayItem> {
-        match store::load(&self.inner.config_dir, cwd, session_id) {
-            Some(doc) => messages_to_replay(&doc.messages),
-            None => Vec::new(),
+        match store::load_checked(&self.inner.config_dir, cwd, session_id) {
+            store::LoadOutcome::Loaded(doc) => {
+                let mut items = messages_to_replay(&doc.messages);
+                // The stored session's last turn failed: resume shows the
+                // failed turn's history AND why it ended (M1), matching the
+                // live `turn_failed` rendering ("Error: …").
+                if let Some(err) = &doc.turn_error {
+                    items.push(ReplayItem::Assistant {
+                        text: format!("Error: {err}"),
+                    });
+                }
+                items
+            }
+            store::LoadOutcome::Missing => Vec::new(),
+            // Damaged file: backed up, surfaced, never silently empty (M2).
+            store::LoadOutcome::Corrupt { backup_path } => vec![ReplayItem::Assistant {
+                text: format!(
+                    "⚠ This session's saved transcript was damaged and could not be \
+                     read. The original file was backed up to `{backup_path}`; the \
+                     session continues fresh from here."
+                ),
+            }],
         }
     }
 
@@ -329,21 +394,82 @@ impl CerseiRuntime {
             .clone()
     }
 
+    /// Cancel every in-flight turn across every session (app quit): flips the
+    /// flags, fires the tokens (tool process groups die), and drains pending
+    /// permissions. In-process, so nothing can orphan — this just stops work
+    /// fast so quit isn't held up by a running Bash command.
+    pub fn cancel_all(&self) {
+        for agent in self.inner.agents.iter() {
+            for session in agent.sessions.iter() {
+                let entry = session.value();
+                {
+                    let guard = entry.cancel.lock();
+                    entry.cancelled.store(true, Ordering::SeqCst);
+                    if let Some(token) = guard.as_ref() {
+                        token.cancel();
+                    }
+                }
+                let keys: Vec<Uuid> = entry.pending.iter().map(|e| *e.key()).collect();
+                for k in keys {
+                    if let Some((_, tx)) = entry.pending.remove(&k) {
+                        let _ = tx.send(CerseiDecision::Deny("cancelled".into()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bump the session's turn counter and return the new turn identity.
+    /// Called by the session actor right before `send_prompt`; the turn's
+    /// events are stamped with this value (see `TurnStampedSink`).
+    pub fn mark_turn_started(&self, agent_id: AgentId, session_id: &str) -> Result<u64> {
+        let entry = self.session(agent_id, session_id)?;
+        Ok(entry.turn_seq.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
     /// Cancel the in-flight turn: flip the flag, drop pending permissions
     /// (so any blocked `check()` resolves), and cancel the agent token.
     pub fn cancel_turn(&self, agent_id: AgentId, session_id: &str) -> Result<()> {
         let entry = self.session(agent_id, session_id)?;
-        entry.cancelled.store(true, Ordering::SeqCst);
+        // Flag + token under ONE lock scope, mirroring the atomic
+        // reset+install at the top of `send_prompt`: either this cancel runs
+        // first (the flag it sets belongs to the previous turn and is
+        // correctly reset by the new install) or it runs after (it finds the
+        // live token and interrupts the turn). No interleaving loses a cancel.
+        {
+            let guard = entry.cancel.lock();
+            entry.cancelled.store(true, Ordering::SeqCst);
+            if let Some(token) = guard.as_ref() {
+                token.cancel();
+            }
+        }
         let keys: Vec<Uuid> = entry.pending.iter().map(|e| *e.key()).collect();
         for k in keys {
             if let Some((_, tx)) = entry.pending.remove(&k) {
                 let _ = tx.send(CerseiDecision::Deny("cancelled".into()));
             }
         }
-        if let Some(token) = entry.cancel.lock().as_ref() {
-            token.cancel();
-        }
         Ok(())
+    }
+
+    /// Resolve every permission request still pending for a session as
+    /// cancelled, returning their ids so the caller can emit
+    /// `PermissionResolved` for each. Called by the session actor when a turn
+    /// finalizes: a permission outstanding at turn end must not leave a live
+    /// modal whose click strands the session (H6/M3).
+    pub fn sweep_permissions(&self, agent_id: AgentId, session_id: &str) -> Vec<Uuid> {
+        let Ok(entry) = self.session(agent_id, session_id) else {
+            return Vec::new();
+        };
+        let keys: Vec<Uuid> = entry.pending.iter().map(|e| *e.key()).collect();
+        let mut swept = Vec::new();
+        for k in keys {
+            if let Some((_, tx)) = entry.pending.remove(&k) {
+                let _ = tx.send(CerseiDecision::Deny("cancelled".into()));
+                swept.push(k);
+            }
+        }
+        swept
     }
 
     /// Resolve a pending permission request raised during a turn.
@@ -376,9 +502,39 @@ impl CerseiRuntime {
         let agent = self.agent(agent_id)?;
         let sid = session_id_str(&session_id);
         let entry = self.session(agent_id, &sid)?;
-        let sink = agent.sink.clone();
+        // Reject a second concurrent turn on this session: both would clone
+        // the same history and the last finisher's `history = msgs` + save
+        // would silently drop the other turn's messages. The actor serializes
+        // sends per session; this is the backstop for any other caller.
+        if entry.busy.swap(true, Ordering::SeqCst) {
+            return Err(AcpError::other(
+                "a turn is already running for this session; cancel it or wait for it to finish",
+            ));
+        }
+        let _busy = BusyGuard(entry.clone());
+        // Stamp every event this turn emits with its identity (0 = no
+        // mark_turn_started yet → unstamped, e.g. direct runtime callers).
+        let turn = {
+            let t = entry.turn_seq.load(Ordering::SeqCst);
+            (t > 0).then_some(t)
+        };
+        let sink: Arc<dyn EventSink> = Arc::new(TurnStampedSink {
+            inner: agent.sink.clone(),
+            turn,
+        });
 
-        entry.cancelled.store(false, Ordering::SeqCst);
+        // Install this turn's cancel token BEFORE any await, atomically with
+        // the flag reset (one lock scope, paired with `cancel_turn`). The old
+        // order reset the flag at the top but installed the token only after
+        // provider/BYOK setup — a Stop landing in that window was erased by
+        // the reset or found no token to fire, and the turn ran to completion
+        // merely relabeled "cancelled" at the end.
+        let token = CancellationToken::new();
+        {
+            let mut guard = entry.cancel.lock();
+            *guard = Some(token.clone());
+            entry.cancelled.store(false, Ordering::SeqCst);
+        }
 
         // Resolve provider + key.
         let provider_id = entry.provider.lock().clone();
@@ -408,9 +564,6 @@ impl CerseiRuntime {
             mode,
         };
 
-        let token = CancellationToken::new();
-        *entry.cancel.lock() = Some(token.clone());
-
         // Coding tools + planning (EnterPlanMode / ExitPlanMode / TodoWrite) so
         // the agent can lay out and track a plan; TodoWrite calls are surfaced
         // as a live plan card (see the adapter below), not a raw tool card.
@@ -424,17 +577,19 @@ impl CerseiRuntime {
             let pid = provider_id.clone();
             let key = api_key.clone();
             let m = model.clone();
-            Arc::new(move || {
-                // Safe to unwrap: the parent provider built successfully above
-                // from the same (provider, key, model), so a rebuild won't fail.
-                provider::build_provider(&pid, &key, &m).expect("delegate provider rebuild")
-            })
+            // Fallible: a rebuild error becomes a per-task delegate error
+            // (rendered in the tool card) instead of a panic that aborted the
+            // whole parent turn through the actor's supervisor (L3).
+            Arc::new(move || provider::build_provider(&pid, &key, &m).map_err(|e| e.to_string()))
         };
         // Sub-agents (delegate) get the same Atlas-owned coding toolset.
         let toolset_factory: ToolsetFactory = Arc::new(crate::tools::atlas_coding);
 
         let mut tools = {
-            let mut t = crate::tools::atlas_coding();
+            // Main turn: Bash gets the turn's cancel token so Stop kills the
+            // running command's process group (delegate children keep the
+            // plain set via `atlas_coding` in the factory below).
+            let mut t = crate::tools::atlas_coding_with(Some(token.clone()));
             t.extend(cersei::tools::planning());
             t.push(Box::new(
                 DelegateTool::new(provider_factory, toolset_factory).with_model(model.clone()),
@@ -514,7 +669,7 @@ impl CerseiRuntime {
         let built = Arc::new(built);
 
         let mut stream = built.run_stream(&text);
-        let mut stop = "endturn".to_string();
+        let mut stop = "end_turn".to_string();
         // TodoWrite tool-call ids — surfaced as plan cards, so their tool
         // start/end are suppressed from the raw tool-card stream.
         let mut todo_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -525,10 +680,32 @@ impl CerseiRuntime {
         } else {
             cersei_compression::CompressionLevel::Off
         });
+        let mut turn_error: Option<String> = None;
         while let Some(ev) = stream.next().await {
             match translate_event(ev, &sink, agent_id, &session_id, &mut todo_ids, &mut acct) {
                 TurnStep::Continue => {}
-                TurnStep::SetStop(s) => stop = s,
+                TurnStep::SetStop(s) => {
+                    stop = s;
+                    // Incremental persistence at a message boundary: each
+                    // completed model round (assistant flush + settled tool
+                    // results) hits disk, so an app crash mid-turn loses at
+                    // most the round in flight — matching the incremental
+                    // JSONL behavior of the Claude path. Cheap: small JSON,
+                    // once per model round, atomic rename (store::save).
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let usage_now = entry.usage.lock().clone();
+                    store::save(
+                        &self.inner.config_dir,
+                        &entry.cwd,
+                        &sid,
+                        &provider_id,
+                        &model,
+                        &built.messages(),
+                        &now,
+                        &usage_now,
+                        None,
+                    );
+                }
                 TurnStep::Done(s) => {
                     stop = s;
                     break;
@@ -538,8 +715,13 @@ impl CerseiRuntime {
                         stop = "cancelled".to_string();
                         break;
                     }
-                    *entry.cancel.lock() = None;
-                    return Err(AcpError::other(e));
+                    // Do NOT return yet: fall through to the persistence
+                    // section so the failed turn's history (user message +
+                    // partial assistant + settled tool results) is written
+                    // with an error marker (M1 — it used to vanish from both
+                    // context and disk).
+                    turn_error = Some(e);
+                    break;
                 }
             }
         }
@@ -557,6 +739,7 @@ impl CerseiRuntime {
                     session_id: session_id.clone(),
                     saved_tokens,
                 },
+                None,
             );
         }
 
@@ -571,7 +754,10 @@ impl CerseiRuntime {
             u.clone()
         };
 
-        // Persist the updated conversation for resume + context continuation.
+        // Persist the updated conversation for resume + context continuation —
+        // for FAILED turns too: the user message and any partial progress stay
+        // in runtime history (next turn keeps context) and on disk (resume
+        // shows the failed turn with its error marker).
         let msgs = built.messages();
         *entry.history.lock() = msgs.clone();
         let now = chrono::Utc::now().to_rfc3339();
@@ -584,8 +770,11 @@ impl CerseiRuntime {
             &msgs,
             &now,
             &usage_snapshot,
+            turn_error.as_deref(),
         );
-        *entry.cancel.lock() = None;
+        if let Some(e) = turn_error {
+            return Err(AcpError::other(e));
+        }
         Ok(stop)
     }
 
@@ -709,6 +898,7 @@ impl PermissionPolicy for UiPolicy {
                 tool_call: permission_tool_call(request),
                 options: permission_options(),
             },
+            None,
         );
         match rx.await {
             Ok(decision) => decision,
@@ -873,6 +1063,7 @@ fn translate_event(
                     output_tokens,
                     cost: cumulative_cost,
                 },
+                None,
             );
             TurnStep::Continue
         }
@@ -883,6 +1074,7 @@ fn translate_event(
                     session_id: session_id.clone(),
                     active: true,
                 },
+                None,
             );
             TurnStep::Continue
         }
@@ -893,6 +1085,26 @@ fn translate_event(
                     session_id: session_id.clone(),
                     active: false,
                 },
+                None,
+            );
+            TurnStep::Continue
+        }
+        E::Retry {
+            attempt,
+            max_attempts,
+            delay_ms,
+            last_error,
+        } => {
+            sink.emit(
+                agent_id,
+                AcpEvent::Retry {
+                    session_id: session_id.clone(),
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    last_error,
+                },
+                None,
             );
             TurnStep::Continue
         }
@@ -985,6 +1197,7 @@ fn emit_session_update(
                 session_id: session_id.clone(),
                 update,
             },
+            None,
         ),
         Err(e) => tracing::warn!(target: "atlas_cersei::adapter", "session update decode failed: {e}"),
     }
@@ -1014,10 +1227,10 @@ fn tool_kind(name: &str) -> &'static str {
 fn map_stop(s: cersei::types::StopReason) -> &'static str {
     use cersei::types::StopReason as S;
     match s {
-        S::EndTurn => "endturn",
-        S::MaxTokens => "maxtokens",
-        S::ToolUse => "endturn",
-        S::StopSequence => "endturn",
+        S::EndTurn => "end_turn",
+        S::MaxTokens => "max_tokens",
+        S::ToolUse => "end_turn",
+        S::StopSequence => "end_turn",
         S::ContentFilter => "refusal",
     }
 }
@@ -1144,7 +1357,7 @@ mod tests {
         events: Mutex<Vec<AcpEvent>>,
     }
     impl EventSink for CollectingSink {
-        fn emit(&self, _agent_id: AgentId, event: AcpEvent) {
+        fn emit(&self, _agent_id: AgentId, event: AcpEvent, _turn: Option<u64>) {
             self.events.lock().push(event);
         }
     }
@@ -1296,7 +1509,7 @@ mod tests {
             stop_reason: cersei::types::StopReason::EndTurn,
             usage: cersei::types::Usage::default(),
         });
-        assert!(matches!(step, TurnStep::SetStop(ref s) if s == "endturn"));
+        assert!(matches!(step, TurnStep::SetStop(ref s) if s == "end_turn"));
         assert_eq!(c.events.lock().len(), 0);
     }
 
@@ -1361,9 +1574,9 @@ mod tests {
     #[test]
     fn stop_reason_mapping() {
         use cersei::types::StopReason as S;
-        assert_eq!(map_stop(S::EndTurn), "endturn");
-        assert_eq!(map_stop(S::MaxTokens), "maxtokens");
-        assert_eq!(map_stop(S::ToolUse), "endturn");
+        assert_eq!(map_stop(S::EndTurn), "end_turn");
+        assert_eq!(map_stop(S::MaxTokens), "max_tokens");
+        assert_eq!(map_stop(S::ToolUse), "end_turn");
         assert_eq!(map_stop(S::ContentFilter), "refusal");
     }
 
@@ -1427,7 +1640,7 @@ mod tests {
             ["agent_message_chunk", "tool_call", "tool_call_update", "agent_message_chunk"],
             "TurnComplete emits nothing; the rest stay in wire order"
         );
-        assert!(matches!(last, TurnStep::SetStop(ref s) if s == "endturn"));
+        assert!(matches!(last, TurnStep::SetStop(ref s) if s == "end_turn"));
     }
 
     // ── Permission policy (the synthesized modes that mirror Claude Code) ──────
@@ -1447,6 +1660,8 @@ mod tests {
             cancel: Mutex::new(None),
             pending: DashMap::new(),
             cancelled: std::sync::atomic::AtomicBool::new(false),
+            turn_seq: AtomicU64::new(0),
+            busy: AtomicBool::new(false),
         });
         UiPolicy {
             sink: s,
@@ -1566,5 +1781,66 @@ mod tests {
             }
             other => panic!("expected Tool replay item, got {other:?}"),
         }
+    }
+
+    // ── Phase 6: history integrity (M1/M2) ─────────────────────────────────
+
+    fn temp_cfg() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "atlas-cersei-libtest-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn failed_turn_survives_reload_with_error_marker() {
+        let cfg = temp_cfg();
+        let rt = CerseiRuntime::new(cfg.clone());
+        let msgs = vec![
+            cersei::types::Message::user("refactor the parser"),
+            cersei::types::Message::assistant("Started, then the provider died…"),
+        ];
+        store::save(
+            &cfg, "/proj/x", "s1", "anthropic", "m", &msgs, "t1",
+            &store::StoredUsage::default(),
+            Some("HTTP 529: overloaded (gave up after 4 attempts)"),
+        );
+        let items = rt.replay_session("/proj/x", "s1");
+        // The failed turn's history is present…
+        assert!(matches!(&items[0], ReplayItem::User { text } if text.contains("refactor")));
+        assert!(items.len() >= 3, "user + partial assistant + error marker");
+        // …and the resume surfaces WHY it ended, like the live turn_failed does.
+        let ReplayItem::Assistant { text } = items.last().unwrap() else {
+            panic!("last replay item must be the error marker");
+        };
+        assert!(text.starts_with("Error:"), "{text}");
+        assert!(text.contains("HTTP 529"));
+    }
+
+    #[test]
+    fn corrupt_session_resumes_with_notice_not_silently_empty() {
+        let cfg = temp_cfg();
+        let rt = CerseiRuntime::new(cfg.clone());
+        store::save(
+            &cfg, "/proj/y", "s1", "anthropic", "m",
+            &[cersei::types::Message::user("q")], "t1",
+            &store::StoredUsage::default(), None,
+        );
+        // Truncate the file (pre-M2 crash artifact).
+        let path = store::project_sessions_dir(&cfg, "/proj/y").join("s1.json");
+        std::fs::write(&path, "{\"session_id\": \"s1").unwrap();
+
+        let items = rt.replay_session("/proj/y", "s1");
+        assert_eq!(items.len(), 1);
+        let ReplayItem::Assistant { text } = &items[0] else {
+            panic!("corrupt session must surface a notice item");
+        };
+        assert!(text.contains("damaged"), "{text}");
+        assert!(text.contains(".corrupt-"), "notice names the backup: {text}");
+        // Subsequent replay: file was moved aside → clean fresh session.
+        assert!(rt.replay_session("/proj/y", "s1").is_empty());
     }
 }

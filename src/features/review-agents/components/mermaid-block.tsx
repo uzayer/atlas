@@ -1,29 +1,50 @@
 import { useEffect, useRef, useState } from "react";
 
-// Mermaid is heavy (~500KB) — load it on first diagram render only, and
-// initialize once with a theme mapped to the Atlas AMOLED-black tokens.
-let initialized = false;
+// Mermaid is heavy (~500KB) — load it on first diagram render only. The theme is
+// mapped to the *live* Atlas interface-theme tokens (read from CSS custom
+// properties), so a diagram matches whichever palette is active (Atlas Black,
+// Chyral, Mirage, …). We re-initialize whenever the palette changes so switching
+// themes re-skins subsequently-rendered diagrams too.
 let counter = 0;
+let lastPaletteKey = "";
+
+/** Read one CSS custom property off the document root, with a fallback. */
+function cssVar(name: string, fallback: string): string {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
 
 async function getMermaid() {
   const mod = await import("mermaid");
   const mermaid = mod.default;
-  if (!initialized) {
-    initialized = true;
+
+  // Pull the current interface-theme palette from CSS vars (set by
+  // apply-atlas-theme.ts). Falls back to the AMOLED-black defaults.
+  const bg = cssVar("--bg-base", "#0a0a0a");
+  const raised = cssVar("--bg-raised", "#161616");
+  const elevated = cssVar("--bg-elevated", "#0f0f0f");
+  const textPrimary = cssVar("--text-primary", "#ffffff");
+  const textSecondary = cssVar("--text-secondary", "#aaaaaa");
+  const border = cssVar("--border-strong", "#3d3d3d");
+  const line = cssVar("--text-tertiary", "#777777");
+
+  const paletteKey = [bg, raised, elevated, textPrimary, textSecondary, border, line].join("|");
+  if (paletteKey !== lastPaletteKey) {
+    lastPaletteKey = paletteKey;
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: "strict",
       theme: "dark",
       themeVariables: {
         darkMode: true,
-        background: "#0a0a0a",
-        primaryColor: "#161616",
-        primaryTextColor: "#ffffff",
-        primaryBorderColor: "#3d3d3d",
-        secondaryColor: "#0f0f0f",
-        tertiaryColor: "#0a0a0a",
-        lineColor: "#777777",
-        textColor: "#aaaaaa",
+        background: bg,
+        primaryColor: raised,
+        primaryTextColor: textPrimary,
+        primaryBorderColor: border,
+        secondaryColor: elevated,
+        tertiaryColor: bg,
+        lineColor: line,
+        textColor: textSecondary,
         fontSize: "12px",
         fontFamily: '-apple-system, "SF Pro Text", system-ui, sans-serif',
       },

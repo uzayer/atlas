@@ -19,6 +19,7 @@ import {
   listenChatModelProgress,
   listenChatModelDone,
   type MemoryChatEvent,
+  type ChatBackend,
   type SessionMeta,
   type SourceRef,
   type DownloadProgress,
@@ -60,6 +61,8 @@ interface MemoryChatState {
   modelPhase: ModelPhase;
   modelProgress: DownloadProgress | null;
   modelError: string | null;
+  /** Inference backend of the loaded local model (Metal/CPU), or null if unknown. */
+  backend: ChatBackend | null;
   metas: SessionMeta[];
   sessions: Record<string, MemoryChatSession>;
   activeId: string | null;
@@ -130,6 +133,7 @@ const useMemoryChatStoreBase = create<MemoryChatState>()((set, get) => ({
   modelPhase: "checking",
   modelProgress: null,
   modelError: null,
+  backend: null,
   metas: [],
   sessions: {},
   activeId: null,
@@ -161,6 +165,9 @@ const useMemoryChatStoreBase = create<MemoryChatState>()((set, get) => ({
       try {
         const status = await memoryChat.modelStatus();
         set({ modelPhase: status.downloaded ? "ready" : "not-downloaded" });
+        // If a model is already cached from a prior load, reflect its backend.
+        const b = await memoryChat.backend();
+        if (b) set({ backend: b });
       } catch {
         set({ modelPhase: "not-downloaded" });
       }
@@ -192,8 +199,8 @@ const useMemoryChatStoreBase = create<MemoryChatState>()((set, get) => ({
     loadModel: async () => {
       set({ modelPhase: "loading", modelError: null });
       try {
-        await memoryChat.modelLoad();
-        set({ modelPhase: "ready" });
+        const backend = await memoryChat.modelLoad();
+        set({ modelPhase: "ready", backend });
       } catch (e) {
         set({ modelPhase: "download-failed", modelError: String(e) });
       }
@@ -375,6 +382,11 @@ function onEvent(
   get: () => MemoryChatState,
   e: MemoryChatEvent,
 ): void {
+  if (e.kind === "backend") {
+    set(() => ({ backend: e.backend }));
+    return;
+  }
+
   const id = get().streamToSession[e.stream_id];
   if (!id) return;
 

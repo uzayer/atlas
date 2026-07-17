@@ -12,7 +12,6 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { Sparkles } from "lucide-react";
 import type { ChatMessage } from "@/types/agent";
 import { MessageItem } from "./message-item";
-import { useChatStore } from "../stores/chat-store";
 import { cn } from "@/lib/utils";
 import { warmMarkdownWorker } from "@/lib/markdown-cache";
 
@@ -86,6 +85,11 @@ let heightCount = 0;
 const DEFAULT_ROW_ESTIMATE = 96;
 
 function recordHeight(id: string, h: number) {
+  // Never record a non-positive height. A real message row is never ~0px; a 0
+  // only comes from measuring while the subtree is `display:none` (backgrounded
+  // chat tab), and caching it collapses every downstream offset. Callers guard
+  // this too, but keep the cache-integrity invariant here as a backstop.
+  if (h < 1) return;
   const prev = measuredHeights.get(id);
   if (prev === h) return;
   if (prev === undefined) {
@@ -168,12 +172,11 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   const parentRef = useRef<HTMLDivElement>(null);
   const cacheKey = `${tabId}:${acpSessionId}`;
 
-  // Session model for the assistant turn badge (live model wins over the
-  // session default). Narrow selector so it only re-renders on change.
-  const sessionModel = useChatStore((s) => {
-    const sess = s.sessions[tabId];
-    return sess?.acpCurrentModel || sess?.model || null;
-  });
+  // The assistant turn badge renders the model stamped onto each message at
+  // creation (`message.model`) — never live session state, which relabels the
+  // whole thread when the session's model or agent changes later. Unstamped
+  // messages (pre-fix history, disk-hydrated transcripts) show no badge
+  // rather than a possibly-wrong one.
 
   // Apply role filter + map filtered→original indices in one pass. The old
   // implementation used `messages.findIndex` per filtered message, making
@@ -278,22 +281,45 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     measureElement:
       typeof window !== "undefined" && !navigator.userAgent.includes("Firefox")
         ? (el) => {
-            // Round to an integer so re-measures of unchanged content
-            // return the exact same value and the virtualizer treats
-            // them as no-ops (no offset recompute, no scrollTop nudge).
-            //
-            // NB: we ALWAYS report the freshly-measured height. An earlier
-            // optimization skipped re-measuring while scrolling up (reuse
-            // cached size, TanStack #659) to avoid upward stutter — but
-            // Atlas message rows change height after first measure
-            // (streaming <pre> → rendered markdown, accordions toggling,
-            // images/code blocks settling), so a stale cached height left
-            // tall rows too short and the next row overlapped them. Always
-            // measuring is the correctness-first choice; the integer
-            // rounding + average-estimate already keep scrolling smooth.
-            const raw = el?.getBoundingClientRect().height ?? averageHeight();
+            const id = el?.getAttribute("data-message-id") ?? undefined;
+            // While actively scrolling, report the cached height for any
+            // already-measured settled row instead of re-reading the DOM. This
+            // stops a row that reflows mid-scroll (highlight applying, font
+            // swap, image load) from feeding a changed height back and shifting
+            // every offset below it — the lurch. The streaming tail is exempt
+            // (it must follow live growth), and rows with no cached height yet
+            // still measure (there's nothing to reuse). The scroll-idle
+            // reconcile in `onScroll` re-measures everything once movement
+            // stops, so nothing stays stale (the fix the old hack lacked).
+            if (
+              isScrollingRef.current &&
+              id &&
+              id !== streamTailIdRef.current &&
+              measuredHeights.has(id)
+            ) {
+              return measuredHeights.get(id)!;
+            }
+            // A row measured inside a `display:none` subtree reports height 0.
+            // The center panel keeps inactive tabs MOUNTED with `display:none`
+            // (fast tab-switch), so backgrounding this chat — e.g. the turn
+            // card's "Draw diagram" action opens the canvas tab — fires a 0×0
+            // ResizeObserver notification for every mounted row. Recording that
+            // 0 into the module-level height cache (and dragging down the
+            // running average) poisons every row's offset and collapses the
+            // whole thread into overlapping bubbles that survive until app
+            // restart. Treat any non-positive measurement as "not measurable
+            // right now": don't record it, and return the last known-good
+            // height (or the running estimate) so offsets stay stable. The real
+            // height is recorded again when the tab is shown and the row
+            // re-measures.
+            const raw = el?.getBoundingClientRect().height ?? 0;
+            if (raw < 1) {
+              return (id ? measuredHeights.get(id) : undefined) ?? averageHeight();
+            }
+            // Round to an integer so re-measures of unchanged content return the
+            // exact same value and the virtualizer treats them as no-ops (no
+            // offset recompute, no scrollTop nudge).
             const h = Math.round(raw);
-            const id = el?.getAttribute("data-message-id");
             if (id) recordHeight(id, h);
             return h;
           }
@@ -377,10 +403,58 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
   const lastSeenLenRef = useRef(filtered.length);
   const filteredLenRef = useRef(filtered.length);
   filteredLenRef.current = filtered.length;
+
+  // The nav rail's active tick is derived from the top-of-viewport row. We keep
+  // it as rAF-throttled state sampled from real scroll movement rather than
+  // reading `virtualizer.getVirtualItems()[0]` inline every render — otherwise
+  // the tick tracks the virtualizer's offset in lockstep and jitters whenever a
+  // row re-measures (streaming settle, accordion toggle) recomputes offsets.
+  const [railTopVIndex, setRailTopVIndex] = useState(0);
+  const railRafRef = useRef<number | null>(null);
+
+  // Scroll-state gate for measurement (see `measureElement`). While the user is
+  // actively scrolling we return cached heights for settled rows instead of
+  // re-measuring, so a row settling/reflowing mid-scroll (highlight applying,
+  // font swap, image load) can't shift the virtualizer's offsets and lurch the
+  // viewport. On scroll-idle we force one `virtualizer.measure()` reconcile so
+  // any height that genuinely changed mid-scroll is corrected — this is what the
+  // previously-removed "skip while scrolling" hack lacked (it went stale and
+  // overlapped). The streaming tail is never skipped (it must follow growth).
+  const isScrollingRef = useRef(false);
+  const scrollIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamTailIdRef = useRef<string | null>(null);
+  streamTailIdRef.current =
+    isStreaming && filtered.length > 0 ? filtered[filtered.length - 1].id : null;
   useEffect(() => {
     const el = parentRef.current;
     if (!el) return;
     const onScroll = () => {
+      // Enter "scrolling" state and (re)arm the idle timer. `measureElement`
+      // skips re-measuring settled rows while this is true; when scrolling
+      // stops we drop the flag and force one reconcile pass so any mid-scroll
+      // height change is corrected.
+      isScrollingRef.current = true;
+      if (scrollIdleTimerRef.current !== null) {
+        clearTimeout(scrollIdleTimerRef.current);
+      }
+      scrollIdleTimerRef.current = setTimeout(() => {
+        scrollIdleTimerRef.current = null;
+        isScrollingRef.current = false;
+        // Force a real DOM re-read of the mounted rows. A row that changed
+        // height while we were skipping (image load, late highlight) had its
+        // change swallowed — its ResizeObserver already fired with the cached
+        // value and won't fire again. `virtualizer.measure()` alone would only
+        // recompute positions from the (now-stale) size cache, so we re-measure
+        // each mounted element explicitly; with the scroll gate now off these
+        // reads record real heights and reconcile any drift.
+        const node = parentRef.current;
+        if (node) {
+          node
+            .querySelectorAll<HTMLElement>("[data-message-id]")
+            .forEach((row) => virtualizer.measureElement(row));
+        }
+      }, 150);
+
       const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
       const isAtBottom = distance <= NEAR_BOTTOM_PX;
       scrollPositionCache.set(cacheKey, {
@@ -393,6 +467,18 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
         lastSeenLenRef.current = filteredLenRef.current;
         setNewCount((c) => (c === 0 ? c : 0));
       }
+      // Sample the top-of-viewport row for the nav rail, rAF-throttled so a fast
+      // flick coalesces to one update per frame and the tick only moves on real
+      // scroll — not on measurement-driven offset recomputes.
+      if (railRafRef.current === null) {
+        railRafRef.current = requestAnimationFrame(() => {
+          railRafRef.current = null;
+          const node = parentRef.current;
+          if (!node) return;
+          const top = virtualizer.getVirtualItemForOffset(node.scrollTop);
+          if (top) setRailTopVIndex((prev) => (prev === top.index ? prev : top.index));
+        });
+      }
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
@@ -403,6 +489,15 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
         isAtBottom: distance <= NEAR_BOTTOM_PX,
       });
       el.removeEventListener("scroll", onScroll);
+      if (railRafRef.current !== null) {
+        cancelAnimationFrame(railRafRef.current);
+        railRafRef.current = null;
+      }
+      if (scrollIdleTimerRef.current !== null) {
+        clearTimeout(scrollIdleTimerRef.current);
+        scrollIdleTimerRef.current = null;
+        isScrollingRef.current = false;
+      }
     };
   }, [cacheKey]);
 
@@ -547,6 +642,21 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     pinToBottom,
   ]);
 
+  // Auto-follow the TURN-END adaptive card. The streaming effect above is gated
+  // on `isStreaming`, so it doesn't fire when the trailing message grows *after*
+  // the turn ends — i.e. when the TurnSummaryCard's files/actions land at
+  // turn_finished, or its suggestion chips resolve from loading→ready. Without
+  // this a near-bottom reader drifts up a few hundred px as the card appears.
+  // Same near-bottom gate, so a user reading above is never yanked.
+  const trailingFooterSig = `${trailing?.turnSummary ? 1 : 0}:${trailing?.suggestions?.status ?? ""}:${trailing?.suggestions?.chips.length ?? 0}`;
+  useEffect(() => {
+    if (filtered.length === 0) return;
+    const el = parentRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distance <= NEAR_BOTTOM_PX) pinToBottom();
+  }, [trailingFooterSig, filtered.length, pinToBottom]);
+
   const scrollToBottom = useCallback(() => {
     if (filtered.length === 0) return;
     pinToBottom();
@@ -580,8 +690,75 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
     return () => window.removeEventListener("atlas:chat-jump", handler);
   }, [jumpToMessage]);
 
+  // ChatGPT-style navigation rail: one tick per user message, on the left.
+  const userAnchors = useMemo(
+    () =>
+      messages
+        .map((m, i) => ({ id: m.id, index: i, role: m.role, content: m.content }))
+        .filter((a) => a.role === "user")
+        .map((a) => ({
+          id: a.id,
+          index: a.index,
+          preview: (a.content || "").replace(/\s+/g, " ").trim().slice(0, 80),
+        })),
+    [messages],
+  );
+  // The active tick = the last user message at/above the top of the viewport.
+  // `railTopVIndex` is the rAF-throttled top *filtered* index sampled in
+  // `onScroll`; map it to the original message index here with the live
+  // `indexMap` so it stays correct as the filter/thread changes.
+  const topOriginalIndex = indexMap[railTopVIndex] ?? 0;
+  let activeAnchorIndex = -1;
+  for (const a of userAnchors) {
+    if (a.index <= topOriginalIndex) activeAnchorIndex = a.index;
+    else break;
+  }
+
   return (
     <div className="relative flex-1 min-h-0">
+      {userAnchors.length > 1 && (
+        <div className="pointer-events-none absolute left-0 top-1/2 z-[3] -translate-y-1/2">
+          {/* Fade so the rail reads cleanly over message borders/content. */}
+          <div className="pointer-events-none absolute inset-y-[-12px] left-0 w-10 bg-gradient-to-r from-[var(--bg-surface)] via-[var(--bg-surface)]/70 to-transparent" />
+          {/* No overflow here: an `overflow` container would clip the
+              horizontally-extending hover tooltip. Natural height, centered. */}
+          <div className="relative flex flex-col justify-center gap-1.5 py-2 pl-2 pr-4">
+            {userAnchors.map((a) => {
+              const active = a.index === activeAnchorIndex;
+              return (
+                <button
+                  key={a.id}
+                  type="button"
+                  aria-label={a.preview || "Jump to message"}
+                  onClick={() =>
+                    window.dispatchEvent(
+                      new CustomEvent("atlas:chat-jump", { detail: { index: a.index } }),
+                    )
+                  }
+                  className="group pointer-events-auto relative flex cursor-pointer items-center"
+                >
+                  <span
+                    className={cn(
+                      "h-0.5 rounded-full transition-all duration-200 ease-out",
+                      active
+                        ? "w-4 bg-[var(--accent-primary)]"
+                        : "w-2 bg-[var(--text-tertiary)]/40 group-hover:w-3 group-hover:bg-[var(--text-tertiary)]",
+                    )}
+                  />
+                  {/* Styled tooltip: the target user message preview. High z so
+                      it renders above the thread content. */}
+                  <span
+                    className="pointer-events-none absolute left-5 top-1/2 z-[50] max-w-[260px] -translate-y-1/2 translate-x-[-4px] truncate rounded-md border border-[var(--border-default)] bg-[var(--bg-elevated)] px-2 py-1 text-[10px] text-[var(--text-secondary)] opacity-0 shadow-[var(--shadow-overlay)] transition-all duration-150 group-hover:translate-x-0 group-hover:opacity-100"
+                    style={{ backdropFilter: "blur(8px)" }}
+                  >
+                    {a.preview || "(message)"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <div
         ref={parentRef}
         // `overflow-anchor: none` stops the browser's native scroll
@@ -626,8 +803,9 @@ export const MessagesList = forwardRef<MessagesListHandle, MessagesListProps>(
                 >
                   <MessageItem
                     message={message}
+                    tabId={tabId}
                     streaming={message.id === streamingId}
-                    model={message.role === "assistant" ? sessionModel : null}
+                    model={message.model ?? null}
                     timeGapAbove={timeGapAbove}
                     dividerAbove={
                       vItem.index > 0 &&
