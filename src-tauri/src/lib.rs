@@ -281,6 +281,7 @@ pub fn run() {
             commands::git::git_checkout,
             commands::git::git_create_branch,
             commands::git::git_delete_branch,
+            commands::git::git_blame_file,
             commands::git::git_refs,
             commands::git::git_graph_signature,
             commands::git_graph::git_graph_build,

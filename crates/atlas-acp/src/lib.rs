@@ -17,7 +17,9 @@ pub mod spawn;
 pub use driver::AuthMethodWire;
 pub use error::{AcpError, ErrorClass, Result, classify_message};
 pub use events::{AcpEvent, EventSink};
-pub use registry::{AgentId, AgentInfo, AgentRegistry, AgentSpec, PermissionDecision};
+pub use registry::{
+    AgentId, AgentInfo, AgentRegistry, AgentSpec, ImageAttachment, PermissionDecision,
+};
 pub use schema::NewSessionInfo;
 pub use spawn::{managed_node_bin, register_managed_node_bin, sanitize_host_env};
 

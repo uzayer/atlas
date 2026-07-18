@@ -11,6 +11,14 @@ export interface SessionKey {
 
 export type TranscriptKind = { kind: "none" } | { kind: "claude_jsonl" };
 
+/** One image attached to an outbound prompt. Mirrors atlas-acp's
+ *  `ImageAttachment` (serde camelCase). `dataBase64` is raw base64 — no
+ *  `data:` URI prefix. */
+export interface ImageAttachment {
+  mimeType: string;
+  dataBase64: string;
+}
+
 export interface PluginSpec {
   plugin_id: string;
   display_name: string;
@@ -85,6 +93,11 @@ export interface SessionSnapshot {
    *  Claude Code / Codex model picker; empty when unsupported. */
   available_models: SessionModeInfo[];
   available_commands: unknown[];
+  /** Whether the agent's transport accepts image content blocks in prompts
+   *  (`promptCapabilities.image`). Drives the composer's attach routing:
+   *  true → picked/pasted images become inline base64 attachments; false →
+   *  they degrade to path mention chips. */
+  prompt_image_supported: boolean;
   plan: PlanEntry[];
   messages: SessionMessage[];
   usage: Usage;

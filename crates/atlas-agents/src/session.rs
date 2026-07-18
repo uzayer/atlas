@@ -126,6 +126,12 @@ pub struct SessionSnapshot {
     /// selection; drives the composer's model picker for Claude Code / Codex.
     pub available_models: Vec<SessionModeInfo>,
     pub available_commands: Vec<serde_json::Value>,
+    /// Whether the agent's transport supports image content blocks in
+    /// prompts (`promptCapabilities.image`). Stamped by the manager from the
+    /// live backend — `SessionState::snapshot()` leaves it false so session
+    /// state stays transport-agnostic. Drives the composer's attach routing.
+    #[serde(default)]
+    pub prompt_image_supported: bool,
     pub plan: Vec<PlanEntry>,
     pub messages: Vec<Message>,
     pub usage: Usage,
@@ -193,6 +199,7 @@ impl SessionState {
             available_modes: self.available_modes.clone(),
             available_models: self.available_models.clone(),
             available_commands: self.available_commands.clone(),
+            prompt_image_supported: false,
             plan: self.plan.clone(),
             messages: self.messages.clone(),
             usage: self.usage.clone(),
@@ -351,4 +358,17 @@ pub fn extract_text_block(content: &acp_schema::ContentBlock) -> Option<String> 
         return None;
     }
     v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+}
+
+/// Pull `(mime_type, base64_data)` out of an image ContentBlock. Returns
+/// `None` for anything else. Same JSON round-trip as [`extract_text_block`]
+/// (`ContentBlock` is `#[non_exhaustive]`).
+pub fn extract_image_block(content: &acp_schema::ContentBlock) -> Option<(String, String)> {
+    let v = serde_json::to_value(content).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("image") {
+        return None;
+    }
+    let mime = v.get("mimeType").and_then(|m| m.as_str())?.to_string();
+    let data = v.get("data").and_then(|d| d.as_str())?.to_string();
+    Some((mime, data))
 }

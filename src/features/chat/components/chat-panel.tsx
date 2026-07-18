@@ -4,7 +4,7 @@ import { appendNextStepsDirective } from "../lib/next-steps";
 import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
 import { loadCachedAcpModes } from "../lib/acp-modes-cache";
 import { warmAcpModels, otherAcpAgent } from "../lib/warm-acp-models";
-import type { SessionKey } from "@/types/agents";
+import type { ImageAttachment, SessionKey } from "@/types/agents";
 import { hasInFlightToolCalls, isBusyAgentStatus } from "@/types/agent";
 import {
   composePrompt,
@@ -488,7 +488,11 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     agents.cancel(key).catch(() => {});
   };
 
-  const handleSend = async (content: string, mentions: MentionData[]) => {
+  const handleSend = async (
+    content: string,
+    mentions: MentionData[],
+    attachments?: ImageAttachment[],
+  ) => {
     const actualContent = content;
 
     // The mount effect kicks off the bind in parallel, but on a fresh
@@ -520,7 +524,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
     // The user-visible message keeps the prose as the user typed it,
     // including the shortform mention references (`@file:src/foo.rs` etc).
     // The context block goes only to the agent, not the local transcript.
-    addMessage(tabId, "user", actualContent);
+    addMessage(tabId, "user", actualContent, attachments);
     logEvent({
       source: "chat",
       kind: "send-agent",
@@ -585,7 +589,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
       session_id: bound.acpSessionId,
     };
     try {
-      await agents.send(key, wirePrompt);
+      await agents.send(key, wirePrompt, attachments);
       logEvent({
         source: "agent",
         kind: "stream-started",
@@ -863,7 +867,11 @@ function ChatComposer({
   onScrollToBottom,
 }: {
   tabId: string;
-  onSend: (message: string, mentions: MentionData[]) => void;
+  onSend: (
+    message: string,
+    mentions: MentionData[],
+    attachments?: ImageAttachment[],
+  ) => void;
   onStop: () => void;
   running: boolean;
   stopping: boolean;

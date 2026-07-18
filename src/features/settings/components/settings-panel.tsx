@@ -270,6 +270,15 @@ function GeneralSettings() {
         />
       </SettingRow>
       <SettingRow
+        label="Inline Git blame"
+        description="Show who last changed the current line, when, and the commit summary as a dim annotation at the end of the line — following your cursor. Only for files inside a git repository."
+      >
+        <Toggle
+          checked={settings.gitBlameInline}
+          onChange={(next) => updateSettings({ gitBlameInline: next })}
+        />
+      </SettingRow>
+      <SettingRow
         label="Enable Atlas Logs"
         description="Record Atlas-internal events (sign-in, agent start/finish, browser/file open, etc.) into the Logs tab under the `atlas` source. Default ON so when something goes wrong you can open the Logs tab, filter by `atlas`, and share a timeline. Turn off if the noise bothers you."
       >

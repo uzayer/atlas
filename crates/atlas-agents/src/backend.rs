@@ -16,7 +16,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use atlas_acp::{
-    AgentRegistry, AuthMethodWire, NewSessionInfo, PermissionDecision, Result as AcpResult,
+    AgentRegistry, AuthMethodWire, ImageAttachment, NewSessionInfo, PermissionDecision,
+    Result as AcpResult,
 };
 use atlas_acp::{AgentId, SessionId};
 use atlas_cersei::CerseiRuntime;
@@ -66,6 +67,23 @@ pub trait AgentBackend: Send + Sync {
     fn set_compress(&self, _agent_id: AgentId, _session_id: &SessionId, _on: bool) -> AcpResult<()> {
         Ok(())
     }
+    /// Stage image attachments to ride on the session's next prompt.
+    /// Default: no-op (the native agent has no multimodal input path yet;
+    /// its frontend gate — `prompt_image_supported() == false` — means
+    /// images degrade to path mentions before ever reaching here).
+    fn stage_attachments(
+        &self,
+        _agent_id: AgentId,
+        _session_id: SessionId,
+        _attachments: Vec<ImageAttachment>,
+    ) -> AcpResult<()> {
+        Ok(())
+    }
+    /// Whether the agent advertised `promptCapabilities.image` at
+    /// initialize. Default: false (native agent, unknown agents).
+    fn prompt_image_supported(&self, _agent_id: AgentId) -> bool {
+        false
+    }
     /// Re-arm the session lifecycle guard for a new turn and return the new
     /// turn epoch (the identity stamped onto this turn's events).
     fn mark_turn_started(&self, agent_id: AgentId, session_id: &SessionId) -> AcpResult<u64>;
@@ -113,6 +131,17 @@ impl AgentBackend for AcpBackend {
         cwd: PathBuf,
     ) -> AcpResult<Option<serde_json::Value>> {
         self.0.load_session(agent_id, session_id, cwd).await
+    }
+    fn stage_attachments(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        attachments: Vec<ImageAttachment>,
+    ) -> AcpResult<()> {
+        self.0.stage_attachments(agent_id, session_id, attachments)
+    }
+    fn prompt_image_supported(&self, agent_id: AgentId) -> bool {
+        self.0.prompt_image_supported(agent_id)
     }
     async fn send_prompt(
         &self,

@@ -2,10 +2,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::schema::v1::{
-    AuthenticateRequest, CancelNotification, ContentBlock, LoadSessionRequest, NewSessionRequest,
-    PermissionOptionId, PromptRequest, RequestPermissionOutcome, SelectedPermissionOutcome,
-    SessionConfigOptionValue, SessionId, SessionModeId, SetSessionConfigOptionRequest,
-    SetSessionModeRequest, StopReason, TextContent,
+    AuthenticateRequest, CancelNotification, ContentBlock, ImageContent, LoadSessionRequest,
+    NewSessionRequest, PermissionOptionId, PromptRequest, RequestPermissionOutcome,
+    SelectedPermissionOutcome, SessionConfigOptionValue, SessionId, SessionModeId,
+    SetSessionConfigOptionRequest, SetSessionModeRequest, StopReason, TextContent,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,17 @@ impl Default for AgentId {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// One image attached to an outbound prompt (multimodal input): base64
+/// `data` + its MIME type, mapped to an ACP `ContentBlock::Image` at send
+/// time when the agent advertised `promptCapabilities.image`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachment {
+    pub mime_type: String,
+    /// Raw base64 payload — no `data:` URI prefix.
+    pub data_base64: String,
 }
 
 /// Description of an agent process that Atlas knows how to spawn.
@@ -359,24 +370,82 @@ impl AgentRegistry {
         Ok(epoch)
     }
 
-    /// Send a single text prompt. Resolves with the turn's `StopReason` when
-    /// the agent finishes streaming. Notifications fire over the event sink
-    /// throughout the turn.
+    /// Send a single text prompt, plus any image attachments staged for this
+    /// session via [`Self::stage_attachments`]. Resolves with the turn's
+    /// `StopReason` when the agent finishes streaming. Notifications fire
+    /// over the event sink throughout the turn.
     pub async fn send_prompt(
         &self,
         agent_id: AgentId,
         session_id: SessionId,
         text: String,
     ) -> Result<StopReason> {
+        // Drain staged images one-shot before the request. Text always goes;
+        // images ride only when the agent advertised promptCapabilities.image
+        // (sending them anyway would violate the ACP spec) — dropped with a
+        // debug log otherwise, never an error.
+        let (image_supported, staged) = {
+            let entry = self.inner.get(&agent_id).ok_or(AcpError::UnknownAgent)?;
+            let staged = entry
+                .runtime
+                .pending_attachments
+                .remove(&session_id)
+                .map(|(_, v)| v)
+                .unwrap_or_default();
+            (entry.runtime.prompt_image_supported, staged)
+        };
+        let mut content = vec![ContentBlock::Text(TextContent::new(text))];
+        if !staged.is_empty() {
+            if image_supported {
+                for att in staged {
+                    content.push(ContentBlock::Image(ImageContent::new(
+                        att.data_base64,
+                        att.mime_type,
+                    )));
+                }
+            } else {
+                tracing::debug!(
+                    count = staged.len(),
+                    "dropping image attachments — agent did not advertise promptCapabilities.image"
+                );
+            }
+        }
         let connection = self.connection(agent_id)?;
         let resp = connection
-            .send_request(PromptRequest::new(
-                session_id,
-                vec![ContentBlock::Text(TextContent::new(text))],
-            ))
+            .send_request(PromptRequest::new(session_id, content))
             .block_task()
             .await?;
         Ok(resp.stop_reason)
+    }
+
+    /// Stage image attachments to ride on this session's *next* prompt. A
+    /// non-empty vec overwrites any previously staged set; an empty vec
+    /// clears. Drained one-shot by [`Self::send_prompt`].
+    pub fn stage_attachments(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+        attachments: Vec<ImageAttachment>,
+    ) -> Result<()> {
+        let entry = self.inner.get(&agent_id).ok_or(AcpError::UnknownAgent)?;
+        if attachments.is_empty() {
+            entry.runtime.pending_attachments.remove(&session_id);
+        } else {
+            entry
+                .runtime
+                .pending_attachments
+                .insert(session_id, attachments);
+        }
+        Ok(())
+    }
+
+    /// Whether the agent advertised `promptCapabilities.image` at
+    /// initialize. `false` for unknown agents.
+    pub fn prompt_image_supported(&self, agent_id: AgentId) -> bool {
+        self.inner
+            .get(&agent_id)
+            .map(|e| e.runtime.prompt_image_supported)
+            .unwrap_or(false)
     }
 
     /// Switch the session's permission mode (default / acceptEdits / plan /

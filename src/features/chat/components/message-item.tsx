@@ -239,6 +239,21 @@ export const MessageItem = memo(function MessageItem({
               />
             )}
 
+            {/* Images the user attached to this message (optimistic echo —
+                not recovered on replay; see ChatMessage.attachments). */}
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {message.attachments.map((img, i) => (
+                  <img
+                    key={i}
+                    src={`data:${img.mimeType};base64,${img.dataBase64}`}
+                    alt="attachment"
+                    className="max-h-48 max-w-full rounded-lg border border-[var(--border-default)] object-contain"
+                  />
+                ))}
+              </div>
+            )}
+
             {/* Block-level markdown, formatted LIVE while streaming: only the
                 trailing block re-parses per frame; completed blocks are
                 source-keyed cache hits. Same renderer streaming + settled, so

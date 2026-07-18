@@ -103,6 +103,10 @@ interface ChatInputProps {
    *  has no skill integration). Read live so switching agents takes effect
    *  without remounting the view. Defaults to true. */
   allowSkillMention?: boolean;
+  /** Offered clipboard image files BEFORE the default file-paste handling.
+   *  Return true to consume them (e.g. stage as inline attachments); false
+   *  falls through to the path-paste path. Read live via ref. */
+  onPasteImages?: (files: File[]) => boolean;
   /** Slot for future extensions. */
   extraExtensions?: Extension[];
   /** Min height in pixels (matches old textarea: 44). */
@@ -122,6 +126,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
       onSlashTrigger,
       keyInterceptor,
       allowSkillMention = true,
+      onPasteImages,
       extraExtensions,
       minHeight = 44,
       maxHeight = 200,
@@ -148,6 +153,8 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
     keyInterceptorRef.current = keyInterceptor;
     const allowSkillRef = useRef(allowSkillMention);
     allowSkillRef.current = allowSkillMention;
+    const onPasteImagesRef = useRef(onPasteImages);
+    onPasteImagesRef.current = onPasteImages;
 
     // Build the theme once — sized to the container, transparent
     // background so the parent's chip rounding shows through.
@@ -307,6 +314,21 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
               // text/markdown pastes (no files) fall through to CodeMirror.
               paste: (event, view) => {
                 const dt = event.clipboardData;
+                // Clipboard images (screenshots) first: offer them to the
+                // parent, which stages them as inline base64 attachments
+                // when the agent supports image prompts. Unconsumed images
+                // fall through to the path-paste below.
+                const imageFiles = dt?.files
+                  ? Array.from(dt.files).filter((f) => f.type.startsWith("image/"))
+                  : [];
+                if (
+                  imageFiles.length > 0 &&
+                  onPasteImagesRef.current?.(imageFiles)
+                ) {
+                  event.preventDefault();
+                  markInputActivity();
+                  return true;
+                }
                 const hasFiles =
                   !!dt &&
                   (Array.from(dt.types).includes("Files") ||

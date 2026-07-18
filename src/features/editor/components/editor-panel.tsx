@@ -15,6 +15,8 @@ import { ChevronRight, RefreshCw } from "lucide-react";
 import { logEvent } from "@/features/log/lib/log";
 import { diffGutter, applyDiffStatus } from "../lib/diff-gutter";
 import { gitDiffLineStatus } from "@/features/git/lib/git-diff-api";
+import { blameInline, applyBlame } from "../lib/blame-inline";
+import { gitBlameFile } from "@/features/git/lib/git-blame-api";
 
 const TOOLBAR_HEIGHT = 32;
 const DIRTY_CHECK_DEBOUNCE = 300; // ms — only check dirty state, not sync content
@@ -23,6 +25,10 @@ const DIRTY_CHECK_DEBOUNCE = 300; // ms — only check dirty state, not sync con
 // from the theme registry (src/features/editor/themes), keyed by the persisted
 // `settings.codeEditorTheme`.
 const themeCompartment = new Compartment();
+
+// Inline git blame — live-toggleable via a Compartment so flipping the
+// `gitBlameInline` setting doesn't rebuild the view (buffer/undo survive).
+const blameCompartment = new Compartment();
 
 function themeExtensions(themeId: string | undefined | null): Extension {
   const theme = getEditorTheme(themeId);
@@ -111,6 +117,7 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   const viewRef = useRef<EditorView | null>(null);
   const onSaveRef = useRef<() => void>(() => {});
   const refreshGutterRef = useRef<() => void>(() => {});
+  const refreshBlameRef = useRef<() => void>(() => {});
   const dirtyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load file content from disk — unless this is an untitled scratch
@@ -202,6 +209,8 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       });
       // Repaint this editor's diff gutter against the just-saved content.
       refreshGutterRef.current();
+      // Buffer and disk agree again — refresh the inline blame snapshot.
+      refreshBlameRef.current();
     } catch (err) {
       console.error("Save failed:", err);
     }
@@ -223,6 +232,28 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       .catch(() => {});
   }, [path, projectPath, isUntitled]);
   refreshGutterRef.current = refreshDiffGutter;
+
+  // Fetch this file's per-line blame and hand it to the inline-blame
+  // extension. Blame is computed against the file on disk, so we skip the
+  // fetch while the buffer is dirty (line numbers would misalign) — the
+  // extension keeps showing the last snapshot, degrading edited lines to
+  // "Uncommitted changes" on its own. No-op for untitled buffers, files
+  // outside the project, or when the setting is off.
+  const refreshBlame = useCallback(() => {
+    const view = viewRef.current;
+    if (!view || isUntitled || !projectPath) return;
+    if (!useProjectStore.getState().settings.gitBlameInline) return;
+    if (!path.startsWith(projectPath + "/")) return;
+    if (useEditorStore.getState().buffers[path]?.dirty) return;
+    const rel = path.slice(projectPath.length + 1);
+    void gitBlameFile(projectPath, rel)
+      .then((lines) => {
+        // Ignore late results after the view was destroyed or swapped.
+        if (viewRef.current === view) applyBlame(view, lines);
+      })
+      .catch(() => {});
+  }, [path, projectPath, isUntitled]);
+  refreshBlameRef.current = refreshBlame;
 
   // Re-seed the live CodeMirror view from a string without polluting undo
   // history (external reload, not a user edit).
@@ -268,6 +299,7 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
     reloadBuffer(path, content, mtime);
     replaceViewDoc(content);
     refreshDiffGutter();
+    refreshBlameRef.current();
   }, [path, isUntitled, reloadBuffer, markExternallyChanged, replaceViewDoc, refreshDiffGutter]);
   const revalidateRef = useRef(revalidate);
   revalidateRef.current = revalidate;
@@ -286,16 +318,20 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
     reloadBuffer(path, content, mtime);
     replaceViewDoc(content);
     refreshDiffGutter();
+    refreshBlameRef.current();
   }, [path, isUntitled, reloadBuffer, replaceViewDoc, refreshDiffGutter]);
 
   // Repaint the gutter when the working tree changes elsewhere (commits,
   // stage/unstage, external edits) — same event the git store listens to.
   useEffect(() => {
-    const un = listen("atlas:git-changed", () => refreshDiffGutter());
+    const un = listen("atlas:git-changed", () => {
+      refreshDiffGutter();
+      refreshBlame();
+    });
     return () => {
       un.then((u) => u());
     };
-  }, [refreshDiffGutter]);
+  }, [refreshDiffGutter, refreshBlame]);
 
   // Reconcile with disk on the signals that indicate an external edit:
   //  • buffer mount (fixes close-then-reopen showing a stale cached buffer),
@@ -320,7 +356,8 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
   // common case; this covers the late-projectPath race.
   useEffect(() => {
     refreshDiffGutter();
-  }, [refreshDiffGutter, buffer]);
+    refreshBlame();
+  }, [refreshDiffGutter, refreshBlame, buffer]);
 
   // Create/destroy CodeMirror view
   useEffect(() => {
@@ -343,6 +380,9 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
           langExt,
           lineNumbers(),
           diffGutter(),
+          blameCompartment.of(
+            useProjectStore.getState().settings.gitBlameInline ? blameInline() : [],
+          ),
           highlightActiveLine(),
           drawSelection(),
           bracketMatching(),
@@ -384,6 +424,7 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       const latest = useEditorStore.getState().buffers[path]?.originalContent;
       if (latest !== undefined) replaceViewDoc(latest);
       refreshDiffGutter();
+      refreshBlameRef.current();
     })();
 
     return () => {
@@ -404,6 +445,18 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
     if (!view) return;
     view.dispatch({ effects: themeCompartment.reconfigure(themeExtensions(codeEditorTheme)) });
   }, [codeEditorTheme]);
+
+  // Live-toggle inline blame: reconfigure the compartment in place; turning it
+  // on also fetches a fresh snapshot (the extension starts empty).
+  const gitBlameInline = useProjectStore.use.settings().gitBlameInline;
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: blameCompartment.reconfigure(gitBlameInline ? blameInline() : []),
+    });
+    if (gitBlameInline) refreshBlameRef.current();
+  }, [gitBlameInline]);
 
   if (!buffer) {
     return (

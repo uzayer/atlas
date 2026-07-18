@@ -104,6 +104,13 @@ pub struct PendingPermissionEntry {
 /// MUST resolve as `Cancelled`).
 pub type PendingPermissions = DashMap<Uuid, PendingPermissionEntry>;
 
+/// Image attachments staged for the *next* prompt of each session, drained
+/// one-shot when that prompt is sent. A separate low-churn side-channel so
+/// the `text: String` prompt seam stays untouched. Safe because the frontend
+/// serialises sends per session — exactly one prompt is staged-then-fired at
+/// a time, so each turn drains its own images.
+pub type PendingAttachments = DashMap<SessionId, Vec<crate::registry::ImageAttachment>>;
+
 /// Resources owned by a single spawned ACP agent. Held inside the
 /// [`crate::registry::AgentRegistry`] under an [`AgentId`].
 pub struct AgentRuntime {
@@ -122,6 +129,13 @@ pub struct AgentRuntime {
     /// flow. Returned as a JSON-friendly projection so the Tauri layer
     /// can hand them straight to the frontend.
     pub auth_methods: Vec<AuthMethodWire>,
+    /// Whether the agent advertised `promptCapabilities.image` at
+    /// initialize. Gates whether staged image attachments are sent as
+    /// `ContentBlock::Image` or dropped (sending them anyway would violate
+    /// the ACP spec).
+    pub prompt_image_supported: bool,
+    /// Images staged for each session's next prompt. See [`PendingAttachments`].
+    pub pending_attachments: Arc<PendingAttachments>,
 }
 
 /// JSON-friendly projection of `AuthMethod` for the wire. The ACP Rust
@@ -199,6 +213,7 @@ fn extract_terminal_auth(meta: &Map<String, Value>) -> Option<TerminalAuth> {
 pub struct InitializedAgent {
     pub connection: ConnectionTo<Agent>,
     pub auth_methods: Vec<AuthMethodWire>,
+    pub prompt_image_supported: bool,
 }
 
 /// Spawn an ACP agent and wait for its `initialize` handshake to complete.
@@ -289,6 +304,8 @@ pub async fn spawn_agent(
         session_guards: guards,
         shutdown_tx: Some(shutdown_tx),
         auth_methods: initialized.auth_methods,
+        prompt_image_supported: initialized.prompt_image_supported,
+        pending_attachments: Arc::new(DashMap::new()),
     })
 }
 
@@ -473,9 +490,12 @@ async fn run_driver(
                                 })
                         })
                         .unwrap_or_default();
+                    let prompt_image_supported =
+                        resp.agent_capabilities.prompt_capabilities.image;
                     let _ = ready_tx.send(Ok(InitializedAgent {
                         connection: connection.clone(),
                         auth_methods: methods,
+                        prompt_image_supported,
                     }));
                 }
                 Err(e) => {

@@ -612,3 +612,88 @@ pub async fn git_delete_branch(path: String, name: String) -> Result<(), String>
         Ok(())
     }).await.map_err(|e| e.to_string())?
 }
+
+/// One line of blame output, in final-file order (`line` is 1-based).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameLine {
+    pub line: u32,
+    pub sha: String,
+    pub short_sha: String,
+    pub author: String,
+    /// Author time as unix milliseconds (0 if unparsable).
+    pub time_ms: i64,
+    pub summary: String,
+    /// False for git's synthetic all-zero sha ("Not Committed Yet").
+    pub committed: bool,
+}
+
+/// Blame `file` against the working tree. `-w` keeps whitespace-only
+/// reformatting from stealing authorship. Untracked files and non-repos are
+/// not errors — they return an empty vec and the editor renders nothing.
+#[tauri::command]
+pub async fn git_blame_file(path: String, file: String) -> Result<Vec<BlameLine>, String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("git")
+            .args(["blame", "-w", "--line-porcelain", "--", &file])
+            .current_dir(&path)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        Ok(parse_line_porcelain(&String::from_utf8_lossy(&output.stdout)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Parse `git blame --line-porcelain`: every line group starts with a
+/// "<40-hex sha> <orig> <final> [count]" header, carries a full metadata block
+/// (author / author-time / summary / …), and ends with the tab-prefixed file
+/// content — which is our emit signal.
+fn parse_line_porcelain(out: &str) -> Vec<BlameLine> {
+    const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
+
+    let mut result = Vec::new();
+    let (mut sha, mut line_no): (String, u32) = (String::new(), 0);
+    let (mut author, mut time_ms, mut summary): (String, i64, String) =
+        (String::new(), 0, String::new());
+
+    for raw in out.lines() {
+        if raw.starts_with('\t') {
+            let committed = !sha.is_empty() && sha != ZERO_SHA;
+            result.push(BlameLine {
+                short_sha: sha.chars().take(7).collect(),
+                sha: std::mem::take(&mut sha),
+                line: line_no,
+                author: if committed { std::mem::take(&mut author) } else { "You".into() },
+                time_ms,
+                summary: if committed {
+                    std::mem::take(&mut summary)
+                } else {
+                    "Uncommitted changes".into()
+                },
+                committed,
+            });
+            author.clear();
+            summary.clear();
+            time_ms = 0;
+            continue;
+        }
+
+        // Header vs metadata: only headers start with a 40-char hex token.
+        let first = raw.split(' ').next().unwrap_or("");
+        if first.len() == 40 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
+            sha = first.to_string();
+            line_no = raw.split(' ').nth(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+        } else if let Some(rest) = raw.strip_prefix("author ") {
+            author = rest.to_string();
+        } else if let Some(rest) = raw.strip_prefix("author-time ") {
+            time_ms = rest.trim().parse::<i64>().map(|s| s * 1000).unwrap_or(0);
+        } else if let Some(rest) = raw.strip_prefix("summary ") {
+            summary = rest.to_string();
+        }
+    }
+    result
+}

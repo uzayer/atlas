@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use atlas_acp::{
-    AcpEvent, AgentId, AgentInfo, AgentRegistry, AuthMethodWire, EventSink, NewSessionInfo,
-    PermissionDecision, SessionId,
+    AcpEvent, AgentId, AgentInfo, AgentRegistry, AuthMethodWire, EventSink, ImageAttachment,
+    NewSessionInfo, PermissionDecision, SessionId,
 };
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -333,12 +333,35 @@ impl AgentManager {
 
     pub fn snapshot(&self, key: &SessionKey) -> Result<SessionSnapshot> {
         let handle = self.handle_for(key)?;
-        let snap = handle.state.lock().snapshot();
+        let mut snap = handle.state.lock().snapshot();
+        // Transport capability, not session state — stamped here so
+        // SessionState stays transport-agnostic.
+        snap.prompt_image_supported = self
+            .backend_for(key.agent_id)
+            .map(|b| b.prompt_image_supported(key.agent_id))
+            .unwrap_or(false);
         Ok(snap)
     }
 
     pub fn send(&self, key: &SessionKey, text: String) -> Result<()> {
         self.handle_for(key)?.send_prompt(text)
+    }
+
+    /// Stage image attachments to ride on this session's next prompt.
+    /// ACP agents only — the native agent's backend no-ops (its capability
+    /// reads false, so the frontend degrades images to path mentions first).
+    pub fn stage_attachments(
+        &self,
+        key: &SessionKey,
+        attachments: Vec<ImageAttachment>,
+    ) -> Result<()> {
+        let backend = self.backend_for(key.agent_id)?;
+        backend.stage_attachments(
+            key.agent_id,
+            SessionId::new(key.session_id.clone()),
+            attachments,
+        )?;
+        Ok(())
     }
 
     /// Cancel an in-flight turn. The actor services this on its control channel
