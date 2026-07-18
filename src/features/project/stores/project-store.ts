@@ -71,6 +71,9 @@ export interface AppSettings {
    *  `<next_steps>` block (uses the live session context, no BYOK); "off"
    *  disables it. (Legacy "parse"/"llm" values are treated as enabled.) */
   adaptiveSuggestions: "off" | "agent";
+  /** Inline Git blame in the code editor — dim author/age/summary annotation
+   *  trailing the active line. Off = the CodeMirror extension isn't loaded. */
+  gitBlameInline: boolean;
   /** Auto-update master switch. ON (default) → every startup checks PostHog
    *  remote config and prompts when a newer signed DMG is available. */
   autoUpdate: boolean;
@@ -90,6 +93,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   codeEditorTheme: DEFAULT_EDITOR_THEME_ID,
   atlasTheme: DEFAULT_ATLAS_THEME_ID,
   adaptiveSuggestions: "agent",
+  gitBlameInline: true,
   autoUpdate: true,
   updaterIgnoredVersion: null,
 };
