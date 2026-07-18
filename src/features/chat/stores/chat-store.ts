@@ -15,6 +15,7 @@ import type { PendingPermission } from "@/types/acp";
 import type {
   AgentDelta,
   ToolCall as AgentToolCall,
+  ImageAttachment,
   SessionModeInfo,
 } from "@/types/agents";
 import { splitAtlasContext } from "../lib/atlas-context";
@@ -258,7 +259,8 @@ interface ChatActions {
     addMessage: (
       sessionId: string,
       role: MessageRole,
-      content: string
+      content: string,
+      attachments?: ImageAttachment[]
     ) => void;
     appendToolCall: (
       sessionId: string,
@@ -679,7 +681,7 @@ export const useChatStore = createSelectors(
           set((s) => {
             s.activeSessionId = id;
           }),
-        addMessage: (sessionId, role, content) =>
+        addMessage: (sessionId, role, content, attachments) =>
           set((s) => {
             const session = s.sessions[sessionId];
             if (!session) return;
@@ -692,6 +694,7 @@ export const useChatStore = createSelectors(
               id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
               role,
               content,
+              ...(attachments?.length ? { attachments } : {}),
               toolCalls: [],
               fileChanges: [],
               plan: null,

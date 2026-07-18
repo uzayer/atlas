@@ -21,7 +21,8 @@ use parking_lot::Mutex;
 use crate::events::{Emitter, SessionDelta, SessionDeltaEnvelope};
 use crate::session::{
     MessageMode, MessageRole, PlanEntry, SessionState, SessionStatus, ToolCall, ToolCallStatus,
-    extract_text_block, format_tool_content, map_tool_status, new_assistant_text,
+    extract_image_block, extract_text_block, format_tool_content, map_tool_status,
+    new_assistant_text,
     new_assistant_thinking, new_assistant_tool, normalise_tool_input,
 };
 
@@ -160,6 +161,14 @@ fn apply_session_update(
             };
             if let Some(text) = extract_text_block(&block) {
                 append_text_chunk(emitter, state, text);
+            } else if let Some((mime, data)) = extract_image_block(&block) {
+                // Agent-sent images fold into the existing markdown pipeline
+                // as a data-URI image — no new delta variant or frontend path.
+                append_text_chunk(
+                    emitter,
+                    state,
+                    format!("\n\n![image](data:{mime};base64,{data})\n\n"),
+                );
             }
         }
         "agent_thought_chunk" => {

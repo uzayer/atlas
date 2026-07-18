@@ -349,6 +349,7 @@ const INJECT_BUDGET_SECS: u64 = 8;
 pub async fn agents_send(
     key: SessionKey,
     text: String,
+    attachments: Option<Vec<atlas_acp::ImageAttachment>>,
     manager: State<'_, AgentManager>,
     sharing: State<'_, MemorySharingState>,
     app: AppHandle,
@@ -359,6 +360,15 @@ pub async fn agents_send(
         "agent_turn_started",
         serde_json::json!({ "agent_kind": key.agent_id.0.to_string() }),
     );
+
+    // Stage image attachments up front so every send exit below (bare or
+    // memory-prefixed) drains them into this turn's prompt. Best-effort: a
+    // staging failure must not block the text send.
+    if let Some(atts) = attachments {
+        if !atts.is_empty() {
+            let _ = manager.stage_attachments(&key, atts);
+        }
+    }
 
     // Resolve the project cwd. Unknown session → fail with the SAME error
     // shape `manager.send` produces, without attempting a send that would

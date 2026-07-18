@@ -15,6 +15,7 @@ import type {
 } from "@/types/acp";
 import type {
   AgentDelta,
+  ImageAttachment,
   PluginSpec,
   SessionKey,
   SessionSnapshot,
@@ -53,8 +54,12 @@ export const agents = {
   snapshot: (key: SessionKey) =>
     invoke<SessionSnapshot>("agents_snapshot", { key }),
 
-  send: (key: SessionKey, text: string) =>
-    invoke<void>("agents_send", { key, text }),
+  send: (key: SessionKey, text: string, attachments?: ImageAttachment[]) =>
+    invoke<void>("agents_send", {
+      key,
+      text,
+      attachments: attachments?.length ? attachments : null,
+    }),
   cancel: (key: SessionKey) => invoke<void>("agents_cancel", { key }),
   /** Tear down a session's backend state (actor + driver guard) on tab close
    *  or project switch. Idempotent; fire-and-forget from UI paths. */

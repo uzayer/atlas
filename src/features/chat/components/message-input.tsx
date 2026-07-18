@@ -46,7 +46,10 @@ import { commandRequiresArgs } from "./slash-command-picker";
 import { CodexLoginDialog } from "./codex-login-dialog";
 import { PlanDock } from "./plan-dock";
 import { RetryPill } from "./retry-pill";
-import type { MentionFile } from "../lib/mentions";
+import { ComposerAddMenu } from "./composer-add-menu";
+import { imageMimeFromPath } from "@/features/model-chat/lib/model-capabilities";
+import type { ImageAttachment } from "@/types/agents";
+import type { MentionFile, MentionSkill } from "../lib/mentions";
 import { useComposerFileDrop } from "../hooks/use-composer-file-drop";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
@@ -71,14 +74,38 @@ const slashCommandPickerPromise: Promise<typeof import("./slash-command-picker")
 // queue" hand back a stable reference instead of allocating per render.
 const EMPTY_QUEUE: readonly string[] = Object.freeze([]);
 
+/** Read an image `File` (clipboard paste) into a base64 attachment. Returns
+ *  null for non-images. The `data:` URI prefix is stripped — the wire shape
+ *  carries raw base64 + mime separately. */
+async function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
+  if (!file.type.startsWith("image/")) return null;
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  }).catch(() => null);
+  if (!dataUrl) return null;
+  const comma = dataUrl.indexOf(",");
+  return {
+    mimeType: file.type,
+    dataBase64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl,
+  };
+}
+
 interface MessageInputProps {
   tabId: string;
   /**
    * Send a message right now (used when idle, or to dequeue). Receives
-   * both the plain prose text and the list of mention records the user
-   * inserted — the panel-level handler composes the final wire prompt.
+   * the plain prose text, the list of mention records the user inserted,
+   * and any staged image attachments — the panel-level handler composes
+   * the final wire prompt and stages the images.
    */
-  onSend: (message: string, mentions: MentionData[]) => void;
+  onSend: (
+    message: string,
+    mentions: MentionData[],
+    attachments?: ImageAttachment[],
+  ) => void;
   /** Stop the current generation. */
   onStop?: () => void;
   /** Stop was clicked; awaiting the cancelled turn's terminal delta. */
@@ -778,6 +805,98 @@ export function MessageInput({
     onDropFiles: handleDropFiles,
   });
 
+  // ── Image attachments (multimodal input) ─────────────────────────────────
+  // Images staged for the next send, shown as thumbnails above the input.
+  // Only populated when the bound agent advertised promptCapabilities.image;
+  // otherwise picked images degrade to path mention chips (any agent can
+  // read those off disk).
+  const [stagedImages, setStagedImages] = useState<ImageAttachment[]>([]);
+  const acpBoundKey = useChatStore((s) => {
+    const sess = s.sessions[tabId];
+    return sess?.acpAgentId && sess.acpSessionId
+      ? `${sess.acpAgentId}::${sess.acpSessionId}`
+      : null;
+  });
+  const [imageSupported, setImageSupported] = useState(false);
+  useEffect(() => {
+    if (!acpBoundKey) {
+      setImageSupported(false);
+      return;
+    }
+    const [agent_id, session_id] = acpBoundKey.split("::");
+    let cancelled = false;
+    agents
+      .snapshot({ agent_id, session_id })
+      .then((snap) => {
+        if (!cancelled) setImageSupported(!!snap.prompt_image_supported);
+      })
+      .catch(() => {
+        if (!cancelled) setImageSupported(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [acpBoundKey]);
+  // Rebinding to an agent without image support (agent switch, crash rebind)
+  // drops staged images — they could no longer be sent truthfully.
+  useEffect(() => {
+    if (!imageSupported) setStagedImages([]);
+  }, [imageSupported]);
+
+  // "+" menu → "Add files or photos". The Tauri dialog hands back real
+  // paths (a browser file input wouldn't), which is what makes the routing
+  // possible: images become inline base64 attachments when the agent
+  // supports them; everything else — and any unreadable image — becomes a
+  // path mention chip via the same handler the drag-drop path uses.
+  const pickFilesOrPhotos = useCallback(async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({ multiple: true, title: "Attach files or photos" });
+      if (!picked) return;
+      const paths = (Array.isArray(picked) ? picked : [picked]) as string[];
+      const images: ImageAttachment[] = [];
+      const mentionPaths: string[] = [];
+      for (const p of paths) {
+        const mime = imageSupported ? imageMimeFromPath(p) : null;
+        if (mime) {
+          try {
+            const data = await invoke<string>("read_file_base64", { path: p });
+            images.push({ mimeType: mime, dataBase64: data });
+            continue;
+          } catch {
+            // Unreadable as base64 → fall through to a path mention.
+          }
+        }
+        mentionPaths.push(p);
+      }
+      if (images.length) setStagedImages((prev) => [...prev, ...images]);
+      if (mentionPaths.length) handleDropFiles(mentionPaths);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (err) {
+      console.warn("attach picker failed:", err);
+    }
+  }, [imageSupported, handleDropFiles]);
+
+  const handlePickSkill = useCallback((skill: MentionSkill) => {
+    inputRef.current?.insertMention(skill);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  // Clipboard images (screenshots) → staged attachments. Returning false
+  // lets chat-input's default file-paste (native pasteboard → quoted paths)
+  // handle everything else.
+  const handlePasteImages = useCallback(
+    (files: File[]) => {
+      if (!imageSupported) return false;
+      void Promise.all(files.map(fileToImageAttachment)).then((atts) => {
+        const ok = atts.filter((a): a is ImageAttachment => a !== null);
+        if (ok.length) setStagedImages((prev) => [...prev, ...ok]);
+      });
+      return true;
+    },
+    [imageSupported],
+  );
+
   const handleSlashSelect = useCallback(
     (cmd: SlashCommand) => {
       const t = slashTriggerRef.current;
@@ -996,17 +1115,20 @@ export function MessageInput({
       // Queued messages don't carry mentions yet — the queue holds raw
       // strings and the agent will see whatever shortform text was in the
       // composer. Mentions are dropped here intentionally; promoting the
-      // queue to a structured shape is a follow-up.
+      // queue to a structured shape is a follow-up. Staged images likewise
+      // stay in the composer strip and ride the next direct send.
       enqueueMessage(tabId, trimmed);
     } else {
-      onSend(trimmed, mentions);
+      const images = stagedImages;
+      onSend(trimmed, mentions, images.length ? images : undefined);
+      if (images.length) setStagedImages([]);
     }
     inputRef.current?.clear();
     setValue("");
     // The value→draft sync effect will collapse the empty value into a
     // `delete s.drafts[tabId]` on the next commit, so no explicit
     // clearDraft call is needed.
-  }, [value, running, onSend, onStop, enqueueMessage, tabId, disabled]);
+  }, [value, running, onSend, onStop, enqueueMessage, tabId, disabled, stagedImages]);
 
   const trimmed = value.trim();
   // Tri-state button:
@@ -1096,6 +1218,28 @@ export function MessageInput({
               </span>
             </div>
           )}
+          {stagedImages.length > 0 && (
+            <div className="flex flex-wrap gap-2 px-3 pt-3">
+              {stagedImages.map((img, i) => (
+                <div key={i} className="relative group">
+                  <img
+                    src={`data:${img.mimeType};base64,${img.dataBase64}`}
+                    alt="attachment"
+                    className="h-14 w-14 object-cover rounded-lg border border-[var(--border-default)]"
+                  />
+                  <button
+                    onClick={() =>
+                      setStagedImages((prev) => prev.filter((_, j) => j !== i))
+                    }
+                    className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-default)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                    title="Remove image"
+                  >
+                    <X size={9} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {LazyChatInput ? (
             <LazyChatInput
               ref={inputRef}
@@ -1105,6 +1249,7 @@ export function MessageInput({
               onSubmit={submit}
               onMentionTrigger={setTrigger}
               onSlashTrigger={setSlashTrigger}
+              onPasteImages={handlePasteImages}
               keyInterceptor={keyInterceptor}
               // All agents (incl. the native Atlas/cersei agent) support skills
               // now — the `#` rail inlines a skill body via compose_prompt, and the
@@ -1124,6 +1269,20 @@ export function MessageInput({
           )}
           <div className="flex items-center justify-between px-2 pb-2 pt-1">
             <div className="flex items-center gap-1">
+              <ComposerAddMenu
+                disabled={disabled}
+                projectPath={useProjectStore.getState().currentProject?.path ?? null}
+                agentId={
+                  agentType === "codex"
+                    ? "codex"
+                    : agentType === "cersei"
+                      ? "cersei"
+                      : "claude-code"
+                }
+                imageSupported={imageSupported}
+                onAddFilesOrPhotos={() => void pickFilesOrPhotos()}
+                onPickSkill={handlePickSkill}
+              />
               {/* Which coding agent this chat is bound to (Claude / Codex).
                   Switch with ⌥/ (only on a fresh chat). */}
               <span
