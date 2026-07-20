@@ -5,6 +5,7 @@ import { createSelectors } from "@/lib/create-selectors";
 import { invoke } from "@tauri-apps/api/core";
 import type { TabType } from "@/lib/constants";
 import type { LayoutTemplate } from "../templates";
+import { clearTabViewState } from "@/features/editor/lib/editor-view-state-registry";
 
 export interface Tab {
   id: string;
@@ -116,6 +117,10 @@ interface LayoutActions {
   actions: {
     toggleLeftPanel: () => void;
     toggleRightPanel: () => void;
+    /** Force the right panel closed (idempotent). Used by the workspace switch
+     *  to drop the heavy lazy sub-panels (Source Control / Commit graph / …)
+     *  before they can re-fetch for the incoming workspace. */
+    closeRightPanel: () => void;
     toggleBottomPanel: () => void;
     toggleChatSidebar: () => void;
     toggleModelChatSidebar: () => void;
@@ -351,6 +356,10 @@ export const useLayoutStore = createSelectors(
           set((s) => {
             s.rightPanel.visible = !s.rightPanel.visible;
           }),
+        closeRightPanel: () =>
+          set((s) => {
+            s.rightPanel.visible = false;
+          }),
         toggleBottomPanel: () =>
           set((s) => {
             s.bottomPanel.visible = !s.bottomPanel.visible;
@@ -461,6 +470,8 @@ export const useLayoutStore = createSelectors(
             if (idx === -1) return;
             const tab = s.tabs[idx];
             if (!tab.closable) return;
+            // Drop any stored editor view-state for this tab (Phase 2).
+            clearTabViewState(id);
             const grp = groupOf(tab);
             const groupIdxInGroup = s.tabs
               .filter((t) => groupOf(t) === grp)

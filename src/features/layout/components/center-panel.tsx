@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { useLayoutStore, type Tab, type WorkspaceView } from "../stores/layout-store";
+import { lazyFirstMount, unmountBackgroundEditors } from "../lib/perf-flags";
 import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 // Chat is the default landing surface — always loaded so the first paint
 // shows the agent UI without a Suspense flash.
@@ -87,6 +88,11 @@ const tabIcons: Record<TabType, React.ElementType> = {
 };
 
 const GROUP_OF = (t: Tab) => t.groupId ?? "main";
+// Tab types that are safe to fully UNMOUNT for a background workspace (Phase 2c,
+// behind the `unmountBackgroundEditors` flag): only editors, because their warm
+// document model + serialized view-state make remount lossless. Terminals/chat/
+// browser hold live, non-serializable state and stay keep-alive (display:none).
+const WORKSPACE_UNMOUNTABLE_TYPES: ReadonlySet<TabType> = new Set(["editor"]);
 const PERSISTENT_TYPES: ReadonlySet<TabType> = new Set([
   "editor",
   "terminal",
@@ -164,7 +170,7 @@ export function CenterPanel() {
         return (
           <div
             key={ws.id}
-            className="absolute inset-0"
+            className="absolute inset-0 [contain:layout_paint]"
             style={{ display: isActive ? "block" : "none" }}
           >
             <WorkspaceColumns
@@ -414,6 +420,9 @@ function TabContentContainer({
   const { setActiveTab } = useLayoutStore.use.actions();
   const ref = useRef<HTMLDivElement>(null);
   const [height, setHeight] = useState(0);
+  // Set of tab ids that have been active at least once in this column — drives
+  // lazy-first-mount (Phase 1). Persists for this column's lifetime.
+  const everActivatedRef = useRef<Set<string>>(new Set());
 
   const tabsAll = view.tabs;
   const tabs = useMemo(
@@ -466,11 +475,33 @@ function TabContentContainer({
   const persistentTabs = tabs.filter((t) => PERSISTENT_TYPES.has(t.type));
   const activeIsNonPersistent = !persistentTabs.find((t) => t.id === activeTab.id);
 
+  // Phase 1 (lazy-first-mount): a persistent tab's heavy body is only mounted
+  // once it has been the active tab at least once; thereafter it stays mounted
+  // (so tab-switch-back is still instant). This bounds live CodeMirror/xterm
+  // instances to *visited* tabs instead of *all open* tabs — the biggest cost
+  // on a workspace with many open tabs. Accumulating into a render-time ref is
+  // safe here: it's idempotent and the active id is always added first, so the
+  // active tab always renders. Off by default (flag).
+  const lazyMount = lazyFirstMount();
+  everActivatedRef.current.add(activeTab.id);
+  // Phase 2c: for BACKGROUND workspaces, unmount editor tabs entirely (warm
+  // model + per-tab view-state make the remount lossless + cheap). Only editors
+  // — terminals (live PTY), chat (virtualizer/streams), browser (webview) must
+  // stay alive, so they keep the display:none keep-alive behavior. `isActive`
+  // here is the WORKSPACE-level flag (the map shadows it with a tab-level one).
+  const unmountBgEditors = unmountBackgroundEditors();
+  const workspaceIsActive = isActive;
+
   return (
     <div ref={ref} style={{ flex: "1 1 0%", minHeight: 0, overflow: "hidden", position: "relative" }}>
       <Suspense fallback={<PanelLoading />}>
         {persistentTabs.map((tab) => {
           const isActive = tab.id === activeTab.id;
+          // Not yet visited → don't mount its body yet (lazy-first-mount).
+          if (lazyMount && !everActivatedRef.current.has(tab.id)) return null;
+          // Background workspace + unmountable type → tear the editor down.
+          if (unmountBgEditors && !workspaceIsActive && WORKSPACE_UNMOUNTABLE_TYPES.has(tab.type))
+            return null;
           return (
             <div key={tab.id} style={{ display: isActive ? "contents" : "none" }}>
               {tab.type === "editor" ? (

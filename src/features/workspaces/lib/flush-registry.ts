@@ -49,14 +49,27 @@ export function registerFlush(id: string, flush: FlushFn): () => void {
  * ALL flushes settle, so callers can `await flushAll(ctx)` and be certain
  * pending writes have hit disk. Individual failures are swallowed (logged) so
  * a single bad store can't strand a workspace switch.
+ *
+ * `opts.skip` omits named flushes. The workspace-SWITCH path uses this to skip
+ * the `app-state` flush: on a switch that write is pure overhead (it runs
+ * before the active-id swaps, so it persists the OUTGOING id, and the debounced
+ * `scheduleAppStateSave()` at the end of the switch already persists the new
+ * one). The data-loss-sensitive flushes (`knowledge`, `editor-state`) are NOT
+ * skipped — they must still complete before the stores are snapshotted/swapped.
+ * Teardown paths (close / quit) call `flushAll` with no skip so app-state is
+ * still durably written there.
  */
 export async function flushAll(
   ctx: FlushCtx = { workspaceId: null, path: null },
+  opts: { skip?: readonly string[] } = {},
 ): Promise<void> {
-  const pending = Array.from(registry.values()).map((r) =>
-    r.flush(ctx).catch((e) => {
-      console.warn(`flushAll: "${r.id}" flush failed:`, e);
-    }),
-  );
+  const skip = opts.skip;
+  const pending = Array.from(registry.values())
+    .filter((r) => !skip || !skip.includes(r.id))
+    .map((r) =>
+      r.flush(ctx).catch((e) => {
+        console.warn(`flushAll: "${r.id}" flush failed:`, e);
+      }),
+    );
   await Promise.all(pending);
 }

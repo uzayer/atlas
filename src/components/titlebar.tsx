@@ -52,11 +52,10 @@ export function Titlebar() {
     currentProject?.name ??
     "Atlas";
   const { windowRef, isFullscreen } = useTauriWindow();
-  // When the workspace sidebar is open it owns the top-left corner (its own
-  // traffic-light spacer), so the titlebar must NOT also reserve 72px for the
-  // window controls — that double-reservation is the empty gap before the
-  // workspace toggle. Fullscreen hides the controls entirely, same effect.
-  const sidebarOpen = useWorkspaceStore.use.sidebarOpen();
+  // The workspace sidebar is now a floating OVERLAY (it no longer occupies flow
+  // width), so the titlebar always reserves 72px for the OS window controls
+  // (unless fullscreen, which hides them). Keying the padding on `sidebarOpen`
+  // used to reflow the titlebar on every toggle — dropped.
 
   const isTitlebarSurface = (target: EventTarget | null) => {
     const el = target as HTMLElement | null;
@@ -98,7 +97,7 @@ export function Titlebar() {
     <div
       onMouseDown={handleDrag}
       onDoubleClick={handleDoubleClick}
-      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[var(--bg-base)] border-b border-border-default ${isFullscreen || sidebarOpen ? "pl-3" : "pl-[72px]"}`}
+      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[var(--bg-base)] border-b border-border-default ${isFullscreen ? "pl-3" : "pl-[72px]"}`}
     >
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
         <WorkspaceToggle />

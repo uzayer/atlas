@@ -74,6 +74,12 @@ interface WorkspaceState {
   editingWorkspaceId: string | null;
   /** Guards re-entrant switches while a flush/restore is in flight. */
   switching: boolean;
+  /** OPTIMISTIC selection target. Set synchronously the instant a switch is
+   *  requested — before the (awaited) flush + restore that actually swaps
+   *  `activeWorkspaceId`. The sidebar highlights `optimisticActiveId ??
+   *  activeWorkspaceId`, so the clicked row lights up immediately and the real
+   *  state catches up. Cleared when the switch settles (or fails). */
+  optimisticActiveId: string | null;
   actions: {
     /** Add a workspace for `path`, or focus the existing one if `path` is
      *  already open. Returns the workspace id. Switches to it (mounts it). */
@@ -127,6 +133,21 @@ const uuid = (): string =>
 const nameOf = (path: string): string => path.split("/").pop() || path;
 
 /**
+ * Run `fn` after the current frame has painted. A double-rAF hops past the
+ * browser's style/layout/paint commit for this frame, so a workspace switch's
+ * authoritative store swap renders visibly before the deferred tail (background
+ * revalidate + event logging) competes for the main thread. Falls back to a
+ * macrotask where rAF is unavailable (non-DOM test env).
+ */
+function deferAfterPaint(fn: () => void): void {
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => requestAnimationFrame(fn));
+  } else {
+    setTimeout(fn, 0);
+  }
+}
+
+/**
  * Tear a workspace OUT of the hot set: free its heavy RAM (chat history,
  * terminal trees), drop its panel snapshot, unmount its CenterPanel subtree
  * (→ BlockTerminal closes its PTYs), and stop its resident Rust watchers.
@@ -160,6 +181,7 @@ export const useWorkspaceStore = createSelectors(
     maxMounted: DEFAULT_MAX_MOUNTED,
     sidebarOpen: false,
     switching: false,
+    optimisticActiveId: null,
     editingGroupId: null,
     editingWorkspaceId: null,
     actions: {
@@ -260,7 +282,17 @@ export const useWorkspaceStore = createSelectors(
           return;
         }
 
-        set({ switching: true });
+        // Optimistic + instant (synchronous, before the awaited flush below):
+        //  • `optimisticActiveId` lights the clicked row in the switcher NOW.
+        //  • Close the right panel so its heavy LAZY sub-panels (Source Control /
+        //    Commit graph / Review / GitHub) unmount BEFORE `currentProject`
+        //    flips — otherwise they'd synchronously re-fetch/re-render for the
+        //    incoming workspace mid-switch and jank it. This is the one
+        //    deliberate layout reset; everything else (editors/terminals/chat)
+        //    stays resident. The panel stays closed (global state) until the
+        //    user reopens it — a cheap on-demand lazy load.
+        set({ switching: true, optimisticActiveId: id });
+        useLayoutStore.getState().actions.closeRightPanel();
         try {
           // 1) Commit the OUTGOING workspace's tab/split VIEW into the layout
           //    store (its tab subtree stays MOUNTED + hidden in CenterPanel),
@@ -279,7 +311,21 @@ export const useWorkspaceStore = createSelectors(
             // The snapshot is then taken AFTER the flush so it reflects the
             // just-saved state. `flushAll` swallows per-store errors, so a bad
             // flush can't block the switch.
-            await flushAll({ workspaceId: activeWorkspaceId, path: outgoingPath });
+            //
+            // Skip `app-state` here: on a switch that write is pure overhead —
+            // it runs BEFORE the active-id swaps (so it would persist the
+            // OUTGOING id) and the debounced `scheduleAppStateSave()` at the end
+            // of this switch already persists the new active id. The remaining
+            // flushes (`knowledge`, `editor-state`) are data-loss-sensitive and
+            // MUST stay awaited: the KB flush reads the live editor buffer +
+            // `activeEntryId` and must land on disk BEFORE `restoreSnapshot`
+            // swaps `useKnowledgeStore` below, or it saves the incoming note's
+            // body to the outgoing file. Both are dedup-gated, so on a switch
+            // with no unsaved edits this resolves in a microtask.
+            await flushAll(
+              { workspaceId: activeWorkspaceId, path: outgoingPath },
+              { skip: ["app-state"] },
+            );
             captureSnapshot(activeWorkspaceId);
           }
 
@@ -309,10 +355,12 @@ export const useWorkspaceStore = createSelectors(
 
           if (wasHot) {
             // WARM: its subtree is already mounted — swap light panel data +
-            // make its column-set visible. No remount.
+            // make its column-set visible. No remount. The stale-while-
+            // revalidate refresh is deferred (below) so the swapped-in UI paints
+            // first; `revalidateWorkspace` re-checks the active id before it
+            // applies, so a rapid A→B→A can't clobber.
             restoreSnapshot(id);
             layout.loadWorkspaceView(id);
-            revalidateWorkspace(id, target.path);
           } else {
             // COLD: mount fresh. `loadEditorState` (inside loadProjectStores)
             // appends saved tabs by id — idempotent against the seeded view.
@@ -323,16 +371,25 @@ export const useWorkspaceStore = createSelectors(
           }
 
           scheduleAppStateSave();
-          logEvent({
-            source: "project",
-            kind: "workspace-switch",
-            summary: target.name,
-            projectPath: target.path,
-            projectName: target.name,
-            payload: { workspaceId: id },
+          // Defer the non-urgent tail (background git/explorer revalidate +
+          // event log) to the next frame so the authoritative swap above paints
+          // in this one instead of sharing its long task. `deferAfterPaint`
+          // runs after the browser has committed the frame.
+          deferAfterPaint(() => {
+            if (wasHot) revalidateWorkspace(id, target.path);
+            logEvent({
+              source: "project",
+              kind: "workspace-switch",
+              summary: target.name,
+              projectPath: target.path,
+              projectName: target.name,
+              payload: { workspaceId: id },
+            });
           });
         } finally {
-          set({ switching: false });
+          // Real `activeWorkspaceId` is now authoritative (or the switch failed
+          // and it's unchanged) — drop the optimistic overlay either way.
+          set({ switching: false, optimisticActiveId: null });
         }
       },
 

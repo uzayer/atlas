@@ -406,6 +406,10 @@ export function WorkspaceSidebar() {
   const workspaces = useWorkspaceStore.use.workspaces();
   const groups = useWorkspaceStore.use.groups();
   const activeWorkspaceId = useWorkspaceStore.use.activeWorkspaceId();
+  const optimisticActiveId = useWorkspaceStore.use.optimisticActiveId();
+  // Highlight the OPTIMISTIC target the instant a switch is clicked; fall back
+  // to the real active id once the (awaited) switch settles or if none pending.
+  const displayActiveId = optimisticActiveId ?? activeWorkspaceId;
   const { addWorkspace } = useWorkspaceStore.use.actions();
   const { addTab } = useLayoutStore.use.actions();
   const recentProjects = useProjectStore.use.recentProjects();
@@ -544,7 +548,14 @@ export function WorkspaceSidebar() {
     addTab({ id: type === "mission-control" ? "mission-control" : type, type, title, closable: true, dirty: false, data: {} });
 
   return (
-    <aside className="flex flex-col h-screen w-[244px] shrink-0 border-r border-[var(--border-default)] bg-[var(--panel-rail-bg)]/80 backdrop-blur-xl" data-tauri-drag-region>
+    <aside
+      // Transparent — the frosted glass (bg + `backdrop-blur-2xl`) lives on the
+      // animated OVERLAY wrapper in app-layout.tsx, not here. Putting the blur
+      // on this child would break it: the wrapper's opacity/transform isolates
+      // its own layer, leaving a descendant's backdrop-filter nothing to sample.
+      className="flex flex-col h-screen w-[244px] shrink-0 bg-transparent"
+      data-tauri-drag-region
+    >
       {/* Top bar: aligned to the titlebar height (h-[30px] + border-b) so the
        *  line under the traffic lights matches the rest of the title bar.
        *  Buttons sit right to dodge the traffic lights — but in fullscreen the
@@ -608,7 +619,7 @@ export function WorkspaceSidebar() {
                   ) : row.kind === "group" ? (
                     <GroupHeaderRow group={row.group} collapsed={!!collapsed[row.group.id]} onToggle={() => toggle(row.group.id)} />
                   ) : row.kind === "ws" ? (
-                    <WorkspaceRow ws={row.ws} active={row.ws.id === activeWorkspaceId} summary={summaries[row.ws.path]} groups={groups} indented={row.indented} />
+                    <WorkspaceRow ws={row.ws} active={row.ws.id === displayActiveId} summary={summaries[row.ws.path]} groups={groups} indented={row.indented} />
                   ) : row.kind === "recent" ? (
                     <RecentProjectRow name={row.name} path={row.path} onOpen={() => void addWorkspace(row.path)} />
                   ) : (
