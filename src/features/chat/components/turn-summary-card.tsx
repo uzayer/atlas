@@ -285,7 +285,10 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
               type="button"
               onClick={() =>
                 window.dispatchEvent(
-                  new CustomEvent("atlas:chat-send", { detail: { text: chip } }),
+                  // Stamp the ORIGIN tab id so only this chat session sends it —
+                  // the listener is a global window event and every mounted
+                  // ChatPanel hears it, so without this every session would fire.
+                  new CustomEvent("atlas:chat-send", { detail: { text: chip, tabId } }),
                 )
               }
               className={cn(

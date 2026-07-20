@@ -448,16 +448,21 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   }, [session?.status, session?.acpSessionId, tabId]);
 
   // Suggestion chips (and other adaptive affordances) send as the next message.
+  // This is a GLOBAL window event and every mounted ChatPanel hears it, so only
+  // act when the event is addressed to THIS tab (the chip stamps its origin
+  // tabId). A tabId-less event (none today) still falls through to all, matching
+  // the prior behaviour.
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ text?: string }>).detail;
+      const detail = (e as CustomEvent<{ text?: string; tabId?: string }>).detail;
+      if (detail?.tabId != null && detail.tabId !== tabId) return;
       if (detail?.text && handleSendRef.current) {
         handleSendRef.current(detail.text, []);
       }
     };
     window.addEventListener("atlas:chat-send", handler);
     return () => window.removeEventListener("atlas:chat-send", handler);
-  }, []);
+  }, [tabId]);
 
   if (!session) return null;
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense, Fragment } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo, memo, lazy, Suspense, Fragment } from "react";
 import { cn } from "@/lib/utils";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
@@ -180,7 +180,11 @@ export function CenterPanel() {
   );
 }
 
-function WorkspaceColumns({
+// Memoized so a workspace switch re-renders only the ≤2 columns whose props
+// actually change, not every mounted workspace's whole subtree (the O(N×tabs)
+// re-render that makes even warm switches feel slow). `view` is a stable
+// reference for uninvolved workspaces; `runningTabIds` is shallow-stable.
+const WorkspaceColumns = memo(function WorkspaceColumns({
   workspaceId,
   view,
   isActive,
@@ -216,9 +220,9 @@ function WorkspaceColumns({
       ))}
     </PanelGroup>
   );
-}
+});
 
-function TabColumn({
+const TabColumn = memo(function TabColumn({
   groupId,
   view,
   isActive,
@@ -400,9 +404,9 @@ function TabColumn({
       <TabContentContainer groupId={groupId} view={view} isActive={isActive} />
     </div>
   );
-}
+});
 
-function TabContentContainer({
+const TabContentContainer = memo(function TabContentContainer({
   groupId,
   view,
   isActive,
@@ -502,7 +506,7 @@ function TabContentContainer({
       </Suspense>
     </div>
   );
-}
+});
 
 function PanelLoading() {
   // Structural skeleton (not centered text) so the first open of a lazy panel
