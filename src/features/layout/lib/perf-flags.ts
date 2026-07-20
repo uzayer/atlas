@@ -30,3 +30,7 @@ export const lazyFirstMount = (): boolean => readFlag("lazyFirstMount");
  *  view-state make remount lossless). Requires the warm-model path. */
 export const unmountBackgroundEditors = (): boolean =>
   readFlag("unmountBackgroundEditors");
+
+/** Dev instrumentation: log workspace-switch latency + live-editor count per
+ *  switch (see switch-perf.ts). Off by default; enable to profile the flags. */
+export const instrument = (): boolean => readFlag("instrument");

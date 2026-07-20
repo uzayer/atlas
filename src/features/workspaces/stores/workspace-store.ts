@@ -18,6 +18,7 @@ import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { useTerminalStore } from "@/features/terminal/stores/terminal-store";
 import { isWorkspaceRunning } from "../lib/agent-activity";
+import { switchClockStart, logSwitchPerf } from "@/features/layout/lib/switch-perf";
 
 /** Default hot-set cap — how many workspaces stay mounted/resident at once. */
 const DEFAULT_MAX_MOUNTED = 6;
@@ -293,6 +294,8 @@ export const useWorkspaceStore = createSelectors(
         //    user reopens it — a cheap on-demand lazy load.
         set({ switching: true, optimisticActiveId: id });
         useLayoutStore.getState().actions.closeRightPanel();
+        // Instrumentation clock: request → first post-swap paint (see below).
+        const perfStart = switchClockStart();
         try {
           // 1) Commit the OUTGOING workspace's tab/split VIEW into the layout
           //    store (its tab subtree stays MOUNTED + hidden in CenterPanel),
@@ -376,6 +379,7 @@ export const useWorkspaceStore = createSelectors(
           // in this one instead of sharing its long task. `deferAfterPaint`
           // runs after the browser has committed the frame.
           deferAfterPaint(() => {
+            logSwitchPerf(target.name, perfStart);
             if (wasHot) revalidateWorkspace(id, target.path);
             logEvent({
               source: "project",
