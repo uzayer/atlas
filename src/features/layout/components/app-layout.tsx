@@ -87,8 +87,13 @@ export function AppLayout() {
           fades via `opacity` (compositor-only, no layout). */}
       <div
         className={cn(
-          "absolute inset-0 z-[55] bg-black/20 transition-opacity duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
-          sidebarOpen ? "opacity-100" : "opacity-0 pointer-events-none",
+          // Strong dim + blur so the (possibly lagging) main content is HIDDEN
+          // while the switcher is open and during its enter/exit — the animation
+          // reads as a clean focus transition rather than exposing a mid-load
+          // centre. Both are compositor-cheap once established.
+          "absolute inset-0 z-[55] bg-black/28 backdrop-blur-md transition-opacity ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+          // Closing is 50% slower than opening (300 → 450ms).
+          sidebarOpen ? "opacity-100 duration-300" : "opacity-0 pointer-events-none duration-[450ms]",
         )}
         onClick={() => setSidebarOpen(false)}
         aria-hidden
@@ -109,7 +114,11 @@ export function AppLayout() {
           backdrop to nothing — the panel would look merely transparent). Closed =
           parked off the left edge, transparent. */}
       <div
-        className="absolute left-0 top-0 h-screen w-[244px] z-[60] border-r border-[var(--border-default)] bg-[var(--bg-elevated)]/60 backdrop-blur-2xl shadow-[var(--shadow-overlay)] transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none [backface-visibility:hidden]"
+        className={cn(
+          "absolute left-0 top-0 h-screen w-[244px] z-[60] border-r border-[var(--border-default)] bg-[var(--bg-elevated)]/60 backdrop-blur-2xl shadow-[var(--shadow-overlay)] transition-[transform,opacity] ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none [backface-visibility:hidden]",
+          // Closing (slide-out) is 50% slower than opening (300 → 450ms).
+          sidebarOpen ? "duration-300" : "duration-[450ms]",
+        )}
         style={{
           transform: sidebarOpen ? "translateX(0)" : "translateX(-244px)",
           opacity: sidebarOpen ? 1 : 0,

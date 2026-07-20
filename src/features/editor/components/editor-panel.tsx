@@ -14,10 +14,6 @@ import { listen } from "@tauri-apps/api/event";
 import { ChevronRight, RefreshCw } from "lucide-react";
 import { logEvent } from "@/features/log/lib/log";
 import { diffGutter, applyDiffStatus } from "../lib/diff-gutter";
-import { unmountBackgroundEditors } from "@/features/layout/lib/perf-flags";
-import { captureViewState, restoreEditorState, applyFoldsAndScroll } from "../lib/editor-view-state";
-import { getTabViewState, setTabViewState } from "../lib/editor-view-state-registry";
-import { acquireModel, releaseModel, writeBackModel } from "../lib/document-model-registry";
 import { gitDiffLineStatus } from "@/features/git/lib/git-diff-api";
 import { blameInline, applyBlame } from "../lib/blame-inline";
 import { gitBlameFile } from "@/features/git/lib/git-blame-api";
@@ -373,59 +369,49 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       useEditorStore.getState().buffers[path]?.originalContent ?? buffer.originalContent;
     let cancelled = false;
 
-    // Phase 2 (buffer/view split): when enabled, an editor may be unmounted for
-    // a background workspace and remounted later. Restore its serialized
-    // view-state (doc+selection+undo+folds+scroll) if we captured one on the
-    // previous unmount. Flag OFF ⇒ savedVS is always undefined ⇒ behavior is
-    // byte-identical to before.
-    const restoreEnabled = unmountBackgroundEditors();
-    const savedVS = restoreEnabled ? getTabViewState(tabId) : undefined;
-
     (async () => {
       const langExt = await getLanguageExtension(buffer.language);
       if (cancelled) return;
 
-      const extensions: Extension = [
-        themeCompartment.of(themeExtensions(useProjectStore.getState().settings.codeEditorTheme)),
-        langExt,
-        lineNumbers(),
-        diffGutter(),
-        blameCompartment.of(
-          useProjectStore.getState().settings.gitBlameInline ? blameInline() : [],
-        ),
-        highlightActiveLine(),
-        drawSelection(),
-        bracketMatching(),
-        foldGutter(),
-        indentOnInput(),
-        history(),
-        highlightSelectionMatches(),
-        keymap.of([
-          { key: "Mod-s", run: () => { onSaveRef.current(); return true; } },
-          indentWithTab,
-          ...defaultKeymap,
-          ...historyKeymap,
-          ...searchKeymap,
-        ]),
-        // Debounced dirty check — never sync full content to store on keystroke
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged) {
-            if (dirtyTimerRef.current) clearTimeout(dirtyTimerRef.current);
-            dirtyTimerRef.current = setTimeout(() => {
-              const current = update.view.state.doc.toString();
-              const orig = useEditorStore.getState().buffers[path]?.originalContent ?? "";
-              setDirty(path, current !== orig);
-            }, DIRTY_CHECK_DEBOUNCE);
-          }
-        }),
-        EditorState.tabSize.of(2),
-      ];
-
-      // Restore the full editor state if we have a memento; else seed from disk.
-      const restoredState = savedVS ? restoreEditorState(savedVS, extensions) : null;
-      const view = restoredState
-        ? new EditorView({ state: restoredState, parent: containerRef.current! })
-        : new EditorView({ doc: originalContent, extensions, parent: containerRef.current! });
+      const view = new EditorView({
+        doc: originalContent,
+        extensions: [
+          themeCompartment.of(themeExtensions(useProjectStore.getState().settings.codeEditorTheme)),
+          langExt,
+          lineNumbers(),
+          diffGutter(),
+          blameCompartment.of(
+            useProjectStore.getState().settings.gitBlameInline ? blameInline() : [],
+          ),
+          highlightActiveLine(),
+          drawSelection(),
+          bracketMatching(),
+          foldGutter(),
+          indentOnInput(),
+          history(),
+          highlightSelectionMatches(),
+          keymap.of([
+            { key: "Mod-s", run: () => { onSaveRef.current(); return true; } },
+            indentWithTab,
+            ...defaultKeymap,
+            ...historyKeymap,
+            ...searchKeymap,
+          ]),
+          // Debounced dirty check — never sync full content to store on keystroke
+          EditorView.updateListener.of((update) => {
+            if (update.docChanged) {
+              if (dirtyTimerRef.current) clearTimeout(dirtyTimerRef.current);
+              dirtyTimerRef.current = setTimeout(() => {
+                const current = update.view.state.doc.toString();
+                const orig = useEditorStore.getState().buffers[path]?.originalContent ?? "";
+                setDirty(path, current !== orig);
+              }, DIRTY_CHECK_DEBOUNCE);
+            }
+          }),
+          EditorState.tabSize.of(2),
+        ],
+        parent: containerRef.current!,
+      });
 
       if (cancelled) {
         view.destroy();
@@ -433,20 +419,10 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
       }
 
       viewRef.current = view;
-
-      if (restoredState && savedVS) {
-        // Restored a (possibly unsaved) buffer — do NOT overwrite it with disk
-        // content. Re-apply folds + scroll once the view is laid out.
-        requestAnimationFrame(() => {
-          if (!cancelled && viewRef.current === view) applyFoldsAndScroll(view, savedVS);
-        });
-      } else {
-        // Fresh seed — a revalidation that landed while the view was being built
-        // updates only the store; sync the view to it now (idempotent if equal).
-        const latest = useEditorStore.getState().buffers[path]?.originalContent;
-        if (latest !== undefined) replaceViewDoc(latest);
-      }
-      if (restoreEnabled) acquireModel(path, () => view.state.doc);
+      // A revalidation that landed while the view was being built updates only
+      // the store; sync the view to it now (idempotent — no-op when equal).
+      const latest = useEditorStore.getState().buffers[path]?.originalContent;
+      if (latest !== undefined) replaceViewDoc(latest);
       refreshDiffGutter();
       refreshBlameRef.current();
     })();
@@ -454,22 +430,8 @@ export function EditorPanel({ tabId, filePath, containerHeight }: EditorPanelPro
     return () => {
       cancelled = true;
       if (dirtyTimerRef.current) clearTimeout(dirtyTimerRef.current);
-      const view = viewRef.current;
-      if (view) {
-        if (restoreEnabled) {
-          // Capture view-state + write back the live doc BEFORE destroy, so an
-          // unmount (background workspace / hot-set eviction) never loses
-          // unsaved edits. Best-effort — a failure must not block teardown.
-          try {
-            setTabViewState(tabId, captureViewState(view));
-            const dirty = useEditorStore.getState().buffers[path]?.dirty ?? false;
-            writeBackModel(path, view.state.doc, dirty);
-          } catch {
-            /* ignore capture failures */
-          }
-          releaseModel(path);
-        }
-        view.destroy();
+      if (viewRef.current) {
+        viewRef.current.destroy();
         viewRef.current = null;
       }
     };

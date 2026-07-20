@@ -407,8 +407,8 @@ export function WorkspaceSidebar() {
   const groups = useWorkspaceStore.use.groups();
   const activeWorkspaceId = useWorkspaceStore.use.activeWorkspaceId();
   const optimisticActiveId = useWorkspaceStore.use.optimisticActiveId();
-  // Highlight the OPTIMISTIC target the instant a switch is clicked; fall back
-  // to the real active id once the (awaited) switch settles or if none pending.
+  // Highlight the clicked workspace INSTANTLY (optimistic), falling back to the
+  // real active id once the switch settles.
   const displayActiveId = optimisticActiveId ?? activeWorkspaceId;
   const { addWorkspace } = useWorkspaceStore.use.actions();
   const { addTab } = useLayoutStore.use.actions();
