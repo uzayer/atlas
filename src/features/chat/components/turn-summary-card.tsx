@@ -116,8 +116,9 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
   const chips = message.suggestions?.chips ?? [];
   const loadingChips = message.suggestions?.status === "loading";
   const [filesOpen, setFilesOpen] = useState(false);
-  const repoPath = useGitStore.use.repoPath();
-  const gitFiles = useGitStore.use.files();
+  // Git state (repoPath/files) is subscribed INSIDE `TurnFileList` (rendered
+  // only when expanded), NOT here — otherwise every mounted card in every thread
+  // re-rendered on each git-status poll, even collapsed ones.
 
   const files = summary?.files ?? [];
   const reads = files.filter((f) => f.kind === "read");
@@ -252,14 +253,7 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
           </button>
           {filesOpen && (
             <div className="border-t border-[var(--border-default)] px-3 py-1.5">
-              {files.map((f) => (
-                <FileRow
-                  key={`${f.kind}:${f.path}`}
-                  file={f}
-                  repoPath={repoPath}
-                  gitFiles={gitFiles}
-                />
-              ))}
+              <TurnFileList files={files} />
             </div>
           )}
         </div>
@@ -357,10 +351,26 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
   );
 });
 
+/** The expanded per-turn file list. Subscribes to git state (repoPath/files)
+ *  ITSELF and is rendered only while the card is expanded, so collapsed cards —
+ *  the vast majority in a long thread — never subscribe to git and don't
+ *  re-render on git-status polls. */
+function TurnFileList({ files }: { files: TurnFile[] }) {
+  const repoPath = useGitStore.use.repoPath();
+  const gitFiles = useGitStore.use.files();
+  return (
+    <>
+      {files.map((f) => (
+        <FileRow key={`${f.kind}:${f.path}`} file={f} repoPath={repoPath} gitFiles={gitFiles} />
+      ))}
+    </>
+  );
+}
+
 /** One file the turn touched, with per-file open actions revealed on hover
  *  (Zed/Linear style). Reads open in the editor or Finder; edits open in the
  *  git diff when the file is under source control, else the editor / Finder. */
-function FileRow({
+const FileRow = memo(function FileRow({
   file,
   repoPath,
   gitFiles,
@@ -424,7 +434,7 @@ function FileRow({
       )}
     </div>
   );
-}
+});
 
 /** A tiny text link used for a per-file open action (underline on hover). */
 function FileAction({ label, onClick }: { label: string; onClick: () => void }) {

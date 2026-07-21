@@ -19,8 +19,12 @@ import { useChatStore } from "@/features/chat/stores/chat-store";
 import { useTerminalStore } from "@/features/terminal/stores/terminal-store";
 import { isWorkspaceRunning } from "../lib/agent-activity";
 
-/** Default hot-set cap — how many workspaces stay mounted/resident at once. */
-const DEFAULT_MAX_MOUNTED = 6;
+/** Default hot-set cap — how many workspaces stay mounted/resident at once.
+ *  Set above a typical open-project count (users commonly keep ~7) so cycling
+ *  through them doesn't LRU-evict one and force an expensive cold reload
+ *  (re-index + re-analyze) on switch-back. Raise cautiously: each resident
+ *  workspace keeps its subtree mounted. */
+const DEFAULT_MAX_MOUNTED = 8;
 
 /**
  * A single open workspace = one project + its UI-state identity. `id` is the

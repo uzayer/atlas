@@ -145,10 +145,19 @@ export default defineConfig(async () => ({
           if (id.includes("@tauri-apps")) {
             return "vendor-tauri";
           }
+          // Keep the heavy lazy-panel libs OUT of vendor-react. `@xyflow/react`
+          // (Canvas) and `@tiptap/react` (Knowledge) are only reached through
+          // lazy() panels, so they must land in their own lazy chunks — the old
+          // `/react/` substring match pulled them into the EAGER vendor-react
+          // chunk, loading ~500KB+ at startup and defeating those lazy boundaries.
+          if (id.includes("@xyflow")) return "vendor-xyflow";
+          if (id.includes("@tiptap")) return "vendor-tiptap";
+          // Exact package roots only — NOT a `/react/` substring (which matches
+          // @xyflow/react, @tiptap/react, react-markdown, …).
           if (
-            id.includes("/react/") ||
-            id.includes("/react-dom/") ||
-            id.includes("/scheduler/")
+            id.includes("/node_modules/react/") ||
+            id.includes("/node_modules/react-dom/") ||
+            id.includes("/node_modules/scheduler/")
           ) {
             return "vendor-react";
           }

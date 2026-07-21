@@ -72,6 +72,29 @@ function dataSlice(state: unknown): Record<string, unknown> {
   return clone(data);
 }
 
+/**
+ * Like `dataSlice`, but keeps the named keys by REFERENCE instead of deep-cloning
+ * them. Used for the analysis `symbols` array, which is MB-scale on large
+ * codebases (markopolo-backend-nest: ~1598 files → a symbols array that
+ * `structuredClone`d in tens of ms on EVERY switch — the dominant per-switch
+ * cost for big projects). Keeping a reference is safe: the analysis store
+ * replaces the array wholesale on re-analyze and never mutates it in place, so
+ * the snapshot's reference can't be aliased out from under it.
+ */
+function dataSliceRefKeep(
+  state: unknown,
+  refKeys: readonly string[],
+): Record<string, unknown> {
+  const { actions: _actions, ...data } = state as { actions?: unknown; [k: string]: unknown };
+  const kept: Record<string, unknown> = {};
+  const toClone: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (refKeys.includes(k)) kept[k] = v;
+    else toClone[k] = v;
+  }
+  return { ...clone(toClone), ...kept };
+}
+
 /** Cheap, stable string hash (djb2). */
 function hashString(s: string): string {
   let h = 5381;
@@ -85,7 +108,10 @@ function hashString(s: string): string {
  */
 export function captureSnapshot(workspaceId: string): void {
   const explorer = dataSlice(useExplorerStore.getState());
-  const analysis = dataSlice(useAnalysisStore.getState());
+  // Keep the (potentially MB-scale) `symbols` array by reference — see
+  // `dataSliceRefKeep`. This is the main fix for slow switching on large
+  // codebases like markopolo-backend-nest.
+  const analysis = dataSliceRefKeep(useAnalysisStore.getState(), ["symbols"]);
   const git = dataSlice(useGitStore.getState());
   const knowledge = dataSlice(useKnowledgeStore.getState());
   const knowledgeMeta = dataSlice(useKnowledgeMetaStore.getState());

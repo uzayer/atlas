@@ -48,15 +48,24 @@ export function ExplorePanel() {
   const { analyzeProject, setFilterKind, setSearchQuery } = useAnalysisStore.use.actions();
   const { addTab } = useLayoutStore.use.actions();
   const knowledgeEntries = useKnowledgeStore.use.entries();
-  const chatSessions = useChatStore.use.sessions();
 
+  // Subscribe to a PRIMITIVE task-status signature, not the whole `sessions`
+  // map: immer rewrites the sessions root on every streaming chunk (~60/s), so
+  // subscribing to it re-rendered this panel every frame during any stream even
+  // though only task counts matter. The signature only changes when a task is
+  // added/removed or flips status, so we read the rich state non-reactively.
+  const taskSig = useChatStore((s) =>
+    Object.values(s.sessions)
+      .map((x) => x.tasks.map((t) => t.status).join(","))
+      .join("|"),
+  );
   const agentTaskStats = useMemo(() => {
-    const allTasks = Object.values(chatSessions).flatMap((s) => s.tasks);
+    const allTasks = Object.values(useChatStore.getState().sessions).flatMap((s) => s.tasks);
     return {
       total: allTasks.length,
       pending: allTasks.filter((t) => t.status === "action_needed" || t.status === "running").length,
     };
-  }, [chatSessions]);
+  }, [taskSig]);
 
   // Analysis is triggered by project-store.openProject(), not auto on mount
 

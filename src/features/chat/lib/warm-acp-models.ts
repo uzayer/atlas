@@ -15,7 +15,17 @@
 // pooled per plugin, so this is one cheap extra ACP session per agent per launch.
 
 import { agents, ensureAgent, CODEX_PLUGIN_ID, DEFAULT_PLUGIN_ID } from "./agents-api";
-import { loadCachedAcpModels, saveCachedAcpModels } from "./acp-models-cache";
+import {
+  loadCachedAcpModels,
+  saveCachedAcpModels,
+  isCachedAcpModelsFresh,
+} from "./acp-models-cache";
+
+/** How long a cached model list is trusted before a background re-warm. The
+ *  catalog is effectively static (only changes on an agent update), so re-
+ *  fetching it every launch — by spawning a throwaway ACP session — is pure
+ *  waste. A week keeps it fresh enough while eliminating the per-launch spawns. */
+const MODELS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** ACP agent types that expose a model list (the native "cersei" agent uses its
  *  own BYOK catalog, not ACP models). */
@@ -44,6 +54,11 @@ export async function warmAcpModels(agentType: string, cwd: string): Promise<voi
   const at = agentType === "claude-code" || agentType === "codex" ? (agentType as AcpAgentType) : null;
   if (!at) return;
   if (warmed.has(at)) return;
+  // TTL gate: if we already have a fresh cached list, DON'T spawn a throwaway
+  // session to re-fetch a static catalog — the cache drives the picker and any
+  // real chat session reconciles it. Don't mark `warmed` here, so clearing the
+  // cache (or it aging out) lets a later trigger re-warm.
+  if (isCachedAcpModelsFresh(at, MODELS_TTL_MS)) return;
   warmed.add(at);
   try {
     const agent = await ensureAgent(pluginFor(at));
