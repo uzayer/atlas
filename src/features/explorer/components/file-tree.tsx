@@ -651,9 +651,11 @@ export function FileTree() {
 
   return (
     <div className="h-full flex flex-col">
-      {/* Panel header. No refresh button — the file-tree updates live
-          off the project-wide filesystem watcher (atlas:explorer:changed). */}
-      <div className="flex items-center justify-between px-3 h-[28px] shrink-0">
+      {/* Panel header. Height + bottom border match the center tab strip
+          (h-[29px] border-b) so the divider reads as one continuous straight
+          line across the file tree and the tab bar. No refresh button — the
+          file-tree updates live off the filesystem watcher. */}
+      <div className="flex items-center justify-between px-3 h-[29px] shrink-0 border-b border-border-default">
         <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider truncate flex-1">
           {rootPath ? rootPath.split("/").pop() : "Files"}
         </span>

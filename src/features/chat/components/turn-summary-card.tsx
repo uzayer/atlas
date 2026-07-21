@@ -8,6 +8,9 @@ import {
   Sparkles,
   Gauge,
   Clock,
+  GitCompare,
+  Code,
+  FolderOpen,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -407,19 +410,28 @@ const FileRow = memo(function FileRow({
     if (repoPath && rel) openGitDiff(repoPath, rel, scEntry?.staged ?? false, null);
   };
 
+  // Clicking the path itself runs the primary action (diff when tracked, else
+  // open in the editor) — the underline-on-hover signals it's clickable.
+  const openPrimary = inSourceControl ? openInDiff : openInEditor;
+
   return (
     <div className="group flex items-center gap-2 py-0.5 text-[11px]">
       <FileStatusBadge file={file} />
-      <span className="truncate text-[var(--text-secondary)]">{file.path}</span>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); openPrimary(); }}
+        className="min-w-0 truncate text-left text-[var(--text-secondary)] underline-offset-2 transition-colors hover:text-[var(--text-primary)] hover:underline"
+      >
+        {file.path}
+      </button>
 
-      {/* Actions — hidden until the row is hovered. */}
-      <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-2 opacity-0 transition-opacity group-hover:opacity-100">
-        {inSourceControl ? (
-          <FileAction label="Diff" onClick={openInDiff} />
-        ) : (
-          <FileAction label="Editor" onClick={openInEditor} />
+      {/* Actions — icons, revealed on row hover. */}
+      <span className="ml-auto flex shrink-0 items-center gap-2 pl-2 opacity-0 transition-opacity group-hover:opacity-100">
+        {inSourceControl && (
+          <FileAction icon={<GitCompare size={12} />} title="Open diff" onClick={openInDiff} />
         )}
-        <FileAction label="Finder" onClick={openInFinder} />
+        <FileAction icon={<Code size={12} />} title="Open in editor" onClick={openInEditor} />
+        <FileAction icon={<FolderOpen size={12} />} title="Reveal in Finder" onClick={openInFinder} />
       </span>
 
       {isEdit && (file.added > 0 || file.removed > 0) && (
@@ -436,18 +448,20 @@ const FileRow = memo(function FileRow({
   );
 });
 
-/** A tiny text link used for a per-file open action (underline on hover). */
-function FileAction({ label, onClick }: { label: string; onClick: () => void }) {
+/** A tiny icon button for a per-file open action (Diff / Editor / Finder).
+ *  `title` provides the tooltip that the removed text label used to convey. */
+function FileAction({ icon, title, onClick }: { icon: React.ReactNode; title: string; onClick: () => void }) {
   return (
     <button
       type="button"
+      title={title}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
-      className="cursor-pointer text-[10px] text-[var(--text-tertiary)] underline-offset-2 transition-colors hover:text-[var(--text-primary)] hover:underline"
+      className="cursor-pointer text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)]"
     >
-      {label}
+      {icon}
     </button>
   );
 }

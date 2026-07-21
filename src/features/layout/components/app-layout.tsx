@@ -21,7 +21,11 @@ export function AppLayout() {
   const bottomPanel = useLayoutStore.use.bottomPanel();
   const currentProject = useProjectStore.use.currentProject();
   const sidebarOpen = useWorkspaceStore.use.sidebarOpen();
+  const sidebarPinned = useWorkspaceStore.use.sidebarPinned();
   const { setSidebarOpen } = useWorkspaceStore.use.actions();
+  // DOCKED = pinned + open → an in-flow left column that pushes the layout.
+  // Otherwise the sidebar is an OVERLAY (rail + scrim), gated by `sidebarOpen`.
+  const docked = sidebarPinned && sidebarOpen;
 
   // Warm the workspace-pane git data at startup so the first slide is smooth.
   useWorkspaceGitPrefetch();
@@ -35,6 +39,17 @@ export function AppLayout() {
     // OVERLAYS. The main column below is the only in-flow child, so it always
     // fills the window and NEVER reflows when the rail toggles.
     <div className="relative flex h-screen">
+      {/* DOCKED workspace sidebar — an in-flow left column (solid, not glass)
+          that pushes the whole shell right. Full-height so it sits beside the
+          titlebar; the sidebar's own top bar already dodges the traffic lights.
+          Only present when pinned + open; unpinned falls through to the overlay
+          below. */}
+      {docked && (
+        <div className="h-screen w-[244px] shrink-0 border-r border-[var(--border-default)] bg-[#0C0C0C]">
+          <WorkspaceSidebar />
+        </div>
+      )}
+
       {/*
        * NOT keyed by workspace: keying forced a full unmount/remount of the
        * whole shell on every switch (rebuilding CodeMirror/xterm/virtualizer)
@@ -82,6 +97,10 @@ export function AppLayout() {
         {showStatus && <StatusBar />}
       </div>
 
+      {/* OVERLAY mode only (unpinned). When docked, the sidebar is the in-flow
+          column above and there is no scrim/rail. */}
+      {!sidebarPinned && (
+      <>
       {/* Scrim — subtle dim + click-to-close (the frosted rail carries the
           depth, same as the notification overlay). Only interactive while open;
           fades via `opacity` (compositor-only, no layout). */}
@@ -127,6 +146,8 @@ export function AppLayout() {
       >
         <WorkspaceSidebar />
       </div>
+      </>
+      )}
     </div>
   );
 }

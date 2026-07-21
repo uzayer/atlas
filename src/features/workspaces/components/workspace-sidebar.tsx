@@ -410,7 +410,8 @@ export function WorkspaceSidebar() {
   // Highlight the clicked workspace INSTANTLY (optimistic), falling back to the
   // real active id once the switch settles.
   const displayActiveId = optimisticActiveId ?? activeWorkspaceId;
-  const { addWorkspace } = useWorkspaceStore.use.actions();
+  const sidebarPinned = useWorkspaceStore.use.sidebarPinned();
+  const { addWorkspace, toggleSidebarPinned } = useWorkspaceStore.use.actions();
   const { addTab } = useLayoutStore.use.actions();
   const recentProjects = useProjectStore.use.recentProjects();
   const { clearRecents } = useProjectStore.use.actions();
@@ -567,6 +568,18 @@ export function WorkspaceSidebar() {
         )}
         data-tauri-drag-region
       >
+        <button
+          onClick={toggleSidebarPinned}
+          className={cn(
+            "p-1 rounded-full outline-none transition-colors hover:bg-[var(--bg-hover)]",
+            sidebarPinned
+              ? "text-[var(--accent-primary)]"
+              : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]",
+          )}
+          title={sidebarPinned ? "Unpin sidebar (float as overlay)" : "Pin sidebar (dock into layout)"}
+        >
+          {sidebarPinned ? <PinOff size={13} /> : <Pin size={13} />}
+        </button>
         <button
           onClick={toggleAll}
           className="p-1 rounded-full text-[var(--text-tertiary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] outline-none"

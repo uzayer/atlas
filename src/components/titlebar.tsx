@@ -52,10 +52,14 @@ export function Titlebar() {
     currentProject?.name ??
     "Atlas";
   const { windowRef, isFullscreen } = useTauriWindow();
-  // The workspace sidebar is now a floating OVERLAY (it no longer occupies flow
-  // width), so the titlebar always reserves 72px for the OS window controls
-  // (unless fullscreen, which hides them). Keying the padding on `sidebarOpen`
-  // used to reflow the titlebar on every toggle — dropped.
+  // The titlebar reserves 72px for the OS window controls (traffic lights),
+  // EXCEPT when the sidebar is DOCKED (pinned + open): the docked column then
+  // sits under the lights and carries that gap itself, so the titlebar reclaims
+  // the space. Fullscreen hides the lights entirely. (Unpinned overlay mode
+  // doesn't occupy flow width, so it never affects this.)
+  const sidebarPinned = useWorkspaceStore.use.sidebarPinned();
+  const sidebarOpen = useWorkspaceStore.use.sidebarOpen();
+  const dockedSidebar = sidebarPinned && sidebarOpen;
 
   const isTitlebarSurface = (target: EventTarget | null) => {
     const el = target as HTMLElement | null;
@@ -97,7 +101,7 @@ export function Titlebar() {
     <div
       onMouseDown={handleDrag}
       onDoubleClick={handleDoubleClick}
-      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[var(--bg-base)] border-b border-border-default ${isFullscreen ? "pl-3" : "pl-[72px]"}`}
+      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[var(--bg-base)] border-b border-border-default ${isFullscreen || dockedSidebar ? "pl-3" : "pl-[72px]"}`}
     >
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
         <WorkspaceToggle />

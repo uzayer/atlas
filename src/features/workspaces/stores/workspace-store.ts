@@ -68,6 +68,10 @@ interface WorkspaceState {
   maxMounted: number;
   /** Cmd+. sidebar visibility. */
   sidebarOpen: boolean;
+  /** When true the workspace sidebar is DOCKED (in-flow, pushes the layout)
+   *  instead of the default OVERLAY. A user preference, persisted to
+   *  localStorage. `sidebarOpen` still gates visibility in both modes. */
+  sidebarPinned: boolean;
   /** Group whose header is currently in inline-rename mode (transient, not
    *  persisted). Lives in the store so it survives the virtualized row
    *  remounting and so a freshly-created group can open straight into rename. */
@@ -119,6 +123,10 @@ interface WorkspaceState {
     unpinGroup: (id: string) => void;
     toggleSidebar: () => void;
     setSidebarOpen: (open: boolean) => void;
+    /** Toggle docked (pinned) vs overlay. Pinning also opens the sidebar so it
+     *  docks into view immediately. */
+    toggleSidebarPinned: () => void;
+    setSidebarPinned: (pinned: boolean) => void;
     /** One-shot hydration from Rust `AppState` on boot. */
     hydrate: (payload: {
       workspaces: Workspace[];
@@ -165,6 +173,17 @@ function teardownHot(id: string): void {
   void invoke("mention_cache_clear", { workspaceId: id }).catch(() => {});
 }
 
+const SIDEBAR_PINNED_KEY = "atlas.sidebar.pinned";
+/** Read the persisted dock preference (localStorage — a self-contained UI pref,
+ *  not part of the Rust-backed AppState). */
+function readSidebarPinned(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_PINNED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export const useWorkspaceStore = createSelectors(
   create<WorkspaceState>()((set, get) => ({
     workspaces: [],
@@ -173,6 +192,7 @@ export const useWorkspaceStore = createSelectors(
     mountedWorkspaceIds: [],
     maxMounted: DEFAULT_MAX_MOUNTED,
     sidebarOpen: false,
+    sidebarPinned: readSidebarPinned(),
     switching: false,
     optimisticActiveId: null,
     editingGroupId: null,
@@ -266,13 +286,15 @@ export const useWorkspaceStore = createSelectors(
         if (!target) return;
 
         // INSTANT UI response — before any guard or heavy work:
-        //  • close the switcher (its slide-out animation covers the switch's
-        //    eventual load latency, so the user isn't staring at a lagging
-        //    centre), and
+        //  • close the OVERLAY switcher (its slide-out animation covers the
+        //    switch's eventual load latency). When DOCKED (pinned) the sidebar
+        //    is a persistent panel, so we leave it open — closing it would make
+        //    the whole layout jump on every switch.
         //  • optimistically highlight the selection so the clicked item updates
         //    immediately even though the real `activeWorkspaceId` lags behind.
-        const wasOpen = get().sidebarOpen;
-        set({ optimisticActiveId: id, sidebarOpen: false });
+        const pinnedNow = get().sidebarPinned;
+        const wasOpen = get().sidebarOpen && !pinnedNow;
+        set({ optimisticActiveId: id, ...(pinnedNow ? {} : { sidebarOpen: false }) });
 
         // A switch already in flight → don't DROP the click; remember the latest
         // target and run it when the current one settles (coalesce). The close +
@@ -508,6 +530,22 @@ export const useWorkspaceStore = createSelectors(
       },
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
+      toggleSidebarPinned: () =>
+        set((s) => {
+          const sidebarPinned = !s.sidebarPinned;
+          try {
+            localStorage.setItem(SIDEBAR_PINNED_KEY, sidebarPinned ? "1" : "0");
+          } catch { /* ignore */ }
+          // Pinning docks it into view immediately; unpinning leaves the
+          // (now overlay) sidebar in whatever open state it was.
+          return sidebarPinned ? { sidebarPinned, sidebarOpen: true } : { sidebarPinned };
+        }),
+      setSidebarPinned: (pinned) => {
+        try {
+          localStorage.setItem(SIDEBAR_PINNED_KEY, pinned ? "1" : "0");
+        } catch { /* ignore */ }
+        set({ sidebarPinned: pinned });
+      },
 
       hydrate: (payload) => {
         set({
