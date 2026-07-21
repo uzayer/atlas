@@ -12,7 +12,6 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-meta-store";
-import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { listClaudeSessions, readClaudeSession } from "./claude-api";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
@@ -576,24 +575,6 @@ export async function ensureKnowledgeMentionCache(projectPath: string): Promise<
     });
   }
   return knowledgeEnsuring;
-}
-
-/** Push symbols into the Rust mention cache. Call from the analysis
- *  store whenever a fresh `analyze_project` result lands. */
-export function publishSymbolsToMentionCache(): void {
-  const items = useAnalysisStore.getState().symbols.map((s) => ({
-    name: s.name,
-    kind: s.kind,
-    filePath: s.file_path,
-    line: s.line,
-    signature: s.signature,
-  }));
-  void invoke("mention_cache_set_symbols", {
-    items,
-    workspaceId: activeWorkspaceId(),
-  }).catch((err) =>
-    console.warn("mention_cache_set_symbols failed:", err),
-  );
 }
 
 /** Build the final prompt sent to the agent. Pure pass-through to a

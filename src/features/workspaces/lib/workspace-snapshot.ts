@@ -16,7 +16,6 @@
 
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
-import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { useGitStore } from "@/features/git/stores/git-store";
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-meta-store";
@@ -30,7 +29,6 @@ const LRU_CAP = 8;
 
 interface Snapshot {
   explorer: Record<string, unknown>;
-  analysis: Record<string, unknown>;
   git: Record<string, unknown>;
   knowledge: Record<string, unknown>;
   knowledgeMeta: Record<string, unknown>;
@@ -72,29 +70,6 @@ function dataSlice(state: unknown): Record<string, unknown> {
   return clone(data);
 }
 
-/**
- * Like `dataSlice`, but keeps the named keys by REFERENCE instead of deep-cloning
- * them. Used for the analysis `symbols` array, which is MB-scale on large
- * codebases (markopolo-backend-nest: ~1598 files → a symbols array that
- * `structuredClone`d in tens of ms on EVERY switch — the dominant per-switch
- * cost for big projects). Keeping a reference is safe: the analysis store
- * replaces the array wholesale on re-analyze and never mutates it in place, so
- * the snapshot's reference can't be aliased out from under it.
- */
-function dataSliceRefKeep(
-  state: unknown,
-  refKeys: readonly string[],
-): Record<string, unknown> {
-  const { actions: _actions, ...data } = state as { actions?: unknown; [k: string]: unknown };
-  const kept: Record<string, unknown> = {};
-  const toClone: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(data)) {
-    if (refKeys.includes(k)) kept[k] = v;
-    else toClone[k] = v;
-  }
-  return { ...clone(toClone), ...kept };
-}
-
 /** Cheap, stable string hash (djb2). */
 function hashString(s: string): string {
   let h = 5381;
@@ -108,10 +83,6 @@ function hashString(s: string): string {
  */
 export function captureSnapshot(workspaceId: string): void {
   const explorer = dataSlice(useExplorerStore.getState());
-  // Keep the (potentially MB-scale) `symbols` array by reference — see
-  // `dataSliceRefKeep`. This is the main fix for slow switching on large
-  // codebases like markopolo-backend-nest.
-  const analysis = dataSliceRefKeep(useAnalysisStore.getState(), ["symbols"]);
   const git = dataSlice(useGitStore.getState());
   const knowledge = dataSlice(useKnowledgeStore.getState());
   const knowledgeMeta = dataSlice(useKnowledgeMetaStore.getState());
@@ -128,7 +99,6 @@ export function captureSnapshot(workspaceId: string): void {
 
   const snapshot: Snapshot = {
     explorer,
-    analysis,
     git,
     knowledge,
     knowledgeMeta,
@@ -155,7 +125,6 @@ export function restoreSnapshot(workspaceId: string): boolean {
   // Tab content (editor/terminal/chat) + tab/split layout are resident in their
   // own stores and are restored via `loadWorkspaceView`, not here.
   useExplorerStore.setState(snap.explorer);
-  useAnalysisStore.setState(snap.analysis);
   useGitStore.setState(snap.git);
   useKnowledgeStore.setState(snap.knowledge);
   useKnowledgeMetaStore.setState(snap.knowledgeMeta);

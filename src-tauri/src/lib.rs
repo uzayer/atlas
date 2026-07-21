@@ -323,7 +323,6 @@ pub fn run() {
             commands::git_watcher::git_watch_status,
             commands::mention_search::mention_search,
             commands::mention_search::mention_cache_set_knowledge,
-            commands::mention_search::mention_cache_set_symbols,
             commands::mention_search::mention_cache_clear,
             commands::recent_files::recent_files_open_project,
             commands::recent_files::recent_files_close_project,
@@ -336,7 +335,6 @@ pub fn run() {
             commands::github::list_cloned_repos,
             commands::github::read_repo_readme,
             commands::github::delete_cloned_repo,
-            commands::analysis::analyze_project,
             // Legacy Claude-CLI subprocess commands (claude_run/stream/stop/check/version)
             // were replaced by ACP. Session-history readers below are still in use.
             commands::claude::list_claude_sessions,

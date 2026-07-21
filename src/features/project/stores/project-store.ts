@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { createSelectors } from "@/lib/create-selectors";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
-import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { useGitStore } from "@/features/git/stores/git-store";
 import { useSessionStore } from "./session-store";
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
@@ -241,18 +240,30 @@ function maybeEnsureAtlasGitignore(path: string, settings: AppSettings): void {
 export async function loadProjectStores(path: string): Promise<void> {
   await Promise.all([
     useExplorerStore.getState().actions.openFolder(path).catch((e) => console.error("Explorer failed:", e)),
-    useAnalysisStore.getState().actions.analyzeProject(path).catch((e) => console.error("Analysis failed:", e)),
     useGitStore.getState().actions.loadStatus(path).catch((e) => console.error("Git failed:", e)),
     useSessionStore.getState().actions.loadSession(path).catch((e) => console.error("Session load failed:", e)),
-    // Bind the KB meta store BEFORE loading entries so the entries published
-    // to the @-/~ mention cache already carry the page-header titles + emoji
-    // from `_meta.json`.
-    (async () => {
-      await useKnowledgeMetaStore.getState().actions.bind(path);
-      await useKnowledgeStore.getState().actions.loadEntries(path);
-    })().catch((e) => console.error("Knowledge load failed:", e)),
+    // Only the KB META bind is on the critical path — it's cheap and the @-/~
+    // mention picker needs it for page-header titles + emoji from `_meta.json`.
+    useKnowledgeMetaStore.getState().actions.bind(path).catch((e) => console.error("Knowledge bind failed:", e)),
     useLayoutStore.getState().actions.loadEditorState(path).catch((e) => console.error("Editor state load failed:", e)),
   ]);
+
+  // Load the full KB entries OFF the switch critical path. This is the single
+  // biggest post-switch main-thread spike (up to ~1.2s on large vaults) and it
+  // isn't needed for first paint — Knowledge isn't the landing tab, and
+  // `KnowledgePanel` reloads entries on its own mount. Deferring to idle keeps
+  // its setState from colliding with (and congesting) rapid workspace switches,
+  // while still warming the @-/~ mention cache shortly after open. Fire-and-
+  // forget; a stale project is harmless (entries are keyed by path).
+  const warmEntries = () => {
+    void useKnowledgeStore.getState().actions.loadEntries(path)
+      .catch((e) => console.error("Knowledge entries load failed:", e));
+  };
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(warmEntries, { timeout: 2000 });
+  } else {
+    setTimeout(warmEntries, 0);
+  }
 }
 
 export const useProjectStore = createSelectors(
