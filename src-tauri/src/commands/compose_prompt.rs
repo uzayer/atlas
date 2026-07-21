@@ -105,6 +105,17 @@ pub enum MentionSpec {
         session_title: String,
         content: String,
     },
+    /// A whole past agent session's transcript, referenced with
+    /// `@session:<title>`. The frontend pre-reads + formats the JSONL
+    /// transcript into `inline_body` (like `Skill`); there is no Rust read
+    /// fallback since formatting a transcript lives on the JS side.
+    PastSession {
+        id: String,
+        display_name: String,
+        session_title: String,
+        #[serde(default)]
+        inline_body: Option<String>,
+    },
 }
 
 impl MentionSpec {
@@ -119,7 +130,8 @@ impl MentionSpec {
             | MentionSpec::Repo { id, .. }
             | MentionSpec::Paper { id, .. }
             | MentionSpec::Branch { id, .. }
-            | MentionSpec::PastMessage { id, .. } => id,
+            | MentionSpec::PastMessage { id, .. }
+            | MentionSpec::PastSession { id, .. } => id,
         }
     }
 
@@ -139,6 +151,7 @@ impl MentionSpec {
             MentionSpec::Paper { display_name, .. } => format!("@paper:{display_name}"),
             MentionSpec::Branch { display_name, .. } => format!("@branch:{display_name}"),
             MentionSpec::PastMessage { id, .. } => format!("@msg:{id}"),
+            MentionSpec::PastSession { display_name, .. } => format!("@session:{display_name}"),
         }
     }
 }
@@ -330,6 +343,21 @@ fn render_block(m: &MentionSpec) -> Option<String> {
             sf = m.short_form(),
             body = clip_body(content),
         )),
+        MentionSpec::PastSession {
+            session_title,
+            inline_body,
+            ..
+        } => {
+            let body = match inline_body.as_deref() {
+                Some(b) if !b.is_empty() => b,
+                _ => "(unable to read session transcript)",
+            };
+            Some(format!(
+                "## {sf} _(transcript of session {session_title})_\n\n{body}",
+                sf = m.short_form(),
+                body = clip_body(body),
+            ))
+        }
         MentionSpec::Branch { .. } => None,
     }
 }

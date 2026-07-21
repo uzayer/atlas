@@ -827,6 +827,7 @@ function CategoryIcon({ kind }: { kind: MentionKind }) {
     case "paper":        return <Newspaper size={size} />;
     case "branch":       return <GitBranch size={size} />;
     case "past_message": return <MessageSquare size={size} />;
+    case "past_session": return <MessageSquare size={size} />;
   }
 }
 
@@ -856,6 +857,7 @@ function secondaryLabel(m: MentionData): string {
     case "paper":        return m.authors[0] ?? "";
     case "branch":       return m.refKind + (m.isCurrent ? " · HEAD" : "");
     case "past_message": return m.sessionTitle;
+    case "past_session": return "session transcript";
   }
 }
 
@@ -909,5 +911,6 @@ function mentionTitle(m: MentionData): string {
     case "paper":        return m.metadataPath;
     case "branch":       return `${m.refKind} ${m.id} (${m.sha.slice(0, 7)})`;
     case "past_message": return m.content;
+    case "past_session": return m.sessionTitle;
   }
 }

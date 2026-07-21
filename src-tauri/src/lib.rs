@@ -251,6 +251,7 @@ pub fn run() {
             commands::fs::read_directory,
             commands::fs::read_file_content,
             commands::fs::read_file_base64,
+            commands::fs::capture_screenshot,
             commands::fs::is_text_file,
             commands::fs::file_mtime_ms,
             commands::fs::asset_allow_dir,

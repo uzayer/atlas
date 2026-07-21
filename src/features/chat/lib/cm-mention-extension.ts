@@ -34,8 +34,139 @@ import {
   WidgetType,
 } from "@codemirror/view";
 
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+
 import type { MentionData, MentionKind } from "./mentions";
 import { toShortForm } from "./mentions";
+
+// ── Media hover preview (image/video `@file` chips) ──────────────────────────
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg", "heic", "heif"]);
+const VIDEO_EXTS = new Set(["mp4", "mov", "webm", "m4v", "avi", "mkv", "ogv"]);
+
+function mediaKindOf(path: string): "image" | "video" | null {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (IMAGE_EXTS.has(ext)) return "image";
+  if (VIDEO_EXTS.has(ext)) return "video";
+  return null;
+}
+
+function parentDirOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i > 0 ? path.slice(0, i) : path;
+}
+
+function imageMime(path: string): string {
+  switch (path.split(".").pop()?.toLowerCase() ?? "") {
+    case "jpg": case "jpeg": return "image/jpeg";
+    case "gif": return "image/gif";
+    case "webp": return "image/webp";
+    case "svg": return "image/svg+xml";
+    case "bmp": return "image/bmp";
+    case "avif": return "image/avif";
+    case "heic": case "heif": return "image/heic";
+    default: return "image/png";
+  }
+}
+
+type ChipDom = HTMLElement & { _atlasPreviewCleanup?: () => void };
+
+/** Attach a Zed-style media preview card that appears above a media `@file`
+ *  chip on hover. Uses Tauri's `convertFileSrc` (streams the file — no base64
+ *  memory blowup, works for video) after allow-listing the file's directory
+ *  for the asset protocol. Returns a cleanup fn (called from `destroy`). */
+function attachMediaHoverPreview(
+  anchor: HTMLElement,
+  path: string,
+  media: "image" | "video",
+): () => void {
+  let card: HTMLElement | null = null;
+  let timer: number | null = null;
+  let hovering = false;
+  let allowed = false;
+
+  const removeCard = () => {
+    if (card) {
+      card.remove();
+      card = null;
+    }
+  };
+
+  const build = async () => {
+    // Resolve the media source. Images → base64 (small, and works for `.atlas`
+    // paths the asset protocol 403s). Video → streamed via `convertFileSrc`
+    // after allow-listing its dir (avoids loading a whole video into memory).
+    let src: string;
+    if (media === "image") {
+      let b64: string;
+      try {
+        b64 = await invoke<string>("read_file_base64", { path });
+      } catch {
+        return;
+      }
+      if (!hovering || card) return;
+      src = `data:${imageMime(path)};base64,${b64}`;
+    } else {
+      if (!allowed) {
+        try {
+          await invoke("asset_allow_dir", { path: parentDirOf(path) });
+        } catch {
+          /* may already be allowed, or denied — try to render anyway */
+        }
+        allowed = true;
+      }
+      if (!hovering || card) return;
+      src = convertFileSrc(path);
+    }
+    const el = document.createElement("div");
+    el.className = "atlas-mention-preview";
+    if (media === "image") {
+      const img = document.createElement("img");
+      img.src = src;
+      img.className = "atlas-mention-preview__media";
+      el.appendChild(img);
+    } else {
+      const v = document.createElement("video");
+      v.src = src;
+      v.muted = true;
+      v.autoplay = true;
+      v.loop = true;
+      v.playsInline = true;
+      v.className = "atlas-mention-preview__media";
+      el.appendChild(v);
+    }
+    // Float above the chip, clamped into the viewport.
+    const r = anchor.getBoundingClientRect();
+    el.style.position = "fixed";
+    el.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 436))}px`;
+    el.style.bottom = `${Math.max(8, window.innerHeight - r.top + 6)}px`;
+    document.body.appendChild(el);
+    card = el;
+  };
+
+  const onEnter = () => {
+    hovering = true;
+    if (timer) window.clearTimeout(timer);
+    timer = window.setTimeout(() => void build(), 200);
+  };
+  const onLeave = () => {
+    hovering = false;
+    if (timer) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+    removeCard();
+  };
+  anchor.addEventListener("mouseenter", onEnter);
+  anchor.addEventListener("mouseleave", onLeave);
+
+  return () => {
+    hovering = false;
+    if (timer) window.clearTimeout(timer);
+    anchor.removeEventListener("mouseenter", onEnter);
+    anchor.removeEventListener("mouseleave", onLeave);
+    removeCard();
+  };
+}
 
 // ── Trigger detection ────────────────────────────────────────────────────────
 
@@ -263,11 +394,20 @@ class ChipWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
-    const el = document.createElement("span");
+    const el = document.createElement("span") as ChipDom;
     el.className = "atlas-mention-chip";
     el.setAttribute("data-mention-kind", this.mention.kind);
     el.setAttribute("data-mention-id", this.mention.id);
-    el.title = chipTitle(this.mention);
+
+    // A media `@file` chip shows a hover preview CARD (image/video) instead of
+    // the plain path tooltip.
+    const media = this.mention.kind === "file" ? mediaKindOf(this.mention.absPath) : null;
+    if (this.mention.kind === "file" && media) {
+      el.setAttribute("data-mention-media", media);
+      el._atlasPreviewCleanup = attachMediaHoverPreview(el, this.mention.absPath, media);
+    } else {
+      el.title = chipTitle(this.mention);
+    }
 
     const icon = document.createElement("span");
     icon.className = "atlas-mention-chip__icon";
@@ -280,6 +420,12 @@ class ChipWidget extends WidgetType {
     el.appendChild(label);
 
     return el;
+  }
+
+  destroy(dom: HTMLElement): void {
+    // Tear down the hover-preview listeners + any live card when CM recycles
+    // the widget (doc edit, chip removal) so nothing orphans on document.body.
+    (dom as ChipDom)._atlasPreviewCleanup?.();
   }
 
   ignoreEvent(): boolean {
@@ -356,6 +502,7 @@ function kindGlyph(kind: MentionKind): string {
     case "paper":        return ICON_NEWSPAPER;
     case "branch":       return ICON_GIT_BRANCH;
     case "past_message": return ICON_MESSAGE_SQUARE;
+    case "past_session": return ICON_MESSAGE_SQUARE;
   }
 }
 
@@ -371,6 +518,7 @@ function chipTitle(m: MentionData): string {
     case "paper":        return m.authors.length ? m.authors.join(", ") : "paper";
     case "branch":       return `${m.refKind} · ${m.sha.slice(0, 7)}`;
     case "past_message": return m.sessionTitle;
+    case "past_session": return `session · ${m.sessionTitle}`;
   }
 }
 

@@ -173,6 +173,25 @@
 .atlas-mention-chip[data-mention-kind="paper"]        { color: var(--status-warning); }
 .atlas-mention-chip[data-mention-kind="branch"]       { color: var(--text-secondary); }
 .atlas-mention-chip[data-mention-kind="past_message"] { color: var(--text-secondary); }
+.atlas-mention-chip[data-mention-kind="past_session"] { color: var(--text-secondary); }
+
+/* Hover preview card for media (`@file` image/video) mention chips. Appended to
+   document.body by the CM ChipWidget; positioned inline via fixed coords. */
+.atlas-mention-preview {
+  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-overlay);
+  padding: 4px;
+  pointer-events: none;
+}
+.atlas-mention-preview__media {
+  display: block;
+  max-width: 420px;
+  max-height: 320px;
+  border-radius: 6px;
+  object-fit: contain;
+}
 /* Invokable capabilities — distinguished by glyph/sigil, not color (white). */
 .atlas-mention-chip[data-mention-kind="skill"]        { color: var(--accent-primary); }
 .atlas-mention-chip[data-mention-kind="command"]      { color: var(--accent-primary); }

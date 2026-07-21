@@ -12,7 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-meta-store";
-import { listClaudeSessions, readClaudeSession } from "./claude-api";
+import { listClaudeSessions, readClaudeSession, type ChatMessageDump } from "./claude-api";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
 import { skills } from "@/features/skills/lib/skills-api";
@@ -30,7 +30,8 @@ export type MentionKind =
   | "repo"
   | "paper"
   | "branch"
-  | "past_message";
+  | "past_message"
+  | "past_session";
 
 export interface MentionFile {
   kind: "file";
@@ -137,6 +138,15 @@ export interface MentionPastMessage {
   content: string;       // the message body — small, fine to keep inline
 }
 
+export interface MentionPastSession {
+  kind: "past_session";
+  id: string;            // the session id (JSONL stem = acpSessionId)
+  displayName: string;   // session title/preview
+  sessionId: string;
+  sessionTitle: string;
+  filePath: string;      // JSONL transcript path — read + formatted at send time
+}
+
 export type MentionData =
   | MentionFile
   | MentionFolder
@@ -147,7 +157,8 @@ export type MentionData =
   | MentionRepo
   | MentionPaper
   | MentionBranch
-  | MentionPastMessage;
+  | MentionPastMessage
+  | MentionPastSession;
 
 // ── Catalog ──────────────────────────────────────────────────────────────────
 
@@ -171,6 +182,7 @@ export const MENTION_CATEGORIES: readonly MentionCategory[] = [
   { kind: "paper",        label: "Papers",          aliases: ["paper", "p/"],             weight: 0.7  },
   { kind: "branch",       label: "Branches",        aliases: ["branch", "b/"],            weight: 0.6  },
   { kind: "past_message", label: "Past Messages",   aliases: ["msg", "message", "m/"],    weight: 0.55 },
+  { kind: "past_session", label: "Past Sessions",   aliases: ["session", "sess/"],        weight: 0.5  },
 ];
 
 export function categoryForKind(kind: MentionKind): MentionCategory {
@@ -319,6 +331,8 @@ export function toShortForm(m: MentionData): string {
       return `@branch:${m.displayName}`;
     case "past_message":
       return `@msg:${m.timestamp ?? m.id}`;
+    case "past_session":
+      return `@session:${m.displayName}`;
   }
 }
 
@@ -591,6 +605,20 @@ export async function ensureKnowledgeMentionCache(projectPath: string): Promise<
  *
  *  Knowledge entries pre-fill `inlineBody` from the in-memory store so
  *  Rust doesn't re-read them from disk. */
+/** Render a Claude session's message dump as a plain-text transcript for the
+ *  `@session:` context block. Roles are labelled; empty turns are skipped. The
+ *  Rust side clips the final size to the mention body budget. */
+function formatSessionTranscript(dump: ChatMessageDump[]): string {
+  const parts: string[] = [];
+  for (const m of dump) {
+    const content = m.content?.trim();
+    if (!content) continue;
+    const label = m.role === "user" ? "User" : "Assistant";
+    parts.push(`### ${label}\n${content}`);
+  }
+  return parts.join("\n\n");
+}
+
 export async function composePrompt(
   prosePlainText: string,
   mentions: MentionData[]
@@ -614,6 +642,20 @@ export async function composePrompt(
           inlineBody = (await skills.read(m.scope, m.skillName, m.projectPath)).body;
         } catch (e) {
           console.warn("skills.read for compose failed:", e);
+        }
+        return { ...m, inlineBody };
+      }
+      // Past session: read the JSONL transcript now and format it into a
+      // plain-text conversation the agent can reference. Kept lightweight in
+      // the chip (just filePath); the (potentially large) body only
+      // materializes here, at send time — same lazy pattern skills use.
+      if (m.kind === "past_session") {
+        let inlineBody: string | null = null;
+        try {
+          const dump = await readClaudeSession(m.filePath);
+          inlineBody = formatSessionTranscript(dump);
+        } catch (e) {
+          console.warn("readClaudeSession for compose failed:", e);
         }
         return { ...m, inlineBody };
       }
