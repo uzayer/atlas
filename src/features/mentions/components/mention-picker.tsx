@@ -60,6 +60,7 @@ import {
   useRecentFilesStore,
   type RecentFile,
 } from "@/features/chat/stores/recent-files-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -143,6 +144,10 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
     ref
   ) {
     const recentFiles = useRecentFilesStore.use.items();
+    // Workspace mentions are scoped to the active org (see `searchWorkspaces`).
+    // Subscribe so switching orgs re-runs the search and the list reflects the
+    // new org's projects even while the picker stays mounted.
+    const activeOrganisationId = useOrgStore.use.activeOrganisationId();
     const [scope, setScope] = useState<MentionKind | null>(initialScope ?? null);
     /** When scope === "past_message" and no `pastSession` is locked, the
      *  picker shows a sessions list (level 1). Once `pastSession` is set,
@@ -232,7 +237,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       }
 
       return () => controller.abort();
-    }, [open, query, scope, pastSession, projectPath, agentId, excludeIds, indexNonce]);
+    }, [open, query, scope, pastSession, projectPath, agentId, excludeIds, indexNonce, activeOrganisationId]);
 
     // Reset the keyboard cursor to the top ONLY when the user changes what
     // they're looking at (query/scope/session) — NOT when results merely

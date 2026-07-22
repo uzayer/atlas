@@ -447,7 +447,7 @@ export function WorkspaceSidebar() {
   const recentProjects = useProjectStore.use.recentProjects();
   const { clearRecents } = useProjectStore.use.actions();
   const recentChats = useRecentChatsStore.use.items();
-  const { clear: clearChats } = useRecentChatsStore.use.actions();
+  const { remove: removeChat } = useRecentChatsStore.use.actions();
   const runningChatKeys = useRunningChatKeys();
   const isChatRunning = useCallback(
     (c: RecentChat) =>
@@ -476,15 +476,29 @@ export function WorkspaceSidebar() {
     [recentProjects, openPaths],
   );
 
+  // Chats are recorded globally (no orgId), so scope the sidebar list to the
+  // active org by keeping only chats whose project belongs to an active-org
+  // workspace. `workspaces` is already org-filtered above; a project path maps
+  // to exactly one workspace (addWorkspace dedupes by path), so this is
+  // unambiguous. Chats for projects not open in this org are hidden.
+  const orgWorkspacePaths = useMemo(
+    () => new Set(workspaces.map((w) => w.path)),
+    [workspaces],
+  );
+  const orgRecentChats = useMemo(
+    () => recentChats.filter((c) => orgWorkspacePaths.has(c.projectPath)),
+    [recentChats, orgWorkspacePaths],
+  );
+
   // Section ids that currently exist (for collapse-all + the toggle button).
   const sectionIds = useMemo(() => {
     const ids: string[] = [];
     if (pinned.length) ids.push("sec:pinned");
     ids.push("sec:projects");
     if (recents.length) ids.push("sec:recent");
-    if (recentChats.length) ids.push("sec:chats");
+    if (orgRecentChats.length) ids.push("sec:chats");
     return ids;
-  }, [pinned.length, recents.length, recentChats.length]);
+  }, [pinned.length, recents.length, orgRecentChats.length]);
 
   // Flatten everything into one virtualized row list. Sections AND group
   // folders are collapsible; a collapsed section omits all its content rows.
@@ -508,18 +522,18 @@ export function WorkspaceSidebar() {
       out.push({ kind: "section", id: "sec:recent", label: "Recent", key: "s:recent" });
       if (!collapsed["sec:recent"]) for (const r of recents) out.push({ kind: "recent", name: r.name, path: r.path, key: `r:${r.path}` });
     }
-    if (recentChats.length) {
+    if (orgRecentChats.length) {
       out.push({ kind: "section", id: "sec:chats", label: "Chats", key: "s:chats" });
       // Active (live-running) chats float to the top of the stack; the rest keep
       // their most-recent-first order. Capacity (15) is enforced by the store.
       const ordered = [
-        ...recentChats.filter(isChatRunning),
-        ...recentChats.filter((c) => !isChatRunning(c)),
+        ...orgRecentChats.filter(isChatRunning),
+        ...orgRecentChats.filter((c) => !isChatRunning(c)),
       ];
       if (!collapsed["sec:chats"]) for (const c of ordered) out.push({ kind: "chat", chat: c, key: `c:${c.tabId}` });
     }
     return out;
-  }, [pinned, projects, sortedGroups, collapsed, recents, recentChats, isChatRunning]);
+  }, [pinned, projects, sortedGroups, collapsed, recents, orgRecentChats, isChatRunning]);
 
   // Collapse-all / expand-all: collapses every section + group, or expands all.
   const allCollapsibleIds = useMemo(
@@ -661,7 +675,7 @@ export function WorkspaceSidebar() {
                         row.id === "sec:recent"
                           ? { icon: <Trash2 size={11} />, title: "Clear recent projects", onClick: () => clearRecents() }
                           : row.id === "sec:chats"
-                            ? { icon: <Trash2 size={11} />, title: "Clear chats", onClick: () => clearChats() }
+                            ? { icon: <Trash2 size={11} />, title: "Clear chats", onClick: () => orgRecentChats.forEach((c) => removeChat(c.tabId)) }
                             : undefined
                       }
                     />
