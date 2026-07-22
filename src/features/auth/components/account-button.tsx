@@ -68,6 +68,8 @@ export function AccountButton() {
     </button>
   );
 
-  if (!signedIn) return button;
-  return <AccountMenu user={user}>{button}</AccountMenu>;
+  // Narrowed on `snapshot` rather than the `signedIn` boolean, so the menu is
+  // handed one coherent account state instead of pieces pulled out separately.
+  if (snapshot.status !== "signed-in") return button;
+  return <AccountMenu account={snapshot}>{button}</AccountMenu>;
 }

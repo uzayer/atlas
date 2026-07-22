@@ -31,10 +31,11 @@ mod store;
 
 pub use config::auth_base;
 pub use core::{AuthCore, GrantError, Validation};
+pub use store::Role;
 
 use serde::Serialize;
 
-use store::StoredIdentity;
+use store::{StoredIdentity, StoredOrg};
 
 /// Who is signed in, as the frontend sees them.
 ///
@@ -60,6 +61,30 @@ impl From<StoredIdentity> for AccountUser {
             name: id.name,
             email: id.email,
             avatar_path: id.avatar_path,
+        }
+    }
+}
+
+/// One organisation the account belongs to, as the frontend sees it (ATL-51).
+///
+/// Read-only here by design: switching and creating belong to ATL-36, which
+/// owns the whole organisation data layer. This carries what is already true.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountOrg {
+    pub id: String,
+    pub name: String,
+    /// `None` when the access token's `orgs` claim did not place the user in
+    /// this organisation, or named a role this build does not know.
+    pub role: Option<Role>,
+}
+
+impl From<StoredOrg> for AccountOrg {
+    fn from(org: StoredOrg) -> Self {
+        Self {
+            id: org.id,
+            name: org.name,
+            role: org.role,
         }
     }
 }
@@ -98,6 +123,21 @@ pub enum AuthSnapshot {
         /// successful validation fills it in. Signed-in-but-nameless is a far
         /// better outcome than discarding a valid credential over a photo.
         user: Option<AccountUser>,
+        /// Every organisation the user belongs to (ATL-51).
+        ///
+        /// Alongside `user` rather than inside it, matching the spec's
+        /// `AuthState`: the two are refreshed together but neither implies the
+        /// other, and nesting would make the no-profile window lose the
+        /// organisations as well.
+        ///
+        /// `Some([])` is "belongs to none" and gets the deliberate empty state.
+        /// `None` is "not known yet" and gets no section at all — see
+        /// [`StoredIdentity::orgs`] for why the two must not be collapsed.
+        orgs: Option<Vec<AccountOrg>>,
+        /// Which of `orgs` this device is acting for, already resolved — see
+        /// [`StoredIdentity::active_org`]. `None` whenever `orgs` is empty or
+        /// not yet known.
+        active_org_id: Option<String>,
     },
 }
 

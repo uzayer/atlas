@@ -13,7 +13,12 @@ import { toast } from "sonner";
 import { KbdCombo } from "@/ui/kbd";
 import { openSettingsSection } from "@/features/settings/lib/open-settings";
 import type { SettingsSection } from "@/features/settings/stores/settings-nav-store";
-import type { AccountUser } from "../lib/auth-api";
+import {
+  ROLE_LABELS,
+  type AccountOrg,
+  type AccountUser,
+  type SignedIn,
+} from "../lib/auth-api";
 import { useAuthStore } from "../stores/auth-store";
 import { AccountAvatar } from "./account-avatar";
 
@@ -64,6 +69,10 @@ const ITEM_CLASS =
   "text-[var(--text-secondary)] data-[highlighted]:bg-[var(--bg-hover)] " +
   "data-[highlighted]:text-[var(--text-primary)]";
 
+// Hoisted for the same reason as the two above: this menu now has three
+// separators, and a rule one of them disagreed with would be visible.
+const SEPARATOR_CLASS = "my-1 h-px bg-[var(--border-default)]";
+
 /**
  * The menu behind the title bar's avatar — who you are, the parts of Settings
  * people actually reach for, and the way out.
@@ -74,21 +83,26 @@ const ITEM_CLASS =
  * same primitive every other Atlas menu uses.
  */
 export function AccountMenu({
-  user,
+  account,
   children,
 }: {
   /**
-   * `null` in the narrow window between holding a credential and the first
-   * successful profile fetch (see `SignedIn.user`). The menu still opens, and
-   * Sign Out still works — neither depends on identity, and a credential we
-   * cannot put a name to is still one the user must be able to disconnect.
-   * There is simply no header to render, and inventing a placeholder name would
-   * be worse than the gap it fills.
+   * The whole signed-in snapshot rather than its pieces, so the menu cannot be
+   * handed an identity and a set of organisations that came from different
+   * moments.
+   *
+   * `account.user` is `null` in the narrow window between holding a credential
+   * and the first successful profile fetch (see `SignedIn.user`). The menu still
+   * opens, and Sign Out still works — neither depends on identity, and a
+   * credential we cannot put a name to is still one the user must be able to
+   * disconnect. There is simply no header to render, and inventing a placeholder
+   * name would be worse than the gap it fills.
    */
-  user: AccountUser | null;
+  account: SignedIn;
   children: ReactNode;
 }) {
   const { signOut } = useAuthStore.use.actions();
+  const { user, orgs, activeOrgId } = account;
 
   // Not awaited by anything on screen: the title bar has already flipped by the
   // time this promise settles, off the state event Rust emits before it touches
@@ -107,6 +121,13 @@ export function AccountMenu({
           className={CONTENT_CLASS}
         >
           {user && <Header user={user} />}
+          {/* Omitted entirely while the organisations are unknown — see
+              `SignedIn.orgs`. Same reasoning as the header above it. */}
+          {orgs && (
+            <Organisation
+              active={orgs.find((org) => org.id === activeOrgId) ?? null}
+            />
+          )}
           {ITEMS.map((item) => (
             <DropdownMenu.Item
               key={item.section}
@@ -125,7 +146,7 @@ export function AccountMenu({
               menu navigates, and this one ends the session. Rendered whether or
               not there is an identity to show — a credential held with no
               profile yet is still one the user must be able to disconnect. */}
-          <DropdownMenu.Separator className="my-1 h-px bg-[var(--border-default)]" />
+          <DropdownMenu.Separator className={SEPARATOR_CLASS} />
           <DropdownMenu.Item onSelect={() => void onSignOut()} className={ITEM_CLASS}>
             <LogOut size={13} className="shrink-0 text-[var(--text-tertiary)]" />
             <span className="flex-1 text-left">Sign Out</span>
@@ -133,6 +154,59 @@ export function AccountMenu({
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
+  );
+}
+
+/**
+ * Which organisation this device is acting for, and the role it carries there
+ * (ATL-51).
+ *
+ * A `Label`, not an `Item`: this section is read-only, and rendering it as an
+ * item would make it focusable, highlightable, and reachable by type-ahead —
+ * every affordance of something you can act on, for something you cannot.
+ * Switching organisations is ATL-36's.
+ *
+ * `active` is `null` for a user who belongs to none. That is a real answer and
+ * gets a plain sentence, not a blank row or a spinner: nothing is loading, and
+ * nothing is wrong.
+ *
+ * No plan or tier badge, deliberately. The mockup had one; the server has no
+ * billing, subscription, or plan concept anywhere, so a hardcoded "Free" would
+ * be untrue from the first commit and would quietly stay untrue after billing
+ * ships.
+ */
+function Organisation({ active }: { active: AccountOrg | null }) {
+  return (
+    <>
+      <DropdownMenu.Label className="px-3 pt-1 pb-1.5">
+        {/* Same caption shape as the provider picker's section labels, so
+            dropdown sections read alike across the app. */}
+        <div className="text-[9px] uppercase tracking-wider text-[var(--text-tertiary)]">
+          Organisation
+        </div>
+        {active ? (
+          // Name and role on one row, mirroring the shortcut rows below: the
+          // name takes the space and truncates, the role never wraps.
+          <div className="mt-0.5 flex items-baseline gap-2">
+            <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-primary)]">
+              {active.name}
+            </span>
+            {/* Absent when the claim named no role, or one this build does not
+                know — the organisation is still real, so it is still shown. */}
+            {active.role && (
+              <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">
+                {ROLE_LABELS[active.role]}
+              </span>
+            )}
+          </div>
+        ) : (
+          <div className="mt-0.5 text-[11px] text-[var(--text-tertiary)]">
+            No organisation
+          </div>
+        )}
+      </DropdownMenu.Label>
+      <DropdownMenu.Separator className={SEPARATOR_CLASS} />
+    </>
   );
 }
 
@@ -165,7 +239,7 @@ function Header({ user }: { user: AccountUser }) {
           )}
         </div>
       </DropdownMenu.Label>
-      <DropdownMenu.Separator className="my-1 h-px bg-[var(--border-default)]" />
+      <DropdownMenu.Separator className={SEPARATOR_CLASS} />
     </>
   );
 }

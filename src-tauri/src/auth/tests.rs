@@ -250,18 +250,42 @@ impl Stub {
     /// A `/get-session` profile. `image` is the *absolute* URL the desktop will
     /// fetch, so tests point it back at this same stub.
     fn profile(&self, name: &str, image: Option<&str>) {
+        self.profile_active_org(name, image, None);
+    }
+
+    /// The same, with the session naming an active organisation — what the
+    /// server returns once the *web* has called `/organization/set-active`.
+    /// `None` is the normal state for a device-granted session.
+    fn profile_active_org(&self, name: &str, image: Option<&str>, active: Option<&str>) {
         let image = match image {
             Some(url) => format!(r#""{url}""#),
+            None => "null".to_string(),
+        };
+        let active = match active {
+            Some(id) => format!(r#""{id}""#),
             None => "null".to_string(),
         };
         self.on(
             "/get-session",
             vec![Reply::ok(&format!(
-                r#"{{"session":{{"id":"sess_1"}},
+                r#"{{"session":{{"id":"sess_1","activeOrganizationId":{active}}},
                      "user":{{"id":"user_1","name":"{name}",
                               "email":"ada@atlas.example","image":{image}}}}}"#
             ))],
         );
+    }
+
+    /// `GET /organization/list` — `(id, name)` pairs, carrying the extra fields
+    /// the real endpoint returns so the desktop is proven to ignore them.
+    fn org_list(&self, orgs: &[(&str, &str)]) {
+        let body = orgs
+            .iter()
+            .map(|(id, name)| {
+                format!(r#"{{"id":"{id}","name":"{name}","slug":"{id}","logo":null}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        self.on("/organization/list", vec![Reply::ok(&format!("[{body}]"))]);
     }
 
     /// Absolute URL for a stub path, for use as a profile `image`.
@@ -283,8 +307,30 @@ fn signed_in(snapshot: &AuthSnapshot) -> bool {
 /// The identity on a signed-in snapshot, or a panic naming what we got instead.
 fn user_of(snapshot: &AuthSnapshot) -> AccountUser {
     match snapshot {
-        AuthSnapshot::SignedIn { user: Some(user) } => user.clone(),
+        AuthSnapshot::SignedIn {
+            user: Some(user), ..
+        } => user.clone(),
         other => panic!("expected a signed-in snapshot with an identity, got {other:?}"),
+    }
+}
+
+/// The organisation list on a signed-in snapshot (ATL-51).
+///
+/// Deliberately hands back the `Option` rather than defaulting it: `None`
+/// ("not known yet") and `Some([])` ("belongs to none") render differently, and
+/// a helper that flattened them would let a test pass while the menu lied.
+fn orgs_of(snapshot: &AuthSnapshot) -> Option<Vec<AccountOrg>> {
+    match snapshot {
+        AuthSnapshot::SignedIn { orgs, .. } => orgs.clone(),
+        other => panic!("expected a signed-in snapshot, got {other:?}"),
+    }
+}
+
+/// The organisation the desktop resolved as active, and nothing else about it.
+fn active_org_of(snapshot: &AuthSnapshot) -> Option<String> {
+    match snapshot {
+        AuthSnapshot::SignedIn { active_org_id, .. } => active_org_id.clone(),
+        other => panic!("expected a signed-in snapshot, got {other:?}"),
     }
 }
 
@@ -297,7 +343,29 @@ async fn sign_in(auth: &AuthCore) {
 const TOKEN_OK: &str = r#"{"access_token":"session-tok","token_type":"Bearer"}"#;
 /// A successful `/token` mint — the call [`AuthCore::validate_once`] takes its
 /// verdict from, so any test that validates has to script it.
+///
+/// Deliberately **not** a well-formed JWT. Every test that does not care about
+/// roles uses it, so each of them also proves that an unparseable token costs
+/// the roles and nothing else.
 const JWT_OK: &str = r#"{"token":"jwt-here"}"#;
+
+/// A `/token` reply whose JWT carries an `orgs` claim — `(organisationId, role)`
+/// pairs, exactly the `{ orgId: role }` shape of the real claim (API doc §5.1).
+///
+/// Three dot-separated segments, base64url without padding. The signature is
+/// gibberish on purpose: nothing verifies it, and a test that supplied a real
+/// one would imply otherwise.
+fn jwt_reply(orgs: &[(&str, &str)]) -> Reply {
+    use base64::Engine;
+    let claims = orgs
+        .iter()
+        .map(|(id, role)| format!(r#""{id}":"{role}""#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(format!(r#"{{"sub":"user_1","orgs":{{{claims}}}}}"#));
+    Reply::ok(&format!(r#"{{"token":"header.{payload}.signature"}}"#))
+}
 /// Stands in for image bytes. Content is irrelevant — nothing decodes it.
 const PIXELS: &str = "not-really-a-png-but-nothing-here-decodes-it";
 
@@ -1152,8 +1220,13 @@ async fn a_credential_stored_before_identities_existed_still_loads() {
     let auth = core(&stub, &dir);
     assert_eq!(
         auth.snapshot(),
-        AuthSnapshot::SignedIn { user: None },
-        "signed in, just not yet identified"
+        AuthSnapshot::SignedIn {
+            user: None,
+            orgs: None,
+            active_org_id: None
+        },
+        "signed in, just not yet identified — and not yet knowing anything \
+         about organisations either, which is not the same as belonging to none"
     );
 
     stub.profile("Ada Lovelace", None);
@@ -1162,6 +1235,340 @@ async fn a_credential_stored_before_identities_existed_still_loads() {
         user_of(&validated(&auth).await).name,
         "Ada Lovelace",
         "the first validation after upgrade fills the identity in"
+    );
+}
+
+// ----------------------------------------------------------- organisations
+//
+// ATL-51. Two calls, joined, because neither answers alone: `/organization/list`
+// carries the names and no roles, and the access token's `orgs` claim carries
+// the roles and no names. Everything below is about that join surviving the
+// ways either half can be missing.
+
+/// A grant whose `/token` mint carries real roles, so signing in alone lands a
+/// populated organisation section — no validation pass required.
+fn scripted_grant_with_roles(stub: &Stub, roles: &[(&str, &str)]) {
+    stub.grant_ready(600);
+    stub.on("/device/token", vec![Reply::ok(TOKEN_OK)]);
+    stub.on("/token", vec![jwt_reply(roles)]);
+}
+
+fn org(id: &str, name: &str, role: Option<Role>) -> AccountOrg {
+    AccountOrg {
+        id: id.into(),
+        name: name.into(),
+        role,
+    }
+}
+
+#[tokio::test]
+async fn organisation_names_and_roles_are_joined_from_the_two_sources() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[("org_1", "admin"), ("org_2", "developer")]);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[("org_1", "Atlas"), ("org_2", "Side Project")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    let snapshot = auth.snapshot();
+    assert_eq!(
+        orgs_of(&snapshot),
+        Some(vec![
+            org("org_1", "Atlas", Some(Role::Admin)),
+            org("org_2", "Side Project", Some(Role::Developer)),
+        ]),
+        "every name came from the list and every role from the claim — \
+         neither source could have produced this alone"
+    );
+    assert_eq!(
+        active_org_of(&snapshot).as_deref(),
+        Some("org_1"),
+        "with nothing set on the web, the first organisation is the active one"
+    );
+
+    // The contract ATL-44 proved: the desktop has no cookie, so the list is
+    // only reachable with the session token as a Bearer.
+    let seen = stub.seen("/organization/list");
+    assert_eq!(seen.len(), 1, "one list call per refresh");
+    assert_eq!(seen[0].method, "GET");
+    assert_eq!(seen[0].bearer.as_deref(), Some("session-tok"));
+}
+
+#[tokio::test]
+async fn an_account_in_no_organisation_yields_a_deliberate_empty_state() {
+    // The user belongs to none — a real answer, not a failure. It has to be
+    // distinguishable from every degraded state, because the menu renders a
+    // plain line for it rather than a blank row, a spinner, or an error.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[]);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    let snapshot = auth.snapshot();
+    assert!(signed_in(&snapshot), "no organisation is not a failed sign-in");
+    assert_eq!(
+        orgs_of(&snapshot),
+        Some(Vec::new()),
+        "`Some([])` — the server answered, and the answer is none. The menu \
+         only states that because it can tell this from having never asked"
+    );
+    assert_eq!(active_org_of(&snapshot), None);
+    assert_eq!(
+        user_of(&snapshot).name,
+        "Ada Lovelace",
+        "the identity is unaffected by having joined nothing"
+    );
+}
+
+#[tokio::test]
+async fn the_organisation_list_survives_a_restart_and_renders_with_the_server_unreachable() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[("org_1", "product_owner")]);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[("org_1", "Atlas")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    let known = orgs_of(&auth.snapshot());
+    assert_eq!(
+        known,
+        Some(vec![org("org_1", "Atlas", Some(Role::ProductOwner))])
+    );
+
+    // A relaunch on a plane: same config directory, nothing listening.
+    let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
+    assert_eq!(
+        orgs_of(&offline.snapshot()),
+        known,
+        "the section renders from the snapshot before any call is made"
+    );
+
+    offline.validate_once().await;
+    assert_eq!(
+        orgs_of(&offline.snapshot()),
+        known,
+        "a call that never landed says nothing about membership, so it must \
+         not empty the menu"
+    );
+    assert_eq!(active_org_of(&offline.snapshot()).as_deref(), Some("org_1"));
+}
+
+#[tokio::test]
+async fn a_failed_organisation_list_keeps_the_one_already_stored() {
+    // Distinct from being offline: the server answered, just not with a list.
+    // The old one is still the best thing known about this user's membership.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[("org_1", "admin")]);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[("org_1", "Atlas")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    let known = orgs_of(&auth.snapshot());
+
+    stub.on("/organization/list", vec![Reply::err(500, "boom")]);
+    assert_eq!(auth.validate_once().await, Validation::Confirmed);
+    assert_eq!(
+        orgs_of(&auth.snapshot()),
+        known,
+        "an outage on one endpoint must not trade a known-good list for an \
+         empty one"
+    );
+}
+
+#[tokio::test]
+async fn an_organisation_the_claim_does_not_mention_is_listed_without_a_role() {
+    // The two calls are not atomic with respect to each other: an invitation
+    // accepted between the mint and the list lands here. A name with no role
+    // beats an organisation that silently disappears.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[("org_1", "admin")]);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[("org_1", "Atlas"), ("org_2", "Joined Just Now")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    assert_eq!(
+        orgs_of(&auth.snapshot()),
+        Some(vec![
+            org("org_1", "Atlas", Some(Role::Admin)),
+            org("org_2", "Joined Just Now", None),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn a_role_this_build_does_not_know_is_dropped_but_its_organisation_is_not() {
+    // A fifth role added server-side after this build shipped. There is no
+    // label to render, but the organisation is still real.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[("org_1", "auditor")]);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[("org_1", "Atlas")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    assert_eq!(
+        orgs_of(&auth.snapshot()),
+        Some(vec![org("org_1", "Atlas", None)])
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_access_token_costs_the_roles_and_nothing_else() {
+    // `scripted_grant` mints a `token` that is not a JWT at all. Nothing here
+    // authorises anything, so an unparseable claim is a missing label — never
+    // an error, and never a reason to doubt the credential.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[("org_1", "Atlas")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    assert_eq!(
+        orgs_of(&auth.snapshot()),
+        Some(vec![org("org_1", "Atlas", None)]),
+        "nothing was ever known about this role, so there is nothing to show"
+    );
+    assert_eq!(active_org_of(&auth.snapshot()).as_deref(), Some("org_1"));
+    assert!(auth.stored().is_some());
+}
+
+#[tokio::test]
+async fn an_unreadable_access_token_keeps_the_role_already_known() {
+    // The other half of the case above, and the one that matters: a role was
+    // known, and a later refresh could not read the claim. Downgrading "Admin"
+    // to nothing over one unreadable token is the same mistake as trading a
+    // known-good photo for initials over one timeout.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[("org_1", "admin")]);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[("org_1", "Atlas")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    let known = orgs_of(&auth.snapshot());
+    assert_eq!(known, Some(vec![org("org_1", "Atlas", Some(Role::Admin))]));
+
+    // The mint still succeeds — the credential is fine — but the token is not
+    // one this build can read.
+    stub.on("/token", vec![Reply::ok(JWT_OK)]);
+    assert_eq!(auth.validate_once().await, Validation::Confirmed);
+    assert_eq!(orgs_of(&auth.snapshot()), known);
+}
+
+#[tokio::test]
+async fn a_claim_that_places_the_user_nowhere_does_clear_the_role() {
+    // The distinction the tri-state exists for: an `orgs` claim of `{}` was
+    // *read*, and says this user holds no role here (API doc §5.1). Unlike an
+    // unreadable token, that is an answer, and it must land.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[("org_1", "admin")]);
+    stub.profile("Ada Lovelace", None);
+    stub.org_list(&[("org_1", "Atlas")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    assert_eq!(
+        orgs_of(&auth.snapshot()),
+        Some(vec![org("org_1", "Atlas", Some(Role::Admin))])
+    );
+
+    stub.on("/token", vec![jwt_reply(&[])]);
+    assert_eq!(auth.validate_once().await, Validation::Confirmed);
+    assert_eq!(
+        orgs_of(&auth.snapshot()),
+        Some(vec![org("org_1", "Atlas", None)]),
+        "a claim we could read outranks one we remember"
+    );
+}
+
+#[tokio::test]
+async fn organisations_that_were_never_fetched_are_unknown_rather_than_none() {
+    // Upgrading from a build that stored no organisations. Saying "no
+    // organisation" here would be a lie to a user who has one — and offline,
+    // a lie with no expiry, since the list call never lands to correct it.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    std::fs::write(
+        dir.path().join("atlas-session.json"),
+        r#"{"sessionToken":"session-tok","savedAt":"2026-07-22T00:00:00Z",
+            "identity":{"id":"user_1","name":"Ada Lovelace",
+                        "email":"ada@atlas.example","avatarUrl":null,
+                        "avatarPath":null}}"#,
+    )
+    .unwrap();
+
+    let auth = core(&stub, &dir);
+    assert_eq!(
+        user_of(&auth.snapshot()).name,
+        "Ada Lovelace",
+        "the identity from the old file still loads"
+    );
+    assert_eq!(
+        orgs_of(&auth.snapshot()),
+        None,
+        "never asked is not the same answer as none"
+    );
+
+    // A launch where the list call fails must not resolve the question either.
+    stub.profile("Ada Lovelace", None);
+    stub.on("/token", vec![Reply::ok(JWT_OK)]);
+    stub.on("/organization/list", vec![Reply::err(500, "boom")]);
+    assert_eq!(auth.validate_once().await, Validation::Confirmed);
+    assert_eq!(orgs_of(&auth.snapshot()), None, "still unknown, still silent");
+
+    // And is settled the moment one lands.
+    stub.org_list(&[("org_1", "Atlas")]);
+    assert_eq!(auth.validate_once().await, Validation::Confirmed);
+    assert_eq!(
+        orgs_of(&auth.snapshot()),
+        Some(vec![org("org_1", "Atlas", None)])
+    );
+}
+
+#[tokio::test]
+async fn the_active_organisation_follows_the_web_and_falls_back_when_it_cannot() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant_with_roles(&stub, &[("org_1", "member"), ("org_2", "admin")]);
+    stub.org_list(&[("org_1", "First"), ("org_2", "Chosen")]);
+    stub.profile_active_org("Ada Lovelace", None, Some("org_2"));
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    assert_eq!(
+        active_org_of(&auth.snapshot()).as_deref(),
+        Some("org_2"),
+        "a choice made on the web outranks list order"
+    );
+
+    // Membership in the active organisation removed on the web: the stored
+    // choice is no longer in the list, and must not resolve to nothing.
+    stub.profile_active_org("Ada Lovelace", None, Some("org_2"));
+    stub.org_list(&[("org_1", "First")]);
+    assert_eq!(auth.validate_once().await, Validation::Confirmed);
+    assert_eq!(
+        active_org_of(&auth.snapshot()).as_deref(),
+        Some("org_1"),
+        "an active id that is no longer a membership falls back to the first"
     );
 }
 

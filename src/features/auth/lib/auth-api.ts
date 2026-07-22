@@ -44,6 +44,35 @@ export interface AccountUser {
   avatarPath: string | null;
 }
 
+/**
+ * A role in an organisation (API doc §6), highest privilege first.
+ *
+ * A union rather than `string` so `ROLE_LABELS` cannot silently lose a case:
+ * the only thing the desktop does with a role is render its label, and a value
+ * with no label renders as nothing at all.
+ */
+export type Role = "admin" | "product_owner" | "developer" | "member";
+
+/** What each role is called on screen. Matches the web dashboard's wording. */
+export const ROLE_LABELS: Record<Role, string> = {
+  admin: "Admin",
+  product_owner: "Product Owner",
+  developer: "Developer",
+  member: "Member",
+};
+
+/** One organisation the account belongs to (ATL-51). Read-only — see ATL-36. */
+export interface AccountOrg {
+  id: string;
+  name: string;
+  /**
+   * `null` when the access token's `orgs` claim did not place the user in this
+   * organisation, or named a role this build does not know. The organisation is
+   * still real; only its label is missing.
+   */
+  role: Role | null;
+}
+
 /** A credential is held. */
 export interface SignedIn {
   status: "signed-in";
@@ -54,6 +83,25 @@ export interface SignedIn {
    * button shows the generic icon rather than nothing.
    */
   user: AccountUser | null;
+  /**
+   * Every organisation the user belongs to, from the stored snapshot — so this
+   * is populated on an offline launch too.
+   *
+   * Three states, and the menu must render each differently:
+   * - a non-empty array — known, and shown.
+   * - `[]` — **known to be none.** The deliberate empty state.
+   * - `null` — **not known yet**, because no list call has ever succeeded on
+   *   this machine. Telling such a user they belong to no organisation would be
+   *   a lie, and offline it is one nothing would ever correct — so the section
+   *   is omitted, exactly as the identity header is when `user` is null.
+   */
+  orgs: AccountOrg[] | null;
+  /**
+   * Which of `orgs` this device is acting for, already resolved in Rust — the
+   * one the user made active on the web, or the first they belong to. `null`
+   * whenever `orgs` is empty or not yet known.
+   */
+  activeOrgId: string | null;
 }
 
 export type AuthSnapshot = SignedOut | Connecting | SignedIn;

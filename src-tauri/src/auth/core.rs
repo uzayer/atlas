@@ -1,5 +1,6 @@
 //! The device grant, the poll loop, and the credential and identity lifecycle.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use serde::Deserialize;
 
 use super::backoff::{self, Backoff};
-use super::store::{self, StoredIdentity, StoredSession};
+use super::store::{self, Role, StoredIdentity, StoredOrg, StoredSession};
 use super::{avatar, AuthSnapshot};
 
 /// RFC 8628 `client_id` for this app, matching the server's device plugin.
@@ -252,9 +253,18 @@ impl AuthCore {
             }
         }
         match self.stored() {
-            Some(session) => AuthSnapshot::SignedIn {
-                user: session.identity.map(Into::into),
-            },
+            Some(session) => {
+                let identity = session.identity;
+                AuthSnapshot::SignedIn {
+                    orgs: identity.as_ref().and_then(|i| {
+                        i.orgs
+                            .as_ref()
+                            .map(|orgs| orgs.iter().cloned().map(Into::into).collect())
+                    }),
+                    active_org_id: identity.as_ref().and_then(StoredIdentity::active_org),
+                    user: identity.map(Into::into),
+                }
+            }
             None => AuthSnapshot::SignedOut,
         }
     }
@@ -267,8 +277,9 @@ impl AuthCore {
     /// `/get-session` expresses that as **200 with a `null` body**, not a 401
     /// (proven in ATL-44), so status alone would never see it. It is reported
     /// rather than classified: [`Self::validate_once`] takes its verdict from
-    /// `/token` instead, and this call only ever decides a name and a photo.
-    async fn fetch_profile(&self) -> Authed<Option<Profile>> {
+    /// `/token` instead, and this call only ever decides a name, a photo, and
+    /// which organisation was last made active.
+    async fn fetch_profile(&self) -> Authed<Option<SessionResponse>> {
         let res = self.authed_get("/get-session").await?;
 
         let body = res
@@ -280,28 +291,132 @@ impl AuthCore {
         }
         let session: SessionResponse = serde_json::from_str(&body)
             .map_err(|e| AuthFailure::indeterminate(format!("unreadable profile: {e}")))?;
-        Ok(Some(session.user))
+        Ok(Some(session))
     }
 
-    /// Pull the profile and write it onto the stored credential.
+    /// Every organisation the user belongs to, with the role they hold in each
+    /// (ATL-51).
+    ///
+    /// Two calls, because neither answers alone: `/organization/list` has the
+    /// names and no roles, and the access token's `orgs` claim has the roles
+    /// and no names.
+    ///
+    /// **A failed list keeps the one already stored.** Same rule as the avatar
+    /// cache and the credential itself: a call that never landed says nothing
+    /// about the user's membership, and trading a known-good list for an empty
+    /// one would empty the menu on every flaky launch — including the offline
+    /// one this snapshot exists to serve.
+    ///
+    /// That includes a 401 here, which does **not** clear the credential:
+    /// [`Self::validate_once`] takes its verdict from `/token` alone and has
+    /// already confirmed it by the time this runs, so a rejection arriving on
+    /// this call means the session died in between and the next validation is
+    /// what acts on it. Only one call in this module may destroy a credential.
+    ///
+    /// A 403 is not surfaced to the user either, deviating from the spec's
+    /// "DENIED → surface in context". There is no honest context to surface it
+    /// in: this runs unprompted on the launch path, the endpoint is
+    /// caller-scoped so a 403 on it indicates a server fault rather than
+    /// anything the user can act on, and a toast on every launch would be
+    /// noise. The section simply stays as it was, or absent — which is the
+    /// truthful rendering of "we do not know".
+    async fn resolve_orgs(
+        &self,
+        access_token: Option<String>,
+        previous: Option<&StoredIdentity>,
+    ) -> Option<Vec<StoredOrg>> {
+        let Ok(listed) = self.fetch_orgs().await else {
+            // `None` propagates when there was nothing stored either: still not
+            // known, which the menu renders as no section rather than as "no
+            // organisation".
+            return previous.and_then(|p| p.orgs.clone());
+        };
+
+        // An empty list is a *verdict*, not a failure — a user who has joined
+        // no organisation — so it is stored as-is and reaches the menu as the
+        // empty state.
+        let roles = match access_token {
+            Some(jwt) => org_roles(&jwt),
+            // Nothing minted one for us: this is the sign-in path, where the
+            // credential is seconds old and no validation has run yet. A failure
+            // costs the roles, never the names.
+            None => self
+                .mint_access_token()
+                .await
+                .ok()
+                .and_then(|jwt| org_roles(&jwt)),
+        };
+
+        Some(
+            listed
+                .into_iter()
+                .map(|org| StoredOrg {
+                    role: match &roles {
+                        // The claim was read. Absent from it means absent —
+                        // membership per the server, not a failure to look.
+                        Some(roles) => roles.get(&org.id).copied(),
+                        // The claim was never read at all. Downgrading a label
+                        // we already have would be the same mistake as trading
+                        // a known-good photo for initials over one timeout.
+                        None => previous.and_then(|p| p.role_of(&org.id)),
+                    },
+                    id: org.id,
+                    name: org.name,
+                })
+                .collect(),
+        )
+    }
+
+    /// `GET /organization/list` — the only source of organisation *names*.
+    ///
+    /// **One extra request per successful validation**, and one extra `/token`
+    /// mint on the sign-in path. Re-checked against the auth worker's global
+    /// ceiling of 100 requests per 60s, as the spec requires of anyone changing
+    /// the request count: the retry path is untouched, because
+    /// [`Self::validate_once`] only loops when `/token` itself fails and
+    /// [`Self::refresh_identity`] never runs on the backoff schedule. A
+    /// successful validation costs 3 requests and happens about once a launch.
+    async fn fetch_orgs(&self) -> Authed<Vec<OrgEntry>> {
+        let res = self.authed_get("/organization/list").await?;
+        res.json::<Vec<OrgEntry>>()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable organisations: {e}")))
+    }
+
+    /// Pull the profile and organisations and write them onto the stored
+    /// credential.
     ///
     /// Silent about every failure on purpose: this runs on the boot path behind
-    /// an already-rendered signed-in title bar, and a photo or a stale display
-    /// name is never worth a toast, let alone touching the credential.
+    /// an already-rendered signed-in title bar, and a photo, a stale display
+    /// name, or a stale role is never worth a toast, let alone touching the
+    /// credential.
     ///
-    /// `previous` is the identity being replaced — it supplies the avatar cache
-    /// key, and is what lets an unchanged photo cost zero requests.
-    async fn refresh_identity(&self, previous: Option<StoredIdentity>) {
-        let Ok(Some(profile)) = self.fetch_profile().await else {
+    /// `previous` is the identity being replaced. It supplies the avatar cache
+    /// key — what lets an unchanged photo cost zero requests — and is also what
+    /// every fallback in [`Self::resolve_orgs`] falls back *to*.
+    ///
+    /// `access_token` is a JWT the caller has *already* minted, so the common
+    /// path costs no second mint: [`Self::validate_once`] takes its verdict from
+    /// one and would otherwise throw it away.
+    async fn refresh_identity(
+        &self,
+        previous: Option<StoredIdentity>,
+        access_token: Option<String>,
+    ) {
+        let Ok(Some(session)) = self.fetch_profile().await else {
             return;
         };
+        let profile = session.user;
         let held = previous
-            .map(|p| avatar::CachedAvatar::new(p.avatar_url, p.avatar_path))
+            .as_ref()
+            .map(|p| avatar::CachedAvatar::new(p.avatar_url.clone(), p.avatar_path.clone()))
             .unwrap_or_default();
         // Writes back the *pair* — a failed fetch returns the previous one
         // untouched, so a blip never trades a known-good photo for initials.
         let avatar =
             avatar::resolve(&self.http, &self.dir, profile.image.as_deref(), &held).await;
+
+        let orgs = self.resolve_orgs(access_token, previous.as_ref()).await;
 
         // Re-read *after* the network work rather than reusing an earlier load,
         // and after the photo rather than before it: both calls above are round
@@ -323,6 +438,8 @@ impl AuthCore {
                     email: profile.email,
                     avatar_url: avatar.url,
                     avatar_path: avatar.path,
+                    orgs,
+                    active_org_id: session.session.active_organization_id,
                 }),
                 ..current
             },
@@ -465,7 +582,10 @@ impl AuthCore {
                     // The alternative flashes a nameless signed-in title bar on
                     // every sign-in to save a few hundred milliseconds behind a
                     // spinner the user is already watching.
-                    self.refresh_identity(previous).await;
+                    //
+                    // `None`: nothing has minted an access token yet on this
+                    // path, so the roles cost one of their own.
+                    self.refresh_identity(previous, None).await;
                     return Ok(());
                 }
                 PollOutcome::Pending | PollOutcome::Transient => continue,
@@ -572,13 +692,17 @@ impl AuthCore {
         };
 
         match self.mint_access_token().await {
-            Ok(_) => {
-                // Every successful validation refreshes the snapshot, so a name
-                // or photo changed on the web reaches the desktop without a
-                // re-sign-in. It runs only after the credential is confirmed —
+            Ok(jwt) => {
+                // Every successful validation refreshes the snapshot, so a name,
+                // photo, or role changed on the web reaches the desktop without
+                // a re-sign-in. It runs only after the credential is confirmed —
                 // there is no point fetching a profile we may be about to
                 // discard, and a failure here must never reach the credential.
-                self.refresh_identity(current.identity).await;
+                //
+                // The JWT is handed on rather than dropped: it is the only
+                // source of per-organisation roles, and this call already paid
+                // for it.
+                self.refresh_identity(current.identity, Some(jwt)).await;
                 Validation::Confirmed
             }
             Err(AuthFailure::NoCredential) => Validation::NoCredential,
@@ -638,8 +762,11 @@ impl AuthCore {
     /// here pretends otherwise: [`Self::snapshot`] is derived from the file, so
     /// the state the caller broadcasts next is whatever is really on disk.
     ///
-    /// There is no in-memory access token to clear yet; minting is currently
-    /// lazy and uncached. Whatever ATL-51 adds to hold one belongs here.
+    /// There is still no in-memory access token to clear. ATL-51 added none:
+    /// the JWT it needs for the `orgs` claim is minted, read, and dropped inside
+    /// a single call, and nothing else in the desktop consumes one. A cache
+    /// would buy nothing and would be one more thing this function had to
+    /// remember to clear.
     pub fn sign_out(&self) -> Option<RevocationTicket> {
         let stored = self.stored();
         // Before the credential, not after: the identity is where the path to
@@ -718,11 +845,79 @@ struct DeviceTokenSuccess {
     access_token: String,
 }
 
-/// `GET /get-session`. The session half is ignored — expiry is the server's
-/// business, and nothing here is improved by a second opinion on it.
+/// `GET /get-session`.
 #[derive(Deserialize)]
 struct SessionResponse {
+    /// `default` so a body without one still yields a profile. Expiry is
+    /// deliberately still ignored — it is the server's business, and nothing
+    /// here is improved by a second opinion on it.
+    #[serde(default)]
+    session: SessionMeta,
     user: Profile,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SessionMeta {
+    /// Which organisation the user last made active, or `None` — which is the
+    /// normal state for a device-granted session, since only the web ever calls
+    /// `/organization/set-active`. [`active_org`] is what copes with that.
+    #[serde(default)]
+    active_organization_id: Option<String>,
+}
+
+/// One entry of `GET /organization/list`. Slug, logo, and timestamps are
+/// deliberately not read: the menu renders a name, and ATL-36 owns the rest.
+#[derive(Deserialize)]
+struct OrgEntry {
+    id: String,
+    name: String,
+}
+
+/// The `orgs` claim — `{ organisationId: role }` — off an access token.
+///
+/// **The signature is deliberately not verified.** We minted this token
+/// ourselves, over TLS, from the issuer, seconds ago; JWKS verification exists
+/// for parties receiving tokens from untrusted sources, and checking our own
+/// proves nothing it did not already know. The claims are used only to label a
+/// row in a menu — nothing here authorises anything (spec, "Deviations from the
+/// API doc", §5.2).
+///
+/// `None` for a token that could not be read at all — the same "we learned
+/// nothing" the rest of the module turns on, kept distinct from `Some({})`,
+/// which is the server genuinely placing the user in no organisation (API doc
+/// §5.1: "`orgs` is `{}` until the user belongs to an Organisation"). Only the
+/// caller can tell what to do with the difference, and it does: an unread claim
+/// keeps the roles already known, an empty one clears them.
+///
+/// Never an error, and never a reason to doubt the credential — nothing here
+/// authorises anything.
+fn org_roles(jwt: &str) -> Option<HashMap<String, Role>> {
+    use base64::Engine;
+
+    #[derive(Deserialize)]
+    struct Claims {
+        #[serde(default)]
+        orgs: HashMap<String, String>,
+    }
+
+    let payload = jwt.split('.').nth(1)?;
+    // JWTs are base64**url** with the padding stripped, which the standard
+    // alphabet decodes into garbage rather than rejecting.
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims = serde_json::from_slice::<Claims>(&bytes).ok()?;
+
+    Some(
+        claims
+            .orgs
+            .into_iter()
+            // A role this build does not know is dropped, leaving its
+            // organisation role-less rather than absent.
+            .filter_map(|(id, role)| Role::from_claim(&role).map(|role| (id, role)))
+            .collect(),
+    )
 }
 
 #[derive(Deserialize)]

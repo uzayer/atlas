@@ -28,14 +28,60 @@ use serde::{Deserialize, Serialize};
 /// File name inside the app config directory.
 const SESSION_FILE: &str = "atlas-session.json";
 
+/// A role in an organisation (API doc §6), highest privilege first.
+///
+/// A closed set rather than a `String` because it reaches the UI as a label: an
+/// unrecognised value has no label to render, and the server's own contract
+/// (`packages/contracts`) defines exactly these four. Anything else is dropped
+/// at the boundary by [`Role::from_claim`] rather than carried inward.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Admin,
+    ProductOwner,
+    Developer,
+    Member,
+}
+
+impl Role {
+    /// Read one value of the access token's `orgs` claim.
+    ///
+    /// `None` for anything unrecognised — a role added server-side after this
+    /// build shipped. The organisation is still listed, just without a role:
+    /// omitting a name we know is worse than omitting a label we do not.
+    ///
+    /// Routed through the `serde` attribute above rather than a second
+    /// hand-written table of the same four strings. That attribute already
+    /// decides how a role is spelled on disk, and a table that drifted from it
+    /// would read back a role this file had just written.
+    pub(crate) fn from_claim(raw: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(raw.to_string())).ok()
+    }
+}
+
+/// One organisation the user belongs to, as of the last successful refresh.
+///
+/// Assembled from two sources because neither is sufficient alone: the name
+/// comes from `/organization/list`, the role from the access token's `orgs`
+/// claim, which carries `{ organisationId: role }` and no names at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredOrg {
+    pub id: String,
+    pub name: String,
+    /// `None` when the claim did not mention this organisation, or named a role
+    /// this build does not know. Membership can change between the mint and the
+    /// list, and the two calls are not atomic with respect to each other.
+    #[serde(default)]
+    pub role: Option<Role>,
+}
+
 /// Who the credential belongs to, as of the last successful profile fetch.
 ///
 /// This is what makes an offline launch render a *complete* signed-in state —
-/// a face and a name — rather than a half-populated one. Refreshed on every
-/// successful validation, so a name or photo changed on the web reaches the
-/// desktop on the next launch.
-///
-/// ATL-51 adds the organisation list and active organisation alongside it.
+/// a face, a name, and the organisation this device is acting for — rather than
+/// a half-populated one. Refreshed on every successful validation, so a name,
+/// photo, or role changed on the web reaches the desktop on the next launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredIdentity {
@@ -51,6 +97,68 @@ pub struct StoredIdentity {
     /// Absolute path to the cached photo. `None` when the user has no photo or
     /// the fetch failed; the UI falls back to initials either way.
     pub avatar_path: Option<String>,
+    /// Every organisation the user belongs to.
+    ///
+    /// Three states, and the menu renders each differently, so collapsing any
+    /// two would make it state something untrue:
+    ///
+    /// - `Some(non-empty)` — known, and rendered.
+    /// - `Some([])` — **known to be none.** A real answer about a real user,
+    ///   and the one the deliberate empty state is for.
+    /// - `None` — **not known yet.** A credential file written before this
+    ///   field existed (`#[serde(default)]`, so an ATL-47 build's file still
+    ///   loads instead of signing the user out), or one whose every list call
+    ///   has failed. Offline, that state can last indefinitely — so telling
+    ///   such a user they belong to no organisation would be a lie with no
+    ///   expiry. The section is omitted instead, exactly as the identity header
+    ///   is omitted when there is no profile yet.
+    #[serde(default)]
+    pub orgs: Option<Vec<StoredOrg>>,
+    /// The organisation the user last made active **on the web**, when they ever
+    /// did. Never written from the desktop: `/organization/set-active` is
+    /// ATL-36's, and this ticket is read-only.
+    ///
+    /// Kept separate from "which one to display" — see [`Self::active_org`],
+    /// which resolves that and has to cope with this being `None`, the common
+    /// case for a device-granted session.
+    #[serde(default)]
+    pub active_org_id: Option<String>,
+}
+
+impl StoredIdentity {
+    /// Which organisation the desktop is acting for.
+    ///
+    /// Prefers the one the user made active **on the web**, and falls back to
+    /// the first they belong to. The fallback is not a nicety:
+    /// `/organization/set-active` is the only thing that sets the stored value,
+    /// the desktop never calls it (ATL-36 owns switching), and a device-granted
+    /// session starts with it unset — so without the fallback almost every
+    /// desktop user would see an empty section while plainly belonging to an
+    /// organisation. The web dashboard defaults the same way, so the two
+    /// surfaces agree.
+    ///
+    /// A stored id that is no longer in the list — membership removed on the
+    /// web — falls through to the fallback rather than resolving to nothing.
+    pub(crate) fn active_org(&self) -> Option<String> {
+        let orgs = self.orgs.as_ref()?;
+        self.active_org_id
+            .as_ref()
+            .filter(|id| orgs.iter().any(|org| &org.id == *id))
+            .cloned()
+            .or_else(|| orgs.first().map(|org| org.id.clone()))
+    }
+
+    /// The role last known for one organisation, if any.
+    ///
+    /// The fallback for a refresh that could not read the `orgs` claim: a
+    /// label we already have beats one we just failed to fetch.
+    pub(crate) fn role_of(&self, id: &str) -> Option<Role> {
+        self.orgs
+            .as_ref()?
+            .iter()
+            .find(|org| org.id == id)
+            .and_then(|org| org.role)
+    }
 }
 
 /// The persisted credential, plus who it belongs to.
