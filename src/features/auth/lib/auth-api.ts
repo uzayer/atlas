@@ -28,9 +28,32 @@ export interface Connecting {
   expiresAt: string;
 }
 
-/** A credential is held. ATL-47 adds the user identity here. */
+/** Who is signed in. Carries no credential — see the note at the top. */
+export interface AccountUser {
+  id: string;
+  name: string;
+  email: string;
+  /**
+   * Absolute path to the locally cached profile photo, or `null` when the user
+   * has none or the fetch failed. Render it through `convertFileSrc`.
+   *
+   * Deliberately a local path rather than the provider URL: an `<img>` pointed
+   * at Google or GitHub would tell them the user opened Atlas, every launch,
+   * for a photo already on disk — and would leave the title bar blank offline.
+   */
+  avatarPath: string | null;
+}
+
+/** A credential is held. */
 export interface SignedIn {
   status: "signed-in";
+  /**
+   * `null` only between holding a credential and the first successful profile
+   * fetch — a network blip right after approval, or an upgrade from a build
+   * that stored no identity. The next validation fills it in; until then the
+   * button shows the generic icon rather than nothing.
+   */
+  user: AccountUser | null;
 }
 
 export type AuthSnapshot = SignedOut | Connecting | SignedIn;

@@ -55,14 +55,38 @@ impl Drop for TempDir {
 struct Reply {
     status: u16,
     body: String,
+    content_type: &'static str,
+    /// `None` omits the header entirely, so the client must read to EOF without
+    /// knowing how much is coming. That is the only way to reach the avatar
+    /// fetch's *streaming* size cap: with an honest length the cheap up-front
+    /// check fires first, and an understated one just makes `reqwest` truncate.
+    content_length: Option<usize>,
 }
 
 impl Reply {
+    fn new(status: u16, body: &str, content_type: &'static str) -> Self {
+        Self {
+            status,
+            body: body.into(),
+            content_type,
+            content_length: Some(body.len()),
+        }
+    }
     fn ok(body: &str) -> Self {
-        Self { status: 200, body: body.into() }
+        Self::new(200, body, "application/json")
     }
     fn err(status: u16, body: &str) -> Self {
-        Self { status, body: body.into() }
+        Self::new(status, body, "application/json")
+    }
+    /// A 200 with an explicit content type — used for image bodies, and for
+    /// proving what happens when the "photo" turns out not to be one. The bytes
+    /// are never a real image: nothing in the Rust layer decodes them.
+    fn with_content_type(content_type: &'static str, body: &str) -> Self {
+        Self::new(200, body, content_type)
+    }
+    fn without_content_length(mut self) -> Self {
+        self.content_length = None;
+        self
     }
 }
 
@@ -115,11 +139,13 @@ impl Stub {
                         }
                     };
 
+                    let length = match reply.content_length {
+                        Some(n) => format!("Content-Length: {n}\r\n"),
+                        None => String::new(),
+                    };
                     let out = format!(
-                        "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        reply.status,
-                        reply.body.len(),
-                        reply.body
+                        "HTTP/1.1 {} X\r\nContent-Type: {}\r\n{}Connection: close\r\n\r\n{}",
+                        reply.status, reply.content_type, length, reply.body
                     );
                     let _ = sock.write_all(out.as_bytes()).await;
                     let _ = sock.shutdown().await;
@@ -154,13 +180,57 @@ impl Stub {
             ))],
         );
     }
+
+    /// A `/get-session` profile. `image` is the *absolute* URL the desktop will
+    /// fetch, so tests point it back at this same stub.
+    fn profile(&self, name: &str, image: Option<&str>) {
+        let image = match image {
+            Some(url) => format!(r#""{url}""#),
+            None => "null".to_string(),
+        };
+        self.on(
+            "/get-session",
+            vec![Reply::ok(&format!(
+                r#"{{"session":{{"id":"sess_1"}},
+                     "user":{{"id":"user_1","name":"{name}",
+                              "email":"ada@atlas.example","image":{image}}}}}"#
+            ))],
+        );
+    }
+
+    /// Absolute URL for a stub path, for use as a profile `image`.
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base(), path)
+    }
 }
 
 fn core(stub: &Stub, dir: &TempDir) -> AuthCore {
     AuthCore::new(stub.base(), dir.path(), reqwest::Client::new())
 }
 
+/// Signed in, whoever it turns out to be — for the tests that are about the
+/// grant rather than the user.
+fn signed_in(snapshot: &AuthSnapshot) -> bool {
+    matches!(snapshot, AuthSnapshot::SignedIn { .. })
+}
+
+/// The identity on a signed-in snapshot, or a panic naming what we got instead.
+fn user_of(snapshot: &AuthSnapshot) -> AccountUser {
+    match snapshot {
+        AuthSnapshot::SignedIn { user: Some(user) } => user.clone(),
+        other => panic!("expected a signed-in snapshot with an identity, got {other:?}"),
+    }
+}
+
+/// Drive a grant to completion against an already-scripted stub.
+async fn sign_in(auth: &AuthCore) {
+    let grant = auth.start_grant().await.expect("start grant");
+    auth.run_grant(&grant).await.expect("complete grant");
+}
+
 const TOKEN_OK: &str = r#"{"access_token":"session-tok","token_type":"Bearer"}"#;
+/// Stands in for image bytes. Content is irrelevant — nothing decodes it.
+const PIXELS: &str = "not-really-a-png-but-nothing-here-decodes-it";
 
 // ------------------------------------------------------------------ config
 
@@ -193,11 +263,11 @@ async fn a_granted_token_is_persisted_and_survives_a_restart() {
     let grant = auth.start_grant().await.expect("start");
     auth.run_grant(&grant).await.expect("grant");
 
-    assert_eq!(auth.snapshot(), AuthSnapshot::SignedIn);
+    assert!(signed_in(&auth.snapshot()));
 
     // A fresh core over the same directory is what a relaunch looks like.
     let relaunched = AuthCore::new(stub.base(), dir.path(), reqwest::Client::new());
-    assert_eq!(relaunched.snapshot(), AuthSnapshot::SignedIn);
+    assert!(signed_in(&relaunched.snapshot()));
     assert_eq!(relaunched.stored().unwrap().session_token, "session-tok");
 }
 
@@ -259,7 +329,7 @@ async fn pending_polls_continue_until_approval() {
     let grant = auth.start_grant().await.unwrap();
     auth.run_grant(&grant).await.expect("should end signed in");
 
-    assert_eq!(auth.snapshot(), AuthSnapshot::SignedIn);
+    assert!(signed_in(&auth.snapshot()));
     assert_eq!(stub.hits("/device/token"), 3);
 }
 
@@ -283,7 +353,7 @@ async fn a_transient_failure_does_not_discard_an_approval() {
     let auth = core(&stub, &dir);
     let grant = auth.start_grant().await.unwrap();
     auth.run_grant(&grant).await.expect("transient errors must not end the grant");
-    assert_eq!(auth.snapshot(), AuthSnapshot::SignedIn);
+    assert!(signed_in(&auth.snapshot()));
 }
 
 #[tokio::test]
@@ -305,7 +375,7 @@ async fn slow_down_backs_off_and_keeps_going() {
         started.elapsed() >= Duration::from_secs(5),
         "slow_down must add 5s to the interval before the next poll"
     );
-    assert_eq!(auth.snapshot(), AuthSnapshot::SignedIn);
+    assert!(signed_in(&auth.snapshot()));
 }
 
 #[tokio::test]
@@ -460,7 +530,7 @@ async fn boot_preserves_the_credential_even_when_the_server_rejects_it() {
     auth.run_grant(&grant).await.unwrap();
 
     stub.on("/token", vec![Reply::err(401, "unauthorized")]);
-    assert_eq!(auth.validate_stored().await, AuthSnapshot::SignedIn);
+    assert!(signed_in(&auth.validate_stored().await));
     assert!(auth.stored().is_some(), "a 401 must not clear the credential yet");
 }
 
@@ -477,7 +547,7 @@ async fn boot_preserves_the_credential_when_the_server_is_unreachable() {
 
     // Point a fresh core at a dead port — the offline launch case.
     let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
-    assert_eq!(offline.validate_stored().await, AuthSnapshot::SignedIn);
+    assert!(signed_in(&offline.validate_stored().await));
     assert!(offline.stored().is_some());
 }
 
@@ -503,4 +573,335 @@ async fn minting_reports_rejection_and_unreachability_differently() {
 
     let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
     assert!(offline.mint_access_token().await.is_err(), "unreachable is not a rejection");
+}
+
+// ---------------------------------------------------------------- identity
+
+/// How many avatar files the cache is holding. Growth here would mean every
+/// photo change leaks a file into the config directory forever.
+fn cached_avatars(dir: &TempDir) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir.path())
+        .expect("read config dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("avatar-"))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+fn scripted_grant(stub: &Stub) {
+    stub.grant_ready(600);
+    stub.on("/device/token", vec![Reply::ok(TOKEN_OK)]);
+}
+
+#[tokio::test]
+async fn the_identity_snapshot_is_written_on_sign_in_and_survives_a_restart() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo.png")));
+    stub.on("/photo.png", vec![Reply::with_content_type("image/png", PIXELS)]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    let user = user_of(&auth.snapshot());
+    assert_eq!(user.name, "Ada Lovelace");
+    assert_eq!(user.email, "ada@atlas.example");
+    let path = user.avatar_path.clone().expect("a photo was fetched");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        PIXELS,
+        "the cached file must hold the bytes the server served"
+    );
+
+    // A fresh core over the same directory is what a relaunch looks like — and
+    // it must render a complete title bar with no network involved at all.
+    let relaunched = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
+    let offline = user_of(&relaunched.snapshot());
+    assert_eq!(offline, user, "the snapshot must survive a restart intact");
+}
+
+#[tokio::test]
+async fn a_photo_that_has_not_changed_is_never_fetched_again() {
+    // The privacy claim, made testable: a launch must not tell Google or GitHub
+    // that this user opened their editor, for a picture already on disk.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo.png")));
+    stub.on("/photo.png", vec![Reply::with_content_type("image/png", PIXELS)]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    assert_eq!(stub.hits("/photo.png"), 1, "fetched once on sign-in");
+    let first = user_of(&auth.snapshot()).avatar_path;
+
+    let relaunched = core(&stub, &dir);
+    let snapshot = relaunched.validate_stored().await;
+
+    assert_eq!(stub.hits("/photo.png"), 1, "a relaunch must reuse the cache");
+    assert_eq!(user_of(&snapshot).avatar_path, first);
+    assert!(
+        stub.hits("/get-session") >= 2,
+        "the profile itself is still refreshed — it is the photo that is cached"
+    );
+}
+
+#[tokio::test]
+async fn a_changed_photo_url_re_fetches_and_drops_the_old_file() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo.png")));
+    stub.on("/photo.png", vec![Reply::with_content_type("image/png", PIXELS)]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    let old = user_of(&auth.snapshot()).avatar_path.expect("first photo");
+
+    // The user changed their photo; the provider hands back a new URL.
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo-v2.png")));
+    stub.on("/photo-v2.png", vec![Reply::with_content_type("image/png", "new-pixels")]);
+
+    let snapshot = core(&stub, &dir).validate_stored().await;
+    let new = user_of(&snapshot).avatar_path.expect("second photo");
+
+    assert_eq!(stub.hits("/photo-v2.png"), 1, "a changed URL must re-fetch");
+    assert_ne!(new, old, "a new photo must land at a new path, or the webview caches the old face");
+    assert_eq!(std::fs::read_to_string(&new).unwrap(), "new-pixels");
+    assert_eq!(cached_avatars(&dir).len(), 1, "the superseded file must not linger");
+}
+
+#[tokio::test]
+async fn a_failed_re_fetch_keeps_the_photo_it_already_had() {
+    // The rule the whole failure classification turns on, applied to the cache:
+    // a timeout tells us nothing about the new photo, so it must not cost the
+    // known-good old one. Deleting it would mean a five-second blip during one
+    // launch leaves the title bar blank on every offline launch afterwards.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo.png")));
+    stub.on("/photo.png", vec![Reply::with_content_type("image/png", PIXELS)]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    let known_good = user_of(&auth.snapshot()).avatar_path.expect("first photo");
+
+    // The photo changes, but the CDN is having a bad minute.
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo-v2.png")));
+    stub.on("/photo-v2.png", vec![Reply::err(503, "unavailable")]);
+
+    let snapshot = core(&stub, &dir).validate_stored().await;
+    assert_eq!(
+        user_of(&snapshot).avatar_path.as_deref(),
+        Some(known_good.as_str()),
+        "an indeterminate failure must not trade a good photo for initials"
+    );
+    assert!(
+        std::path::Path::new(&known_good).exists(),
+        "nor delete the bytes behind it"
+    );
+
+    // And the next launch must still notice the photo changed, rather than
+    // filing the new URL against the old file and never trying again.
+    stub.on(
+        "/photo-v2.png",
+        vec![Reply::with_content_type("image/png", "new-pixels")],
+    );
+    let recovered = core(&stub, &dir).validate_stored().await;
+    let new = user_of(&recovered).avatar_path.expect("second photo");
+    assert_ne!(new, known_good, "the retry must land the new photo");
+    assert_eq!(std::fs::read_to_string(&new).unwrap(), "new-pixels");
+    assert_eq!(cached_avatars(&dir).len(), 1, "and only then drop the old one");
+}
+
+#[tokio::test]
+async fn a_photo_that_fails_to_fetch_falls_back_without_blocking_sign_in() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/gone.png")));
+    stub.on("/gone.png", vec![Reply::err(404, "nope")]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    let user = user_of(&auth.snapshot());
+    assert_eq!(user.avatar_path, None, "a failed fetch renders as initials");
+    assert_eq!(user.name, "Ada Lovelace", "and must not cost the rest of the identity");
+    assert!(auth.stored().is_some(), "least of all the credential");
+    assert!(cached_avatars(&dir).is_empty(), "nothing half-written on disk");
+
+    // Self-healing: the recorded URL matches but no file exists, so the next
+    // launch tries again rather than treating the failure as permanent.
+    stub.on("/gone.png", vec![Reply::with_content_type("image/png", PIXELS)]);
+    let snapshot = core(&stub, &dir).validate_stored().await;
+    assert!(
+        user_of(&snapshot).avatar_path.is_some(),
+        "a failed fetch must be retried on the next launch, not cached as a no"
+    );
+}
+
+#[tokio::test]
+async fn an_oversized_photo_is_refused_however_the_length_is_declared() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    let huge = "x".repeat(2 * 1024 * 1024 + 1);
+
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/huge.png")));
+    stub.on("/huge.png", vec![Reply::with_content_type("image/png", &huge)]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    assert_eq!(
+        user_of(&auth.snapshot()).avatar_path,
+        None,
+        "a declared length over the cap must be refused before downloading it"
+    );
+
+    // No Content-Length at all: the cap has to hold while streaming, which is
+    // the case a host that wants to fill the disk would actually use.
+    let dir2 = TempDir::new();
+    stub.on(
+        "/huge.png",
+        vec![Reply::with_content_type("image/png", &huge).without_content_length()],
+    );
+    let auth2 = core(&stub, &dir2);
+    sign_in(&auth2).await;
+    assert_eq!(
+        user_of(&auth2.snapshot()).avatar_path,
+        None,
+        "an undeclared length must be capped while streaming"
+    );
+    assert!(cached_avatars(&dir2).is_empty());
+}
+
+#[tokio::test]
+async fn a_response_that_is_not_an_image_is_never_written_to_disk() {
+    // The avatar cache lives in a directory the asset protocol serves, so what
+    // gets written there is worth being narrow about.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/login.html")));
+    stub.on(
+        "/login.html",
+        vec![Reply::with_content_type("text/html", "<h1>sign in</h1>")],
+    );
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    assert_eq!(user_of(&auth.snapshot()).avatar_path, None);
+    assert!(cached_avatars(&dir).is_empty(), "only image types reach the disk");
+}
+
+#[tokio::test]
+async fn a_user_with_no_photo_is_still_fully_identified() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Grace Hopper", None);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    let user = user_of(&auth.snapshot());
+    assert_eq!(user.name, "Grace Hopper");
+    assert_eq!(user.avatar_path, None, "the UI draws an initial for this");
+}
+
+#[tokio::test]
+async fn a_successful_validation_refreshes_a_stale_snapshot() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", None);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    assert_eq!(user_of(&auth.snapshot()).name, "Ada Lovelace");
+
+    // Renamed on the web. The desktop must pick it up without a re-sign-in.
+    stub.profile("Ada Byron", None);
+    let snapshot = core(&stub, &dir).validate_stored().await;
+    assert_eq!(user_of(&snapshot).name, "Ada Byron");
+}
+
+#[tokio::test]
+async fn a_validation_that_fails_keeps_the_last_known_identity() {
+    // The offline launch. The snapshot exists precisely so this renders a
+    // complete title bar rather than a nameless one.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo.png")));
+    stub.on("/photo.png", vec![Reply::with_content_type("image/png", PIXELS)]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+    let known = user_of(&auth.snapshot());
+
+    let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
+    assert_eq!(user_of(&offline.validate_stored().await), known);
+    assert!(offline.stored().is_some());
+}
+
+#[tokio::test]
+async fn the_signed_in_snapshot_identifies_the_user_and_carries_no_credential() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo.png")));
+    stub.on("/photo.png", vec![Reply::with_content_type("image/png", PIXELS)]);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    let json = serde_json::to_string(&auth.snapshot()).unwrap();
+    assert!(json.contains("ada@atlas.example"), "identity is what the frontend is for");
+    assert!(
+        !json.contains("session-tok"),
+        "the session token must never cross to the frontend"
+    );
+    assert!(
+        !json.contains("/photo.png"),
+        "nor the remote photo URL — an <img> pointed at it would put the \
+         per-launch request to the provider straight back"
+    );
+}
+
+#[tokio::test]
+async fn a_credential_stored_before_identities_existed_still_loads() {
+    // Anyone who signed in on an ATL-46 build has a file with no `identity`
+    // key. Treating that as corrupt would sign them out on upgrade.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    std::fs::write(
+        dir.path().join("atlas-session.json"),
+        r#"{"sessionToken":"session-tok","savedAt":"2026-07-22T00:00:00Z"}"#,
+    )
+    .unwrap();
+
+    let auth = core(&stub, &dir);
+    assert_eq!(
+        auth.snapshot(),
+        AuthSnapshot::SignedIn { user: None },
+        "signed in, just not yet identified"
+    );
+
+    stub.profile("Ada Lovelace", None);
+    assert_eq!(
+        user_of(&auth.validate_stored().await).name,
+        "Ada Lovelace",
+        "the first validation after upgrade fills the identity in"
+    );
 }

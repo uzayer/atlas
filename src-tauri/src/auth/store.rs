@@ -28,11 +28,32 @@ use serde::{Deserialize, Serialize};
 /// File name inside the app config directory.
 const SESSION_FILE: &str = "atlas-session.json";
 
-/// The persisted credential.
+/// Who the credential belongs to, as of the last successful profile fetch.
 ///
-/// ATL-47 grows this with the identity snapshot (name, email, avatar, orgs) so
-/// an offline launch can render a complete signed-in state rather than a
-/// half-populated one.
+/// This is what makes an offline launch render a *complete* signed-in state —
+/// a face and a name — rather than a half-populated one. Refreshed on every
+/// successful validation, so a name or photo changed on the web reaches the
+/// desktop on the next launch.
+///
+/// ATL-51 adds the organisation list and active organisation alongside it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredIdentity {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    /// The remote photo URL last seen on the profile. Kept **only** to decide
+    /// whether the cache is stale: a URL that still matches means the bytes on
+    /// disk are still the right bytes, so a launch costs no request to Google
+    /// or GitHub. It is never handed to the frontend — that would put the
+    /// per-launch request back, one `<img src>` away.
+    pub avatar_url: Option<String>,
+    /// Absolute path to the cached photo. `None` when the user has no photo or
+    /// the fetch failed; the UI falls back to initials either way.
+    pub avatar_path: Option<String>,
+}
+
+/// The persisted credential, plus who it belongs to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredSession {
@@ -41,6 +62,13 @@ pub struct StoredSession {
     pub session_token: String,
     /// ISO-8601, for diagnostics only. Expiry is the server's business.
     pub saved_at: String,
+    /// Absent until the first profile fetch succeeds. That window is real: a
+    /// connectivity blip between approval and the profile call leaves a valid
+    /// credential with nobody's name attached, and losing the credential over
+    /// that would be far worse than showing a generic icon until the next
+    /// launch refreshes it.
+    #[serde(default)]
+    pub identity: Option<StoredIdentity>,
 }
 
 pub(crate) fn session_path(dir: &Path) -> PathBuf {

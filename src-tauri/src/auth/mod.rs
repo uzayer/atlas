@@ -18,6 +18,7 @@
 //! ever handed across the IPC boundary — the frontend receives [`AuthSnapshot`],
 //! which carries no credentials. Nothing here logs a token or a device code.
 
+mod avatar;
 mod config;
 mod core;
 mod store;
@@ -26,6 +27,36 @@ pub use config::auth_base;
 pub use core::{AuthCore, GrantError};
 
 use serde::Serialize;
+
+use store::StoredIdentity;
+
+/// Who is signed in, as the frontend sees them.
+///
+/// Notice what is missing: the remote avatar URL. Handing it over would let one
+/// `<img src>` reinstate the per-launch request to Google or GitHub that the
+/// avatar cache exists to avoid, so the frontend only ever learns a local path.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUser {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    /// Absolute path to the cached photo, or `None` — no photo set, or the
+    /// fetch failed. Both render as initials; the UI draws no distinction
+    /// because the user cannot act on one.
+    pub avatar_path: Option<String>,
+}
+
+impl From<StoredIdentity> for AccountUser {
+    fn from(id: StoredIdentity) -> Self {
+        Self {
+            id: id.id,
+            name: id.name,
+            email: id.email,
+            avatar_path: id.avatar_path,
+        }
+    }
+}
 
 /// What the frontend is allowed to know about the account.
 ///
@@ -52,8 +83,16 @@ pub enum AuthSnapshot {
         /// ISO-8601. The dialog uses this to stop offering a dead code.
         expires_at: String,
     },
-    /// A credential is held. ATL-47 adds the user identity to this variant.
-    SignedIn,
+    /// A credential is held.
+    #[serde(rename_all = "camelCase")]
+    SignedIn {
+        /// `None` only in the gap between holding a credential and the first
+        /// successful profile fetch — a blip between approval and the profile
+        /// call, or an upgrade from a build that stored no identity. The next
+        /// successful validation fills it in. Signed-in-but-nameless is a far
+        /// better outcome than discarding a valid credential over a photo.
+        user: Option<AccountUser>,
+    },
 }
 
 #[cfg(test)]

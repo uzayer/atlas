@@ -1,4 +1,4 @@
-//! The device grant, the poll loop, and credential lifecycle.
+//! The device grant, the poll loop, and the credential and identity lifecycle.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
-use super::store::{self, StoredSession};
-use super::AuthSnapshot;
+use super::store::{self, StoredIdentity, StoredSession};
+use super::{avatar, AuthSnapshot};
 
 /// RFC 8628 `client_id` for this app, matching the server's device plugin.
 const CLIENT_ID: &str = "atlas-desktop";
@@ -17,6 +17,13 @@ const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 /// Floor on the poll interval so a misbehaving or hostile server cannot make us
 /// hammer it. The server normally says 5s.
 const MIN_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Ceiling on an authenticated call. The shared `reqwest::Client` carries no
+/// default, and one of these sits on the sign-in path between approval and the
+/// dialog closing: a server that accepts the connection and then never answers
+/// would otherwise leave "Continue in your browser…" on screen forever, long
+/// after the credential was safely written.
+const AUTHED_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A grant awaiting approval in the browser.
 #[derive(Debug, Clone)]
@@ -115,12 +122,18 @@ impl AuthCore {
         store::clear(&self.dir)
     }
 
+    /// Write a freshly granted credential, deliberately with **no identity**.
+    ///
+    /// A new grant can be a different person, so carrying the old snapshot over
+    /// would show one user another user's name until the profile call returned.
+    /// [`Self::refresh_identity`] fills it in a moment later.
     fn persist(&self, session_token: &str) -> Result<(), String> {
         store::save(
             &self.dir,
             &StoredSession {
                 session_token: session_token.to_string(),
                 saved_at: chrono::Utc::now().to_rfc3339(),
+                identity: None,
             },
         )
     }
@@ -136,11 +149,74 @@ impl AuthCore {
                 };
             }
         }
-        if self.stored().is_some() {
-            AuthSnapshot::SignedIn
-        } else {
-            AuthSnapshot::SignedOut
+        match self.stored() {
+            Some(session) => AuthSnapshot::SignedIn {
+                user: session.identity.map(Into::into),
+            },
+            None => AuthSnapshot::SignedOut,
         }
+    }
+
+    // ---- identity --------------------------------------------------------
+
+    /// Read the signed-in user from the server.
+    ///
+    /// `Ok(None)` is the server saying nobody is signed in — note that
+    /// `/get-session` expresses that as **200 with a `null` body**, not a 401
+    /// (proven in ATL-44), so status alone would never see it.
+    async fn fetch_profile(&self) -> Result<Option<Profile>, String> {
+        let Some(res) = self.authed_get("/get-session").await? else {
+            return Ok(None);
+        };
+
+        let body = res.text().await.map_err(|e| redact(&e.to_string()))?;
+        if body.trim().is_empty() || body.trim() == "null" {
+            return Ok(None);
+        }
+        let session: SessionResponse = serde_json::from_str(&body)
+            .map_err(|e| format!("unreadable profile: {e}"))?;
+        Ok(Some(session.user))
+    }
+
+    /// Pull the profile and write it onto the stored credential.
+    ///
+    /// Silent about every failure on purpose: this runs on the boot path behind
+    /// an already-rendered signed-in title bar, and a photo or a stale display
+    /// name is never worth a toast, let alone touching the credential.
+    ///
+    /// `previous` is the identity being replaced — it supplies the avatar cache
+    /// key, and is what lets an unchanged photo cost zero requests.
+    async fn refresh_identity(&self, previous: Option<StoredIdentity>) {
+        let Ok(Some(profile)) = self.fetch_profile().await else {
+            return;
+        };
+        // Re-read rather than reusing an earlier load: the profile call is a
+        // network round trip, and a sign-out during it must not be undone here.
+        let Some(current) = self.stored() else {
+            return;
+        };
+
+        let held = previous
+            .map(|p| avatar::CachedAvatar::new(p.avatar_url, p.avatar_path))
+            .unwrap_or_default();
+        // Writes back the *pair* — a failed fetch returns the previous one
+        // untouched, so a blip never trades a known-good photo for initials.
+        let avatar =
+            avatar::resolve(&self.http, &self.dir, profile.image.as_deref(), &held).await;
+
+        let _ = store::save(
+            &self.dir,
+            &StoredSession {
+                identity: Some(StoredIdentity {
+                    id: profile.id,
+                    name: profile.name,
+                    email: profile.email,
+                    avatar_url: avatar.url,
+                    avatar_path: avatar.path,
+                }),
+                ..current
+            },
+        );
     }
 
     // ---- device grant --------------------------------------------------
@@ -268,8 +344,18 @@ impl AuthCore {
 
             match self.poll_once(&grant.device_code).await {
                 PollOutcome::Token(token) => {
+                    // Captured before the write: a new grant may be a different
+                    // person, and this is what lets the avatar cache prune the
+                    // previous user's photo and skip a re-fetch for the same.
+                    let previous = self.stored().and_then(|s| s.identity);
                     self.persist(&token).map_err(GrantError::Start)?;
                     self.finish();
+                    // Inline rather than spawned, so the single state broadcast
+                    // the caller emits already carries the user's name and face.
+                    // The alternative flashes a nameless signed-in title bar on
+                    // every sign-in to save a few hundred milliseconds behind a
+                    // spinner the user is already watching.
+                    self.refresh_identity(previous).await;
                     return Ok(());
                 }
                 PollOutcome::Pending | PollOutcome::Transient => continue,
@@ -299,20 +385,23 @@ impl AuthCore {
 
     // ---- token ----------------------------------------------------------
 
-    /// Mint a short-TTL access JWT from the stored session token.
+    /// A GET carrying the stored session token as a Bearer.
     ///
-    /// `Ok(None)` means the server authoritatively rejected the credential
-    /// (401). `Err` means we could not find out — the caller must treat those
-    /// completely differently, which is what ATL-48 formalises.
-    pub async fn mint_access_token(&self) -> Result<Option<String>, String> {
+    /// Every authenticated call goes through here so the distinction the whole
+    /// module turns on is written **once**: `Ok(None)` is the server looking at
+    /// the credential and rejecting it, `Err` is us never finding out. Conflating
+    /// them is what signs people out for opening a laptop on a plane, and ATL-48
+    /// builds its retry policy directly on the split.
+    async fn authed_get(&self, path: &str) -> Result<Option<reqwest::Response>, String> {
         let Some(stored) = self.stored() else {
             return Ok(None);
         };
 
         let res = self
             .http
-            .get(self.url("/token"))
+            .get(self.url(path))
             .bearer_auth(&stored.session_token)
+            .timeout(AUTHED_TIMEOUT)
             .send()
             .await
             .map_err(|e| redact(&e.to_string()))?;
@@ -321,8 +410,18 @@ impl AuthCore {
             return Ok(None);
         }
         if !res.status().is_success() {
-            return Err(format!("token mint failed: {}", res.status()));
+            // The path, never the response body: an error body from an auth
+            // server is the one place a token could plausibly be echoed back.
+            return Err(format!("{path} failed: {}", res.status()));
         }
+        Ok(Some(res))
+    }
+
+    /// Mint a short-TTL access JWT from the stored session token.
+    pub async fn mint_access_token(&self) -> Result<Option<String>, String> {
+        let Some(res) = self.authed_get("/token").await? else {
+            return Ok(None);
+        };
 
         #[derive(Deserialize)]
         struct TokenResponse {
@@ -340,11 +439,17 @@ impl AuthCore {
     /// here is a stale signed-in state, never a destroyed valid session — which
     /// is the right way round if that ticket slips.
     pub async fn validate_stored(&self) -> AuthSnapshot {
-        if self.stored().is_none() {
+        let Some(current) = self.stored() else {
             return AuthSnapshot::SignedOut;
-        }
+        };
         let _ = self.mint_access_token().await;
-        AuthSnapshot::SignedIn
+        // Every successful validation refreshes the snapshot, so a name or photo
+        // changed on the web reaches the desktop without a re-sign-in. A failed
+        // one leaves the last-known identity in place — which is the whole point
+        // of persisting it, and is what makes an offline launch render a
+        // complete title bar rather than a nameless one.
+        self.refresh_identity(current.identity).await;
+        self.snapshot()
     }
 }
 
@@ -371,6 +476,22 @@ struct DeviceCodeResponse {
 #[derive(Deserialize)]
 struct DeviceTokenSuccess {
     access_token: String,
+}
+
+/// `GET /get-session`. The session half is ignored — expiry is the server's
+/// business, and nothing here is improved by a second opinion on it.
+#[derive(Deserialize)]
+struct SessionResponse {
+    user: Profile,
+}
+
+#[derive(Deserialize)]
+struct Profile {
+    id: String,
+    name: String,
+    email: String,
+    /// The provider photo URL. Absent for a user who set none.
+    image: Option<String>,
 }
 
 #[derive(Deserialize)]
