@@ -23,6 +23,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::auth::{auth_base, AuthCore, AuthSnapshot, GrantError, Validation};
+use crate::telemetry::TelemetryClient;
 
 /// Shown when the server rejects the stored credential. Deliberately says what
 /// happened and what to do about it: a title bar that silently reverts to a
@@ -52,6 +53,14 @@ impl AuthState {
 
 fn broadcast(app: &AppHandle, snapshot: AuthSnapshot) {
     let _ = app.emit("atlas:auth-changed", snapshot);
+}
+
+/// The anonymous account events (ATL-52). Both are no-ops unless the user has
+/// already opted into telemetry, and neither carries a user id, email, or
+/// Organisation id — see [`TelemetryClient::capture_signed_in`] for why the
+/// payload is defined there rather than here.
+fn telemetry(app: &AppHandle) -> Arc<TelemetryClient> {
+    Arc::clone(&app.state::<Arc<TelemetryClient>>())
 }
 
 /// Current account state. Carries no credential — see [`AuthSnapshot`].
@@ -95,6 +104,7 @@ pub async fn auth_sign_in(
             Ok(()) => {
                 broadcast(&task_app, core.snapshot());
                 raise(&task_app);
+                telemetry(&task_app).capture_signed_in();
             }
             // Cancellation is a deliberate user action; it needs no error toast.
             Err(GrantError::Cancelled) => broadcast(&task_app, core.snapshot()),
@@ -141,9 +151,15 @@ pub async fn auth_sign_out(app: AppHandle, state: State<'_, AuthState>) -> Resul
     broadcast(&app, core.snapshot());
 
     Ok(match ticket {
-        Some(ticket) => core.revoke(ticket).await,
+        Some(ticket) => {
+            // Recorded on the local sign-out, not the revocation: the user has
+            // signed out either way, and whether the server could be reached is
+            // not what this event counts.
+            telemetry(&app).capture_signed_out();
+            core.revoke(ticket).await
+        }
         // Nothing was stored, so there is nothing the server could still be
-        // holding — no caveat is owed.
+        // holding — no caveat is owed, and nothing happened worth recording.
         None => true,
     })
 }

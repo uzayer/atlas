@@ -296,7 +296,7 @@ function GeneralSettings() {
       </SettingRow>
       <SettingRow
         label="Share anonymous usage data"
-        description="Anonymous, privacy-preserving usage data (app launches, agents/skills used, token counts, crashes) to help improve Atlas. Never your prompts, code, paths, or keys. See TELEMETRY.md."
+        description="Anonymous, privacy-preserving usage data (app launches, agents/skills used, token counts, crashes, and that a sign-in happened — never who signed in) to help improve Atlas. Never your prompts, code, paths, or keys. See TELEMETRY.md."
       >
         <Toggle
           checked={settings.shareTelemetry}
