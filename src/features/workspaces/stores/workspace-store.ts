@@ -17,7 +17,14 @@ import {
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { useTerminalStore } from "@/features/terminal/stores/terminal-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
 import { isWorkspaceRunning } from "../lib/agent-activity";
+
+/** The active org id, used to tag newly-created workspaces/groups so they
+ *  belong to the org the user is currently in. Read lazily to avoid an
+ *  import-time dependency cycle with the org store. */
+const activeOrgId = (): string | undefined =>
+  useOrgStore.getState().activeOrganisationId ?? undefined;
 
 /** Default hot-set cap — how many workspaces stay mounted/resident at once.
  *  Set above a typical open-project count (users commonly keep ~7) so cycling
@@ -37,6 +44,13 @@ export interface Workspace {
   name: string;
   path: string;
   groupId: string | null;
+  /** Owning Organisation (mirrors `app_state.rs:Workspace::org_id`). The
+   *  sidebar shows only the active org's workspaces. Legacy/undefined is
+   *  treated as belonging to the active org during the migration window. */
+  orgId?: string;
+  /** Optional git remote — the only field besides id/name that syncs to the
+   *  server (`workspace_refs.git_url`) for one-click clone. */
+  gitUrl?: string;
   color?: string;
   /** Pinned to the top of the sidebar + prioritized to stay in the hot set. */
   pinned?: boolean;
@@ -49,6 +63,8 @@ export interface WorkspaceGroup {
   id: string;
   name: string;
   order: number;
+  /** Owning Organisation (mirrors `Workspace.orgId`). */
+  orgId?: string;
   /** Pinned groups float to the top of the Recent tier. */
   pinned?: boolean;
 }
@@ -98,6 +114,12 @@ interface WorkspaceState {
     switchTo: (id: string) => Promise<void>;
     /** Flush + remove a workspace from the registry, tearing down its state. */
     closeWorkspace: (id: string) => Promise<void>;
+    /** Tear down EVERY mounted workspace + clear the active pointer, without
+     *  touching the registry. Used by the org switch: the outgoing org's whole
+     *  hot set is discarded (RAM freed, Rust watchers stopped) before the new
+     *  org's workspaces load. Does NOT flush — the caller flushes the active
+     *  workspace first (its layout mirror is the only unsaved state). */
+    teardownForOrgSwitch: () => void;
     /** Ensure `id` is in the hot set, evicting the LRU evictable workspace if
      *  that pushes the set over `maxMounted`. */
     ensureMounted: (id: string) => void;
@@ -209,6 +231,7 @@ export const useWorkspaceStore = createSelectors(
           name: nameOf(path),
           path,
           groupId: null,
+          orgId: activeOrgId(),
         };
         set((s) => ({ workspaces: [...s.workspaces, ws] }));
         scheduleAppStateSave();
@@ -224,6 +247,7 @@ export const useWorkspaceStore = createSelectors(
           name: nameOf(path),
           path,
           groupId: null,
+          orgId: activeOrgId(),
         };
         set((s) => ({ workspaces: [...s.workspaces, ws] }));
         scheduleAppStateSave();
@@ -447,6 +471,16 @@ export const useWorkspaceStore = createSelectors(
         scheduleAppStateSave();
       },
 
+      teardownForOrgSwitch: () => {
+        const { mountedWorkspaceIds } = get();
+        for (const id of mountedWorkspaceIds) teardownHot(id);
+        set({
+          mountedWorkspaceIds: [],
+          activeWorkspaceId: null,
+          optimisticActiveId: null,
+        });
+      },
+
       setColor: (id, color) => {
         set((s) => ({
           workspaces: s.workspaces.map((w) =>
@@ -492,6 +526,7 @@ export const useWorkspaceStore = createSelectors(
           id: uuid(),
           name,
           order: get().groups.length,
+          orgId: activeOrgId(),
         };
         // Open the new group straight into inline-rename so the user can name it.
         set((s) => ({ groups: [...s.groups, group], editingGroupId: group.id }));

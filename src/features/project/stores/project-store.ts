@@ -13,6 +13,8 @@ import {
   type Workspace,
   type WorkspaceGroup,
 } from "@/features/workspaces/stores/workspace-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
+import type { Organisation } from "@/features/organisations/types";
 import { registerFlush } from "@/features/workspaces/lib/flush-registry";
 import { persistHashOf } from "@/features/workspaces/lib/workspace-snapshot";
 import { applyUiScale, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
@@ -111,6 +113,9 @@ export interface AppStateWire {
   workspaces?: Workspace[];
   groups?: WorkspaceGroup[];
   activeWorkspaceId?: string | null;
+  /** The Organisation layer above workspaces (v3). */
+  organisations?: Organisation[];
+  activeOrganisationId?: string | null;
   settings?: AppSettings;
   version: number;
 }
@@ -142,22 +147,30 @@ interface ProjectState {
 // `AppState` payload. Both `useProjectStore` (recents/settings) and
 // `useWorkspaceStore` (workspaces/groups/activeWorkspaceId) contribute to it,
 // so the save reads from both stores at flush time. Coalesced to ~500ms.
+/** Build the full `AppState` payload from every contributing store. Shared by
+ *  the debounced + immediate save paths so they never drift. */
+function buildAppStatePayload(): AppStateWire {
+  const project = useProjectStore.getState();
+  const ws = useWorkspaceStore.getState();
+  const org = useOrgStore.getState();
+  return {
+    currentProject: null,
+    recentProjects: project.recentProjects,
+    workspaces: ws.workspaces,
+    groups: ws.groups,
+    activeWorkspaceId: ws.activeWorkspaceId,
+    organisations: org.organisations,
+    activeOrganisationId: org.activeOrganisationId,
+    settings: project.settings,
+    version: 3,
+  };
+}
+
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 export function scheduleAppStateSave(): void {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    const project = useProjectStore.getState();
-    const ws = useWorkspaceStore.getState();
-    const payload: AppStateWire = {
-      currentProject: null,
-      recentProjects: project.recentProjects,
-      workspaces: ws.workspaces,
-      groups: ws.groups,
-      activeWorkspaceId: ws.activeWorkspaceId,
-      settings: project.settings,
-      version: 2,
-    };
-    invoke("save_app_state", { payload }).catch((e) =>
+    invoke("save_app_state", { payload: buildAppStatePayload() }).catch((e) =>
       console.warn("save_app_state failed:", e),
     );
   }, 500);
@@ -170,18 +183,7 @@ export async function flushAppStateSave(): Promise<void> {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  const project = useProjectStore.getState();
-  const ws = useWorkspaceStore.getState();
-  const payload: AppStateWire = {
-    currentProject: null,
-    recentProjects: project.recentProjects,
-    workspaces: ws.workspaces,
-    groups: ws.groups,
-    activeWorkspaceId: ws.activeWorkspaceId,
-    settings: project.settings,
-    version: 2,
-  };
-  await invoke("save_app_state", { payload }).catch((e) =>
+  await invoke("save_app_state", { payload: buildAppStatePayload() }).catch((e) =>
     console.warn("flushAppStateSave failed:", e),
   );
 }
@@ -366,6 +368,15 @@ export const useProjectStore = createSelectors(
         // Re-apply the persisted Atlas interface theme (writes the palette CSS
         // custom properties that re-skin the whole dark UI).
         applyAtlasTheme(settings.atlasTheme);
+
+        // Hand the Organisation layer to the org store FIRST — the workspace
+        // sidebar filters by the active org, and new workspaces tag themselves
+        // with it. (Rust `migrate()` guarantees a default "Personal" org + an
+        // `activeOrganisationId` on any pre-v3 state, so this is always set.)
+        useOrgStore.getState().actions.hydrate({
+          organisations: payload.organisations ?? [],
+          activeOrganisationId: payload.activeOrganisationId ?? null,
+        });
 
         // Hand the multi-workspace fields to the workspace store. We hydrate
         // with `activeWorkspaceId: null` and then `switchTo` the persisted id

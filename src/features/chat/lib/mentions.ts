@@ -15,6 +15,8 @@ import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-met
 import { listClaudeSessions, readClaudeSession, type ChatMessageDump } from "./claude-api";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
 import { skills } from "@/features/skills/lib/skills-api";
 import type { PackComponentKind } from "@/features/skills/lib/types";
 
@@ -28,6 +30,7 @@ export type MentionKind =
   | "skill"
   | "component"
   | "repo"
+  | "workspace"
   | "paper"
   | "branch"
   | "past_message"
@@ -111,6 +114,15 @@ export interface MentionRepo {
   hasReadme: boolean;
 }
 
+export interface MentionWorkspace {
+  kind: "workspace";
+  id: string;            // workspace id — dedupe key
+  displayName: string;   // workspace name
+  absPath: string;       // the project path, expanded into the prompt at send
+  /** Owning org name, shown as the secondary label to disambiguate. */
+  orgName: string | null;
+}
+
 export interface MentionPaper {
   kind: "paper";
   id: string;
@@ -155,6 +167,7 @@ export type MentionData =
   | MentionSkill
   | MentionComponent
   | MentionRepo
+  | MentionWorkspace
   | MentionPaper
   | MentionBranch
   | MentionPastMessage
@@ -179,6 +192,7 @@ export const MENTION_CATEGORIES: readonly MentionCategory[] = [
   { kind: "skill",        label: "Skills",          aliases: ["skill", "sk/"],            weight: 0.9  },
   { kind: "component",    label: "Pack Components", aliases: ["command", "agent", "rule", "cmd", "c/"], weight: 0.88 },
   { kind: "repo",         label: "Cloned Repos",    aliases: ["repo", "github", "gh/"],   weight: 0.8  },
+  { kind: "workspace",    label: "Workspaces",      aliases: ["workspace", "project", "ws", "w/"], weight: 0.82 },
   { kind: "paper",        label: "Papers",          aliases: ["paper", "p/"],             weight: 0.7  },
   { kind: "branch",       label: "Branches",        aliases: ["branch", "b/"],            weight: 0.6  },
   { kind: "past_message", label: "Past Messages",   aliases: ["msg", "message", "m/"],    weight: 0.55 },
@@ -325,6 +339,8 @@ export function toShortForm(m: MentionData): string {
       return `#${m.componentKind}:${m.displayName}`;
     case "repo":
       return `@repo:${m.displayName}`;
+    case "workspace":
+      return `@workspace:${m.displayName}`;
     case "paper":
       return `@paper:${m.displayName}`;
     case "branch":
@@ -376,6 +392,11 @@ export async function searchMentions(
   if (scope === "component") {
     return searchPackComponents(stripCategoryAlias(query, "component"), ctx);
   }
+  // Workspaces live in a JS store — resolve them JS-side (like skills), so an
+  // agent in one project can be handed another project's path via @workspace.
+  if (scope === "workspace") {
+    return searchWorkspaces(stripCategoryAlias(query, "workspace"), ctx);
+  }
   // File/folder mentions read from the same backend FileIndex as Cmd+P. If it
   // got stuck/unloaded, recover here too (cheap + coalesced once confirmed).
   if (scope === null || scope === "file" || scope === "folder") {
@@ -394,11 +415,46 @@ export async function searchMentions(
       projectPath: ctx.projectPath,
       workspaceId: activeWorkspaceId(),
     });
+    // Blend JS-owned workspaces into the unscoped `@` results (Rust doesn't
+    // know about them). A few entries, so a simple prepend is fine.
+    if (scope === null) {
+      return [...searchWorkspaces(stripCategoryAlias(query, "file"), ctx), ...results];
+    }
     return results;
   } catch (e) {
     console.warn("mention_search invoke failed:", e);
     return [];
   }
+}
+
+/** Workspace search for the `@workspace:` rail (and the unscoped blend). Lists
+ *  the workspaces from the JS store — EXCLUDING the current one (you never need
+ *  to hand an agent its own path) — substring-filtered by name or path. Scoped
+ *  to the active org, with the org name attached for disambiguation. */
+function searchWorkspaces(query: string, ctx: MentionContext): MentionWorkspace[] {
+  const q = query.trim().toLowerCase();
+  const { workspaces } = useWorkspaceStore.getState();
+  const { organisations, activeOrganisationId } = useOrgStore.getState();
+  const orgName =
+    organisations.find((o) => o.id === activeOrganisationId)?.name ?? null;
+  const currentPath = ctx.projectPath;
+  return workspaces
+    .filter((w) => !w.orgId || w.orgId === activeOrganisationId) // active org
+    .filter((w) => w.path !== currentPath) // never mention the current project
+    .filter(
+      (w) =>
+        !q ||
+        w.name.toLowerCase().includes(q) ||
+        w.path.toLowerCase().includes(q),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((w) => ({
+      kind: "workspace" as const,
+      id: w.id,
+      displayName: w.name,
+      absPath: w.path,
+      orgName,
+    }));
 }
 
 /** Skill search for the `#skill:` rail. Lists the canonical store for global

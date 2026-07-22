@@ -22,7 +22,9 @@ import {
   Search,
   Trash2,
   Pencil,
+  Copy,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   useWorkspaceStore,
   type Workspace,
@@ -37,6 +39,8 @@ import { AtlasLoader } from "@/components/atlas-loader";
 import { AgentIcons } from "@/components/agent-icons";
 import { useRecentChatsStore, type RecentChat } from "../stores/recent-chats-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
+import { OrgSwitcher } from "@/features/organisations/components/org-switcher";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { useFullscreen } from "@/hooks/use-fullscreen";
@@ -219,6 +223,16 @@ function WorkspaceRow({
               onSelect={() => beginRenameWorkspace(ws.id)}
               className="px-2.5 h-6 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
               <Pencil size={11} /> Rename
+            </DropdownMenu.Item>
+            <DropdownMenu.Item
+              onSelect={() => {
+                void navigator.clipboard
+                  .writeText(ws.path)
+                  .then(() => toast.success("Path copied"))
+                  .catch(() => toast.error("Couldn't copy path"));
+              }}
+              className="px-2.5 h-6 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
+              <Copy size={11} /> Copy path
             </DropdownMenu.Item>
             <DropdownMenu.Separator className="my-0.5 h-px bg-[var(--border-default)]" />
             <DropdownMenu.Sub>
@@ -403,8 +417,25 @@ type Row =
   | { kind: "chat"; chat: RecentChat; key: string };
 
 export function WorkspaceSidebar() {
-  const workspaces = useWorkspaceStore.use.workspaces();
-  const groups = useWorkspaceStore.use.groups();
+  const allWorkspaces = useWorkspaceStore.use.workspaces();
+  const allGroups = useWorkspaceStore.use.groups();
+  const activeOrganisationId = useOrgStore.use.activeOrganisationId();
+  // The sidebar shows only the ACTIVE org's workspaces/groups. A null `orgId`
+  // (transient pre-migration state) is treated as belonging to the active org.
+  const workspaces = useMemo(
+    () =>
+      allWorkspaces.filter(
+        (w) => w.orgId === activeOrganisationId || w.orgId == null,
+      ),
+    [allWorkspaces, activeOrganisationId],
+  );
+  const groups = useMemo(
+    () =>
+      allGroups.filter(
+        (g) => g.orgId === activeOrganisationId || g.orgId == null,
+      ),
+    [allGroups, activeOrganisationId],
+  );
   const activeWorkspaceId = useWorkspaceStore.use.activeWorkspaceId();
   const optimisticActiveId = useWorkspaceStore.use.optimisticActiveId();
   // Highlight the clicked workspace INSTANTLY (optimistic), falling back to the
@@ -437,8 +468,9 @@ export function WorkspaceSidebar() {
     [groups],
   );
 
-  // Recent projects = picker recents NOT already in the registry.
-  const openPaths = useMemo(() => new Set(workspaces.map((w) => w.path)), [workspaces]);
+  // Recent projects = picker recents NOT already in the registry. Excludes
+  // projects open in ANY org (recents are global) so nothing double-lists.
+  const openPaths = useMemo(() => new Set(allWorkspaces.map((w) => w.path)), [allWorkspaces]);
   const recents = useMemo(
     () => recentProjects.filter((r) => !openPaths.has(r.path)),
     [recentProjects, openPaths],
@@ -589,6 +621,10 @@ export function WorkspaceSidebar() {
         </button>
         <AddProjectMenu />
       </div>
+
+      {/* Organisation switcher — the top-level tenant picker. Sits below the
+       *  titlebar drag zone so it clears the traffic lights. */}
+      <OrgSwitcher />
 
       {/* Header actions. */}
       <div className="px-1.5 pb-1 shrink-0 space-y-0.5">
