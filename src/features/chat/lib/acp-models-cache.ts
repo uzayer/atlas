@@ -16,6 +16,10 @@ const key = (agentType: string) => `atlas:acp-models:${agentType}`;
 export interface CachedAcpModels {
   currentModel: string | null;
   availableModels: SessionModeInfo[];
+  /** Epoch ms when this list was last confirmed by a live session. Drives the
+   *  warm-refresh TTL so we don't spawn a throwaway session every launch to
+   *  re-fetch an effectively-static catalog. Absent on pre-TTL entries. */
+  fetchedAt?: number;
 }
 
 /** Last-seen models for an agent, or null if we've never bound one. */
@@ -31,11 +35,24 @@ export function loadCachedAcpModels(agentType: string): CachedAcpModels | null {
   return null;
 }
 
+/** True when we have a cached list newer than `ttlMs`. A pre-TTL entry (no
+ *  `fetchedAt`) counts as fresh — treat existing caches as good rather than
+ *  forcing one more warm. */
+export function isCachedAcpModelsFresh(agentType: string, ttlMs: number): boolean {
+  const cached = loadCachedAcpModels(agentType);
+  if (!cached) return false;
+  if (cached.fetchedAt == null) return true;
+  return Date.now() - cached.fetchedAt < ttlMs;
+}
+
 /** Persist the models confirmed by a live session (no-op for empty sets). */
 export function saveCachedAcpModels(agentType: string, models: CachedAcpModels): void {
   try {
     if (models.availableModels.length > 0) {
-      localStorage.setItem(key(agentType), JSON.stringify(models));
+      localStorage.setItem(
+        key(agentType),
+        JSON.stringify({ ...models, fetchedAt: Date.now() }),
+      );
     }
   } catch {
     // storage full / unavailable — caching is best-effort

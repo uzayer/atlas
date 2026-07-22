@@ -3,7 +3,7 @@
  *
  * After `restoreSnapshot` paints the cached UI instantly, we kick a
  * NON-BLOCKING background refresh of the cheap-but-possibly-stale data (git
- * status, explorer tree, analysis symbols). Steady-state freshness also arrives
+ * status, explorer tree). Steady-state freshness also arrives
  * via the resident watchers (`atlas:git-changed`, `atlas:explorer:changed`),
  * so this mainly covers changes that happened while the workspace was
  * backgrounded.
@@ -38,10 +38,4 @@ export function revalidateWorkspace(workspaceId: string, path: string): void {
       .actions.refresh()
       .catch(() => {});
   }
-
-  // NOTE: `analyzeProject` is intentionally NOT re-run here. The symbols are
-  // already resident (snapshot / never reset), and re-running it on every warm
-  // switch was a 600-1500ms Rust IPC + a large `symbols` setState that janked
-  // the main thread. The resident fs watcher (`atlas:explorer:changed`) already
-  // triggers re-analysis when files actually change.
 }

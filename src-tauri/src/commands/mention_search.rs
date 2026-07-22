@@ -39,11 +39,11 @@ use super::papers::{list_saved_papers, SavedPaper, SavedPapersIndex};
 const PER_KIND_LIMIT: usize = 30;
 const TOTAL_LIMIT: usize = 30;
 
-/// Per-process cache of the two mention-search inputs whose authoritative
-/// state currently lives in JS stores (knowledge entries from
-/// `useKnowledgeStore`, symbols from `useAnalysisStore`). Pushed in via
-/// `mention_cache_set_knowledge` / `mention_cache_set_symbols` when the
-/// JS stores hydrate or mutate; read by `mention_search`.
+/// Per-process cache of the mention-search inputs that aren't already held in
+/// a lock-protected Rust state. Knowledge entries are pushed in from JS
+/// (`useKnowledgeStore`) via `mention_cache_set_knowledge`; symbols are loaded
+/// Rust-side from the persisted `atlas-codeindex` by [`ensure_symbol_cache`]
+/// (no JS push). Read by `mention_search`.
 ///
 /// Why this exists: before the cache, every @-picker keystroke
 /// serialized the full knowledge + symbols arrays from JS to JSON,
@@ -60,6 +60,16 @@ const TOTAL_LIMIT: usize = 30;
 struct WindowCache {
     knowledge: Vec<KnowledgeInput>,
     symbols: Vec<SymbolInput>,
+    /// Which project `symbols` was loaded from. Symbols are now sourced
+    /// Rust-side from the persisted `atlas-codeindex` (see
+    /// `ensure_symbol_cache`) rather than pushed from JS, so we lazily load
+    /// them on the first symbol-search per project and remember the project
+    /// here to avoid re-reading `docs.json` on every keystroke.
+    symbols_project: Option<String>,
+    /// `docs.json` mtime (ms) the cached `symbols` were built from. Re-read
+    /// when the index is (re)built so freshly-indexed symbols show up without
+    /// a window reload; a cheap `stat` per keystroke gates the reload.
+    symbols_mtime: i64,
 }
 
 #[derive(Default)]
@@ -95,22 +105,6 @@ pub fn mention_cache_set_knowledge(
 }
 
 #[tauri::command]
-pub fn mention_cache_set_symbols(
-    items: Vec<SymbolInput>,
-    workspace_id: Option<String>,
-    webview: WebviewWindow,
-    state: State<'_, MentionCacheState>,
-) {
-    let key = workspace_id.unwrap_or_else(|| webview.label().to_string());
-    state
-        .per_window
-        .write()
-        .entry(key)
-        .or_default()
-        .symbols = items;
-}
-
-#[tauri::command]
 pub fn mention_cache_clear(
     workspace_id: Option<String>,
     webview: WebviewWindow,
@@ -120,19 +114,77 @@ pub fn mention_cache_clear(
     state.per_window.write().remove(&key);
 }
 
-/// Frontend-supplied caches for kinds whose source-of-truth state
-/// lives in JS today (analysis store, knowledge store). Mirrors of
-/// Rust types but with `Deserialize` so the wire decoder can rebuild
-/// them — the originals (`commands::analysis::Symbol`,
-/// `commands::knowledge::KnowledgeEntry`) are Serialize-only.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// Ranked shape for a code symbol in the @-mention picker. Built Rust-side
+/// from the persisted `atlas-codeindex` (`docs.json`) by [`ensure_symbol_cache`].
+#[derive(Debug, Clone)]
 pub struct SymbolInput {
     pub name: String,
     pub kind: String,
     pub file_path: String,
     pub line: u32,
     pub signature: String,
+}
+
+/// Lazily populate a window's symbol cache from the persisted codebase index
+/// (`atlas-codeindex`) the first time symbols are searched for a given
+/// project. The `docs.json` read + flatten runs once per project on a blocking
+/// thread; every subsequent keystroke hits the hot in-memory cache. Mirrors
+/// the branch-refs lazy-cache pattern. A project that has never been indexed
+/// (no `docs.json`) yields an empty list — `@symbol` simply returns nothing
+/// until chat-with-codebase indexing has run.
+async fn ensure_symbol_cache(
+    state: &MentionCacheState,
+    label: &str,
+    project_path: Option<&str>,
+) {
+    let Some(project) = project_path else {
+        return;
+    };
+    // Cheap stat of `docs.json` — its mtime tells us whether the index was
+    // (re)built since we cached. 0 when it doesn't exist yet (unindexed).
+    let mtime = std::fs::metadata(atlas_codeindex::docs_path(project))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // Already loaded for this exact project + index revision → nothing to do.
+    {
+        let map = state.per_window.read();
+        if let Some(c) = map.get(label) {
+            if c.symbols_project.as_deref() == Some(project) && c.symbols_mtime == mtime {
+                return;
+            }
+        }
+    }
+    let project_owned = project.to_string();
+    let symbols = tokio::task::spawn_blocking(move || {
+        let index = atlas_codeindex::load_index(&project_owned);
+        let mut out: Vec<SymbolInput> = Vec::new();
+        for doc in &index.docs {
+            for s in &doc.symbols {
+                out.push(SymbolInput {
+                    name: s.name.clone(),
+                    kind: s.kind.clone(),
+                    // Absolute path so the picker can open the file directly.
+                    file_path: doc.abs_path.clone(),
+                    line: s.line,
+                    // atlas-codeindex stores no signature; synthesize a compact
+                    // "kind name" so the picker's detail line still reads well.
+                    signature: format!("{} {}", s.kind, s.name),
+                });
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default();
+
+    let mut map = state.per_window.write();
+    let entry = map.entry(label.to_string()).or_default();
+    entry.symbols = symbols;
+    entry.symbols_project = Some(project.to_string());
+    entry.symbols_mtime = mtime;
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -326,6 +378,11 @@ pub async fn mention_search(
     // entries across the IPC boundary on every keystroke (the old
     // path could push 100-500 KB per keystroke on a project with
     // many symbols, which was the visible typing lag).
+    // Symbols are sourced from the persisted codebase index, loaded lazily
+    // into the per-window cache on the first symbol-search per project.
+    if want_symbol {
+        ensure_symbol_cache(cache.inner(), &label, project_path.as_deref()).await;
+    }
     let symbols_data: Vec<SymbolInput> = if want_symbol {
         cache
             .per_window

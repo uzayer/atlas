@@ -43,7 +43,7 @@ export function CanvasExportToolbar() {
   };
 
   return (
-    <div className="absolute right-3 top-3 z-20">
+    <div className="absolute right-3 top-3 z-40">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}

@@ -21,10 +21,10 @@ use uuid::Uuid;
 
 use crate::backend::{AcpBackend, AgentBackend, CerseiBackend};
 use crate::error::{Error, Result};
-use crate::events::{DeltaSink, Emitter, SessionDelta, SessionDeltaEnvelope};
+use crate::events::{DeltaSink, Emitter, SessionDeltaEnvelope};
 use crate::plugin::{PluginSpec, TranscriptKind, builtin_plugins, find_plugin};
 use crate::session::{
-    Message, SessionModeInfo, SessionSnapshot, SessionState, SessionStatus, ToolCall,
+    Message, SessionModeInfo, SessionSnapshot, SessionState, ToolCall,
     ToolCallStatus, new_assistant_text, new_assistant_thinking, new_assistant_tool,
 };
 use crate::handle::SessionHandle;
@@ -544,10 +544,6 @@ impl AgentManager {
             session_id: target,
         };
         self.inner.sessions.get(&key).map(|e| e.value().clone())
-    }
-
-    fn emit(&self, envelope: SessionDeltaEnvelope) {
-        self.inner.emitter.emit(envelope);
     }
 
     fn dispatch(&self, agent_id: AgentId, event: AcpEvent, turn: Option<u64>) {

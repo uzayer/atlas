@@ -53,6 +53,7 @@ import { warmMarkdownWorker } from "@/lib/markdown-cache";
 import { useNotificationsStore } from "@/features/notifications/stores/notifications-store";
 import { NotificationPanel } from "@/features/notifications/components/notification-panel";
 import { UpdateAvailableModal } from "@/features/updater/components/update-available-modal";
+import { LoadingOrganisationOverlay } from "@/features/organisations/components/loading-organisation-overlay";
 import { useUpdaterStore } from "@/features/updater/stores/updater-store";
 import {
   updater,
@@ -1248,6 +1249,7 @@ export function App() {
       <NotificationPanel />
       <UpdateAvailableModal />
       <ConnectDialog />
+      <LoadingOrganisationOverlay />
       <BrowserOverlayWatcher />
       <Toaster
         position="bottom-right"

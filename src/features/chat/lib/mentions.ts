@@ -12,10 +12,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
 import { useKnowledgeMetaStore } from "@/features/knowledge/stores/knowledge-meta-store";
-import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
-import { listClaudeSessions, readClaudeSession } from "./claude-api";
+import { listClaudeSessions, readClaudeSession, type ChatMessageDump } from "./claude-api";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 import { activeWorkspaceId } from "@/features/workspaces/lib/active-workspace";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
 import { skills } from "@/features/skills/lib/skills-api";
 import type { PackComponentKind } from "@/features/skills/lib/types";
 
@@ -29,9 +30,11 @@ export type MentionKind =
   | "skill"
   | "component"
   | "repo"
+  | "workspace"
   | "paper"
   | "branch"
-  | "past_message";
+  | "past_message"
+  | "past_session";
 
 export interface MentionFile {
   kind: "file";
@@ -111,6 +114,15 @@ export interface MentionRepo {
   hasReadme: boolean;
 }
 
+export interface MentionWorkspace {
+  kind: "workspace";
+  id: string;            // workspace id — dedupe key
+  displayName: string;   // workspace name
+  absPath: string;       // the project path, expanded into the prompt at send
+  /** Owning org name, shown as the secondary label to disambiguate. */
+  orgName: string | null;
+}
+
 export interface MentionPaper {
   kind: "paper";
   id: string;
@@ -138,6 +150,15 @@ export interface MentionPastMessage {
   content: string;       // the message body — small, fine to keep inline
 }
 
+export interface MentionPastSession {
+  kind: "past_session";
+  id: string;            // the session id (JSONL stem = acpSessionId)
+  displayName: string;   // session title/preview
+  sessionId: string;
+  sessionTitle: string;
+  filePath: string;      // JSONL transcript path — read + formatted at send time
+}
+
 export type MentionData =
   | MentionFile
   | MentionFolder
@@ -146,9 +167,11 @@ export type MentionData =
   | MentionSkill
   | MentionComponent
   | MentionRepo
+  | MentionWorkspace
   | MentionPaper
   | MentionBranch
-  | MentionPastMessage;
+  | MentionPastMessage
+  | MentionPastSession;
 
 // ── Catalog ──────────────────────────────────────────────────────────────────
 
@@ -169,9 +192,11 @@ export const MENTION_CATEGORIES: readonly MentionCategory[] = [
   { kind: "skill",        label: "Skills",          aliases: ["skill", "sk/"],            weight: 0.9  },
   { kind: "component",    label: "Pack Components", aliases: ["command", "agent", "rule", "cmd", "c/"], weight: 0.88 },
   { kind: "repo",         label: "Cloned Repos",    aliases: ["repo", "github", "gh/"],   weight: 0.8  },
+  { kind: "workspace",    label: "Workspaces",      aliases: ["workspace", "project", "ws", "w/"], weight: 0.82 },
   { kind: "paper",        label: "Papers",          aliases: ["paper", "p/"],             weight: 0.7  },
   { kind: "branch",       label: "Branches",        aliases: ["branch", "b/"],            weight: 0.6  },
   { kind: "past_message", label: "Past Messages",   aliases: ["msg", "message", "m/"],    weight: 0.55 },
+  { kind: "past_session", label: "Past Sessions",   aliases: ["session", "sess/"],        weight: 0.5  },
 ];
 
 export function categoryForKind(kind: MentionKind): MentionCategory {
@@ -314,12 +339,16 @@ export function toShortForm(m: MentionData): string {
       return `#${m.componentKind}:${m.displayName}`;
     case "repo":
       return `@repo:${m.displayName}`;
+    case "workspace":
+      return `@workspace:${m.displayName}`;
     case "paper":
       return `@paper:${m.displayName}`;
     case "branch":
       return `@branch:${m.displayName}`;
     case "past_message":
       return `@msg:${m.timestamp ?? m.id}`;
+    case "past_session":
+      return `@session:${m.displayName}`;
   }
 }
 
@@ -363,6 +392,11 @@ export async function searchMentions(
   if (scope === "component") {
     return searchPackComponents(stripCategoryAlias(query, "component"), ctx);
   }
+  // Workspaces live in a JS store — resolve them JS-side (like skills), so an
+  // agent in one project can be handed another project's path via @workspace.
+  if (scope === "workspace") {
+    return searchWorkspaces(stripCategoryAlias(query, "workspace"), ctx);
+  }
   // File/folder mentions read from the same backend FileIndex as Cmd+P. If it
   // got stuck/unloaded, recover here too (cheap + coalesced once confirmed).
   if (scope === null || scope === "file" || scope === "folder") {
@@ -381,11 +415,46 @@ export async function searchMentions(
       projectPath: ctx.projectPath,
       workspaceId: activeWorkspaceId(),
     });
+    // Blend JS-owned workspaces into the unscoped `@` results (Rust doesn't
+    // know about them). A few entries, so a simple prepend is fine.
+    if (scope === null) {
+      return [...searchWorkspaces(stripCategoryAlias(query, "file"), ctx), ...results];
+    }
     return results;
   } catch (e) {
     console.warn("mention_search invoke failed:", e);
     return [];
   }
+}
+
+/** Workspace search for the `@workspace:` rail (and the unscoped blend). Lists
+ *  the workspaces from the JS store — EXCLUDING the current one (you never need
+ *  to hand an agent its own path) — substring-filtered by name or path. Scoped
+ *  to the active org, with the org name attached for disambiguation. */
+function searchWorkspaces(query: string, ctx: MentionContext): MentionWorkspace[] {
+  const q = query.trim().toLowerCase();
+  const { workspaces } = useWorkspaceStore.getState();
+  const { organisations, activeOrganisationId } = useOrgStore.getState();
+  const orgName =
+    organisations.find((o) => o.id === activeOrganisationId)?.name ?? null;
+  const currentPath = ctx.projectPath;
+  return workspaces
+    .filter((w) => !w.orgId || w.orgId === activeOrganisationId) // active org
+    .filter((w) => w.path !== currentPath) // never mention the current project
+    .filter(
+      (w) =>
+        !q ||
+        w.name.toLowerCase().includes(q) ||
+        w.path.toLowerCase().includes(q),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((w) => ({
+      kind: "workspace" as const,
+      id: w.id,
+      displayName: w.name,
+      absPath: w.path,
+      orgName,
+    }));
 }
 
 /** Skill search for the `#skill:` rail. Lists the canonical store for global
@@ -578,24 +647,6 @@ export async function ensureKnowledgeMentionCache(projectPath: string): Promise<
   return knowledgeEnsuring;
 }
 
-/** Push symbols into the Rust mention cache. Call from the analysis
- *  store whenever a fresh `analyze_project` result lands. */
-export function publishSymbolsToMentionCache(): void {
-  const items = useAnalysisStore.getState().symbols.map((s) => ({
-    name: s.name,
-    kind: s.kind,
-    filePath: s.file_path,
-    line: s.line,
-    signature: s.signature,
-  }));
-  void invoke("mention_cache_set_symbols", {
-    items,
-    workspaceId: activeWorkspaceId(),
-  }).catch((err) =>
-    console.warn("mention_cache_set_symbols failed:", err),
-  );
-}
-
 /** Build the final prompt sent to the agent. Pure pass-through to a
  *  Rust command that:
  *   - dedupes mentions by id
@@ -610,6 +661,20 @@ export function publishSymbolsToMentionCache(): void {
  *
  *  Knowledge entries pre-fill `inlineBody` from the in-memory store so
  *  Rust doesn't re-read them from disk. */
+/** Render a Claude session's message dump as a plain-text transcript for the
+ *  `@session:` context block. Roles are labelled; empty turns are skipped. The
+ *  Rust side clips the final size to the mention body budget. */
+function formatSessionTranscript(dump: ChatMessageDump[]): string {
+  const parts: string[] = [];
+  for (const m of dump) {
+    const content = m.content?.trim();
+    if (!content) continue;
+    const label = m.role === "user" ? "User" : "Assistant";
+    parts.push(`### ${label}\n${content}`);
+  }
+  return parts.join("\n\n");
+}
+
 export async function composePrompt(
   prosePlainText: string,
   mentions: MentionData[]
@@ -633,6 +698,20 @@ export async function composePrompt(
           inlineBody = (await skills.read(m.scope, m.skillName, m.projectPath)).body;
         } catch (e) {
           console.warn("skills.read for compose failed:", e);
+        }
+        return { ...m, inlineBody };
+      }
+      // Past session: read the JSONL transcript now and format it into a
+      // plain-text conversation the agent can reference. Kept lightweight in
+      // the chip (just filePath); the (potentially large) body only
+      // materializes here, at send time — same lazy pattern skills use.
+      if (m.kind === "past_session") {
+        let inlineBody: string | null = null;
+        try {
+          const dump = await readClaudeSession(m.filePath);
+          inlineBody = formatSessionTranscript(dump);
+        } catch (e) {
+          console.warn("readClaudeSession for compose failed:", e);
         }
         return { ...m, inlineBody };
       }
