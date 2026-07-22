@@ -30,6 +30,13 @@ interface AuthStoreState {
     cancelSignIn: () => Promise<void>;
     /** Dismiss the dialog, leaving the grant running. */
     closeDialog: () => void;
+    /**
+     * Sign out. Resolves to whether the server session was revoked too —
+     * `false` means this device is signed out but the server session may
+     * outlive it. The signed-out state itself arrives as an event, not from
+     * this promise.
+     */
+    signOut: () => Promise<boolean>;
     /** Pull the current state from Rust (mount hydration). */
     hydrate: () => Promise<void>;
   };
@@ -76,6 +83,17 @@ const useAuthStoreBase = create<AuthStoreState>()((set, get) => ({
     },
 
     closeDialog: () => set({ dialogOpen: false }),
+
+    signOut: async () => {
+      try {
+        return await auth.signOut();
+      } catch {
+        // The local half cannot fail — Rust clears before it can return an
+        // error at all — so an IPC failure here says nothing about the server
+        // session, and the caveat is the honest thing to show.
+        return false;
+      }
+    },
 
     hydrate: async () => {
       try {

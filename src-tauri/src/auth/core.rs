@@ -154,6 +154,27 @@ pub enum Validation {
     },
 }
 
+/// The credential a completed sign-out has already cleared, kept just long
+/// enough to tell the server about it (ATL-50).
+///
+/// The ordering the ticket exists for is written as a type rather than a
+/// comment: the only way to obtain one is to have *already* cleared the local
+/// state, so no caller can revoke first and clear second — the mistake that
+/// makes sign-out fail exactly when someone closing a borrowed laptop most
+/// needs it to work. [`AuthCore::revoke`] then consumes it, so "fired once and
+/// forgotten" is not a discipline anyone has to keep either: there is no second
+/// ticket to retry with.
+pub struct RevocationTicket(String);
+
+impl std::fmt::Debug for RevocationTicket {
+    /// Hand-written because this is the one type here whose entire content is a
+    /// credential; a derived `Debug` would put the user's session into any log
+    /// line that ever formatted a struct holding one.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RevocationTicket(<redacted>)")
+    }
+}
+
 /// The auth module's whole public surface.
 pub struct AuthCore {
     base: String,
@@ -274,12 +295,6 @@ impl AuthCore {
         let Ok(Some(profile)) = self.fetch_profile().await else {
             return;
         };
-        // Re-read rather than reusing an earlier load: the profile call is a
-        // network round trip, and a sign-out during it must not be undone here.
-        let Some(current) = self.stored() else {
-            return;
-        };
-
         let held = previous
             .map(|p| avatar::CachedAvatar::new(p.avatar_url, p.avatar_path))
             .unwrap_or_default();
@@ -287,6 +302,17 @@ impl AuthCore {
         // untouched, so a blip never trades a known-good photo for initials.
         let avatar =
             avatar::resolve(&self.http, &self.dir, profile.image.as_deref(), &held).await;
+
+        // Re-read *after* the network work rather than reusing an earlier load,
+        // and after the photo rather than before it: both calls above are round
+        // trips, and a sign-out landing in either must not be undone by the
+        // write below — a resurrected credential file would sign the user
+        // straight back in on the next launch. A photo fetched into that gap
+        // goes with it, since nothing will ever point at it again.
+        let Some(current) = self.stored() else {
+            avatar::discard(avatar.path.as_deref());
+            return;
+        };
 
         let _ = store::save(
             &self.dir,
@@ -593,6 +619,66 @@ impl AuthCore {
                     return settled;
                 }
             }
+        }
+    }
+
+    // ---- sign-out --------------------------------------------------------
+
+    /// Sign out of this device. Touches nothing but local state, and cannot
+    /// fail (ATL-50).
+    ///
+    /// The credential, the identity snapshot, and the cached photo all go
+    /// first and unconditionally — no network call gates any of it, which is
+    /// what makes signing out work with the wifi off. The returned ticket is
+    /// the only way to reach [`Self::revoke`], and it is `None` when there was
+    /// nothing stored: already signed out is a success with nothing to tell the
+    /// server about.
+    ///
+    /// If the unlink itself somehow fails — a read-only config dir — nothing
+    /// here pretends otherwise: [`Self::snapshot`] is derived from the file, so
+    /// the state the caller broadcasts next is whatever is really on disk.
+    ///
+    /// There is no in-memory access token to clear yet; minting is currently
+    /// lazy and uncached. Whatever ATL-51 adds to hold one belongs here.
+    pub fn sign_out(&self) -> Option<RevocationTicket> {
+        let stored = self.stored();
+        // Before the credential, not after: the identity is where the path to
+        // the cached photo is recorded, so clearing the file first would leave
+        // a face on disk with nothing left pointing at it.
+        if let Some(identity) = stored.as_ref().and_then(|s| s.identity.as_ref()) {
+            avatar::discard(identity.avatar_path.as_deref());
+        }
+        let _ = self.clear_session();
+        stored.map(|s| RevocationTicket(s.session_token))
+    }
+
+    /// Tell the server the session is over. Best-effort, fired **once**.
+    ///
+    /// Deliberately outside [`Self::authed_get`] and the retry policy it feeds:
+    /// the credential arrives on the ticket because the store is already empty
+    /// by the time this runs, and there is nothing left for a backoff schedule
+    /// to protect. A failure costs a residual server session that expires on
+    /// its own — which the user is told about, rather than retried at.
+    ///
+    /// `true` when the session is definitely gone server-side.
+    pub async fn revoke(&self, ticket: RevocationTicket) -> bool {
+        let res = self
+            .http
+            .post(self.url("/sign-out"))
+            .bearer_auth(&ticket.0)
+            .json(&serde_json::json!({}))
+            .timeout(AUTHED_TIMEOUT)
+            .send()
+            .await;
+
+        match res {
+            // A 401 is the server saying it does not recognise this credential,
+            // so there is no live session left to caveat. Every other refusal
+            // is counted as a failure: we cannot tell whether it ended.
+            Ok(res) => {
+                res.status().is_success() || res.status() == reqwest::StatusCode::UNAUTHORIZED
+            }
+            Err(_) => false,
         }
     }
 }

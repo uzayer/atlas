@@ -66,6 +66,8 @@ struct Reply {
     /// Extra raw header lines, without the trailing CRLF. Currently only
     /// `Retry-After`, which the classification has to read off a 429.
     headers: Vec<String>,
+    /// Held before answering, so a test can act while a call is in flight.
+    delay: Option<Duration>,
 }
 
 impl Reply {
@@ -76,6 +78,7 @@ impl Reply {
             content_type,
             content_length: Some(body.len()),
             headers: Vec::new(),
+            delay: None,
         }
     }
     fn ok(body: &str) -> Self {
@@ -99,6 +102,42 @@ impl Reply {
         self.headers.push(line.to_string());
         self
     }
+    /// Answer only after `ms`, which is what makes a call *observably* in
+    /// flight — the only way to test what a user action racing one does.
+    fn slow(mut self, ms: u64) -> Self {
+        self.delay = Some(Duration::from_millis(ms));
+        self
+    }
+}
+
+/// What the stub was *sent*, so a test can assert on the request and not only
+/// on the reply. Carries only what something asserts on: sign-out is defined by
+/// the call it makes, not by the answer it chooses to ignore.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Seen {
+    method: String,
+    /// The credential from `Authorization: Bearer …`, when one was sent.
+    bearer: Option<String>,
+}
+
+impl Seen {
+    /// Parse the request line and headers out of a raw request.
+    fn parse(req: &str) -> Self {
+        let method = req
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().next())
+            .unwrap_or("")
+            .to_string();
+        let bearer = req
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::to_string);
+        Self { method, bearer }
+    }
 }
 
 /// Scriptable auth server. Each path holds a queue of replies; the last one
@@ -108,6 +147,7 @@ impl Reply {
 struct Script {
     replies: HashMap<String, Vec<Reply>>,
     hits: HashMap<String, u32>,
+    seen: HashMap<String, Vec<Seen>>,
 }
 
 struct Stub {
@@ -142,6 +182,7 @@ impl Stub {
                     let reply = {
                         let mut s = handle.lock().unwrap();
                         *s.hits.entry(path.clone()).or_insert(0) += 1;
+                        s.seen.entry(path.clone()).or_default().push(Seen::parse(&req));
                         let queue = s.replies.get_mut(&path);
                         match queue {
                             Some(q) if q.len() > 1 => q.remove(0),
@@ -149,6 +190,10 @@ impl Stub {
                             _ => Reply::err(404, "{}"),
                         }
                     };
+
+                    if let Some(delay) = reply.delay {
+                        tokio::time::sleep(delay).await;
+                    }
 
                     let length = match reply.content_length {
                         Some(n) => format!("Content-Length: {n}\r\n"),
@@ -182,6 +227,11 @@ impl Stub {
 
     fn hits(&self, path: &str) -> u32 {
         self.script.lock().unwrap().hits.get(path).copied().unwrap_or(0)
+    }
+
+    /// Every request the stub received for a path, in order.
+    fn seen(&self, path: &str) -> Vec<Seen> {
+        self.script.lock().unwrap().seen.get(path).cloned().unwrap_or_default()
     }
 
     /// A grant that is immediately pollable, with no artificial delay.
@@ -1113,4 +1163,169 @@ async fn a_credential_stored_before_identities_existed_still_loads() {
         "Ada Lovelace",
         "the first validation after upgrade fills the identity in"
     );
+}
+
+// ---------------------------------------------------------------- sign-out
+//
+// The ordering is the whole ticket (ATL-50): everything local goes first and
+// unconditionally, and only then is the server told. Revoking first would make
+// sign-out fail while offline — precisely when someone closing a borrowed
+// laptop most needs it to work.
+
+/// Signed in with a photo on disk, which is the state sign-out has to erase.
+async fn signed_in_with_a_photo(stub: &Stub, dir: &TempDir) -> AuthCore {
+    scripted_grant(stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo.png")));
+    stub.on("/photo.png", vec![Reply::with_content_type("image/png", PIXELS)]);
+    let auth = core(stub, dir);
+    sign_in(&auth).await;
+    assert!(!cached_avatars(dir).is_empty(), "the photo should be cached");
+    auth
+}
+
+#[tokio::test]
+async fn signing_out_clears_everything_local_before_the_server_is_told() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    stub.on("/sign-out", vec![Reply::ok("{}")]);
+    let auth = signed_in_with_a_photo(&stub, &dir).await;
+
+    let ticket = auth.sign_out().expect("a stored credential to revoke");
+
+    assert_eq!(auth.snapshot(), AuthSnapshot::SignedOut);
+    assert!(auth.stored().is_none(), "the credential must be gone");
+    assert!(
+        !dir.path().join("atlas-session.json").exists(),
+        "the identity snapshot lives in the credential file and goes with it"
+    );
+    assert!(cached_avatars(&dir).is_empty(), "the cached photo must be gone too");
+    assert_eq!(
+        stub.hits("/sign-out"),
+        0,
+        "nothing may be sent before the local state is clear — that ordering is \
+         what makes sign-out work with the network off"
+    );
+
+    // A fresh core over the same directory is what a relaunch looks like: it
+    // must start signed out, and reach for nothing.
+    let relaunched = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
+    assert_eq!(relaunched.snapshot(), AuthSnapshot::SignedOut);
+    assert_eq!(relaunched.validate_once().await, Validation::NoCredential);
+
+    assert!(auth.revoke(ticket).await, "a 200 is the session confirmed gone");
+    assert_eq!(
+        stub.seen("/sign-out"),
+        vec![Seen {
+            method: "POST".into(),
+            bearer: Some("session-tok".into()),
+        }],
+        "revocation is one POST carrying the session token as a Bearer (ATL-44)"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_revocation_is_reported_once_and_never_retried() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    stub.on("/sign-out", vec![Reply::err(500, "boom")]);
+    let auth = signed_in_with_a_photo(&stub, &dir).await;
+
+    let ticket = auth.sign_out().expect("signed in");
+    assert!(!auth.revoke(ticket).await, "a 500 leaves the server session up");
+
+    // The local state a retry would protect is already gone, so there is
+    // nothing left for a backoff schedule to defend — see `revoke`.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(stub.hits("/sign-out"), 1, "fired once and forgotten");
+    assert!(auth.stored().is_none(), "and the failure never resurrects the credential");
+}
+
+#[tokio::test]
+async fn signing_out_with_the_network_off_still_signs_out() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    // Sign in against the reachable stub, then throw that core away.
+    drop(signed_in_with_a_photo(&stub, &dir).await);
+
+    // Port 1 on loopback: nothing listens, so the connection is refused. This
+    // is the case the ordering exists for.
+    let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
+    let ticket = offline.sign_out().expect("signed in");
+
+    assert_eq!(offline.snapshot(), AuthSnapshot::SignedOut);
+    assert!(offline.stored().is_none());
+    assert!(cached_avatars(&dir).is_empty());
+    assert!(
+        !offline.revoke(ticket).await,
+        "unreachable is not confirmation — the user is owed the caveat that the \
+         server session may stay up until it expires"
+    );
+}
+
+#[tokio::test]
+async fn a_session_the_server_has_already_forgotten_needs_no_caveat() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    // 401: the server does not recognise the credential, so there is no live
+    // session left to warn anyone about.
+    stub.on("/sign-out", vec![Reply::err(401, "unauthorized")]);
+    let auth = signed_in_with_a_photo(&stub, &dir).await;
+
+    let ticket = auth.sign_out().expect("signed in");
+    assert!(auth.revoke(ticket).await);
+}
+
+#[tokio::test]
+async fn signing_out_when_already_signed_out_asks_the_server_nothing() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    let auth = core(&stub, &dir);
+
+    assert!(
+        auth.sign_out().is_none(),
+        "no credential means no ticket, and nothing to revoke"
+    );
+    assert_eq!(auth.snapshot(), AuthSnapshot::SignedOut);
+    assert_eq!(stub.hits("/sign-out"), 0);
+}
+
+#[tokio::test]
+async fn a_refresh_in_flight_cannot_resurrect_a_signed_out_credential() {
+    // Sign-out is not the only thing running: a launch validates in the
+    // background, and that path *writes the credential file* once its profile
+    // and photo calls return. A click landing in that window would otherwise be
+    // undone — the title bar signed out, the file back on disk, and the next
+    // launch signed straight back in.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    let auth = Arc::new(signed_in_with_a_photo(&stub, &dir).await);
+
+    // A changed photo URL, served slowly: the refresh is now provably still in
+    // flight when the sign-out below happens.
+    stub.profile("Ada Lovelace", Some(&stub.url("/slow.png")));
+    stub.on(
+        "/slow.png",
+        vec![Reply::with_content_type("image/png", PIXELS).slow(300)],
+    );
+
+    let refreshing = {
+        let auth = Arc::clone(&auth);
+        tokio::spawn(async move { auth.validate_once().await })
+    };
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let ticket = auth.sign_out().expect("signed in");
+    let _ = refreshing.await;
+
+    assert!(
+        auth.stored().is_none(),
+        "a write from a call that started before the sign-out must not put the \
+         credential back"
+    );
+    assert_eq!(auth.snapshot(), AuthSnapshot::SignedOut);
+    assert!(
+        cached_avatars(&dir).is_empty(),
+        "nor may it leave a face behind in the config directory"
+    );
+    drop(ticket);
 }

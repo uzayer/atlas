@@ -70,6 +70,19 @@ export const auth = {
   signIn: () => invoke<AuthSnapshot>("auth_sign_in"),
   /** Abandon an in-flight grant. Idempotent. */
   cancelSignIn: () => invoke<AuthSnapshot>("auth_cancel_sign_in"),
+  /**
+   * Sign out (ATL-50).
+   *
+   * Nothing here waits: Rust clears the credential, the identity snapshot and
+   * the cached photo first and unconditionally, and the signed-out state
+   * arrives over `atlas:auth-changed` before the server is contacted at all.
+   *
+   * Resolves — later, once the background revocation settles — to whether the
+   * server confirmed the session is gone. `false` means this device is signed
+   * out but the server session may stay active until it expires, which is the
+   * one thing the user has to be told.
+   */
+  signOut: () => invoke<boolean>("auth_sign_out"),
 };
 
 /** Every auth transition, broadcast to every window. */

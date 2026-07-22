@@ -181,6 +181,12 @@ async fn fetch(http: &reqwest::Client, dir: &Path, url: &str) -> Option<String> 
     Some(path.to_string_lossy().into_owned())
 }
 
+/// Drop a cached photo we are done with — sign-out, where the face on disk
+/// outlives the credential unless something deletes it.
+pub(crate) fn discard(path: Option<&str>) {
+    prune(path, None);
+}
+
 /// Remove a superseded cache file. Best-effort, and never removes the file we
 /// just wrote (a URL that hashes to the same name is the same photo).
 fn prune(old: Option<&str>, keep: Option<&str>) {

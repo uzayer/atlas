@@ -119,6 +119,33 @@ pub fn auth_cancel_sign_in(app: AppHandle, state: State<'_, AuthState>) -> AuthS
     snapshot
 }
 
+/// Sign out (ATL-50).
+///
+/// Local state is gone and the signed-out snapshot has been broadcast to every
+/// window **before** the server is contacted at all, so the UI flips with no
+/// spinner and no wait — and sign-out works with the network off, which is when
+/// it matters most.
+///
+/// Resolves to `true` when the server confirmed the session is revoked. The
+/// caller is already signed out either way; the value only decides whether they
+/// are told the server session may outlive the local one. It is returned rather
+/// than emitted because, unlike everything else here, it answers *this* window's
+/// click — broadcasting it would put the same caveat in front of two other
+/// windows that did nothing.
+#[tauri::command]
+pub async fn auth_sign_out(app: AppHandle, state: State<'_, AuthState>) -> Result<bool, String> {
+    let core = state.core();
+    let ticket = core.sign_out();
+    broadcast(&app, core.snapshot());
+
+    Ok(match ticket {
+        Some(ticket) => core.revoke(ticket).await,
+        // Nothing was stored, so there is nothing the server could still be
+        // holding — no caveat is owed.
+        None => true,
+    })
+}
+
 /// Bring Atlas forward once approval lands, so the human does not have to hunt
 /// for the window they left behind in the browser.
 fn raise(app: &AppHandle) {

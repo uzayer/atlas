@@ -1,11 +1,20 @@
 import type { ReactNode } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Keyboard, LayoutTemplate, Palette, Settings, Zap } from "lucide-react";
+import {
+  Keyboard,
+  LayoutTemplate,
+  LogOut,
+  Palette,
+  Settings,
+  Zap,
+} from "lucide-react";
+import { toast } from "sonner";
 
 import { KbdCombo } from "@/ui/kbd";
 import { openSettingsSection } from "@/features/settings/lib/open-settings";
 import type { SettingsSection } from "@/features/settings/stores/settings-nav-store";
 import type { AccountUser } from "../lib/auth-api";
+import { useAuthStore } from "../stores/auth-store";
 import { AccountAvatar } from "./account-avatar";
 
 /**
@@ -38,14 +47,26 @@ const CONTENT_CLASS =
   "z-[var(--z-max)] min-w-[228px] max-w-[300px] rounded-md border border-[var(--border-default)] " +
   "bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)] py-1";
 
+/**
+ * Shown when the background revocation did not land — offline, or an Atlas
+ * outage.
+ *
+ * States the residual risk instead of implying a clean revocation, because the
+ * session is a 7-day rolling credential: "may stay active until it expires" is
+ * a real window, and only the user can judge whether it matters on the machine
+ * they are walking away from.
+ */
+const RESIDUAL_SESSION =
+  "Signed out on this device. Your Atlas session may stay active on the server until it expires.";
+
 const ITEM_CLASS =
   "flex items-center gap-2 px-3 h-[26px] text-[11px] cursor-default outline-none " +
   "text-[var(--text-secondary)] data-[highlighted]:bg-[var(--bg-hover)] " +
   "data-[highlighted]:text-[var(--text-primary)]";
 
 /**
- * The menu behind the title bar's avatar — who you are, and the parts of
- * Settings people actually reach for.
+ * The menu behind the title bar's avatar — who you are, the parts of Settings
+ * people actually reach for, and the way out.
  *
  * Wraps the account button rather than replacing it, so signed out the button
  * keeps its plain click-to-sign-in behaviour and this component is simply not
@@ -58,14 +79,24 @@ export function AccountMenu({
 }: {
   /**
    * `null` in the narrow window between holding a credential and the first
-   * successful profile fetch (see `SignedIn.user`). The menu still opens — its
-   * destinations do not depend on identity, and this is where signing out will
-   * live — but there is no header to render, and inventing a placeholder name
-   * would be worse than the gap it fills.
+   * successful profile fetch (see `SignedIn.user`). The menu still opens, and
+   * Sign Out still works — neither depends on identity, and a credential we
+   * cannot put a name to is still one the user must be able to disconnect.
+   * There is simply no header to render, and inventing a placeholder name would
+   * be worse than the gap it fills.
    */
   user: AccountUser | null;
   children: ReactNode;
 }) {
+  const { signOut } = useAuthStore.use.actions();
+
+  // Not awaited by anything on screen: the title bar has already flipped by the
+  // time this promise settles, off the state event Rust emits before it touches
+  // the network. All that arrives here is whether a caveat is owed.
+  const onSignOut = async () => {
+    if (!(await signOut())) toast.warning(RESIDUAL_SESSION);
+  };
+
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>{children}</DropdownMenu.Trigger>
@@ -90,6 +121,15 @@ export function AccountMenu({
               {item.shortcut && <KbdCombo combo={item.shortcut} />}
             </DropdownMenu.Item>
           ))}
+          {/* Separated from the destinations above: everything else in this
+              menu navigates, and this one ends the session. Rendered whether or
+              not there is an identity to show — a credential held with no
+              profile yet is still one the user must be able to disconnect. */}
+          <DropdownMenu.Separator className="my-1 h-px bg-[var(--border-default)]" />
+          <DropdownMenu.Item onSelect={() => void onSignOut()} className={ITEM_CLASS}>
+            <LogOut size={13} className="shrink-0 text-[var(--text-tertiary)]" />
+            <span className="flex-1 text-left">Sign Out</span>
+          </DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

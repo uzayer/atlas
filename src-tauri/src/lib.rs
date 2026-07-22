@@ -244,6 +244,7 @@ pub fn run() {
             commands::auth::auth_snapshot,
             commands::auth::auth_sign_in,
             commands::auth::auth_cancel_sign_in,
+            commands::auth::auth_sign_out,
             commands::window::window_zoom,
             commands::clipboard::clipboard_file_paths,
             commands::window::set_window_title,
