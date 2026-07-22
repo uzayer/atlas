@@ -99,6 +99,34 @@ export async function switchOrg(id: string): Promise<void> {
 }
 
 /**
+ * Delete an organisation and every piece of app-state scoped to it (its
+ * workspace/group references + recent chats for those projects). Refuses to
+ * delete the only remaining org. If the target is the active org, switches to
+ * another org FIRST (tearing down its workspace set behind the loading overlay)
+ * so nothing dangles, then purges. Returns whether it deleted.
+ *
+ * Note: the user's actual project files + on-disk `.atlas/` data are NOT
+ * removed — only Atlas's org-scoped tracking.
+ */
+export async function deleteOrgAndData(id: string): Promise<boolean> {
+  const { organisations, activeOrganisationId } = useOrgStore.getState();
+  if (organisations.length <= 1) return false;
+  if (!organisations.some((o) => o.id === id)) return false;
+
+  if (id === activeOrganisationId) {
+    const next = organisations.find((o) => o.id !== id);
+    if (!next) return false;
+    await switchOrg(next.id); // teardown active set + load the next org
+  }
+  // `id` is now guaranteed inactive (its workspaces are cold) → pure purge.
+  const ok = useOrgStore.getState().actions.deleteOrg(id);
+  if (ok) {
+    logEvent({ source: "project", kind: "org-delete", summary: id });
+  }
+  return ok;
+}
+
+/**
  * Pick the workspace to open when entering an org: its remembered
  * `activeWorkspaceId` if it still exists, else the most-recently-active
  * workspace in that org, else none (empty org).

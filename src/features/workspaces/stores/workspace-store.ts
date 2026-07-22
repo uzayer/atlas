@@ -120,6 +120,9 @@ interface WorkspaceState {
      *  org's workspaces load. Does NOT flush — the caller flushes the active
      *  workspace first (its layout mirror is the only unsaved state). */
     teardownForOrgSwitch: () => void;
+    /** Purge every workspace + group belonging to `orgId` from the registry
+     *  (tearing down any still mounted). Used by org deletion. */
+    removeWorkspacesForOrg: (orgId: string) => void;
     /** Ensure `id` is in the hot set, evicting the LRU evictable workspace if
      *  that pushes the set over `maxMounted`. */
     ensureMounted: (id: string) => void;
@@ -479,6 +482,25 @@ export const useWorkspaceStore = createSelectors(
           activeWorkspaceId: null,
           optimisticActiveId: null,
         });
+      },
+
+      removeWorkspacesForOrg: (orgId: string) => {
+        const { workspaces, mountedWorkspaceIds } = get();
+        const removedIds = new Set(
+          workspaces.filter((w) => w.orgId === orgId).map((w) => w.id),
+        );
+        // Tear down any that are still mounted (defensive — a deleted org is
+        // normally switched away from first, so its set is already cold).
+        for (const id of mountedWorkspaceIds) {
+          if (removedIds.has(id)) teardownHot(id);
+        }
+        set((s) => ({
+          workspaces: s.workspaces.filter((w) => w.orgId !== orgId),
+          groups: s.groups.filter((g) => g.orgId !== orgId),
+          mountedWorkspaceIds: s.mountedWorkspaceIds.filter(
+            (x) => !removedIds.has(x),
+          ),
+        }));
       },
 
       setColor: (id, color) => {

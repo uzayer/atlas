@@ -1,5 +1,6 @@
 import { useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import * as Dialog from "@radix-ui/react-dialog";
 import {
   Check,
   ChevronsUpDown,
@@ -11,10 +12,13 @@ import {
   UserCircle2,
   Building2,
   Pencil,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
+import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
 import { useOrgStore } from "../stores/org-store";
-import { switchOrg } from "../lib/org-switch";
+import { switchOrg, deleteOrgAndData } from "../lib/org-switch";
 import type { Organisation } from "../types";
 
 /** Two-letter avatar seed from an org name. */
@@ -76,6 +80,7 @@ export function OrgSwitcher() {
   const organisations = useOrgStore.use.organisations();
   const activeOrganisationId = useOrgStore.use.activeOrganisationId();
   const { createOrg, rename, enableSync } = useOrgStore.use.actions();
+  const workspaces = useWorkspaceStore.use.workspaces();
 
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -83,6 +88,9 @@ export function OrgSwitcher() {
   // Inline-rename state: the org id being renamed + its draft name.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  // Org pending delete-confirmation (null = no dialog).
+  const [confirmDelete, setConfirmDelete] = useState<Organisation | null>(null);
+  const canDelete = organisations.length > 1;
 
   const active =
     organisations.find((o) => o.id === activeOrganisationId) ?? organisations[0];
@@ -177,7 +185,7 @@ export function OrgSwitcher() {
               <span className="truncate">Organisation</span>
             </div>
             <div className="overflow-y-auto pb-1 hide-scrollbar">
-              {organisations.map((org, i) => {
+              {organisations.map((org) => {
                 const isActive = org.id === active.id;
                 // Inline-rename row: a plain input (NOT a menu item) so typing
                 // doesn't trigger Radix typeahead / select / close.
@@ -225,14 +233,24 @@ export function OrgSwitcher() {
                     >
                       <Pencil size={11} />
                     </button>
-                    {isActive ? (
+                    {/* Delete — appears on hover; opens confirmation. Hidden when
+                        this is the only org (can't delete the last one). */}
+                    {canDelete && (
+                      <button
+                        title="Delete organisation"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setConfirmDelete(org);
+                          setOpen(false);
+                        }}
+                        className="opacity-0 group-hover/org:opacity-100 p-0.5 rounded text-[var(--text-tertiary)] hover:text-error hover:bg-[var(--bg-active)] transition-opacity shrink-0 cursor-pointer"
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    )}
+                    {isActive && (
                       <Check size={13} className="text-[var(--text-secondary)] shrink-0" />
-                    ) : (
-                      i < 9 && (
-                        <span className="w-3 text-center text-[10px] text-[var(--text-tertiary)] group-hover/org:hidden">
-                          {i + 1}
-                        </span>
-                      )
                     )}
                   </DropdownMenu.Item>
                 );
@@ -300,6 +318,74 @@ export function OrgSwitcher() {
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
+
+      <DeleteOrgDialog
+        org={confirmDelete}
+        projectCount={
+          confirmDelete
+            ? workspaces.filter((w) => w.orgId === confirmDelete.id).length
+            : 0
+        }
+        onClose={() => setConfirmDelete(null)}
+      />
     </div>
+  );
+}
+
+/** Confirmation before wiping an organisation + all its org-scoped app data. */
+function DeleteOrgDialog({
+  org,
+  projectCount,
+  onClose,
+}: {
+  org: Organisation | null;
+  projectCount: number;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog.Root open={!!org} onOpenChange={(o) => !o && onClose()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-[var(--z-max)] bg-black/60 backdrop-blur-sm" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          className={cn(
+            "fixed left-1/2 top-1/2 z-[var(--z-max)] -translate-x-1/2 -translate-y-1/2",
+            "w-[400px] max-w-[92vw] rounded-lg border border-border-default",
+            "bg-[var(--bg-elevated)] p-5 shadow-[var(--shadow-overlay)] animate-scale-in",
+          )}
+        >
+          <Dialog.Title className="text-[14px] font-medium text-[var(--text-primary)]">
+            Delete “{org?.name}”?
+          </Dialog.Title>
+          <p className="mt-2 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+            This permanently removes the organisation
+            {projectCount > 0 && (
+              <>
+                {" "}and its <span className="text-[var(--text-primary)]">{projectCount} project{projectCount === 1 ? "" : "s"}</span> (plus their chats)
+              </>
+            )}{" "}
+            from Atlas. Your actual project files on disk are not touched. This
+            can’t be undone.
+          </p>
+          <div className="mt-5 flex justify-end gap-2">
+            <button
+              onClick={onClose}
+              className="px-3 h-8 rounded-md text-[12px] text-[var(--text-secondary)] hover:bg-[var(--bg-active)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                if (org) void deleteOrgAndData(org.id);
+                onClose();
+              }}
+              className="px-3 h-8 rounded-md text-[12px] font-medium bg-error text-white hover:opacity-90 transition-opacity cursor-pointer"
+            >
+              Delete organisation
+            </button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

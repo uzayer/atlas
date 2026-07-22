@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   Panel,
   PanelGroup,
@@ -29,6 +30,22 @@ export function AppLayout() {
 
   // Warm the workspace-pane git data at startup so the first slide is smooth.
   useWorkspaceGitPrefetch();
+
+  // Esc closes the OVERLAY workspace panel (same animated slide-out as a
+  // scrim click). Only active while the overlay is open — when docked or
+  // closed the listener no-ops, so it never swallows Esc from other surfaces.
+  const overlayOpen = sidebarOpen && !sidebarPinned;
+  useEffect(() => {
+    if (!overlayOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSidebarOpen(false);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [overlayOpen, setSidebarOpen]);
 
   const showLeft = leftPanel.visible && !!currentProject;
   const showRight = rightPanel.visible && !!currentProject;

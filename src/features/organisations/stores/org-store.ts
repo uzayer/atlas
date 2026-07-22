@@ -3,6 +3,7 @@ import { createSelectors } from "@/lib/create-selectors";
 import { logEvent } from "@/features/log/lib/log";
 import { scheduleAppStateSave } from "@/features/project/stores/project-store";
 import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store";
+import { useRecentChatsStore } from "@/features/workspaces/stores/recent-chats-store";
 import type { Organisation } from "../types";
 import { slugify } from "../types";
 
@@ -136,10 +137,20 @@ export const useOrgStore = createSelectors(
       deleteOrg: (id) => {
         const { organisations } = get();
         if (organisations.length <= 1) return false; // never delete the last org
-        const ownsWorkspaces = useWorkspaceStore
-          .getState()
-          .workspaces.some((w) => w.orgId === id);
-        if (ownsWorkspaces) return false; // caller must clear its projects first
+        // Cascade: wipe all app-state scoped to this org — its workspace/group
+        // references, and the recent chats for those projects. (The user's
+        // actual project files + `.atlas/` data on disk are NOT touched; only
+        // Atlas's org-scoped tracking is removed.) The caller (deleteOrgAndData)
+        // must have already switched away if this is the active org.
+        const ws = useWorkspaceStore.getState();
+        const orgPaths = new Set(
+          ws.workspaces.filter((w) => w.orgId === id).map((w) => w.path),
+        );
+        ws.actions.removeWorkspacesForOrg(id);
+        const rc = useRecentChatsStore.getState();
+        for (const c of rc.items) {
+          if (orgPaths.has(c.projectPath)) rc.actions.remove(c.tabId);
+        }
         set((s) => ({
           organisations: s.organisations.filter((o) => o.id !== id),
         }));
