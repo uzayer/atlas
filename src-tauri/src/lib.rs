@@ -1,3 +1,4 @@
+mod auth;
 mod commands;
 mod logging;
 mod menu;
@@ -171,6 +172,19 @@ pub fn run() {
             // then run a non-blocking background check + a periodic re-check. The
             // download/verify/stage happens silently; the user is only prompted
             // once it's ready to restart. See `commands::updater`.
+            // Account auth (ATL-35). The config dir only resolves from the
+            // app handle, so this is managed here rather than in the builder
+            // chain. Restore runs off-thread: a signed-out launch touches the
+            // network not at all, and a signed-in one must never block boot.
+            {
+                let config_dir = app
+                    .path()
+                    .app_config_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                app.manage(commands::auth::AuthState::new(config_dir));
+                commands::auth::restore_on_launch(&app.handle());
+            }
+
             commands::updater::init_on_startup(&app.handle());
             commands::updater::check_in_background(&app.handle());
             commands::updater::spawn_periodic(&app.handle());
@@ -227,6 +241,10 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::auth::auth_snapshot,
+            commands::auth::auth_sign_in,
+            commands::auth::auth_cancel_sign_in,
+            commands::auth::auth_sign_out,
             commands::window::window_zoom,
             commands::clipboard::clipboard_file_paths,
             commands::window::set_window_title,

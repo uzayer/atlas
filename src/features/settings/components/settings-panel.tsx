@@ -41,14 +41,21 @@ import { useProjectStore } from "@/features/project/stores/project-store";
 import { setEnabled as setTelemetryEnabled } from "@/features/telemetry/posthog-client";
 import { updater } from "@/features/updater/lib/updater-api";
 import { useUpdaterStore } from "@/features/updater/stores/updater-store";
-import { useSettingsNav } from "../stores/settings-nav-store";
+import {
+  useSettingsNav,
+  type SettingsSection,
+} from "../stores/settings-nav-store";
 import { isDev } from "@/lib/env";
 
 // Developer section is dev-build only — production users never see the
 // diagnostic toggles (they change app behavior and aren't useful outside
 // UI testing). `isDev` is a Vite build constant, so the production bundle
 // drops the entry entirely via dead-code elimination.
-const SECTIONS = [
+const SECTIONS: Array<{
+  id: SettingsSection;
+  label: string;
+  icon: typeof Settings;
+}> = [
   { id: "general", label: "General", icon: Settings },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "layouts", label: "Layouts", icon: LayoutTemplate },
@@ -58,7 +65,7 @@ const SECTIONS = [
   { id: "updates", label: "Updates", icon: DownloadCloud },
   { id: "keybindings", label: "Keybindings", icon: Keyboard },
   ...(isDev
-    ? [{ id: "developer", label: "Developer", icon: FlaskConical }]
+    ? [{ id: "developer" as const, label: "Developer", icon: FlaskConical }]
     : []),
   { id: "about", label: "About", icon: Info },
 ];
@@ -289,7 +296,7 @@ function GeneralSettings() {
       </SettingRow>
       <SettingRow
         label="Share anonymous usage data"
-        description="Anonymous, privacy-preserving usage data (app launches, agents/skills used, token counts, crashes) to help improve Atlas. Never your prompts, code, paths, or keys. See TELEMETRY.md."
+        description="Anonymous, privacy-preserving usage data (app launches, agents/skills used, token counts, crashes, and that a sign-in happened — never who signed in) to help improve Atlas. Never your prompts, code, paths, or keys. See TELEMETRY.md."
       >
         <Toggle
           checked={settings.shareTelemetry}

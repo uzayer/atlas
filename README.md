@@ -12,6 +12,7 @@ Atlas wraps a code editor, a multi-session AI chat (with first-class Claude Code
 
 - [Why Atlas](#why-atlas)
 - [Features](#features)
+- [Accounts and privacy](#accounts-and-privacy)
 - [Getting started](#getting-started)
 - [Architecture](#architecture)
   - [High-level layout](#high-level-layout)
@@ -26,13 +27,14 @@ Atlas wraps a code editor, a multi-session AI chat (with first-class Claude Code
 
 ## Why Atlas
 
-Most "AI IDEs" today are forks of VS Code with a chat pane bolted on. Atlas is the opposite: a small, opinionated shell that treats the AI agent and your own thinking as equal first-class citizens, alongside the editor and terminal. The goal is a tool that an individual researcher / engineer can keep open all day and trust with project context — not a hosted product, not a fork, no telemetry, no account.
+Most "AI IDEs" today are forks of VS Code with a chat pane bolted on. Atlas is the opposite: a small, opinionated shell that treats the AI agent and your own thinking as equal first-class citizens, alongside the editor and terminal. The goal is a tool that an individual researcher / engineer can keep open all day and trust with project context — not a hosted product, not a fork.
 
 Concretely:
 
 - **The agent is plural.** Multiple Claude Code sessions run concurrently, each with its own thread history and stop button. Switching tabs never freezes a running stream.
 - **State is just files.** No SQLite, no proprietary format. Chat history is JSONL on disk (read directly by Claude Code's own resume flag), notes are markdown, canvases are JSON.
-- **Local-first.** Everything except outbound API calls is on your machine. There is no Atlas account or server.
+- **Local-first.** Your projects, notes, chat history, and memory live on your machine and are never uploaded. Atlas does talk to the network — the model providers you point it at, the research and GitHub features you invoke, an update check, and anonymous usage data you can switch off — but none of that carries your content. See [Accounts and privacy](#accounts-and-privacy).
+- **The account is optional.** Atlas has an Atlas account you can connect to (see [Accounts and privacy](#accounts-and-privacy)), but nothing is gated behind it. Signed out, every feature works exactly as it does signed in.
 
 ---
 
@@ -55,7 +57,26 @@ Concretely:
 | **Project** | Open / close project, project picker, per-project state in `.atlas/`. |
 | **Monitor** | Token-usage tracker per provider/model. |
 | **Tasks** | Lightweight task list driven by agent plans. |
+| **Account** | Optional sign-in to an Atlas account via the OAuth 2.0 device grant — click the title-bar avatar, approve in your browser. Shows who is signed in, the Organisation this device acts for and your role in it, and an account menu that doubles as the entry point to Settings. Nothing is gated behind it. |
 | **Settings** | Provider / model / API key, theme tokens, keyboard shortcuts. |
+
+---
+
+## Accounts and privacy
+
+Atlas used to have no account and no server. It now has both, and this section says exactly what that does and does not mean.
+
+**Signing in is optional and purely additive.** Every feature in the table above works signed out, and none of them changes behaviour when you sign in. There is no paid tier, no gated feature, and no plan. If you never click the avatar, Atlas talks to no Atlas server at all.
+
+**Signing in does not upload anything.** No code, chat history, notes, knowledge, memory, or file paths leave your machine as a result of connecting an account. What sign-in currently buys you is identity — your photo in the title bar, your name, Organisation and role in the account menu — and the foundation for sync work that has not shipped yet. When it does, it will be its own opt-in with its own consent, not a silent consequence of having signed in once.
+
+**The credential stays in Rust.** The session token never crosses into the renderer, is never written to a log, and lives in a `0600` file in the app config directory. Signing out deletes it immediately and unconditionally, before the server is contacted at all — so it works with the network off.
+
+**Telemetry is anonymous, and stays anonymous after you sign in.** Atlas sends coarse usage and crash metadata to PostHog under a random install id, behind **Settings → General → "Share anonymous usage data"**. It defaults on and can be turned off at any time. Signing in does **not** link that id to your account — there is no `identify` and no `alias` call in the app, and the sign-in and sign-out events carry no user id, email, or Organisation id. An install that has opted out sends nothing extra as a result of signing in.
+
+Prompts, code, file paths, notes, terminal I/O, browser URLs, and API keys are never collected. The complete event catalogue and the full never-collected list are in **[TELEMETRY.md](TELEMETRY.md)**.
+
+**The update check is separate.** Atlas asks for the latest version on launch, independently of the telemetry toggle, because an app that stops learning about security updates when you decline analytics is a worse deal than the one you thought you were making. It has its own switch: **Settings → Updates → "Automatic updates"**.
 
 ---
 
@@ -302,7 +323,8 @@ atlas/
 ├── tsconfig.json
 ├── postcss.config.js
 ├── LICENSE
-└── README.md
+├── README.md
+└── TELEMETRY.md                     event catalogue + never-collected list
 ```
 
 ---
@@ -315,7 +337,7 @@ Contributions are very welcome — Atlas is a one-person project and there's ple
 
 1. **Open an issue first** for anything bigger than a small fix. It's easier to align on direction before you write the code.
 2. **Match the existing patterns.** Feature folder, Zustand store with `createSelectors`, Tailwind classes via `cn()`, IPC verbs in a single `commands/<domain>.rs` module. If you're adding something that doesn't fit, propose the structure in the issue.
-3. **No telemetry, no analytics, no auto-update pings.** Atlas is local-first by design.
+3. **Nothing leaves the machine that isn't in [TELEMETRY.md](TELEMETRY.md).** Atlas is local-first by design. The existing telemetry is anonymous, consent-gated, and metadata-only; adding an event means adding it to that catalogue in the same PR, and anything that would send content, paths, or account identity needs its own issue first.
 4. **No new heavy dependencies without discussion.** The current dep list is intentional.
 
 ### Local dev loop

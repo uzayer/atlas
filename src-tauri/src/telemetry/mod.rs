@@ -1,12 +1,15 @@
 //! Consent-gated, privacy-preserving product telemetry (PostHog).
 //!
-//! Atlas ships with **zero** analytics enabled by default. Nothing leaves the
-//! machine until the user explicitly opts in (Settings → General → "Share
-//! anonymous usage data" or the first-run consent prompt). When enabled, this
-//! module emits coarse **usage / error metadata only** — never prompt or
-//! response text, file contents or absolute paths, KB/chat content, API keys,
-//! terminal I/O, or browser URLs. See `TELEMETRY.md` at the repo root for the
-//! full event catalog and the never-collected list.
+//! Consent is Settings → General → "Share anonymous usage data", which defaults
+//! **ON** — the opt-out posture of VS Code and Zed, and the reason `TELEMETRY.md`
+//! says so plainly rather than calling this opt-in. Switching it off takes effect
+//! immediately: [`capture`](TelemetryClient::capture) returns before anything is
+//! queued, and nothing is buffered for later. When enabled, this module emits
+//! coarse **usage / error metadata only** — never prompt or response text, file
+//! contents or absolute paths, KB/chat content, API keys, terminal I/O, or
+//! browser URLs. See `TELEMETRY.md` at the repo root for the full event catalogue
+//! and the never-collected list; an event added here belongs in that table in the
+//! same change.
 //!
 //! Identity is a single persisted anonymous UUID (`telemetry_anon_id` in
 //! `state.json`) used as the PostHog `distinct_id` by both this Rust emitter
@@ -321,6 +324,38 @@ impl TelemetryClient {
         });
     }
 
+    /// The account events, and the whole reason they are named here rather than
+    /// written inline at their call sites (ATL-52).
+    ///
+    /// Atlas's telemetry identity is the persisted anonymous install UUID above,
+    /// consented to under "Share anonymous usage data". Signing in must not
+    /// change that: there is no `identify` and no `alias` anywhere in this app,
+    /// and these two events carry **no user id, email, or Organisation id**.
+    /// Linking the install to a real user would retroactively de-anonymize every
+    /// event it has ever sent, under a consent string that promised the
+    /// opposite. ADR-0007 §8's identified analytics is satisfied server-side,
+    /// where session creation calls `identify` — the desktop must not duplicate
+    /// it.
+    ///
+    /// Defining the payload once, in the module that owns that promise, is what
+    /// lets a test hold it: a `json!({})` written at the call site could grow a
+    /// `user_id` without anything noticing.
+    ///
+    /// Both are no-ops unless consent was already granted, because
+    /// [`capture`](Self::capture) is — a user who has not opted in sends nothing
+    /// extra as a result of signing in.
+    pub fn capture_signed_in(&self) {
+        self.capture("auth_signed_in", json!({}));
+    }
+
+    /// Companion to [`capture_signed_in`](Self::capture_signed_in). Emitted only
+    /// when the *user* signs out, never when the server ends a session: folding
+    /// a revocation into this event would leave a count that means neither one
+    /// thing nor the other.
+    pub fn capture_signed_out(&self) {
+        self.capture("auth_signed_out", json!({}));
+    }
+
     /// Remember the latest cumulative usage for a session (stamped onto the
     /// next `agent_turn_finished`). No-op when inert.
     pub fn note_usage(&self, session_id: &str, usage: Value) {
@@ -557,5 +592,66 @@ mod tests {
         let ev2 = rx.try_recv().expect("finished event");
         assert_eq!(ev2.event, "agent_turn_finished");
         assert_eq!(ev2.properties["agent_kind"], json!("atlas"));
+    }
+
+    /// Build a non-inert client with `enabled` as given, plus the receiving end
+    /// of its queue.
+    fn client_with_consent(enabled: bool) -> (TelemetryClient, mpsc::Receiver<QueuedEvent>) {
+        let (tx, rx) = mpsc::channel(8);
+        let c = TelemetryClient {
+            enabled: AtomicBool::new(enabled),
+            inert: false,
+            api_key: Some("phc_test".into()),
+            host: DEFAULT_HOST.to_string(),
+            using_default_key: true,
+            distinct_id: "anon-install-uuid".into(),
+            app_version: "0.0.0",
+            os: "test",
+            arch: "test",
+            tx: Some(tx),
+            last_usage: DashMap::new(),
+        };
+        (c, rx)
+    }
+
+    /// ATL-52: signing in must not become a telemetry backdoor. A user who has
+    /// not opted in sends *nothing* extra as a result of signing in or out.
+    #[test]
+    fn auth_events_are_gated_by_consent() {
+        let (c, mut rx) = client_with_consent(false);
+        c.capture_signed_in();
+        c.capture_signed_out();
+        assert!(
+            rx.try_recv().is_err(),
+            "auth events must not be enqueued without consent"
+        );
+    }
+
+    /// ATL-52: the install stays anonymous after sign-in. These two events carry
+    /// nothing beyond the common properties every event gets — in particular no
+    /// user id, email, or Organisation id. This is the test the payload lives in
+    /// `capture_signed_in` / `capture_signed_out` to make possible.
+    #[test]
+    fn auth_events_carry_no_identity() {
+        let (c, mut rx) = client_with_consent(true);
+        c.capture_signed_in();
+        c.capture_signed_out();
+
+        // The four keys `inject_common` adds, and nothing else is permitted.
+        const COMMON: [&str; 4] = ["$lib", "app_version", "os", "arch"];
+
+        for expected in ["auth_signed_in", "auth_signed_out"] {
+            let ev = rx.try_recv().unwrap_or_else(|_| panic!("{expected} event"));
+            assert_eq!(ev.event, expected);
+            let props = ev.properties.as_object().expect("object properties");
+            let extra: Vec<&String> = props
+                .keys()
+                .filter(|k| !COMMON.contains(&k.as_str()))
+                .collect();
+            assert!(
+                extra.is_empty(),
+                "{expected} must carry no properties beyond the common ones, found {extra:?}"
+            );
+        }
     }
 }
