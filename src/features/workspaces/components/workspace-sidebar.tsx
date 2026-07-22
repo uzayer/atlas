@@ -28,7 +28,7 @@ import {
   type Workspace,
   type WorkspaceGroup,
 } from "../stores/workspace-store";
-import { useSettingsNav } from "@/features/settings/stores/settings-nav-store";
+import { openSettingsSection } from "@/features/settings/lib/open-settings";
 import { pickAndAddWorkspace } from "../lib/pick-workspace";
 import { useRunningChatKeys } from "../lib/agent-activity";
 import { openAgentSession } from "@/features/chat/lib/open-agent-session";
@@ -573,10 +573,7 @@ export function WorkspaceSidebar() {
         <HeaderButton
           icon={<Zap size={13} />}
           label="Skills"
-          onClick={() => {
-            useSettingsNav.getState().goTo("skills");
-            openTabSingleton("settings", "Settings");
-          }}
+          onClick={() => openSettingsSection("skills")}
         />
         <HeaderButton icon={<Settings size={13} />} label="Settings" onClick={() => openTabSingleton("settings", "Settings")} />
       </div>
