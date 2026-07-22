@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import type { Window as TauriWindow } from "@tauri-apps/api/window";
 import { useUpdaterStore } from "@/features/updater/stores/updater-store";
 import { updater } from "@/features/updater/lib/updater-api";
+import { AccountButton } from "@/features/auth/components/account-button";
 
 function useTauriWindow() {
   const windowRef = useRef<TauriWindow | null>(null);
@@ -107,13 +108,19 @@ export function Titlebar() {
         <ProjectLabel name={displayName} path={currentProject?.path} />
       </div>
 
-      {currentProject && (
-        <div className="flex items-center gap-1.5">
-          <UpdateButton />
-          <NotificationButton />
-          <RightPanelToggle />
-        </div>
-      )}
+      {/* The account button sits OUTSIDE the `currentProject` guard on purpose:
+          a fresh install has no project open, and sign-in must be reachable
+          from that empty state rather than hidden behind opening a folder. */}
+      <div className="flex items-center gap-1.5">
+        {currentProject && (
+          <>
+            <UpdateButton />
+            <NotificationButton />
+            <RightPanelToggle />
+          </>
+        )}
+        <AccountButton />
+      </div>
     </div>
   );
 }

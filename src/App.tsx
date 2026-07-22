@@ -63,6 +63,12 @@ import {
   listenUpdateChecking,
 } from "@/features/updater/lib/updater-api";
 import { Toaster, toast } from "sonner";
+import {
+  listenAuthChanged,
+  listenAuthError,
+} from "@/features/auth/lib/auth-api";
+import { useAuthStore } from "@/features/auth/stores/auth-store";
+import { ConnectDialog } from "@/features/auth/components/connect-dialog";
 import { clampScale, SCALE_STEP, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
 
 // Interface-zoom helpers (⌘+/⌘-/⌘0). They read + write the persisted
@@ -162,6 +168,21 @@ export function App() {
         a.dismissModal();
       }
     });
+    return () => {
+      for (const p of offs) void p.then((off) => off());
+    };
+  }, []);
+
+  // Account auth (ATL-35). Rust owns the credential and every transition; this
+  // only mirrors `atlas:auth-changed` into the store. Broadcast (not per-window)
+  // so two open windows always agree on who is signed in.
+  useEffect(() => {
+    const a = useAuthStore.getState().actions;
+    const offs: Array<Promise<() => void>> = [
+      listenAuthChanged((snapshot) => a.setSnapshot(snapshot)),
+      listenAuthError((e) => a.setError(e.message)),
+    ];
+    void a.hydrate();
     return () => {
       for (const p of offs) void p.then((off) => off());
     };
@@ -1221,6 +1242,7 @@ export function App() {
       <HintOverlay />
       <NotificationPanel />
       <UpdateAvailableModal />
+      <ConnectDialog />
       <BrowserOverlayWatcher />
       <Toaster
         position="bottom-right"
