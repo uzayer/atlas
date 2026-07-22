@@ -130,12 +130,17 @@ export function ConnectDialog() {
                       </button>
                     </div>
 
+                    {/* "Connect device" is the literal button label on the web
+                        page. Naming it means the instruction ends at something
+                        the user can see, rather than at a step they have to
+                        recognise. */}
                     <p className="mt-3 px-1 text-[11px] leading-relaxed text-text-tertiary">
                       Paste this at{" "}
                       <span className="font-mono text-text-secondary">
                         {connecting.verificationUri}
                       </span>
-                      , which just opened in your browser, then approve.
+                      , which just opened in your browser, then press Connect
+                      device.
                     </p>
                   </>
                 ) : null}
