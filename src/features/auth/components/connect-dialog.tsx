@@ -130,17 +130,17 @@ export function ConnectDialog() {
                       </button>
                     </div>
 
-                    {/* "Connect device" is the literal button label on the web
-                        page. Naming it means the instruction ends at something
-                        the user can see, rather than at a step they have to
-                        recognise. */}
+                    {/* "Approve" is the literal button label on the web page.
+                        Naming it means the instruction ends at something the
+                        user can point at rather than at a step they have to
+                        recognise — and it has to be changed here whenever it
+                        changes there. */}
                     <p className="mt-3 px-1 text-[11px] leading-relaxed text-text-tertiary">
                       Paste this at{" "}
                       <span className="font-mono text-text-secondary">
                         {connecting.verificationUri}
                       </span>
-                      , which just opened in your browser, then press Connect
-                      device.
+                      , which just opened in your browser, then press Approve.
                     </p>
                   </>
                 ) : null}
