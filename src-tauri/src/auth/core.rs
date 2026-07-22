@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
+use super::backoff::{self, Backoff};
 use super::store::{self, StoredIdentity, StoredSession};
 use super::{avatar, AuthSnapshot};
 
@@ -87,6 +88,72 @@ impl GrantError {
     }
 }
 
+/// Why an authenticated call produced no value (ATL-48).
+///
+/// This is the failure classification the whole module turns on, and the reason
+/// it is an enum rather than a `String`: a caller that cannot see the class
+/// cannot avoid the mistake this ticket exists to prevent, which is treating
+/// "the server never answered" as "the server said no". **Only [`Rejected`] may
+/// ever clear the credential.**
+///
+/// [`Rejected`]: AuthFailure::Rejected
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthFailure {
+    /// Nothing stored to authenticate with. Not a failure — there was simply
+    /// nothing to ask about, and no request was made.
+    NoCredential,
+    /// **AUTHORITATIVE (401).** The server looked at the credential and
+    /// rejected it. The session is dead and no amount of retrying revives it.
+    Rejected,
+    /// **DENIED (403).** The credential is valid; this particular action is
+    /// not permitted. Neither sign out nor retry.
+    ///
+    /// Every other unexpected 4xx joins this class rather than earning a fourth
+    /// one: a 400 or a 404 is not a verdict on the credential either, and
+    /// repeating the request will not change it — which is exactly how this
+    /// class is handled.
+    Denied,
+    /// **INDETERMINATE.** Transport failure, timeout, DNS failure, 5xx, or 429.
+    /// We learned *nothing* about the credential, so everything is preserved
+    /// and the call is retried on the schedule in [`super::backoff`].
+    Indeterminate {
+        /// From the response's `Retry-After`, when the server supplied one.
+        retry_after: Option<Duration>,
+        /// For logs. Carries no URL and no token — see [`redact`].
+        reason: String,
+    },
+}
+
+impl AuthFailure {
+    fn indeterminate(reason: impl Into<String>) -> Self {
+        AuthFailure::Indeterminate {
+            retry_after: None,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// An authenticated call: a value, or a classified failure.
+pub type Authed<T> = Result<T, AuthFailure>;
+
+/// What one validation of the stored credential settled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Validation {
+    /// Nothing stored. Signed out, and no network call was made.
+    NoCredential,
+    /// The server accepted the credential; the identity snapshot was refreshed.
+    Confirmed,
+    /// **401.** The credential and its snapshot have been cleared.
+    Rejected,
+    /// **403.** Nothing was changed and nothing will be retried.
+    Denied,
+    /// We learned nothing. Everything is preserved; the caller retries.
+    Indeterminate {
+        /// Honoured by the backoff when present — see [`Backoff::next_after`].
+        retry_after: Option<Duration>,
+    },
+}
+
 /// The auth module's whole public surface.
 pub struct AuthCore {
     base: String,
@@ -96,6 +163,10 @@ pub struct AuthCore {
     /// competing codes, and is what makes a second click *resume* rather than
     /// restart — the recovery path for someone who got lost mid-flow.
     pending: Mutex<Option<PendingGrant>>,
+    /// First retry delay for [`Self::revalidate`]. A field only so tests can
+    /// exercise the loop without sleeping through a real schedule; production
+    /// always uses [`backoff::BASE`].
+    backoff_base: Duration,
 }
 
 impl AuthCore {
@@ -105,7 +176,17 @@ impl AuthCore {
             dir: dir.into(),
             http,
             pending: Mutex::new(None),
+            backoff_base: backoff::BASE,
         }
+    }
+
+    /// Shrink the retry schedule so a test can drive the loop through several
+    /// failures in milliseconds. Absent from the shipped binary by
+    /// construction, so no production path can reach for it.
+    #[cfg(test)]
+    pub fn with_backoff_base(mut self, base: Duration) -> Self {
+        self.backoff_base = base;
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -163,18 +244,21 @@ impl AuthCore {
     ///
     /// `Ok(None)` is the server saying nobody is signed in — note that
     /// `/get-session` expresses that as **200 with a `null` body**, not a 401
-    /// (proven in ATL-44), so status alone would never see it.
-    async fn fetch_profile(&self) -> Result<Option<Profile>, String> {
-        let Some(res) = self.authed_get("/get-session").await? else {
-            return Ok(None);
-        };
+    /// (proven in ATL-44), so status alone would never see it. It is reported
+    /// rather than classified: [`Self::validate_once`] takes its verdict from
+    /// `/token` instead, and this call only ever decides a name and a photo.
+    async fn fetch_profile(&self) -> Authed<Option<Profile>> {
+        let res = self.authed_get("/get-session").await?;
 
-        let body = res.text().await.map_err(|e| redact(&e.to_string()))?;
+        let body = res
+            .text()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(redact(&e.to_string())))?;
         if body.trim().is_empty() || body.trim() == "null" {
             return Ok(None);
         }
         let session: SessionResponse = serde_json::from_str(&body)
-            .map_err(|e| format!("unreadable profile: {e}"))?;
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable profile: {e}")))?;
         Ok(Some(session.user))
     }
 
@@ -387,70 +471,140 @@ impl AuthCore {
 
     /// A GET carrying the stored session token as a Bearer.
     ///
-    /// Every authenticated call goes through here so the distinction the whole
-    /// module turns on is written **once**: `Ok(None)` is the server looking at
-    /// the credential and rejecting it, `Err` is us never finding out. Conflating
-    /// them is what signs people out for opening a laptop on a plane, and ATL-48
-    /// builds its retry policy directly on the split.
-    async fn authed_get(&self, path: &str) -> Result<Option<reqwest::Response>, String> {
+    /// **This is the only place a response is classified**, so the distinction
+    /// the whole module turns on is written once rather than per endpoint:
+    /// [`AuthFailure::Rejected`] is the server looking at the credential and
+    /// refusing it, [`AuthFailure::Indeterminate`] is us never finding out.
+    /// Conflating them is what signs people out for opening a laptop on a plane.
+    async fn authed_get(&self, path: &str) -> Authed<reqwest::Response> {
         let Some(stored) = self.stored() else {
-            return Ok(None);
+            return Err(AuthFailure::NoCredential);
         };
 
-        let res = self
+        let res = match self
             .http
             .get(self.url(path))
             .bearer_auth(&stored.session_token)
             .timeout(AUTHED_TIMEOUT)
             .send()
             .await
-            .map_err(|e| redact(&e.to_string()))?;
+        {
+            Ok(res) => res,
+            // Refused, timed out, DNS gone, TLS failed — the request never got
+            // an answer, so it says nothing whatsoever about the credential.
+            // This branch is the entire reason the class exists.
+            Err(e) => return Err(AuthFailure::indeterminate(redact(&e.to_string()))),
+        };
 
-        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Ok(None);
+        let status = res.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(AuthFailure::Rejected);
         }
-        if !res.status().is_success() {
-            // The path, never the response body: an error body from an auth
-            // server is the one place a token could plausibly be echoed back.
-            return Err(format!("{path} failed: {}", res.status()));
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(AuthFailure::Indeterminate {
+                retry_after: retry_after(res.headers()),
+                // The path and the status, never the response body: an error
+                // body from an auth server is the one place a token could
+                // plausibly be echoed back.
+                reason: format!("{path} failed: {status}"),
+            });
         }
-        Ok(Some(res))
+        if !status.is_success() {
+            return Err(AuthFailure::Denied);
+        }
+        Ok(res)
     }
 
     /// Mint a short-TTL access JWT from the stored session token.
-    pub async fn mint_access_token(&self) -> Result<Option<String>, String> {
-        let Some(res) = self.authed_get("/token").await? else {
-            return Ok(None);
-        };
+    pub async fn mint_access_token(&self) -> Authed<String> {
+        let res = self.authed_get("/token").await?;
 
         #[derive(Deserialize)]
         struct TokenResponse {
             token: String,
         }
-        let body: TokenResponse = res.json().await.map_err(|e| e.to_string())?;
-        Ok(Some(body.token))
+        // A 200 we cannot read is not a verdict on the credential either — the
+        // server answered, but not with anything that proves or disproves it.
+        let body: TokenResponse = res
+            .json()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable token: {e}")))?;
+        Ok(body.token)
     }
 
-    /// Boot check.
+    /// Check the stored credential against the server, once.
     ///
-    /// **Preserves the credential on every failure, including 401.** ATL-48
-    /// introduces the authoritative-401-signs-you-out rule; until it lands the
-    /// safe default is to keep a credential we are unsure about. The worst case
-    /// here is a stale signed-in state, never a destroyed valid session — which
-    /// is the right way round if that ticket slips.
-    pub async fn validate_stored(&self) -> AuthSnapshot {
+    /// The verdict is taken from `/token`, not from `/get-session`. Both answer
+    /// for a dead session, but `/get-session` expresses it as **200 with a
+    /// `null` body** (ATL-44) — a far weaker signal than a status code, and one
+    /// an unrelated serialisation change could start emitting by accident. A
+    /// misread here destroys a valid credential, so the reading that carries
+    /// that power is the unambiguous one.
+    pub async fn validate_once(&self) -> Validation {
         let Some(current) = self.stored() else {
-            return AuthSnapshot::SignedOut;
+            return Validation::NoCredential;
         };
-        let _ = self.mint_access_token().await;
-        // Every successful validation refreshes the snapshot, so a name or photo
-        // changed on the web reaches the desktop without a re-sign-in. A failed
-        // one leaves the last-known identity in place — which is the whole point
-        // of persisting it, and is what makes an offline launch render a
-        // complete title bar rather than a nameless one.
-        self.refresh_identity(current.identity).await;
-        self.snapshot()
+
+        match self.mint_access_token().await {
+            Ok(_) => {
+                // Every successful validation refreshes the snapshot, so a name
+                // or photo changed on the web reaches the desktop without a
+                // re-sign-in. It runs only after the credential is confirmed —
+                // there is no point fetching a profile we may be about to
+                // discard, and a failure here must never reach the credential.
+                self.refresh_identity(current.identity).await;
+                Validation::Confirmed
+            }
+            Err(AuthFailure::NoCredential) => Validation::NoCredential,
+            // The one branch permitted to destroy a credential.
+            Err(AuthFailure::Rejected) => {
+                let _ = self.clear_session();
+                Validation::Rejected
+            }
+            Err(AuthFailure::Denied) => Validation::Denied,
+            Err(AuthFailure::Indeterminate { retry_after, .. }) => {
+                // Deliberately touches nothing. The stored snapshot is what
+                // renders a complete signed-in title bar on a plane.
+                Validation::Indeterminate { retry_after }
+            }
+        }
     }
+
+    /// Validate at launch and keep trying until the answer means something.
+    ///
+    /// Indeterminate failures retry on the backoff schedule with **no attempt
+    /// limit**, for as long as this task lives: someone offline for six hours
+    /// is signed in the moment they reconnect, without restarting Atlas.
+    ///
+    /// `on_settled` fires exactly once, with the resulting snapshot. Nothing is
+    /// emitted between attempts — by design. The signed-in state has no
+    /// "verifying" variant, because a spinner or a warning in the title bar
+    /// every time a laptop lid opens only teaches people to ignore it.
+    pub async fn revalidate(&self, on_settled: impl FnOnce(AuthSnapshot)) -> Validation {
+        let mut backoff = Backoff::new(self.backoff_base, backoff::CEILING);
+
+        loop {
+            match self.validate_once().await {
+                Validation::Indeterminate { retry_after } => {
+                    tokio::time::sleep(backoff.next_after(retry_after)).await;
+                }
+                settled => {
+                    on_settled(self.snapshot());
+                    return settled;
+                }
+            }
+        }
+    }
+}
+
+/// `Retry-After` as delta-seconds.
+///
+/// The HTTP-date form is not parsed: the auth worker sends seconds, and a date
+/// read against a skewed local clock is worse than the backoff we already have
+/// waiting behind it.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let raw = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    Some(Duration::from_secs(raw.trim().parse().ok()?))
 }
 
 /// Strip anything that could carry a credential out of an error string before

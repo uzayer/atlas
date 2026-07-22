@@ -5,18 +5,29 @@
 //! tests here — this layer holds no logic of its own.
 //!
 //! Events emitted to the frontend:
-//!   `atlas:auth-changed` — the full [`AuthSnapshot`], on every transition
-//!   `atlas:auth-error`   — `{ message }` when a grant ends without a token
+//!   `atlas:auth-changed`    — the full [`AuthSnapshot`], on every transition
+//!   `atlas:auth-error`      — `{ message }` when a grant ends without a token
+//!   `atlas:auth-signed-out` — `{ message }` when the server ended the session
 //!
-//! Both go out via `app.emit`, which broadcasts to **every** window, so a
+//! All go out via `app.emit`, which broadcasts to **every** window, so a
 //! multi-window install always agrees about who is signed in.
+//!
+//! `auth-error` and `auth-signed-out` are separate because they are read in
+//! different places: a grant failure belongs inside the connect dialog the user
+//! is already looking at, while a revoked session arrives with nothing on
+//! screen and has to reach them as a toast.
 
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::auth::{auth_base, AuthCore, AuthSnapshot, GrantError};
+use crate::auth::{auth_base, AuthCore, AuthSnapshot, GrantError, Validation};
+
+/// Shown when the server rejects the stored credential. Deliberately says what
+/// happened and what to do about it: a title bar that silently reverts to a
+/// signed-out icon reads as a bug.
+const SESSION_ENDED: &str = "Your Atlas session ended. Sign in again to reconnect.";
 
 /// Managed handle to the auth core.
 pub struct AuthState {
@@ -117,15 +128,32 @@ fn raise(app: &AppHandle) {
     }
 }
 
-/// Validate any stored credential at startup, then broadcast the result.
+/// Render the stored credential immediately, then validate it in the
+/// background for as long as it takes (ATL-48).
 ///
-/// Preserves the credential on every failure for now — see
-/// [`AuthCore::validate_stored`].
+/// The first broadcast is the whole offline story: a launch with no network
+/// shows a complete signed-in title bar — name and photo — from the stored
+/// snapshot, rather than waiting on a call that is going to time out.
+///
+/// The validation behind it runs unbounded, so a machine that boots offline
+/// reconnects on its own. Only a 401 ends it in a sign-out, and only then does
+/// the user hear about it.
 pub fn restore_on_launch(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let core = app.state::<AuthState>().core();
-        let snapshot = core.validate_stored().await;
-        broadcast(&app, snapshot);
+        broadcast(&app, core.snapshot());
+
+        let settled = {
+            let app = app.clone();
+            core.revalidate(move |snapshot| broadcast(&app, snapshot)).await
+        };
+
+        if settled == Validation::Rejected {
+            let _ = app.emit(
+                "atlas:auth-signed-out",
+                serde_json::json!({ "message": SESSION_ENDED }),
+            );
+        }
     });
 }

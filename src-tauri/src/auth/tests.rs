@@ -17,6 +17,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use super::backoff::{Backoff, BASE, CEILING};
+use super::core::AuthFailure;
 use super::*;
 
 // ---------------------------------------------------------------- temp dir
@@ -61,6 +63,9 @@ struct Reply {
     /// fetch's *streaming* size cap: with an honest length the cheap up-front
     /// check fires first, and an understated one just makes `reqwest` truncate.
     content_length: Option<usize>,
+    /// Extra raw header lines, without the trailing CRLF. Currently only
+    /// `Retry-After`, which the classification has to read off a 429.
+    headers: Vec<String>,
 }
 
 impl Reply {
@@ -70,6 +75,7 @@ impl Reply {
             body: body.into(),
             content_type,
             content_length: Some(body.len()),
+            headers: Vec::new(),
         }
     }
     fn ok(body: &str) -> Self {
@@ -86,6 +92,11 @@ impl Reply {
     }
     fn without_content_length(mut self) -> Self {
         self.content_length = None;
+        self
+    }
+    /// One extra header line, e.g. `"Retry-After: 42"`.
+    fn with_header(mut self, line: &str) -> Self {
+        self.headers.push(line.to_string());
         self
     }
 }
@@ -143,9 +154,14 @@ impl Stub {
                         Some(n) => format!("Content-Length: {n}\r\n"),
                         None => String::new(),
                     };
+                    let extra = reply
+                        .headers
+                        .iter()
+                        .map(|h| format!("{h}\r\n"))
+                        .collect::<String>();
                     let out = format!(
-                        "HTTP/1.1 {} X\r\nContent-Type: {}\r\n{}Connection: close\r\n\r\n{}",
-                        reply.status, reply.content_type, length, reply.body
+                        "HTTP/1.1 {} X\r\nContent-Type: {}\r\n{}{}Connection: close\r\n\r\n{}",
+                        reply.status, reply.content_type, length, extra, reply.body
                     );
                     let _ = sock.write_all(out.as_bytes()).await;
                     let _ = sock.shutdown().await;
@@ -229,6 +245,9 @@ async fn sign_in(auth: &AuthCore) {
 }
 
 const TOKEN_OK: &str = r#"{"access_token":"session-tok","token_type":"Bearer"}"#;
+/// A successful `/token` mint — the call [`AuthCore::validate_once`] takes its
+/// verdict from, so any test that validates has to script it.
+const JWT_OK: &str = r#"{"token":"jwt-here"}"#;
 /// Stands in for image bytes. Content is irrelevant — nothing decodes it.
 const PIXELS: &str = "not-really-a-png-but-nothing-here-decodes-it";
 
@@ -511,68 +530,243 @@ async fn boot_with_no_credential_makes_no_network_call() {
     let dir = TempDir::new();
     let auth = core(&stub, &dir);
 
-    assert_eq!(auth.validate_stored().await, AuthSnapshot::SignedOut);
+    assert_eq!(auth.validate_once().await, Validation::NoCredential);
+    assert_eq!(auth.snapshot(), AuthSnapshot::SignedOut);
     assert_eq!(stub.hits("/token"), 0, "a signed-out launch must be silent");
 }
 
 #[tokio::test]
-async fn boot_preserves_the_credential_even_when_the_server_rejects_it() {
-    // Safe-by-default until ATL-48 lands the authoritative-401 rule. The worst
-    // outcome here is a stale signed-in state; the alternative would destroy a
-    // valid session, which is much harder to undo.
+async fn minting_reports_rejection_and_unreachability_differently() {
+    // The distinction the whole ticket is built on: `Rejected` is "the server
+    // said no", `Indeterminate` is "we never found out". Conflating them is
+    // what signs people out for opening a laptop on a plane.
     let stub = Stub::start().await;
     let dir = TempDir::new();
-    stub.grant_ready(600);
-    stub.on("/device/token", vec![Reply::ok(TOKEN_OK)]);
+    scripted_grant(&stub);
 
     let auth = core(&stub, &dir);
-    let grant = auth.start_grant().await.unwrap();
-    auth.run_grant(&grant).await.unwrap();
+    sign_in(&auth).await;
 
     stub.on("/token", vec![Reply::err(401, "unauthorized")]);
-    assert!(signed_in(&auth.validate_stored().await));
-    assert!(auth.stored().is_some(), "a 401 must not clear the credential yet");
+    assert_eq!(auth.mint_access_token().await, Err(AuthFailure::Rejected));
+
+    stub.on("/token", vec![Reply::ok(JWT_OK)]);
+    assert_eq!(auth.mint_access_token().await, Ok("jwt-here".into()));
+
+    let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
+    assert!(
+        matches!(
+            offline.mint_access_token().await,
+            Err(AuthFailure::Indeterminate { .. })
+        ),
+        "unreachable is not a rejection"
+    );
+}
+
+// ------------------------------------------------- failure classification
+//
+// The highest-value group in the module (ATL-48). Every case below is one row
+// of the rule: only an authoritative rejection may ever cost the credential.
+
+/// Sign in, then hand back a core pointed at a server that will never answer.
+/// This is what launching on a plane looks like.
+async fn signed_in_then_offline(stub: &Stub, dir: &TempDir) -> AuthCore {
+    let auth = core(stub, dir);
+    sign_in(&auth).await;
+    AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new())
 }
 
 #[tokio::test]
-async fn boot_preserves_the_credential_when_the_server_is_unreachable() {
+async fn a_rejected_session_is_cleared_and_signs_the_user_out() {
     let stub = Stub::start().await;
     let dir = TempDir::new();
-    stub.grant_ready(600);
-    stub.on("/device/token", vec![Reply::ok(TOKEN_OK)]);
+    scripted_grant(&stub);
 
     let auth = core(&stub, &dir);
-    let grant = auth.start_grant().await.unwrap();
-    auth.run_grant(&grant).await.unwrap();
+    sign_in(&auth).await;
 
-    // Point a fresh core at a dead port — the offline launch case.
-    let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
-    assert!(signed_in(&offline.validate_stored().await));
+    stub.on("/token", vec![Reply::err(401, "unauthorized")]);
+    assert_eq!(auth.validate_once().await, Validation::Rejected);
+    assert_eq!(auth.snapshot(), AuthSnapshot::SignedOut);
+    assert!(
+        auth.stored().is_none(),
+        "a 401 is the server refusing this credential — keeping it would leave \
+         a signed-in UI that silently fails every call"
+    );
+}
+
+#[tokio::test]
+async fn a_server_error_never_costs_the_credential() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", None);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    stub.on("/token", vec![Reply::err(500, "boom")]);
+    assert_eq!(
+        auth.validate_once().await,
+        Validation::Indeterminate { retry_after: None }
+    );
+    assert!(auth.stored().is_some(), "an outage says nothing about the session");
+    assert_eq!(user_of(&auth.snapshot()).name, "Ada Lovelace");
+}
+
+#[tokio::test]
+async fn a_refused_connection_never_costs_the_credential() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+
+    let offline = signed_in_then_offline(&stub, &dir).await;
+    assert_eq!(
+        offline.validate_once().await,
+        Validation::Indeterminate { retry_after: None }
+    );
     assert!(offline.stored().is_some());
 }
 
 #[tokio::test]
-async fn minting_reports_rejection_and_unreachability_differently() {
-    // The distinction ATL-48 is built on: Ok(None) is "the server said no",
-    // Err is "we never found out". Conflating them is what signs people out
-    // for opening a laptop on a plane.
+async fn an_offline_launch_renders_a_fully_populated_signed_in_state() {
+    // The case that would otherwise ship as a session-destroying bug: no
+    // network at all, and the title bar still shows a name and a face.
     let stub = Stub::start().await;
     let dir = TempDir::new();
-    stub.grant_ready(600);
-    stub.on("/device/token", vec![Reply::ok(TOKEN_OK)]);
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", Some(&stub.url("/photo.png")));
+    stub.on("/photo.png", vec![Reply::with_content_type("image/png", PIXELS)]);
 
     let auth = core(&stub, &dir);
-    let grant = auth.start_grant().await.unwrap();
-    auth.run_grant(&grant).await.unwrap();
-
-    stub.on("/token", vec![Reply::err(401, "unauthorized")]);
-    assert_eq!(auth.mint_access_token().await, Ok(None), "401 is authoritative");
-
-    stub.on("/token", vec![Reply::ok(r#"{"token":"jwt-here"}"#)]);
-    assert_eq!(auth.mint_access_token().await, Ok(Some("jwt-here".into())));
+    sign_in(&auth).await;
+    let known = user_of(&auth.snapshot());
 
     let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
-    assert!(offline.mint_access_token().await.is_err(), "unreachable is not a rejection");
+    // Before any network attempt — the launch path renders this first.
+    assert_eq!(user_of(&offline.snapshot()), known);
+
+    offline.validate_once().await;
+    let after = user_of(&offline.snapshot());
+    assert_eq!(after, known, "a failed validation must change nothing");
+    assert!(after.avatar_path.is_some(), "the cached photo is the whole point");
+    assert!(!after.name.is_empty());
+}
+
+#[tokio::test]
+async fn a_forbidden_response_neither_signs_out_nor_retries() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+
+    let auth = core(&stub, &dir).with_backoff_base(Duration::from_millis(1));
+    sign_in(&auth).await;
+
+    stub.on("/token", vec![Reply::err(403, "forbidden")]);
+    assert_eq!(auth.revalidate(|_| {}).await, Validation::Denied);
+    assert!(auth.stored().is_some(), "403 says the credential is fine");
+    assert_eq!(
+        stub.hits("/token"),
+        1,
+        "retrying a permission decision would loop forever against a settled answer"
+    );
+}
+
+#[tokio::test]
+async fn two_failures_then_a_success_end_signed_in_with_no_user_action() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+    stub.profile("Ada Lovelace", None);
+
+    let auth = core(&stub, &dir).with_backoff_base(Duration::from_millis(1));
+    sign_in(&auth).await;
+
+    stub.on(
+        "/token",
+        vec![Reply::err(503, "down"), Reply::err(500, "down"), Reply::ok(JWT_OK)],
+    );
+
+    let mut settled_with = None;
+    assert_eq!(
+        auth.revalidate(|snapshot| settled_with = Some(snapshot)).await,
+        Validation::Confirmed
+    );
+    assert!(signed_in(&settled_with.expect("the loop must report once, at the end")));
+    assert_eq!(stub.hits("/token"), 3, "it kept trying without being asked to");
+}
+
+#[tokio::test]
+async fn a_rate_limit_is_indeterminate_and_honours_retry_after() {
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    scripted_grant(&stub);
+
+    let auth = core(&stub, &dir);
+    sign_in(&auth).await;
+
+    stub.on(
+        "/token",
+        vec![Reply::err(429, "slow down").with_header("Retry-After: 42")],
+    );
+    assert_eq!(
+        auth.validate_once().await,
+        Validation::Indeterminate {
+            retry_after: Some(Duration::from_secs(42))
+        },
+        "a 429 is the server rationing us, not rejecting us"
+    );
+    assert!(auth.stored().is_some());
+
+    // Without the header it simply falls into the same backoff.
+    stub.on("/token", vec![Reply::err(429, "slow down")]);
+    assert_eq!(
+        auth.validate_once().await,
+        Validation::Indeterminate { retry_after: None }
+    );
+}
+
+#[test]
+fn backoff_grows_and_is_bounded() {
+    let mut schedule = Backoff::new(BASE, CEILING);
+    let mut previous = Duration::ZERO;
+
+    for attempt in 0..40 {
+        let delay = schedule.next();
+        assert!(delay <= CEILING, "attempt {attempt} exceeded the ceiling: {delay:?}");
+        // Each delay is drawn from [cap/2, cap] and cap doubles, so the lowest
+        // a delay can be is the highest the previous one could have been.
+        // Growth therefore holds without depending on the jitter — until the
+        // ceiling, where both draws come from the same window.
+        if delay < CEILING / 2 {
+            assert!(
+                delay >= previous,
+                "attempt {attempt} went backwards: {previous:?} -> {delay:?}"
+            );
+        }
+        previous = delay;
+    }
+
+    assert!(
+        previous >= CEILING / 2,
+        "a long outage must settle at the ceiling, not drift below it"
+    );
+}
+
+#[test]
+fn a_hostile_retry_after_cannot_escape_the_window() {
+    let mut schedule = Backoff::new(BASE, CEILING);
+    assert_eq!(
+        schedule.next_after(Some(Duration::from_secs(86_400))),
+        CEILING,
+        "one bad header must not strand a signed-in user for a day"
+    );
+    assert_eq!(
+        schedule.next_after(Some(Duration::ZERO)),
+        BASE,
+        "a zero must not turn the loop into a spin against a server asking for quiet"
+    );
+    assert_eq!(schedule.next_after(Some(Duration::from_secs(30))), Duration::from_secs(30));
 }
 
 // ---------------------------------------------------------------- identity
@@ -597,6 +791,17 @@ fn cached_avatars(dir: &TempDir) -> Vec<PathBuf> {
 fn scripted_grant(stub: &Stub) {
     stub.grant_ready(600);
     stub.on("/device/token", vec![Reply::ok(TOKEN_OK)]);
+    // Validation takes its verdict from `/token`, and the identity refresh only
+    // runs once the credential is confirmed — so a test about a photo has to
+    // let the credential pass first.
+    stub.on("/token", vec![Reply::ok(JWT_OK)]);
+}
+
+/// Validate, then hand back the resulting snapshot. The shape the identity
+/// tests want: they care about the name and the photo, not the outcome class.
+async fn validated(auth: &AuthCore) -> AuthSnapshot {
+    auth.validate_once().await;
+    auth.snapshot()
 }
 
 #[tokio::test]
@@ -643,7 +848,7 @@ async fn a_photo_that_has_not_changed_is_never_fetched_again() {
     let first = user_of(&auth.snapshot()).avatar_path;
 
     let relaunched = core(&stub, &dir);
-    let snapshot = relaunched.validate_stored().await;
+    let snapshot = validated(&relaunched).await;
 
     assert_eq!(stub.hits("/photo.png"), 1, "a relaunch must reuse the cache");
     assert_eq!(user_of(&snapshot).avatar_path, first);
@@ -669,7 +874,7 @@ async fn a_changed_photo_url_re_fetches_and_drops_the_old_file() {
     stub.profile("Ada Lovelace", Some(&stub.url("/photo-v2.png")));
     stub.on("/photo-v2.png", vec![Reply::with_content_type("image/png", "new-pixels")]);
 
-    let snapshot = core(&stub, &dir).validate_stored().await;
+    let snapshot = validated(&core(&stub, &dir)).await;
     let new = user_of(&snapshot).avatar_path.expect("second photo");
 
     assert_eq!(stub.hits("/photo-v2.png"), 1, "a changed URL must re-fetch");
@@ -698,7 +903,7 @@ async fn a_failed_re_fetch_keeps_the_photo_it_already_had() {
     stub.profile("Ada Lovelace", Some(&stub.url("/photo-v2.png")));
     stub.on("/photo-v2.png", vec![Reply::err(503, "unavailable")]);
 
-    let snapshot = core(&stub, &dir).validate_stored().await;
+    let snapshot = validated(&core(&stub, &dir)).await;
     assert_eq!(
         user_of(&snapshot).avatar_path.as_deref(),
         Some(known_good.as_str()),
@@ -715,7 +920,7 @@ async fn a_failed_re_fetch_keeps_the_photo_it_already_had() {
         "/photo-v2.png",
         vec![Reply::with_content_type("image/png", "new-pixels")],
     );
-    let recovered = core(&stub, &dir).validate_stored().await;
+    let recovered = validated(&core(&stub, &dir)).await;
     let new = user_of(&recovered).avatar_path.expect("second photo");
     assert_ne!(new, known_good, "the retry must land the new photo");
     assert_eq!(std::fs::read_to_string(&new).unwrap(), "new-pixels");
@@ -742,7 +947,7 @@ async fn a_photo_that_fails_to_fetch_falls_back_without_blocking_sign_in() {
     // Self-healing: the recorded URL matches but no file exists, so the next
     // launch tries again rather than treating the failure as permanent.
     stub.on("/gone.png", vec![Reply::with_content_type("image/png", PIXELS)]);
-    let snapshot = core(&stub, &dir).validate_stored().await;
+    let snapshot = validated(&core(&stub, &dir)).await;
     assert!(
         user_of(&snapshot).avatar_path.is_some(),
         "a failed fetch must be retried on the next launch, not cached as a no"
@@ -832,8 +1037,10 @@ async fn a_successful_validation_refreshes_a_stale_snapshot() {
 
     // Renamed on the web. The desktop must pick it up without a re-sign-in.
     stub.profile("Ada Byron", None);
-    let snapshot = core(&stub, &dir).validate_stored().await;
-    assert_eq!(user_of(&snapshot).name, "Ada Byron");
+    stub.on("/token", vec![Reply::ok(JWT_OK)]);
+    let relaunched = core(&stub, &dir);
+    assert_eq!(relaunched.validate_once().await, Validation::Confirmed);
+    assert_eq!(user_of(&relaunched.snapshot()).name, "Ada Byron");
 }
 
 #[tokio::test]
@@ -851,7 +1058,8 @@ async fn a_validation_that_fails_keeps_the_last_known_identity() {
     let known = user_of(&auth.snapshot());
 
     let offline = AuthCore::new("http://127.0.0.1:1", dir.path(), reqwest::Client::new());
-    assert_eq!(user_of(&offline.validate_stored().await), known);
+    offline.validate_once().await;
+    assert_eq!(user_of(&offline.snapshot()), known);
     assert!(offline.stored().is_some());
 }
 
@@ -899,8 +1107,9 @@ async fn a_credential_stored_before_identities_existed_still_loads() {
     );
 
     stub.profile("Ada Lovelace", None);
+    stub.on("/token", vec![Reply::ok(JWT_OK)]);
     assert_eq!(
-        user_of(&auth.validate_stored().await).name,
+        user_of(&validated(&auth).await).name,
         "Ada Lovelace",
         "the first validation after upgrade fills the identity in"
     );

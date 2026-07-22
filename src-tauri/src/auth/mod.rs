@@ -12,6 +12,11 @@
 //! client, the real poll loop, and the real file I/O. The Tauri commands in
 //! `commands::auth` are thin adapters that translate and emit events.
 //!
+//! Every authenticated call is classified before anything acts on it — see
+//! [`AuthFailure`](core::AuthFailure) for the rule and [`backoff`] for what
+//! happens to the failures that told us nothing. The short version: a 401 is
+//! the only thing in this module that may ever destroy a credential.
+//!
 //! **Token material never leaves this module.** The session token is the user's
 //! whole account, and the renderer runs with no CSP while displaying
 //! agent-authored markdown, so neither the session token nor the access JWT is
@@ -19,12 +24,13 @@
 //! which carries no credentials. Nothing here logs a token or a device code.
 
 mod avatar;
+mod backoff;
 mod config;
 mod core;
 mod store;
 
 pub use config::auth_base;
-pub use core::{AuthCore, GrantError};
+pub use core::{AuthCore, GrantError, Validation};
 
 use serde::Serialize;
 

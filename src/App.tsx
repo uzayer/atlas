@@ -66,6 +66,7 @@ import { Toaster, toast } from "sonner";
 import {
   listenAuthChanged,
   listenAuthError,
+  listenAuthSignedOut,
 } from "@/features/auth/lib/auth-api";
 import { useAuthStore } from "@/features/auth/stores/auth-store";
 import { ConnectDialog } from "@/features/auth/components/connect-dialog";
@@ -181,6 +182,10 @@ export function App() {
     const offs: Array<Promise<() => void>> = [
       listenAuthChanged((snapshot) => a.setSnapshot(snapshot)),
       listenAuthError((e) => a.setError(e.message)),
+      // A revoked or expired session arrives with nothing on screen, so the
+      // only place it can land is a toast — the title bar quietly reverting to
+      // a signed-out icon reads as a bug rather than an explanation.
+      listenAuthSignedOut((e) => toast.error(e.message)),
     ];
     void a.hydrate();
     return () => {

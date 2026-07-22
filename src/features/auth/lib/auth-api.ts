@@ -83,3 +83,22 @@ export const listenAuthError = (
   handler: (e: { message: string }) => void,
 ): Promise<UnlistenFn> =>
   listen<{ message: string }>("atlas:auth-error", (e) => handler(e.payload));
+
+/**
+ * The server rejected the stored credential and Atlas signed out (ATL-48).
+ *
+ * Separate from `atlas:auth-error` because it is read somewhere else: a grant
+ * failure belongs inside the connect dialog the user is already looking at,
+ * while this one arrives unprompted — a session revoked from the web, or one
+ * that finally expired — and has to reach them as a toast.
+ *
+ * Only ever fires on an authoritative rejection. Being offline, an Atlas
+ * outage, or a rate limit never produces this: those preserve the credential
+ * and retry silently, which is the entire point of the classification.
+ */
+export const listenAuthSignedOut = (
+  handler: (e: { message: string }) => void,
+): Promise<UnlistenFn> =>
+  listen<{ message: string }>("atlas:auth-signed-out", (e) =>
+    handler(e.payload),
+  );
