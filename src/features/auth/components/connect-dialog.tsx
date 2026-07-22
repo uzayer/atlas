@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, ChevronRight, Loader2, MonitorSmartphone } from "lucide-react";
+import { Check, Copy, Loader2, MonitorSmartphone } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "../stores/auth-store";
@@ -8,15 +8,17 @@ import { useAuthStore } from "../stores/auth-store";
 /**
  * The connecting dialog.
  *
- * **The device code is not the headline.** RFC 8628 shows a code because it was
- * designed for TVs and printers, where the human carries it to a *second*
- * device. Atlas runs on a laptop with the browser one process away, and the URL
- * we open already has the code embedded — so on the happy path nobody needs to
- * read it. Leading with it imports a compare-these-two-screens ritual that
- * protects nothing the user can perceive and reads as unexplained friction.
+ * **The device code is the content.** It used to sit behind a "Trouble?"
+ * disclosure, on the reasoning that the URL Atlas opened already carried the
+ * code so nobody needed to read it. That reasoning was sound and the conclusion
+ * was wrong: a link that carries the code is exactly what lets someone else's
+ * grant be approved by a signed-in user who clicked a link. Atlas now opens the
+ * *plain* approval page, so this code is the only way the browser can learn
+ * which grant to approve — and the user reading it across is what guarantees
+ * the approved grant is this one.
  *
- * So: a waiting state up front, and the code behind a disclosure for whoever
- * lost the browser tab or is approving from their phone.
+ * So: the code up front, one button that copies it and says so, and the waiting
+ * state underneath.
  */
 export function ConnectDialog() {
   const open = useAuthStore.use.dialogOpen();
@@ -25,10 +27,29 @@ export function ConnectDialog() {
   const starting = useAuthStore.use.starting();
   const { cancelSignIn, closeDialog, beginSignIn } = useAuthStore.use.actions();
 
-  const [showCode, setShowCode] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const connecting = snapshot.status === "connecting" ? snapshot : null;
   const done = snapshot.status === "signed-in";
+
+  // Revert the button to "Copy" a moment after a copy, so a user who returns to
+  // this dialog to copy again is not looking at a tick that says it is done.
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(t);
+  }, [copied]);
+
+  const copyCode = async () => {
+    if (!connecting) return;
+    try {
+      await navigator.clipboard.writeText(connecting.userCode);
+      setCopied(true);
+    } catch {
+      // Clipboard access can be refused. The code is on screen and selectable,
+      // so the fallback is the user reading it — no error worth raising.
+    }
+  };
 
   return (
     <Dialog.Root
@@ -78,42 +99,53 @@ export function ConnectDialog() {
               </div>
             ) : (
               <>
-                <div className="flex items-center gap-2 px-1 py-5 text-xs text-text-secondary">
+                {connecting ? (
+                  <>
+                    {/* `select-all` so a click-drag grabs the whole code and
+                        nothing else — the clipboard button is the fast path,
+                        not the only one, and it can be refused by the OS. */}
+                    <div className="rounded border border-border-default bg-[var(--bg-base)] px-3 py-4">
+                      <p className="select-all text-center font-mono text-[22px] tracking-[0.3em] text-text-primary">
+                        {connecting.userCode}
+                      </p>
+                      <button
+                        onClick={() => void copyCode()}
+                        className={cn(
+                          "mx-auto mt-3 flex items-center gap-1.5 rounded border border-border-default",
+                          "cursor-pointer px-2.5 py-1 text-[11px] transition-colors",
+                          "text-text-secondary hover:bg-[#ffffff08] hover:text-text-primary",
+                        )}
+                      >
+                        {copied ? (
+                          <>
+                            <Check size={12} className="text-[var(--status-success)]" />
+                            Copied
+                          </>
+                        ) : (
+                          <>
+                            <Copy size={12} />
+                            Copy code
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    <p className="mt-3 px-1 text-[11px] leading-relaxed text-text-tertiary">
+                      Paste this at{" "}
+                      <span className="font-mono text-text-secondary">
+                        {connecting.verificationUri}
+                      </span>
+                      , which just opened in your browser, then approve.
+                    </p>
+                  </>
+                ) : null}
+
+                <div className="flex items-center gap-2 px-1 pt-4 text-xs text-text-secondary">
                   <Loader2 size={14} className="animate-spin" />
                   {starting
                     ? "Starting…"
-                    : "Continue in your browser, then come back here."}
+                    : "Waiting for you to approve in the browser…"}
                 </div>
-
-                {connecting ? (
-                  <div className="border-t border-border-default pt-2">
-                    <button
-                      onClick={() => setShowCode((v) => !v)}
-                      className="flex w-full items-center gap-1 px-1 py-1.5 text-[11px] text-text-tertiary transition-colors hover:text-text-secondary"
-                    >
-                      <ChevronRight
-                        size={12}
-                        className={cn("transition-transform", showCode && "rotate-90")}
-                      />
-                      Trouble? Enter the code manually
-                    </button>
-
-                    {showCode ? (
-                      <div className="mt-1 space-y-2 rounded border border-border-default bg-[var(--bg-base)] px-3 py-2.5">
-                        <p className="text-[11px] text-text-tertiary">
-                          Go to{" "}
-                          <span className="font-mono text-text-secondary">
-                            {connecting.verificationUri}
-                          </span>{" "}
-                          and enter:
-                        </p>
-                        <p className="text-center font-mono text-lg tracking-[0.3em] text-text-primary">
-                          {connecting.userCode}
-                        </p>
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
               </>
             )}
           </div>

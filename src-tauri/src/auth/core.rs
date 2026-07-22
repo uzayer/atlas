@@ -35,7 +35,10 @@ pub struct PendingGrant {
     /// The short human-readable code. A display string, not a secret.
     pub user_code: String,
     pub verification_uri: String,
-    /// Pre-fills the code, so the happy path needs no typing at all.
+    /// The pre-filled approval URL. Parsed because RFC 8628 defines it and the
+    /// server sends it, but **deliberately never opened** — see the comment in
+    /// `commands::auth::auth_sign_in`. A link that carries the code is the
+    /// remote-phishing surface the copy-and-paste hand-off exists to close.
     pub verification_uri_complete: String,
     pub expires_at: SystemTime,
     pub interval: Duration,
@@ -46,6 +49,22 @@ pub struct PendingGrant {
 impl PendingGrant {
     fn expired(&self) -> bool {
         SystemTime::now() >= self.expires_at
+    }
+
+    /// The page to open in the browser: the **plain** verification URI.
+    ///
+    /// A named method rather than a field access at the call site, because this
+    /// is a security decision and not a formatting one. Opening
+    /// `verification_uri_complete` instead would put the code in the URL, and a
+    /// link that carries the code is the whole remote-phishing attack — an
+    /// already-signed-in user is then one click from approving a grant someone
+    /// else started. Sending them to an empty box means the code that gets
+    /// approved is necessarily the one this window is showing.
+    ///
+    /// It reads as a harmless UX improvement to "just pre-fill it", which is
+    /// exactly why it is stated here and pinned by a test.
+    pub fn approval_url(&self) -> &str {
+        &self.verification_uri
     }
 }
 

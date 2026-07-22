@@ -26,15 +26,12 @@ export function AccountButton() {
   const signedIn = snapshot.status === "signed-in";
   const user = snapshot.status === "signed-in" ? snapshot.user : null;
 
-  const onClick = () => {
-    // While connecting, the button toggles the dialog rather than starting
-    // anything — the grant is already running.
-    if (connecting) {
-      if (dialogOpen) closeDialog();
-      else void beginSignIn();
-      return;
-    }
-    void beginSignIn();
+  // Only reachable while connecting — every other state opens the menu. Toggles
+  // the dialog rather than starting anything, since the grant is already
+  // running; reopening it resumes that grant and reopens the browser.
+  const toggleDialog = () => {
+    if (dialogOpen) closeDialog();
+    else void beginSignIn();
   };
 
   const title = user
@@ -43,13 +40,14 @@ export function AccountButton() {
       ? "Atlas account — connected"
       : connecting
         ? "Waiting for approval in your browser…"
-        : "Connect your Atlas account";
+        : "Account and settings";
 
   const button = (
-    // Signed in the click is Radix's to handle, so no `onClick` of our own —
-    // one that also ran would fight the trigger it is wrapped in.
+    // Only the connecting state keeps a click of its own. In the other two the
+    // click is Radix's to handle, and one that also ran would fight the trigger
+    // it is wrapped in.
     <button
-      onClick={signedIn ? undefined : onClick}
+      onClick={connecting ? toggleDialog : undefined}
       title={title}
       aria-label={title}
       className={cn(
@@ -71,8 +69,15 @@ export function AccountButton() {
     </button>
   );
 
-  // Narrowed on `snapshot` rather than the `signedIn` boolean, so the menu is
-  // handed one coherent account state instead of pieces pulled out separately.
-  if (snapshot.status !== "signed-in") return button;
+  // The menu opens signed out as well as signed in. Settings, Keybindings,
+  // Themes, Skills and Layouts live behind this avatar and are not account
+  // features — gating them on having an account contradicts the rule that
+  // authentication is additive and nothing becomes gated. Signing in is simply
+  // the first item when there is no account yet.
+  //
+  // `connecting` is the exception and keeps its plain click: a grant is already
+  // running, the only thing the user wants is the dialog they closed, and
+  // putting that behind a menu adds a step to a state that lasts seconds.
+  if (snapshot.status === "connecting") return button;
   return <AccountMenu account={snapshot}>{button}</AccountMenu>;
 }

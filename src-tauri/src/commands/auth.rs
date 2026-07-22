@@ -77,11 +77,13 @@ pub async fn auth_sign_in(
         .await
         .map_err(|e| e.user_message())?;
 
-    // The verification URI comes off the wire — never constructed here, so the
-    // desktop stays ignorant of the web app's routing.
+    // Never a URL built here — it comes off the wire, so the desktop stays
+    // ignorant of the web app's routing. *Which* of the two the server sent is
+    // a security decision, so it is `approval_url`'s to make and not this
+    // layer's: see the note there before changing it.
     let _ = app
         .opener()
-        .open_url(grant.verification_uri_complete.clone(), None::<&str>);
+        .open_url(grant.approval_url().to_string(), None::<&str>);
 
     let snapshot = core.snapshot();
     broadcast(&app, snapshot.clone());

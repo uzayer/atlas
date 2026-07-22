@@ -3,6 +3,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   Keyboard,
   LayoutTemplate,
+  LogIn,
   LogOut,
   Palette,
   Settings,
@@ -18,6 +19,7 @@ import {
   type AccountOrg,
   type AccountUser,
   type SignedIn,
+  type SignedOut,
 } from "../lib/auth-api";
 import { useAuthStore } from "../stores/auth-store";
 import { AccountAvatar } from "./account-avatar";
@@ -103,11 +105,14 @@ export function AccountMenu({
    * disconnect. There is simply no header to render, and inventing a placeholder
    * name would be worse than the gap it fills.
    */
-  account: SignedIn;
+  account: SignedIn | SignedOut;
   children: ReactNode;
 }) {
-  const { signOut } = useAuthStore.use.actions();
-  const { user, orgs, activeOrgId } = account;
+  const { signOut, beginSignIn } = useAuthStore.use.actions();
+  const signedIn = account.status === "signed-in";
+  const user = signedIn ? account.user : null;
+  const orgs = signedIn ? account.orgs : null;
+  const activeOrgId = signedIn ? account.activeOrgId : null;
 
   // Not awaited by anything on screen: the title bar has already flipped by the
   // time this promise settles, off the state event Rust emits before it touches
@@ -125,7 +130,23 @@ export function AccountMenu({
           sideOffset={6}
           className={CONTENT_CLASS}
         >
+          {/* The account zone is always first, whichever state we are in: the
+              identity when there is one, the way to get one when there is not.
+              Keeping it in the same place means the destinations below never
+              move under the pointer as the user signs in or out. */}
           {user && <Header user={user} />}
+          {!signedIn && (
+            <>
+              <DropdownMenu.Item
+                onSelect={() => void beginSignIn()}
+                className={ITEM_CLASS}
+              >
+                <LogIn size={13} className="shrink-0 text-[var(--text-tertiary)]" />
+                <span className="flex-1 text-left">Sign In</span>
+              </DropdownMenu.Item>
+              <DropdownMenu.Separator className={SEPARATOR_CLASS} />
+            </>
+          )}
           {/* Omitted entirely while the organisations are unknown — see
               `SignedIn.orgs`. Same reasoning as the header above it. */}
           {orgs && (
@@ -148,14 +169,21 @@ export function AccountMenu({
             </DropdownMenu.Item>
           ))}
           {/* Separated from the destinations above: everything else in this
-              menu navigates, and this one ends the session. Rendered whether or
-              not there is an identity to show — a credential held with no
-              profile yet is still one the user must be able to disconnect. */}
-          <DropdownMenu.Separator className={SEPARATOR_CLASS} />
-          <DropdownMenu.Item onSelect={() => void onSignOut()} className={ITEM_CLASS}>
-            <LogOut size={13} className="shrink-0 text-[var(--text-tertiary)]" />
-            <span className="flex-1 text-left">Sign Out</span>
-          </DropdownMenu.Item>
+              menu navigates, and this one ends the session. Rendered whenever a
+              credential is held, with or without a profile — one we cannot put
+              a name to is still one the user must be able to disconnect. */}
+          {signedIn && (
+            <>
+              <DropdownMenu.Separator className={SEPARATOR_CLASS} />
+              <DropdownMenu.Item
+                onSelect={() => void onSignOut()}
+                className={ITEM_CLASS}
+              >
+                <LogOut size={13} className="shrink-0 text-[var(--text-tertiary)]" />
+                <span className="flex-1 text-left">Sign Out</span>
+              </DropdownMenu.Item>
+            </>
+          )}
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>

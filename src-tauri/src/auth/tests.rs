@@ -601,6 +601,32 @@ async fn a_second_start_resumes_the_same_grant_instead_of_minting_another() {
 }
 
 #[tokio::test]
+async fn the_browser_is_sent_to_the_plain_url_never_the_pre_filled_one() {
+    // The remote-phishing guard, pinned. A link carrying the code puts an
+    // already-signed-in user one click from approving someone else's grant;
+    // sending them to an empty box means the approved code is necessarily the
+    // one this window is showing. "Just pre-fill it" reads as a harmless UX
+    // win, so the property gets a test rather than only a comment.
+    let stub = Stub::start().await;
+    let dir = TempDir::new();
+    stub.grant_ready(600);
+
+    let auth = core(&stub, &dir);
+    let grant = auth.start_grant().await.expect("start grant");
+
+    assert_eq!(grant.approval_url(), "https://app.example/device");
+    assert!(
+        !grant.approval_url().contains("user_code"),
+        "the code must not travel in the URL — that link is the attack"
+    );
+    assert!(
+        grant.verification_uri_complete.contains("user_code"),
+        "the pre-filled URL is still parsed off the wire; it is simply not opened, \
+         so this asserts the two are genuinely different values"
+    );
+}
+
+#[tokio::test]
 async fn the_connecting_snapshot_exposes_the_code_but_never_the_secret() {
     let stub = Stub::start().await;
     let dir = TempDir::new();
