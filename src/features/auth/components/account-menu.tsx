@@ -64,8 +64,13 @@ const CONTENT_CLASS =
 const RESIDUAL_SESSION =
   "Signed out on this device. Your Atlas session may stay active on the server until it expires.";
 
+// `cursor-pointer`, not the `cursor-default` a native menu would use: every row
+// carrying this class does something when clicked, and the pointer says so.
+// It is deliberately on the class the *actionable* rows share — the identity
+// header and the Organisation section are `Label`s and keep the arrow, so the
+// cursor distinguishes what you can act on from what is only being reported.
 const ITEM_CLASS =
-  "flex items-center gap-2 px-3 h-[26px] text-[11px] cursor-default outline-none " +
+  "flex items-center gap-2 px-3 h-[26px] text-[11px] cursor-pointer outline-none " +
   "text-[var(--text-secondary)] data-[highlighted]:bg-[var(--bg-hover)] " +
   "data-[highlighted]:text-[var(--text-primary)]";
 
