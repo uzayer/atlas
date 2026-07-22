@@ -61,7 +61,7 @@ export function CanvasToolbar({
   return (
     <div
       className={cn(
-        "absolute left-3 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1 p-1",
+        "absolute left-3 top-1/2 -translate-y-1/2 z-40 flex flex-col items-center gap-1 p-1",
         "rounded-xl border border-white/10 bg-[var(--bg-secondary)]/70 backdrop-blur-2xl shadow-[var(--shadow-overlay)]",
       )}
     >
