@@ -11,6 +11,7 @@ import {
   Trash2,
   RefreshCw,
   Loader2,
+  Users,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,7 @@ import { auth } from "@/features/auth/lib/auth-api";
 import { useOrgStore } from "../stores/org-store";
 import { switchOrg, deleteOrgAndData } from "../lib/org-switch";
 import { CreateOrgDialog } from "./create-org-dialog";
+import { MembersModal } from "./members-modal";
 import type { Organisation } from "../types";
 
 /** Two-letter avatar seed from an org name. */
@@ -77,9 +79,17 @@ export function OrgSwitcher() {
   // Org pending delete-confirmation (null = no dialog).
   const [confirmDelete, setConfirmDelete] = useState<Organisation | null>(null);
   const canDelete = organisations.length > 1;
+  // Members manager (server-backed, so synced orgs only).
+  const [membersOpen, setMembersOpen] = useState(false);
 
   const active =
     organisations.find((o) => o.id === activeOrganisationId) ?? organisations[0];
+  /** Members are a SERVER surface, so this needs both halves: an org that
+   *  actually exists server-side, AND a live credential to talk to it with.
+   *  Signing out does not un-sync an org — you stay in it, and every member
+   *  call would 401 — so the credential has to be checked separately. */
+  const isSyncedOrg = !!(active?.syncEnabled && active?.remoteId);
+  const canManageMembers = isSyncedOrg && signedIn;
 
   const beginRename = (id: string, currentName: string) => {
     setEditingId(id);
@@ -255,6 +265,33 @@ export function OrgSwitcher() {
               <span className="flex-1 text-left">Create organisation…</span>
             </DropdownMenu.Item>
 
+            {/* Members live on the server, so this only means anything for a
+                SYNCED org — a local-only org has no server org to manage. */}
+            {canManageMembers ? (
+              <DropdownMenu.Item
+                onSelect={() => {
+                  setOpen(false);
+                  setMembersOpen(true);
+                }}
+                className="w-full flex items-center gap-2 px-3 h-[28px] text-[11px] outline-none hover:bg-[var(--bg-active)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
+              >
+                <Users size={13} className="text-[var(--text-tertiary)] shrink-0" />
+                <span className="flex-1 text-left">Invite &amp; Manage members</span>
+              </DropdownMenu.Item>
+            ) : (
+              <div
+                title={
+                  isSyncedOrg
+                    ? "Sign in to manage members"
+                    : "Turn on sync to manage members"
+                }
+                className="w-full flex items-center gap-2 px-3 h-[28px] text-[11px] text-[var(--text-secondary)] opacity-40 cursor-not-allowed select-none shrink-0"
+              >
+                <Users size={13} className="shrink-0" />
+                <span className="flex-1 text-left">Invite &amp; Manage members</span>
+              </div>
+            )}
+
             <DropdownMenu.Separator className="my-1 h-px bg-[var(--border-default)]" />
 
             {/* Sync toggle for the ACTIVE org — in the footer (not under the org
@@ -313,6 +350,12 @@ export function OrgSwitcher() {
       </DropdownMenu.Root>
 
       <CreateOrgDialog open={createOpen} onOpenChange={setCreateOpen} />
+
+      <MembersModal
+        org={active}
+        open={membersOpen}
+        onOpenChange={setMembersOpen}
+      />
 
       <DeleteOrgDialog
         org={confirmDelete}

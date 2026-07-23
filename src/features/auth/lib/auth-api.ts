@@ -170,7 +170,71 @@ export const auth = {
    */
   deleteOrg: (remoteId: string) =>
     invoke<void>("auth_delete_org", { remoteId }),
+
+  // ── Members (ATL-36) ──────────────────────────────────────────────────────
+  // Every one of these rejects with a user-facing string; none can sign the
+  // user out (only a real 401 inside Rust does that). `orgId` is always the
+  // SERVER org id — the local org's `remoteId`, never its local `id`.
+
+  /** The org's members. */
+  listMembers: (orgId: string) =>
+    invoke<OrgMember[]>("auth_list_members", { orgId }),
+  /** Pending + past invitations. Admin-scoped: a non-admin rejects, and the
+   *  caller should render an empty invitations tab rather than an error. */
+  listInvitations: (orgId: string) =>
+    invoke<OrgInvitation[]>("auth_list_invitations", { orgId }),
+  /**
+   * Invite by email. Email delivery is deferred server-side, so the resolved
+   * `acceptUrl` is the ONLY way the invitee learns of the invite — surface it
+   * for the inviter to copy.
+   */
+  inviteMember: (orgId: string, email: string, role: Role) =>
+    invoke<OrgInvitation>("auth_invite_member", { orgId, email, role }),
+  cancelInvitation: (invitationId: string) =>
+    invoke<void>("auth_cancel_invitation", { invitationId }),
+  /** Change a member's role. Takes effect in their NEXT minted token. */
+  updateMemberRole: (orgId: string, memberId: string, role: Role) =>
+    invoke<void>("auth_update_member_role", { orgId, memberId, role }),
+  /** Remove a member. Re-broadcasts the snapshot — this can remove YOU. */
+  removeMember: (orgId: string, memberIdOrEmail: string) =>
+    invoke<void>("auth_remove_member", { orgId, memberIdOrEmail }),
 };
+
+/**
+ * One person in an organisation. Mirrors Rust `OrgMember`.
+ *
+ * `id` is the MEMBERSHIP id (what role-change and remove address); `userId`
+ * identifies the human. They are different ids and swapping them is a 400.
+ *
+ * No remote avatar URL, deliberately — see {@link AccountUser}. Rust resolves
+ * the photo to a local cache path instead, so a members list costs no requests
+ * to Google/GitHub on reopen.
+ */
+export interface OrgMember {
+  id: string;
+  userId: string;
+  name: string;
+  email: string;
+  /** `null` when the server named a role this build doesn't know — render no
+   *  label rather than guessing at someone's permissions. */
+  role: Role | null;
+  createdAt: string | null;
+  /** Absolute path to the cached photo, or `null` (no photo / fetch failed).
+   *  Both render as initials. Feed it through `convertFileSrc`. */
+  avatarPath: string | null;
+}
+
+/** A pending/past invitation. Mirrors Rust `OrgInvitation`. */
+export interface OrgInvitation {
+  id: string;
+  email: string;
+  role: Role | null;
+  status: string;
+  expiresAt: string | null;
+  /** Only present on the response to {@link auth.inviteMember} — listing
+   *  invitations does not re-issue a link. */
+  acceptUrl: string | null;
+}
 
 /** The result of {@link auth.createOrg} — mirrors Rust `CreatedOrg`. */
 export interface CreatedOrg {

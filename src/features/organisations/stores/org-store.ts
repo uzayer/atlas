@@ -26,6 +26,63 @@ function nameTaken(
   return orgs.some((o) => o.id !== exceptId && o.name.trim().toLowerCase() === norm);
 }
 
+/**
+ * Collapse local orgs that point at the SAME server org into one.
+ *
+ * Two rows for one `remoteId` is always a bug — the id is the sync key — but it
+ * could be produced by a create racing the `atlas:auth-changed` merge, and once
+ * written to `state.json` it survives restarts. So this repairs rather than
+ * merely preventing.
+ *
+ * The survivor is the active org if one of the duplicates is active (switching
+ * away from under the user would be worse than the duplicate), else the first.
+ * Workspaces and groups tagged with a dropped org are re-tagged to the survivor
+ * — dropping the org without that would strand every project inside it.
+ */
+function collapseDuplicateRemotes(
+  set: (fn: (s: OrgState) => Partial<OrgState>) => void,
+  get: () => OrgState,
+): void {
+  const { organisations, activeOrganisationId } = get();
+  const byRemote = new Map<string, Organisation[]>();
+  for (const org of organisations) {
+    if (!org.remoteId) continue;
+    const group = byRemote.get(org.remoteId);
+    if (group) group.push(org);
+    else byRemote.set(org.remoteId, [org]);
+  }
+
+  /** droppedLocalId → survivingLocalId */
+  const remap = new Map<string, string>();
+  for (const group of byRemote.values()) {
+    if (group.length < 2) continue;
+    const keep = group.find((o) => o.id === activeOrganisationId) ?? group[0];
+    for (const dup of group) {
+      if (dup.id !== keep.id) remap.set(dup.id, keep.id);
+    }
+  }
+  if (remap.size === 0) return;
+
+  // Re-tag before dropping, so nothing is briefly owned by a missing org.
+  useWorkspaceStore.setState((s) => ({
+    workspaces: s.workspaces.map((w) =>
+      w.orgId && remap.has(w.orgId) ? { ...w, orgId: remap.get(w.orgId) } : w,
+    ),
+    groups: s.groups.map((g) =>
+      g.orgId && remap.has(g.orgId) ? { ...g, orgId: remap.get(g.orgId) } : g,
+    ),
+  }));
+
+  set((s) => ({
+    organisations: s.organisations.filter((o) => !remap.has(o.id)),
+    activeOrganisationId:
+      s.activeOrganisationId && remap.has(s.activeOrganisationId)
+        ? (remap.get(s.activeOrganisationId) ?? s.activeOrganisationId)
+        : s.activeOrganisationId,
+  }));
+  scheduleAppStateSave();
+}
+
 /** Make `slug` unique within the current local org set (append -2, -3, …).
  *  The server enforces global slug uniqueness; the auth branch reconciles on
  *  link. This only prevents local collisions. */
@@ -57,14 +114,23 @@ interface OrgState {
      *  switch. */
     createOrg: (name: string, slug: string) => string | null;
     /**
-     * Create an org, server-first when signed in, so the globally-unique slug
-     * is settled BEFORE anything is committed locally (no half-created org on
-     * a duplicate handle). Signed out, it creates locally only.
+     * Create an org. When `cloud` (and signed in) it goes **server-first**, so
+     * the globally-unique slug is settled BEFORE anything is committed locally
+     * — a duplicate handle must not leave a half-created org behind.
+     *
+     * `cloud: false` creates a private, offline org: no server call, no
+     * `remoteId`, `syncEnabled: false`. It is a first-class choice, not a
+     * fallback — "Turn on sync" (`enableSync`) links it later, which is the
+     * same path a signed-out user's orgs take once they sign in.
      *
      * Rejects with the user-facing string from Rust on server failure — the
      * caller toasts it. Resolves to the new LOCAL org id.
      */
-    createOrgSynced: (name: string, slug: string) => Promise<string>;
+    createOrgSynced: (
+      name: string,
+      slug: string,
+      cloud: boolean,
+    ) => Promise<string>;
     /** Rename an org. Returns `false` (no-op) if the name is blank or already
      *  taken by ANOTHER org (case-insensitive), so no two orgs collide. */
     rename: (id: string, name: string) => boolean;
@@ -132,7 +198,7 @@ export const useOrgStore = createSelectors(
         return org.id;
       },
 
-      createOrgSynced: async (name, slug) => {
+      createOrgSynced: async (name, slug, cloud) => {
         const trimmed = name.trim();
         const handle = slugify(slug || trimmed);
         if (!trimmed) throw "Enter a name for the organisation.";
@@ -144,14 +210,37 @@ export const useOrgStore = createSelectors(
           throw `The handle “${handle}” is already used by another organisation.`;
         }
 
-        // Server FIRST when signed in: the unique index on `organization.slug`
+        // Server FIRST for a cloud org: the unique index on `organization.slug`
         // is the real guard (the pre-check is advisory and can lose a race), so
         // letting it reject before we touch local state is what keeps a failed
         // create from leaving a stray unsynced org behind.
+        //
+        // A local org never calls out at all — that is the point of it — so its
+        // handle is only checked against the other local orgs above.
         let remoteId: string | null = null;
-        if (useAuthStore.getState().snapshot.status === "signed-in") {
+        if (cloud && useAuthStore.getState().snapshot.status === "signed-in") {
           const created = await auth.createOrg(trimmed, handle);
           remoteId = created.id;
+        }
+
+        // `auth.createOrg` broadcasts a refreshed snapshot on its way back, so
+        // `mergeServerOrgs` can have ALREADY added this org while we were
+        // awaiting — nothing local carried its `remoteId` yet, and the
+        // adopt-by-name path needs an existing unlinked org, which there wasn't.
+        // Appending blindly is what produced two identical rows. Adopt instead.
+        const raced = remoteId
+          ? get().organisations.find((o) => o.remoteId === remoteId)
+          : undefined;
+        if (raced) {
+          set((s) => ({
+            organisations: s.organisations.map((o) =>
+              o.id === raced.id
+                ? { ...o, name: trimmed, slug: handle, syncEnabled: true }
+                : o,
+            ),
+          }));
+          scheduleAppStateSave();
+          return raced.id;
         }
 
         const org: Organisation = {
@@ -236,6 +325,12 @@ export const useOrgStore = createSelectors(
       setActiveOrganisation: (id) => set({ activeOrganisationId: id }),
 
       mergeServerOrgs: (serverOrgs) => {
+        // Repair first: earlier builds could append a local org for a server id
+        // that a racing merge had already added, leaving two identical rows in
+        // the switcher. Collapsing here (rather than only preventing new ones)
+        // is what cleans up state already on disk.
+        collapseDuplicateRemotes(set, get);
+
         const linked = new Set(
           get()
             .organisations.map((o) => o.remoteId)

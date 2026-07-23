@@ -22,7 +22,10 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::auth::{auth_base, AuthCore, AuthSnapshot, CreatedOrg, GrantError, Validation};
+use crate::auth::{
+    auth_base, AuthCore, AuthSnapshot, CreatedOrg, GrantError, OrgInvitation, OrgMember, Role,
+    Validation,
+};
 use crate::telemetry::TelemetryClient;
 
 /// Shown when the server rejects the stored credential. Deliberately says what
@@ -245,6 +248,111 @@ pub async fn auth_delete_org(
     core.delete_org(&remote_id)
         .await
         .map_err(|e| e.user_message())?;
+    broadcast(&app, core.snapshot());
+    Ok(())
+}
+
+// ── Organisation members (ATL-36) ───────────────────────────────────────────
+//
+// `Denied` collapses 403 and 400, and its default message names the org-CREATE
+// case ("that name or handle may already be taken"), which would be nonsense
+// here — so every member command supplies its own wording via
+// `user_message_denied`. As everywhere in this module, only a real 401 inside
+// `AuthCore` clears the credential; nothing below ever touches it.
+
+/// The org's members. Read-only: no `AppHandle`, and it broadcasts nothing.
+#[tauri::command]
+pub async fn auth_list_members(
+    org_id: String,
+    state: State<'_, AuthState>,
+) -> Result<Vec<OrgMember>, String> {
+    state
+        .core()
+        .list_members(&org_id)
+        .await
+        .map_err(|e| e.user_message_denied("You don't have access to this organisation's members."))
+}
+
+/// Pending + past invitations. Admin-scoped server-side, so a non-admin's call
+/// comes back `Denied` and the caller shows an empty tab. Read-only.
+#[tauri::command]
+pub async fn auth_list_invitations(
+    org_id: String,
+    state: State<'_, AuthState>,
+) -> Result<Vec<OrgInvitation>, String> {
+    state
+        .core()
+        .list_invitations(&org_id)
+        .await
+        .map_err(|e| e.user_message_denied("Only an admin can see this organisation's invites."))
+}
+
+/// Invite someone by email. The returned `acceptUrl` is the whole point —
+/// email delivery is deferred, so that link is the only way the invitee hears
+/// about it. Changes server state only; the snapshot holds no members, so
+/// there is nothing to broadcast.
+#[tauri::command]
+pub async fn auth_invite_member(
+    org_id: String,
+    email: String,
+    role: Role,
+    state: State<'_, AuthState>,
+) -> Result<OrgInvitation, String> {
+    state
+        .core()
+        .invite_member(&org_id, &email, role)
+        .await
+        .map_err(|e| {
+            e.user_message_denied(
+                "Couldn't invite them — you may not be an admin, or they're already in.",
+            )
+        })
+}
+
+/// Revoke a pending invitation. Broadcasts nothing (see above).
+#[tauri::command]
+pub async fn auth_cancel_invitation(
+    invitation_id: String,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    state
+        .core()
+        .cancel_invitation(&invitation_id)
+        .await
+        .map_err(|e| e.user_message_denied("Only an admin can cancel an invite."))
+}
+
+/// Change a member's role. Takes effect in their NEXT minted token — tokens
+/// already issued stay valid until they expire. Broadcasts nothing.
+#[tauri::command]
+pub async fn auth_update_member_role(
+    org_id: String,
+    member_id: String,
+    role: Role,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    state
+        .core()
+        .update_member_role(&org_id, &member_id, role)
+        .await
+        .map_err(|e| e.user_message_denied("Only an admin can change a member's role."))
+}
+
+/// Remove a member. **This one does broadcast**: it is the only member op that
+/// can change the caller's own org set (you may be removing yourself), and
+/// `remove_member` re-pulls the identity, so the account menu would otherwise
+/// keep listing an org the user just left.
+#[tauri::command]
+pub async fn auth_remove_member(
+    org_id: String,
+    member_id_or_email: String,
+    app: AppHandle,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    let core = state.core();
+    core.remove_member(&org_id, &member_id_or_email)
+        .await
+        .map_err(|e| e.user_message_denied("Only an admin can remove a member."))?;
     broadcast(&app, core.snapshot());
     Ok(())
 }

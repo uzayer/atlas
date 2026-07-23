@@ -23,6 +23,10 @@ const REGIONS = [
 ] as const;
 type RegionId = (typeof REGIONS)[number]["id"];
 
+/** Where the org lives. `local` is a real choice — private, offline, free —
+ *  not a degraded mode; "Turn on sync" promotes it later. */
+type OrgMode = "cloud" | "local";
+
 /** Availability of the typed handle. `idle` also covers "signed out", where
  *  there is no server to ask and the handle is only locally validated. */
 type SlugState =
@@ -72,9 +76,14 @@ export function CreateOrgDialog({
   /** True once the user edits the handle directly — after that it stops
    *  tracking the name (Linear does the same). */
   const [handleDirty, setHandleDirty] = useState(false);
+  /** Cloud = synced + shareable; local = private and offline. Signed out there
+   *  is no choice to make, so it is pinned to local. */
+  const [mode, setMode] = useState<OrgMode>("cloud");
   const [region, setRegion] = useState<RegionId>("us");
   const [slug, setSlug] = useState<SlugState>({ kind: "idle" });
   const [submitting, setSubmitting] = useState(false);
+
+  const cloud = mode === "cloud" && signedIn;
 
   // Reset every field when the dialog (re)opens, so a cancelled attempt never
   // leaks into the next one.
@@ -83,10 +92,11 @@ export function CreateOrgDialog({
     setName("");
     setHandle("");
     setHandleDirty(false);
+    setMode(signedIn ? "cloud" : "local");
     setRegion("us");
     setSlug({ kind: "idle" });
     setSubmitting(false);
-  }, [open]);
+  }, [open, signedIn]);
 
   // Empty name → empty handle. No placeholder value, so nothing is probed until
   // the user actually types.
@@ -97,7 +107,9 @@ export function CreateOrgDialog({
   // stays `idle` and only local validation applies at submit.
   const seq = useRef(0);
   useEffect(() => {
-    if (!open || !signedIn || submitHandle.length < MIN_HANDLE_FOR_CHECK) {
+    // A local org's handle lives only on this machine, so there is no global
+    // namespace to check it against — and nothing to spend a request on.
+    if (!open || !cloud || submitHandle.length < MIN_HANDLE_FOR_CHECK) {
       setSlug({ kind: "idle" });
       return;
     }
@@ -119,7 +131,7 @@ export function CreateOrgDialog({
         });
     }, 400);
     return () => clearTimeout(t);
-  }, [open, signedIn, submitHandle]);
+  }, [open, cloud, submitHandle]);
 
   const canSubmit =
     !submitting &&
@@ -132,7 +144,7 @@ export function CreateOrgDialog({
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      const id = await createOrgSynced(name, submitHandle);
+      const id = await createOrgSynced(name, submitHandle, cloud);
       onOpenChange(false);
       await switchOrg(id); // land the user in the org they just made
     } catch (e) {
@@ -249,23 +261,76 @@ export function CreateOrgDialog({
                 </p>
               </div>
 
-              {/* Region — pill selector. */}
+              {/* Cloud vs local. Signed out there is nothing to sync to, so
+                  cloud is unavailable rather than merely unselected. */}
               <div>
+                <span className="text-[11px] font-medium text-[var(--text-secondary)]">
+                  Type
+                </span>
+                <div className="mt-1 flex gap-1.5">
+                  {(
+                    [
+                      ["cloud", "Cloud", !signedIn],
+                      ["local", "Local", false],
+                    ] as const
+                  ).map(([id, label, isDisabled]) => {
+                    const on = mode === id;
+                    return (
+                      <button
+                        key={id}
+                        disabled={isDisabled}
+                        title={
+                          isDisabled
+                            ? "Sign in to create a cloud organisation"
+                            : undefined
+                        }
+                        onClick={() => setMode(id)}
+                        className={cn(
+                          "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                          isDisabled
+                            ? "cursor-not-allowed border-[#242424] bg-[#0C0C0C] text-[var(--text-tertiary)] opacity-40"
+                            : on
+                              ? "cursor-pointer border-[#4a4a4a] bg-[#1f1f1f] text-[var(--text-primary)]"
+                              : "cursor-pointer border-[#303030] bg-[#0C0C0C] text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1 text-[10px] text-[var(--text-tertiary)]">
+                  {cloud
+                    ? "Synced across your devices and shareable with your team."
+                    : "Private and offline. Turn on sync later to share it."}
+                </p>
+              </div>
+
+              {/* Region — pill selector. Meaningless for a local org, which
+                  never leaves this machine. */}
+              <div className={cn(!cloud && "opacity-40")}>
                 <span className="text-[11px] font-medium text-[var(--text-secondary)]">
                   Region
                 </span>
                 <div className="mt-1 flex gap-1.5">
                   {REGIONS.map((r) => {
                     const on = region === r.id;
+                    const isDisabled = r.disabled || !cloud;
                     return (
                       <button
                         key={r.id}
-                        disabled={r.disabled}
-                        title={r.disabled ? "Not available yet" : undefined}
+                        disabled={isDisabled}
+                        title={
+                          !cloud
+                            ? "A local organisation isn't hosted anywhere"
+                            : r.disabled
+                              ? "Not available yet"
+                              : undefined
+                        }
                         onClick={() => setRegion(r.id)}
                         className={cn(
                           "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
-                          r.disabled
+                          isDisabled
                             ? "cursor-not-allowed border-[#242424] bg-[#0C0C0C] text-[var(--text-tertiary)] opacity-40"
                             : on
                               ? "cursor-pointer border-[#4a4a4a] bg-[#1f1f1f] text-[var(--text-primary)]"
