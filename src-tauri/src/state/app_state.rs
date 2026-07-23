@@ -171,6 +171,36 @@ impl Default for AppState {
     }
 }
 
+/// A globally-unique handle for the auto-created "Personal" organisation.
+///
+/// Every install creates one, so a fixed `"personal"` would collide for the
+/// second person who ever turns on sync — the server's unique index on
+/// `organization.slug` would reject it, and the failure would land on a user who
+/// never chose the handle in the first place. Suffixing per-install entropy
+/// makes the first sync of a default org always succeed.
+///
+/// The entropy is a **fresh random UUID**, deliberately not the telemetry
+/// anon-id: a slug is public and leaves the machine, and the org's creation
+/// time sits right next to it, so hashing that id with a timestamp would be
+/// recomputable by anyone holding both — quietly linking an anonymous telemetry
+/// profile to a named account. Random bytes give the same uniqueness and cannot
+/// correlate to anything.
+fn default_personal_slug() -> String {
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let entropy = uuid::Uuid::new_v4();
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let digest = Sha256::digest(format!("{entropy}:{millis}").as_bytes());
+    // 5 bytes = 10 hex chars (~2^40). The handle stays typeable, and the space
+    // is far beyond anything a birthday collision reaches in practice.
+    let short: String = digest.iter().take(5).map(|b| format!("{b:02x}")).collect();
+    format!("personal-{short}")
+}
+
 impl AppState {
     /// Migrate a freshly-deserialized older payload in place. Idempotent —
     /// re-running on an already-migrated state is a no-op.
@@ -205,7 +235,7 @@ impl AppState {
             self.organisations.push(Organisation {
                 id: org_id.clone(),
                 name: "Personal".to_string(),
-                slug: "personal".to_string(),
+                slug: default_personal_slug(),
                 color: None,
                 logo: None,
                 created_at: None,
@@ -215,6 +245,20 @@ impl AppState {
             });
             self.active_organisation_id = Some(org_id);
         }
+
+        // Repair installs created before the handle carried entropy: their
+        // default org still holds the literal `"personal"`, which is exactly
+        // the collision above avoids. Safe to rewrite only while the org is
+        // UNSYNCED — once `remote_id` is set the server owns that handle and
+        // it is not ours to change. Narrowed to the untouched auto-created
+        // default (name AND slug both still the originals) so a handle the
+        // user deliberately typed is never silently swapped underneath them.
+        for org in &mut self.organisations {
+            if org.remote_id.is_none() && org.name == "Personal" && org.slug == "personal" {
+                org.slug = default_personal_slug();
+            }
+        }
+
         // Backfill org ownership on any untagged workspace/group (covers both
         // the fresh migration above and stray untagged entries).
         if let Some(default_org) = self.active_organisation_id.clone() {
