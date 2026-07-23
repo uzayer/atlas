@@ -39,6 +39,13 @@ pub struct PendingGrant {
     /// server sends it, but **deliberately never opened** — see the comment in
     /// `commands::auth::auth_sign_in`. A link that carries the code is the
     /// remote-phishing surface the copy-and-paste hand-off exists to close.
+    ///
+    /// Never read outside tests, and that is the point: the test
+    /// `the_browser_is_sent_to_the_plain_url_never_the_pre_filled_one` asserts
+    /// this differs from `approval_url()`, pinning the decision.
+    /// `allow(dead_code)` keeps that guard without the field reading as an
+    /// oversight — do NOT "fix" the warning by deleting it or by opening it.
+    #[allow(dead_code)]
     pub verification_uri_complete: String,
     pub expires_at: SystemTime,
     pub interval: Duration,
