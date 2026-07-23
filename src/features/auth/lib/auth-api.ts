@@ -144,6 +144,17 @@ export const auth = {
   createOrg: (name: string, slug: string) =>
     invoke<CreatedOrg>("auth_create_org", { name, slug }),
   /**
+   * Is an organisation handle free? — the create-form typeahead probe (§6.2).
+   *
+   * A taken handle resolves `false`; it is not an error. Only a real failure
+   * (no session, rate limit, unreachable) rejects, with a user-facing string.
+   *
+   * **Advisory only** — the server's unique index is the real guard, so
+   * {@link auth.createOrg} can still fail on a race after a `true` here.
+   */
+  checkOrgSlug: (slug: string) =>
+    invoke<boolean>("auth_check_org_slug", { slug }),
+  /**
    * Force a server re-pull of the account's organisations and re-broadcast the
    * snapshot — the manual refresh behind the org list. The merge is driven off
    * the resulting `atlas:auth-changed`, so the resolved snapshot is returned

@@ -19,6 +19,7 @@ import { useAuthStore } from "@/features/auth/stores/auth-store";
 import { auth } from "@/features/auth/lib/auth-api";
 import { useOrgStore } from "../stores/org-store";
 import { switchOrg, deleteOrgAndData } from "../lib/org-switch";
+import { CreateOrgDialog } from "./create-org-dialog";
 import type { Organisation } from "../types";
 
 /** Two-letter avatar seed from an org name. */
@@ -59,7 +60,7 @@ function OrgAvatar({ org, size = 20 }: { org: Organisation; size?: number }) {
 export function OrgSwitcher() {
   const organisations = useOrgStore.use.organisations();
   const activeOrganisationId = useOrgStore.use.activeOrganisationId();
-  const { createOrg, rename, enableSync } = useOrgStore.use.actions();
+  const { rename, enableSync } = useOrgStore.use.actions();
   const workspaces = useWorkspaceStore.use.workspaces();
   const signedIn = useAuthStore.use.snapshot().status === "signed-in";
 
@@ -68,8 +69,8 @@ export function OrgSwitcher() {
   const [refreshing, setRefreshing] = useState(false);
   // True while "Turn on sync" is creating the org server-side (spins the row).
   const [syncing, setSyncing] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
+  // Create-organisation modal (name + globally-unique handle).
+  const [createOpen, setCreateOpen] = useState(false);
   // Inline-rename state: the org id being renamed + its draft name.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -79,20 +80,6 @@ export function OrgSwitcher() {
 
   const active =
     organisations.find((o) => o.id === activeOrganisationId) ?? organisations[0];
-
-  const submitCreate = () => {
-    const name = newName.trim();
-    if (!name) return;
-    const id = createOrg(name);
-    if (!id) {
-      toast.error(`An organisation named “${name}” already exists`);
-      return;
-    }
-    setCreating(false);
-    setNewName("");
-    setOpen(false);
-    void switchOrg(id);
-  };
 
   const beginRename = (id: string, currentName: string) => {
     setEditingId(id);
@@ -130,8 +117,6 @@ export function OrgSwitcher() {
         onOpenChange={(o) => {
           setOpen(o);
           if (!o) {
-            setCreating(false);
-            setNewName("");
             setEditingId(null);
           }
         }}
@@ -257,40 +242,18 @@ export function OrgSwitcher() {
 
             <DropdownMenu.Separator className="my-1 h-px bg-[var(--border-default)]" />
 
-            {/* Create organisation — inline. */}
-            {creating ? (
-              <div
-                className="flex items-center gap-1.5 px-3 h-[34px] shrink-0"
-                onKeyDown={(e) => e.stopPropagation()}
-              >
-                <Plus size={12} className="text-[var(--text-tertiary)] shrink-0" />
-                <input
-                  autoFocus
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") submitCreate();
-                    if (e.key === "Escape") {
-                      setCreating(false);
-                      setNewName("");
-                    }
-                  }}
-                  placeholder="Organisation name…"
-                  className="flex-1 bg-transparent outline-none text-[11px] text-[var(--text-primary)] placeholder:text-[var(--text-tertiary)]"
-                />
-              </div>
-            ) : (
-              <DropdownMenu.Item
-                onSelect={(e) => {
-                  e.preventDefault();
-                  setCreating(true);
-                }}
-                className="w-full flex items-center gap-2 px-3 h-[28px] text-[11px] outline-none hover:bg-[var(--bg-active)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
-              >
-                <Plus size={13} className="text-[var(--text-tertiary)] shrink-0" />
-                <span className="flex-1 text-left">Create organisation…</span>
-              </DropdownMenu.Item>
-            )}
+            {/* Create organisation — opens the name + handle modal (the handle
+                is globally unique, so it needs a real form, not an inline input). */}
+            <DropdownMenu.Item
+              onSelect={() => {
+                setOpen(false);
+                setCreateOpen(true);
+              }}
+              className="w-full flex items-center gap-2 px-3 h-[28px] text-[11px] outline-none hover:bg-[var(--bg-active)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
+            >
+              <Plus size={13} className="text-[var(--text-tertiary)] shrink-0" />
+              <span className="flex-1 text-left">Create organisation…</span>
+            </DropdownMenu.Item>
 
             <DropdownMenu.Separator className="my-1 h-px bg-[var(--border-default)]" />
 
@@ -348,6 +311,8 @@ export function OrgSwitcher() {
           </DropdownMenu.Content>
         </DropdownMenu.Portal>
       </DropdownMenu.Root>
+
+      <CreateOrgDialog open={createOpen} onOpenChange={setCreateOpen} />
 
       <DeleteOrgDialog
         org={confirmDelete}

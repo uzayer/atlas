@@ -52,10 +52,19 @@ interface OrgState {
       organisations: Organisation[];
       activeOrganisationId: string | null;
     }) => void;
-    /** Create a new local org (unsynced). Returns its id, or `null` if an org
-     *  with that name already exists (case-insensitive; GitHub-style). Does
-     *  NOT switch. */
-    createOrg: (name: string) => string | null;
+    /** Create a new local org (unsynced) with an explicit handle. Returns its
+     *  id, or `null` if the name or slug is already used locally. Does NOT
+     *  switch. */
+    createOrg: (name: string, slug: string) => string | null;
+    /**
+     * Create an org, server-first when signed in, so the globally-unique slug
+     * is settled BEFORE anything is committed locally (no half-created org on
+     * a duplicate handle). Signed out, it creates locally only.
+     *
+     * Rejects with the user-facing string from Rust on server failure — the
+     * caller toasts it. Resolves to the new LOCAL org id.
+     */
+    createOrgSynced: (name: string, slug: string) => Promise<string>;
     /** Rename an org. Returns `false` (no-op) if the name is blank or already
      *  taken by ANOTHER org (case-insensitive), so no two orgs collide. */
     rename: (id: string, name: string) => boolean;
@@ -97,14 +106,18 @@ export const useOrgStore = createSelectors(
         });
       },
 
-      createOrg: (name) => {
+      createOrg: (name, slug) => {
         const trimmed = name.trim() || "New organisation";
-        // GitHub-style: names are globally unique (case-insensitive).
+        const handle = slugify(slug || trimmed);
+        // GitHub-style: names are globally unique (case-insensitive). The slug
+        // is what the SERVER enforces globally; locally we only stop obvious
+        // self-collisions.
         if (nameTaken(trimmed, get().organisations)) return null;
+        if (get().organisations.some((o) => o.slug === handle)) return null;
         const org: Organisation = {
           id: uuid(),
           name: trimmed,
-          slug: uniqueSlug(slugify(trimmed), get().organisations),
+          slug: handle,
           createdAt: new Date().toISOString(),
           syncEnabled: false,
         };
@@ -115,6 +128,47 @@ export const useOrgStore = createSelectors(
           kind: "org-create",
           summary: org.name,
           payload: { orgId: org.id, slug: org.slug },
+        });
+        return org.id;
+      },
+
+      createOrgSynced: async (name, slug) => {
+        const trimmed = name.trim();
+        const handle = slugify(slug || trimmed);
+        if (!trimmed) throw "Enter a name for the organisation.";
+        if (!handle) throw "Enter a handle for the organisation.";
+        if (nameTaken(trimmed, get().organisations)) {
+          throw `An organisation named “${trimmed}” already exists.`;
+        }
+        if (get().organisations.some((o) => o.slug === handle)) {
+          throw `The handle “${handle}” is already used by another organisation.`;
+        }
+
+        // Server FIRST when signed in: the unique index on `organization.slug`
+        // is the real guard (the pre-check is advisory and can lose a race), so
+        // letting it reject before we touch local state is what keeps a failed
+        // create from leaving a stray unsynced org behind.
+        let remoteId: string | null = null;
+        if (useAuthStore.getState().snapshot.status === "signed-in") {
+          const created = await auth.createOrg(trimmed, handle);
+          remoteId = created.id;
+        }
+
+        const org: Organisation = {
+          id: uuid(),
+          name: trimmed,
+          slug: handle,
+          createdAt: new Date().toISOString(),
+          syncEnabled: !!remoteId,
+          ...(remoteId ? { remoteId } : {}),
+        };
+        set((s) => ({ organisations: [...s.organisations, org] }));
+        scheduleAppStateSave();
+        logEvent({
+          source: "project",
+          kind: "org-create",
+          summary: org.name,
+          payload: { orgId: org.id, slug: org.slug, remoteId },
         });
         return org.id;
       },

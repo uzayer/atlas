@@ -192,6 +192,25 @@ pub async fn auth_create_org(
     Ok(created)
 }
 
+/// Is an organisation handle free? — the create-form typeahead probe (§6.2).
+///
+/// Advisory only: a `true` here can still lose a race against another create,
+/// so the caller must still handle [`auth_create_org`] failing. A taken slug is
+/// a plain `false`, not an error — only a real failure (no session, rate limit,
+/// unreachable) rejects, carrying the same user-facing string as everything
+/// else. Broadcasts nothing: this reads, it does not change state.
+#[tauri::command]
+pub async fn auth_check_org_slug(
+    slug: String,
+    state: State<'_, AuthState>,
+) -> Result<bool, String> {
+    state
+        .core()
+        .check_slug(&slug)
+        .await
+        .map_err(|e| e.user_message())
+}
+
 /// Force a server re-pull of the account's organisations and broadcast the
 /// refreshed snapshot — the manual "refresh" affordance behind the org list.
 ///

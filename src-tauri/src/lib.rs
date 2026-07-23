@@ -246,6 +246,7 @@ pub fn run() {
             commands::auth::auth_cancel_sign_in,
             commands::auth::auth_sign_out,
             commands::auth::auth_create_org,
+            commands::auth::auth_check_org_slug,
             commands::auth::auth_refresh,
             commands::auth::auth_delete_org,
             commands::window::window_zoom,

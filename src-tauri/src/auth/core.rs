@@ -787,6 +787,37 @@ impl AuthCore {
         Ok(created)
     }
 
+    /// `POST /organization/check-slug` — is this handle free? (API doc §6.2)
+    ///
+    /// A create-form probe, for typeahead. The auth worker normalises Better
+    /// Auth's taken-slug `400` into a uniform `200 { "available": false }`, so
+    /// any non-ok response here is a *real* failure (401 no session, 429 rate
+    /// limit) and classifies as usual — a taken slug is NOT an error.
+    ///
+    /// **Advisory only.** The unique index on `organization.slug` is the real
+    /// guard, so [`Self::create_org`] can still come back `Denied` on a race;
+    /// callers must handle that rather than trusting a `true` here.
+    pub async fn check_slug(&self, slug: &str) -> Authed<bool> {
+        #[derive(Serialize)]
+        struct SlugBody<'a> {
+            slug: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct SlugResult {
+            #[serde(default)]
+            available: bool,
+        }
+
+        let res = self
+            .authed_post("/organization/check-slug", &SlugBody { slug })
+            .await?;
+        let body: SlugResult = res
+            .json()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable slug check: {e}")))?;
+        Ok(body.available)
+    }
+
     /// `POST /organization/delete` — delete an organisation server-side.
     ///
     /// Deleting is admin-only, so a non-admin member's call comes back `Denied`
