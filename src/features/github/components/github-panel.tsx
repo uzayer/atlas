@@ -13,18 +13,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { logEvent } from "@/features/log/lib/log";
-
-interface GithubRepo {
-  name: string;
-  full_name: string;
-  description: string;
-  html_url: string;
-  clone_url: string;
-  language: string;
-  stars: number;
-  forks: number;
-  updated_at: string;
-}
+import type { GithubRepo } from "@/features/github/types";
 
 export function GithubPanel() {
   const [query, setQuery] = useState("");

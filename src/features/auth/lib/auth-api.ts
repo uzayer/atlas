@@ -131,7 +131,42 @@ export const auth = {
    * one thing the user has to be told.
    */
   signOut: () => invoke<boolean>("auth_sign_out"),
+  /**
+   * Create an organisation server-side and link it (ATL-36) — the "Turn on
+   * sync" action. Returns the server-issued id (the local org's `remoteId`) and
+   * the name it was created under; carries no credential. The refreshed snapshot
+   * that now lists the org also arrives over `atlas:auth-changed`.
+   *
+   * Rejects with a user-facing string on failure (e.g. name/handle taken,
+   * offline). A rejection here never signs the user out — only a real 401 inside
+   * Rust does, through the one path that may.
+   */
+  createOrg: (name: string, slug: string) =>
+    invoke<CreatedOrg>("auth_create_org", { name, slug }),
+  /**
+   * Force a server re-pull of the account's organisations and re-broadcast the
+   * snapshot — the manual refresh behind the org list. The merge is driven off
+   * the resulting `atlas:auth-changed`, so the resolved snapshot is returned
+   * only for callers that want it inline.
+   */
+  refresh: () => invoke<AuthSnapshot>("auth_refresh"),
+  /**
+   * Delete a synced organisation server-side (ATL-36), by its `remoteId`.
+   *
+   * Deleting is admin-only, so a member's call rejects with a user-facing
+   * string — the caller removes the org locally either way. A rejection never
+   * signs the user out; only a real 401 inside Rust does.
+   */
+  deleteOrg: (remoteId: string) =>
+    invoke<void>("auth_delete_org", { remoteId }),
 };
+
+/** The result of {@link auth.createOrg} — mirrors Rust `CreatedOrg`. */
+export interface CreatedOrg {
+  /** Server `organization.id`; becomes the local org's `remoteId`. */
+  id: string;
+  name: string;
+}
 
 /** Every auth transition, broadcast to every window. */
 export const listenAuthChanged = (

@@ -8,6 +8,9 @@ import {
   Sparkles,
   Gauge,
   Clock,
+  GitCompare,
+  Code,
+  FolderOpen,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -116,8 +119,9 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
   const chips = message.suggestions?.chips ?? [];
   const loadingChips = message.suggestions?.status === "loading";
   const [filesOpen, setFilesOpen] = useState(false);
-  const repoPath = useGitStore.use.repoPath();
-  const gitFiles = useGitStore.use.files();
+  // Git state (repoPath/files) is subscribed INSIDE `TurnFileList` (rendered
+  // only when expanded), NOT here — otherwise every mounted card in every thread
+  // re-rendered on each git-status poll, even collapsed ones.
 
   const files = summary?.files ?? [];
   const reads = files.filter((f) => f.kind === "read");
@@ -252,14 +256,7 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
           </button>
           {filesOpen && (
             <div className="border-t border-[var(--border-default)] px-3 py-1.5">
-              {files.map((f) => (
-                <FileRow
-                  key={`${f.kind}:${f.path}`}
-                  file={f}
-                  repoPath={repoPath}
-                  gitFiles={gitFiles}
-                />
-              ))}
+              <TurnFileList files={files} />
             </div>
           )}
         </div>
@@ -285,7 +282,10 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
               type="button"
               onClick={() =>
                 window.dispatchEvent(
-                  new CustomEvent("atlas:chat-send", { detail: { text: chip } }),
+                  // Stamp the ORIGIN tab id so only this chat session sends it —
+                  // the listener is a global window event and every mounted
+                  // ChatPanel hears it, so without this every session would fire.
+                  new CustomEvent("atlas:chat-send", { detail: { text: chip, tabId } }),
                 )
               }
               className={cn(
@@ -354,10 +354,26 @@ export const TurnSummaryCard = memo(function TurnSummaryCard({
   );
 });
 
+/** The expanded per-turn file list. Subscribes to git state (repoPath/files)
+ *  ITSELF and is rendered only while the card is expanded, so collapsed cards —
+ *  the vast majority in a long thread — never subscribe to git and don't
+ *  re-render on git-status polls. */
+function TurnFileList({ files }: { files: TurnFile[] }) {
+  const repoPath = useGitStore.use.repoPath();
+  const gitFiles = useGitStore.use.files();
+  return (
+    <>
+      {files.map((f) => (
+        <FileRow key={`${f.kind}:${f.path}`} file={f} repoPath={repoPath} gitFiles={gitFiles} />
+      ))}
+    </>
+  );
+}
+
 /** One file the turn touched, with per-file open actions revealed on hover
  *  (Zed/Linear style). Reads open in the editor or Finder; edits open in the
  *  git diff when the file is under source control, else the editor / Finder. */
-function FileRow({
+const FileRow = memo(function FileRow({
   file,
   repoPath,
   gitFiles,
@@ -394,19 +410,28 @@ function FileRow({
     if (repoPath && rel) openGitDiff(repoPath, rel, scEntry?.staged ?? false, null);
   };
 
+  // Clicking the path itself runs the primary action (diff when tracked, else
+  // open in the editor) — the underline-on-hover signals it's clickable.
+  const openPrimary = inSourceControl ? openInDiff : openInEditor;
+
   return (
     <div className="group flex items-center gap-2 py-0.5 text-[11px]">
       <FileStatusBadge file={file} />
-      <span className="truncate text-[var(--text-secondary)]">{file.path}</span>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); openPrimary(); }}
+        className="min-w-0 truncate text-left text-[var(--text-secondary)] underline-offset-2 transition-colors hover:text-[var(--text-primary)] hover:underline"
+      >
+        {file.path}
+      </button>
 
-      {/* Actions — hidden until the row is hovered. */}
-      <span className="ml-auto flex shrink-0 items-center gap-2.5 pl-2 opacity-0 transition-opacity group-hover:opacity-100">
-        {inSourceControl ? (
-          <FileAction label="Diff" onClick={openInDiff} />
-        ) : (
-          <FileAction label="Editor" onClick={openInEditor} />
+      {/* Actions — icons, revealed on row hover. */}
+      <span className="ml-auto flex shrink-0 items-center gap-2 pl-2 opacity-0 transition-opacity group-hover:opacity-100">
+        {inSourceControl && (
+          <FileAction icon={<GitCompare size={12} />} title="Open diff" onClick={openInDiff} />
         )}
-        <FileAction label="Finder" onClick={openInFinder} />
+        <FileAction icon={<Code size={12} />} title="Open in editor" onClick={openInEditor} />
+        <FileAction icon={<FolderOpen size={12} />} title="Reveal in Finder" onClick={openInFinder} />
       </span>
 
       {isEdit && (file.added > 0 || file.removed > 0) && (
@@ -421,20 +446,22 @@ function FileRow({
       )}
     </div>
   );
-}
+});
 
-/** A tiny text link used for a per-file open action (underline on hover). */
-function FileAction({ label, onClick }: { label: string; onClick: () => void }) {
+/** A tiny icon button for a per-file open action (Diff / Editor / Finder).
+ *  `title` provides the tooltip that the removed text label used to convey. */
+function FileAction({ icon, title, onClick }: { icon: React.ReactNode; title: string; onClick: () => void }) {
   return (
     <button
       type="button"
+      title={title}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
-      className="cursor-pointer text-[10px] text-[var(--text-tertiary)] underline-offset-2 transition-colors hover:text-[var(--text-primary)] hover:underline"
+      className="cursor-pointer text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-primary)]"
     >
-      {label}
+      {icon}
     </button>
   );
 }

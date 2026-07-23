@@ -89,6 +89,16 @@ pub enum MentionSpec {
         abs_path: String,
         has_readme: bool,
     },
+    /// Another workspace/project in the app, referenced with `@workspace:<name>`.
+    /// Hands the agent that project's absolute path so it can inspect a sibling
+    /// project without the user copy-pasting the path.
+    Workspace {
+        id: String,
+        display_name: String,
+        abs_path: String,
+        #[serde(default)]
+        org_name: Option<String>,
+    },
     Paper {
         id: String,
         display_name: String,
@@ -105,6 +115,17 @@ pub enum MentionSpec {
         session_title: String,
         content: String,
     },
+    /// A whole past agent session's transcript, referenced with
+    /// `@session:<title>`. The frontend pre-reads + formats the JSONL
+    /// transcript into `inline_body` (like `Skill`); there is no Rust read
+    /// fallback since formatting a transcript lives on the JS side.
+    PastSession {
+        id: String,
+        display_name: String,
+        session_title: String,
+        #[serde(default)]
+        inline_body: Option<String>,
+    },
 }
 
 impl MentionSpec {
@@ -117,9 +138,11 @@ impl MentionSpec {
             | MentionSpec::Skill { id, .. }
             | MentionSpec::Component { id, .. }
             | MentionSpec::Repo { id, .. }
+            | MentionSpec::Workspace { id, .. }
             | MentionSpec::Paper { id, .. }
             | MentionSpec::Branch { id, .. }
-            | MentionSpec::PastMessage { id, .. } => id,
+            | MentionSpec::PastMessage { id, .. }
+            | MentionSpec::PastSession { id, .. } => id,
         }
     }
 
@@ -136,9 +159,11 @@ impl MentionSpec {
                 ..
             } => format!("#{component_kind}:{display_name}"),
             MentionSpec::Repo { display_name, .. } => format!("@repo:{display_name}"),
+            MentionSpec::Workspace { display_name, .. } => format!("@workspace:{display_name}"),
             MentionSpec::Paper { display_name, .. } => format!("@paper:{display_name}"),
             MentionSpec::Branch { display_name, .. } => format!("@branch:{display_name}"),
             MentionSpec::PastMessage { id, .. } => format!("@msg:{id}"),
+            MentionSpec::PastSession { display_name, .. } => format!("@session:{display_name}"),
         }
     }
 }
@@ -203,6 +228,25 @@ fn render_block(m: &MentionSpec) -> Option<String> {
             "## {sf}\n\nDirectory at `{abs_path}`. Use your filesystem tools to explore.",
             sf = m.short_form()
         )),
+        MentionSpec::Workspace {
+            abs_path,
+            display_name,
+            org_name,
+            ..
+        } => {
+            let org = org_name
+                .as_deref()
+                .map(|o| format!(" (in the “{o}” organisation)"))
+                .unwrap_or_default();
+            Some(format!(
+                "## {sf}\n\nThe workspace/project **{display_name}**{org} is located at the \
+                 absolute path:\n`{abs_path}`\n\n\
+                 Use your filesystem tools to inspect it — list its tree, read the relevant \
+                 source, and apply what you find to this request. It is a SEPARATE project from \
+                 the current working directory; reference it by this absolute path.",
+                sf = m.short_form(),
+            ))
+        }
         MentionSpec::Repo {
             abs_path,
             display_name,
@@ -330,6 +374,21 @@ fn render_block(m: &MentionSpec) -> Option<String> {
             sf = m.short_form(),
             body = clip_body(content),
         )),
+        MentionSpec::PastSession {
+            session_title,
+            inline_body,
+            ..
+        } => {
+            let body = match inline_body.as_deref() {
+                Some(b) if !b.is_empty() => b,
+                _ => "(unable to read session transcript)",
+            };
+            Some(format!(
+                "## {sf} _(transcript of session {session_title})_\n\n{body}",
+                sf = m.short_form(),
+                body = clip_body(body),
+            ))
+        }
         MentionSpec::Branch { .. } => None,
     }
 }

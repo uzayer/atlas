@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::auth::{auth_base, AuthCore, AuthSnapshot, GrantError, Validation};
+use crate::auth::{auth_base, AuthCore, AuthSnapshot, CreatedOrg, GrantError, Validation};
 use crate::telemetry::TelemetryClient;
 
 /// Shown when the server rejects the stored credential. Deliberately says what
@@ -162,6 +162,72 @@ pub async fn auth_sign_out(app: AppHandle, state: State<'_, AuthState>) -> Resul
         // holding — no caveat is owed, and nothing happened worth recording.
         None => true,
     })
+}
+
+/// Create an organisation server-side and hand back its id (ATL-36).
+///
+/// The "Turn on sync" action: the frontend keeps the org local and calls this to
+/// link it, writing the returned `id` onto the local org as its `remoteId`. On
+/// success the refreshed snapshot (now listing the new org) is broadcast to every
+/// window; the returned id is what *this* window links against without waiting
+/// for that event.
+///
+/// Carries no token out — only the server id and name (see [`CreatedOrg`]).
+/// A failure is surfaced as a user-facing string; only a real 401 inside
+/// `create_org` clears the credential, and it does so through the same single
+/// path everything else does — never here.
+#[tauri::command]
+pub async fn auth_create_org(
+    name: String,
+    slug: String,
+    app: AppHandle,
+    state: State<'_, AuthState>,
+) -> Result<CreatedOrg, String> {
+    let core = state.core();
+    let created = core
+        .create_org(&name, &slug)
+        .await
+        .map_err(|e| e.user_message())?;
+    broadcast(&app, core.snapshot());
+    Ok(created)
+}
+
+/// Force a server re-pull of the account's organisations and broadcast the
+/// refreshed snapshot — the manual "refresh" affordance behind the org list.
+///
+/// Silent about failure like the launch-path refresh it reuses: a flaky pull
+/// leaves the last-known list in place rather than emptying the menu, and never
+/// touches the credential.
+#[tauri::command]
+pub async fn auth_refresh(
+    app: AppHandle,
+    state: State<'_, AuthState>,
+) -> Result<AuthSnapshot, String> {
+    let core = state.core();
+    core.refresh().await;
+    let snapshot = core.snapshot();
+    broadcast(&app, snapshot.clone());
+    Ok(snapshot)
+}
+
+/// Delete a synced organisation server-side (ATL-36).
+///
+/// Best-effort from the frontend's side: the local purge happens whether this
+/// resolves or rejects (deleting is admin-only, so a member gets a 403 here yet
+/// still wants the org gone locally). On success the refreshed snapshot — now
+/// without the org — is broadcast so no window re-merges it.
+#[tauri::command]
+pub async fn auth_delete_org(
+    remote_id: String,
+    app: AppHandle,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    let core = state.core();
+    core.delete_org(&remote_id)
+        .await
+        .map_err(|e| e.user_message())?;
+    broadcast(&app, core.snapshot());
+    Ok(())
 }
 
 /// Bring Atlas forward once approval lands, so the human does not have to hunt

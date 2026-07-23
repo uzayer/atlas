@@ -20,7 +20,6 @@ import {
   Columns2,
   Maximize2,
   Activity,
-  Sparkles,
   Network,
   BrainCircuit,
   ScrollText,
@@ -107,7 +106,7 @@ export function CommandPalette({
     });
 
   // Reveal the sidebar (toggle it on if hidden) then switch its active section.
-  const showLeft = (section: "files" | "knowledge" | "analysis" | "explore") => {
+  const showLeft = (section: "files" | "knowledge") => {
     if (!useLayoutStore.getState().leftPanel.visible) toggleLeftPanel();
     setLeftSection(section);
   };
@@ -155,8 +154,6 @@ export function CommandPalette({
       // ── Views (reveal the panel, then switch its section) ──
       { id: "view-files", label: "Show File Explorer", icon: PanelLeft, category: "View", action: () => showLeft("files") },
       { id: "view-knowledge", label: "Show Knowledge Sidebar", icon: Brain, category: "View", action: () => showLeft("knowledge") },
-      { id: "view-analysis", label: "Show Analysis", icon: Activity, category: "View", action: () => showLeft("analysis") },
-      { id: "view-explore", label: "Show Explore", icon: Sparkles, category: "View", action: () => showLeft("explore") },
       { id: "view-changes", label: "Show Source Control", icon: PanelRight, category: "View", action: () => showRight("changes") },
       { id: "view-git-graph", label: "Show Git Graph", icon: GitBranch, category: "View", action: () => showRight("git-graph") },
 

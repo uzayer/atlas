@@ -245,6 +245,9 @@ pub fn run() {
             commands::auth::auth_sign_in,
             commands::auth::auth_cancel_sign_in,
             commands::auth::auth_sign_out,
+            commands::auth::auth_create_org,
+            commands::auth::auth_refresh,
+            commands::auth::auth_delete_org,
             commands::window::window_zoom,
             commands::clipboard::clipboard_file_paths,
             commands::window::set_window_title,
@@ -269,6 +272,7 @@ pub fn run() {
             commands::fs::read_directory,
             commands::fs::read_file_content,
             commands::fs::read_file_base64,
+            commands::fs::capture_screenshot,
             commands::fs::is_text_file,
             commands::fs::file_mtime_ms,
             commands::fs::asset_allow_dir,
@@ -341,7 +345,6 @@ pub fn run() {
             commands::git_watcher::git_watch_status,
             commands::mention_search::mention_search,
             commands::mention_search::mention_cache_set_knowledge,
-            commands::mention_search::mention_cache_set_symbols,
             commands::mention_search::mention_cache_clear,
             commands::recent_files::recent_files_open_project,
             commands::recent_files::recent_files_close_project,
@@ -354,7 +357,6 @@ pub fn run() {
             commands::github::list_cloned_repos,
             commands::github::read_repo_readme,
             commands::github::delete_cloned_repo,
-            commands::analysis::analyze_project,
             // Legacy Claude-CLI subprocess commands (claude_run/stream/stop/check/version)
             // were replaced by ACP. Session-history readers below are still in use.
             commands::claude::list_claude_sessions,

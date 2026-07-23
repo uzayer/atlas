@@ -16,7 +16,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { useChatStore } from "../stores/chat-store";
 import { agents } from "../lib/agents-api";
-import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL } from "@/types/agent";
+import { CLAUDE_PERMISSION_MODE_LABEL, AGENT_LABEL, type SwitchableAgent } from "@/types/agent";
 import { AgentMark } from "@/components/agent-mark";
 import { ProviderModelPills } from "./provider-model-pills";
 import { loadCerseiEffort, loadCerseiCompress } from "../lib/cersei-model-pref";
@@ -47,9 +47,17 @@ import { CodexLoginDialog } from "./codex-login-dialog";
 import { PlanDock } from "./plan-dock";
 import { RetryPill } from "./retry-pill";
 import { ComposerAddMenu } from "./composer-add-menu";
+import type { GithubRepo } from "@/features/github/types";
 import { imageMimeFromPath } from "@/features/model-chat/lib/model-capabilities";
 import type { ImageAttachment } from "@/types/agents";
-import type { MentionFile, MentionSkill } from "../lib/mentions";
+import type {
+  MentionFile,
+  MentionSkill,
+  MentionRepo,
+  MentionPastSession,
+  PastSessionRef,
+} from "../lib/mentions";
+import { toast } from "sonner";
 import { useComposerFileDrop } from "../hooks/use-composer-file-drop";
 import { useProjectStore } from "@/features/project/stores/project-store";
 import { useClaudeSetupStore } from "@/features/claude-setup/stores/claude-setup-store";
@@ -582,6 +590,10 @@ export function MessageInput({
   const agentType = useChatStore(
     (s) => s.sessions[tabId]?.agentType ?? "claude-code"
   );
+  // `agentType` widened to a SwitchableAgent (drops "custom") for the composer
+  // sub-components (skill/session scope, agent switcher) + the label lookup.
+  const switchableAgent: SwitchableAgent =
+    agentType === "codex" ? "codex" : agentType === "cersei" ? "cersei" : "claude-code";
   // Native Cersei agent only: BYOK provider + model selection for the composer.
   const cerseiProvider = useChatStore((s) => s.sessions[tabId]?.cerseiProvider ?? "");
   const cerseiModel = useChatStore((s) => s.sessions[tabId]?.acpCurrentModel ?? "");
@@ -811,6 +823,10 @@ export function MessageInput({
   // otherwise picked images degrade to path mention chips (any agent can
   // read those off disk).
   const [stagedImages, setStagedImages] = useState<ImageAttachment[]>([]);
+  // Non-null (the repo's full_name) while a GitHub repo is cloning into
+  // `.atlas/repos`. The composer is locked for the duration so the user can't
+  // send a prompt that references a half-synced repo.
+  const [githubSyncing, setGithubSyncing] = useState<string | null>(null);
   const acpBoundKey = useChatStore((s) => {
     const sess = s.sessions[tabId];
     return sess?.acpAgentId && sess.acpSessionId
@@ -881,6 +897,151 @@ export function MessageInput({
     inputRef.current?.insertMention(skill);
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
+
+  // "+" menu → "Attach media". Same routing as the files picker, but the OS
+  // dialog is filtered to image/video extensions. Images ride along as inline
+  // base64 (when the agent supports it); video and anything unreadable become
+  // path mention chips the agent reads off disk.
+  const pickMedia = useCallback(async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        multiple: true,
+        title: "Attach media",
+        filters: [
+          {
+            name: "Media",
+            extensions: [
+              "png", "jpg", "jpeg", "gif", "webp", "heic", "bmp", "svg",
+              "mp4", "mov", "webm", "m4v", "avi", "mkv",
+            ],
+          },
+        ],
+      });
+      if (!picked) return;
+      const paths = (Array.isArray(picked) ? picked : [picked]) as string[];
+      const images: ImageAttachment[] = [];
+      const mentionPaths: string[] = [];
+      for (const p of paths) {
+        const mime = imageSupported ? imageMimeFromPath(p) : null;
+        if (mime) {
+          try {
+            const data = await invoke<string>("read_file_base64", { path: p });
+            images.push({ mimeType: mime, dataBase64: data });
+            continue;
+          } catch {
+            // Unreadable as base64 → fall through to a path mention.
+          }
+        }
+        mentionPaths.push(p);
+      }
+      if (images.length) setStagedImages((prev) => [...prev, ...images]);
+      if (mentionPaths.length) handleDropFiles(mentionPaths);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (err) {
+      console.warn("media picker failed:", err);
+    }
+  }, [imageSupported, handleDropFiles]);
+
+  // "+" menu → "Take a screenshot". Shells out to the native macOS
+  // `screencapture` CLI (region selection or whole desktop), then attaches the
+  // PNG — inline (multimodal) when the agent supports images, else as an @file
+  // chip pointing at the saved `.atlas/screenshots/…` path.
+  const handleTakeScreenshot = useCallback(async (mode: "region" | "full") => {
+    try {
+      // Let the "+" menu fully close first so it (and any dropdown) isn't caught
+      // in a whole-desktop capture.
+      await new Promise((r) => setTimeout(r, 250));
+      const proj = useProjectStore.getState().currentProject?.path ?? null;
+      const res = await invoke<{ path: string; mimeType: string; dataBase64: string } | null>(
+        "capture_screenshot",
+        { mode, projectPath: proj },
+      );
+      if (!res) return; // cancelled (Esc during region select)
+      if (imageSupported) {
+        setStagedImages((prev) => [...prev, { mimeType: res.mimeType, dataBase64: res.dataBase64 }]);
+      } else {
+        handleDropFiles([res.path]);
+      }
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (err) {
+      toast.error(
+        `Screenshot failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }, [imageSupported, handleDropFiles]);
+
+  // "+" menu → "Add from GitHub". Shorthand for the GitHub panel's search+clone:
+  // download the repo into `<project>/.atlas/repos`, lock the composer while it
+  // syncs, then drop a `@repo:` chip carrying the local path so the agent
+  // explores it (compose_prompt turns that chip into an "explore this repo"
+  // block pointing at the absolute path).
+  const handleCloneRepo = useCallback(async (repo: GithubRepo) => {
+    const proj = useProjectStore.getState().currentProject?.path;
+    if (!proj) {
+      toast.error("Open a project before cloning a repo.");
+      return;
+    }
+    setGithubSyncing(repo.full_name);
+    try {
+      const dest = await invoke<string>("clone_github_repo", {
+        projectPath: proj,
+        cloneUrl: repo.clone_url,
+        repoName: repo.full_name.replace(/\//g, "-"),
+      });
+      const folderName = dest.split("/").pop() || repo.full_name.replace(/\//g, "-");
+      const mention: MentionRepo = {
+        kind: "repo",
+        id: dest,
+        displayName: folderName,
+        absPath: dest,
+        hasReadme: false,
+      };
+      inputRef.current?.insertMention(mention);
+      // Keep the knowledge sidebar's cloned-repos list in sync (same signal the
+      // GitHub panel emits).
+      window.dispatchEvent(new Event("atlas:repo-cloned"));
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (err) {
+      toast.error(
+        `Couldn't clone ${repo.full_name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setGithubSyncing(null);
+    }
+  }, []);
+
+  // "+" menu → "Attach a session". Reference a past session's transcript; the
+  // (potentially large) body is read + formatted at send time by composePrompt.
+  const handlePickSession = useCallback((session: PastSessionRef) => {
+    const mention: MentionPastSession = {
+      kind: "past_session",
+      id: session.id,
+      displayName: session.title,
+      sessionId: session.id,
+      sessionTitle: session.title,
+      filePath: session.filePath,
+    };
+    inputRef.current?.insertMention(mention);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  // "+" menu footer → agent switcher. Mirrors the ⌥/ cycle (App.tsx) but jumps
+  // straight to the picked agent: an empty chat flips in place; a started chat
+  // clears + rebinds in the SAME tab (singleton model — the abandoned turn
+  // persists to the history sidebar).
+  const handleSwitchAgent = useCallback((next: SwitchableAgent) => {
+    const chat = useChatStore.getState();
+    const sess = chat.sessions[tabId];
+    if ((sess?.agentType ?? "claude-code") === next) return;
+    if ((sess?.messages.length ?? 0) === 0) {
+      chat.actions.switchChatAgent(tabId, next);
+    } else {
+      chat.actions.clearSession(tabId);
+      chat.actions.switchChatAgent(tabId, next);
+    }
+    window.dispatchEvent(new CustomEvent("atlas:chat-focus", { detail: { tabId } }));
+  }, [tabId]);
 
   // Clipboard images (screenshots) → staged attachments. Returning false
   // lets chat-input's default file-paste (native pasteboard → quoted paths)
@@ -1103,6 +1264,9 @@ export function MessageInput({
     // surface a confusing ACP spawn error. The banner above tells the user
     // what to do instead.
     if (disabled) return;
+    // A GitHub repo is still syncing into `.atlas/repos` — block the send so the
+    // prompt can't reference a half-cloned repo.
+    if (githubSyncing !== null) return;
     const text = inputRef.current?.getValue() ?? value;
     const trimmed = text.trim();
     if (!trimmed) {
@@ -1128,7 +1292,7 @@ export function MessageInput({
     // The value→draft sync effect will collapse the empty value into a
     // `delete s.drafts[tabId]` on the next commit, so no explicit
     // clearDraft call is needed.
-  }, [value, running, onSend, onStop, enqueueMessage, tabId, disabled, stagedImages]);
+  }, [value, running, onSend, onStop, enqueueMessage, tabId, disabled, stagedImages, githubSyncing]);
 
   const trimmed = value.trim();
   // Tri-state button:
@@ -1208,9 +1372,19 @@ export function MessageInput({
             // ready). Just dim it — no red tint — since the send button is
             // already disabled and submit()/Cmd+Enter are gated on `disabled`.
             disabled && "opacity-60 pointer-events-none",
+            // Lock the composer while a GitHub repo syncs into `.atlas/repos`.
+            githubSyncing !== null && "opacity-60 pointer-events-none",
           )}
           onFocusCapture={handleFocusCapture}
         >
+          {githubSyncing !== null && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-[var(--bg-base)]/40 backdrop-blur-[1px]">
+              <span className="flex items-center gap-2 rounded-full bg-[var(--bg-elevated)] px-3 py-1 text-[11px] font-medium text-[var(--text-secondary)] shadow">
+                <Loader2 size={12} className="animate-spin" />
+                Syncing {githubSyncing}…
+              </span>
+            </div>
+          )}
           {isDropTarget && (
             <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-[var(--accent-primary)]/8 backdrop-blur-[1px]">
               <span className="rounded-full bg-[var(--bg-elevated)] px-3 py-1 text-[11px] font-medium text-[var(--text-secondary)] shadow">
@@ -1220,24 +1394,37 @@ export function MessageInput({
           )}
           {stagedImages.length > 0 && (
             <div className="flex flex-wrap gap-2 px-3 pt-3">
-              {stagedImages.map((img, i) => (
-                <div key={i} className="relative group">
-                  <img
-                    src={`data:${img.mimeType};base64,${img.dataBase64}`}
-                    alt="attachment"
-                    className="h-14 w-14 object-cover rounded-lg border border-[var(--border-default)]"
-                  />
-                  <button
-                    onClick={() =>
-                      setStagedImages((prev) => prev.filter((_, j) => j !== i))
-                    }
-                    className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-default)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-                    title="Remove image"
-                  >
-                    <X size={9} />
-                  </button>
-                </div>
-              ))}
+              {stagedImages.map((img, i) => {
+                const src = `data:${img.mimeType};base64,${img.dataBase64}`;
+                return (
+                  <div key={i} className="relative group">
+                    <img
+                      src={src}
+                      alt="attachment"
+                      className="h-14 w-14 object-cover rounded-lg border border-[var(--border-default)]"
+                    />
+                    <button
+                      onClick={() =>
+                        setStagedImages((prev) => prev.filter((_, j) => j !== i))
+                      }
+                      className="absolute -top-1.5 -right-1.5 hidden group-hover:flex items-center justify-center w-4 h-4 rounded-full bg-[var(--bg-elevated)] border border-[var(--border-default)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                      title="Remove image"
+                    >
+                      <X size={9} />
+                    </button>
+                    {/* Zed-style hover preview — a larger floating image above the
+                        thumbnail. `pointer-events-none` so it never blocks the
+                        remove button; only shown on hover. */}
+                    <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-2 hidden group-hover:block">
+                      <img
+                        src={src}
+                        alt=""
+                        className="max-h-[320px] max-w-[400px] rounded-lg border border-[var(--border-default)] object-contain bg-[var(--bg-elevated)] shadow-[var(--shadow-overlay)]"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
           {LazyChatInput ? (
@@ -1270,18 +1457,18 @@ export function MessageInput({
           <div className="flex items-center justify-between px-2 pb-2 pt-1">
             <div className="flex items-center gap-1">
               <ComposerAddMenu
-                disabled={disabled}
+                disabled={disabled || githubSyncing !== null}
                 projectPath={useProjectStore.getState().currentProject?.path ?? null}
-                agentId={
-                  agentType === "codex"
-                    ? "codex"
-                    : agentType === "cersei"
-                      ? "cersei"
-                      : "claude-code"
-                }
+                agentId={switchableAgent}
                 imageSupported={imageSupported}
                 onAddFilesOrPhotos={() => void pickFilesOrPhotos()}
+                onAttachMedia={() => void pickMedia()}
+                onTakeScreenshot={(mode) => void handleTakeScreenshot(mode)}
                 onPickSkill={handlePickSkill}
+                onCloneRepo={(repo) => void handleCloneRepo(repo)}
+                onPickSession={handlePickSession}
+                currentAgent={switchableAgent}
+                onSwitchAgent={handleSwitchAgent}
               />
               {/* Which coding agent this chat is bound to (Claude / Codex).
                   Switch with ⌥/ (only on a fresh chat). */}
@@ -1290,13 +1477,7 @@ export function MessageInput({
                 title="Coding agent (switch with ⌥/ on a new chat)"
               >
                 <AgentMark agentType={agentType} className="!h-4 !w-4 !text-[9px] !rounded" />
-                {AGENT_LABEL[
-                  agentType === "codex"
-                    ? "codex"
-                    : agentType === "cersei"
-                      ? "cersei"
-                      : "claude-code"
-                ]}
+                {AGENT_LABEL[switchableAgent]}
               </span>
               {agentType === "claude-code" && (
               <button

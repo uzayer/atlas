@@ -30,7 +30,7 @@ mod core;
 mod store;
 
 pub use config::auth_base;
-pub use core::{AuthCore, GrantError, Validation};
+pub use core::{AuthCore, CreatedOrg, GrantError, Validation};
 pub use store::Role;
 
 use serde::Serialize;

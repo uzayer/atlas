@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::backoff::{self, Backoff};
 use super::store::{self, Role, StoredIdentity, StoredOrg, StoredSession};
@@ -149,6 +149,27 @@ impl AuthFailure {
         AuthFailure::Indeterminate {
             retry_after: None,
             reason: reason.into(),
+        }
+    }
+
+    /// A message safe to show the user for a failed authenticated *action*
+    /// (as opposed to the silent launch-path refresh). Never carries the
+    /// `reason` string — that is for logs, and only the class is user-facing.
+    pub fn user_message(&self) -> String {
+        match self {
+            AuthFailure::NoCredential => "Sign in to sync organisations.".into(),
+            AuthFailure::Rejected => {
+                "Your Atlas session ended. Sign in again to reconnect.".into()
+            }
+            // For create, the realistic Denied is a 400 duplicate slug/name; a
+            // 403 on a caller-scoped create would be a server fault. Either way
+            // retrying is pointless, so the message points at the fixable cause.
+            AuthFailure::Denied => {
+                "Couldn't sync — that organisation name or handle may already be taken.".into()
+            }
+            AuthFailure::Indeterminate { .. } => {
+                "Couldn't reach Atlas. Check your connection and try again.".into()
+            }
         }
     }
 }
@@ -680,6 +701,127 @@ impl AuthCore {
         Ok(res)
     }
 
+    /// The write sibling of [`Self::authed_get`]: a bearer-authenticated POST
+    /// carrying a JSON body, classified by the exact same rules. Split out for
+    /// the same reason — the one place a credential's fate is decided lives once,
+    /// not per endpoint. The body is never logged: it, and any error body coming
+    /// back, are the places a token could plausibly be echoed.
+    async fn authed_post(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Authed<reqwest::Response> {
+        let Some(stored) = self.stored() else {
+            return Err(AuthFailure::NoCredential);
+        };
+
+        let res = match self
+            .http
+            .post(self.url(path))
+            .bearer_auth(&stored.session_token)
+            .json(body)
+            .timeout(AUTHED_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => return Err(AuthFailure::indeterminate(redact(&e.to_string()))),
+        };
+
+        let status = res.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(AuthFailure::Rejected);
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(AuthFailure::Indeterminate {
+                retry_after: retry_after(res.headers()),
+                reason: format!("{path} failed: {status}"),
+            });
+        }
+        if !status.is_success() {
+            return Err(AuthFailure::Denied);
+        }
+        Ok(res)
+    }
+
+    /// `POST /organization/create` — create an organisation server-side and link
+    /// it to the local one that requested sync.
+    ///
+    /// The org creator becomes `admin` (API doc §6). On success the new org is
+    /// pulled into the stored identity via [`Self::refresh_identity`] so the next
+    /// snapshot carries it, and the new server id is returned — that id is the
+    /// `remoteId` the frontend writes onto the local org.
+    ///
+    /// A `Denied` here is most likely a 400 duplicate slug (the server enforces a
+    /// global unique index); the caller turns that into a user-facing message
+    /// rather than a credential action. Only a 401 (`Rejected`) is ever about the
+    /// credential.
+    pub async fn create_org(&self, name: &str, slug: &str) -> Authed<CreatedOrg> {
+        #[derive(Serialize)]
+        struct CreateBody<'a> {
+            name: &'a str,
+            slug: &'a str,
+        }
+
+        let res = self
+            .authed_post("/organization/create", &CreateBody { name, slug })
+            .await?;
+        let created: CreatedOrg = res
+            .json()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable organisation: {e}")))?;
+
+        // Fold the new org into the stored identity so the snapshot that follows
+        // this call already lists it. Best-effort — its failure never undoes the
+        // create, and the manual refresh / next launch reconciles regardless.
+        self.refresh_identity(self.stored().and_then(|s| s.identity), None)
+            .await;
+
+        Ok(created)
+    }
+
+    /// `POST /organization/delete` — delete an organisation server-side.
+    ///
+    /// Deleting is admin-only, so a non-admin member's call comes back `Denied`
+    /// (403); the frontend removes the org locally regardless (the user's
+    /// "delete locally anyway"). On success the stored list is refreshed so it
+    /// drops the org and the next snapshot's add-only merge won't re-add it.
+    ///
+    /// As everywhere in this module, only a 401 (`Rejected`) is about the
+    /// credential — a 403/404/offline delete never signs the user out.
+    pub async fn delete_org(&self, remote_id: &str) -> Authed<()> {
+        #[derive(Serialize)]
+        struct DeleteBody<'a> {
+            #[serde(rename = "organizationId")]
+            organization_id: &'a str,
+        }
+
+        self.authed_post(
+            "/organization/delete",
+            &DeleteBody {
+                organization_id: remote_id,
+            },
+        )
+        .await?;
+
+        // Drop it from the stored list so the follow-up snapshot + merge reflect
+        // the deletion. Best-effort — the local purge happens regardless.
+        self.refresh_identity(self.stored().and_then(|s| s.identity), None)
+            .await;
+
+        Ok(())
+    }
+
+    /// Force a server re-pull of profile + organisations onto the stored
+    /// credential, out of band from the launch path. Backs the manual "refresh"
+    /// affordance; the caller broadcasts the resulting snapshot.
+    pub async fn refresh(&self) {
+        if self.stored().is_some() {
+            self.refresh_identity(self.stored().and_then(|s| s.identity), None)
+            .await;
+        }
+    }
+
     /// Mint a short-TTL access JWT from the stored session token.
     pub async fn mint_access_token(&self) -> Authed<String> {
         let res = self.authed_get("/token").await?;
@@ -891,6 +1033,16 @@ struct SessionMeta {
 struct OrgEntry {
     id: String,
     name: String,
+}
+
+/// The result of [`AuthCore::create_org`] — the server-issued id (which becomes
+/// the local org's `remoteId`) and the name it was created under. Public because
+/// it is the one org shape that crosses back out to a command; carries no token
+/// or role, only what the frontend links against.
+#[derive(Serialize, Deserialize)]
+pub struct CreatedOrg {
+    pub id: String,
+    pub name: String,
 }
 
 /// The `orgs` claim — `{ organisationId: role }` — off an access token.

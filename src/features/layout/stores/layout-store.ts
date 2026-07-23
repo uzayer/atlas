@@ -43,7 +43,7 @@ interface LayoutState {
   leftPanel: {
     visible: boolean;
     width: number;
-    activeSection: "files" | "knowledge" | "analysis" | "explore";
+    activeSection: "files" | "knowledge";
     usagePanelHeight: number;
     /** Show the project "Usage" report accordion below the file tree.
      *  Toggled by the chevron in its header. */
@@ -881,7 +881,7 @@ export const useLayoutStore = createSelectors(
           // Coerce section ids that no longer belong to this panel (e.g. a
           // pre-move `state.json` with "git-graph" on the left or "analysis"
           // on the right) back to a valid default so the panel isn't blank.
-          const LEFT = ["files", "knowledge", "analysis", "explore"];
+          const LEFT = ["files", "knowledge"];
           const RIGHT = ["review-agents", "changes", "github", "git-graph"];
           if (!LEFT.includes(leftPanel.activeSection)) leftPanel.activeSection = "files";
           if (!RIGHT.includes(rightPanel.activeSection))
