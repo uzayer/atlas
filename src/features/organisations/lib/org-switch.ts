@@ -6,6 +6,9 @@ import {
   flushAppStateSave,
   scheduleAppStateSave,
 } from "@/features/project/stores/project-store";
+import { toast } from "sonner";
+import { auth } from "@/features/auth/lib/auth-api";
+import { useAuthStore } from "@/features/auth/stores/auth-store";
 import { useOrgStore } from "../stores/org-store";
 
 /** Minimum time the "Loading Organisation…" overlay stays up, so a fast switch
@@ -113,11 +116,28 @@ export async function deleteOrgAndData(id: string): Promise<boolean> {
   if (organisations.length <= 1) return false;
   if (!organisations.some((o) => o.id === id)) return false;
 
+  const target = organisations.find((o) => o.id === id);
+
   if (id === activeOrganisationId) {
     const next = organisations.find((o) => o.id !== id);
     if (!next) return false;
     await switchOrg(next.id); // teardown active set + load the next org
   }
+
+  // Synced org → delete it server-side first so the add-only merge won't
+  // re-add it. Best-effort: deleting is admin-only, so a member's call rejects
+  // (403) — we still purge locally either way (the user's "delete locally
+  // anyway"). A non-admin who stays a member on the server may see it return on
+  // the next sync; that is the accepted tradeoff. Only signed-in, only if the
+  // org was ever linked.
+  if (target?.remoteId && useAuthStore.getState().snapshot.status === "signed-in") {
+    try {
+      await auth.deleteOrg(target.remoteId);
+    } catch (e) {
+      toast.error(typeof e === "string" ? e : "Couldn't delete on the server.");
+    }
+  }
+
   // `id` is now guaranteed inactive (its workspaces are cold) → pure purge.
   const ok = useOrgStore.getState().actions.deleteOrg(id);
   if (ok) {

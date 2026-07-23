@@ -6,6 +6,9 @@ import { useWorkspaceStore } from "@/features/workspaces/stores/workspace-store"
 import { useRecentChatsStore } from "@/features/workspaces/stores/recent-chats-store";
 import type { Organisation } from "../types";
 import { slugify } from "../types";
+import { auth, type AccountOrg } from "@/features/auth/lib/auth-api";
+import { useAuthStore } from "@/features/auth/stores/auth-store";
+import { toast } from "sonner";
 
 const uuid = (): string =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -67,10 +70,15 @@ interface OrgState {
     /** Set the active org id (authoritative swap; called by org-switch). */
     setActiveOrganisation: (id: string) => void;
 
-    // --- Auth-branch seams (stubbed in phase 01) --------------------------
-    /** Opt into cloud sync for an org (Chrome-profile model). Stub: the auth
-     *  branch runs the device grant + org link + sets `syncEnabled/remoteId`. */
-    enableSync: (id: string) => void;
+    // --- Server sync (ATL-36) ---------------------------------------------
+    /** Add-only merge of the server's org list into the local one: link/add
+     *  every server org not already linked locally, keeping local-only orgs.
+     *  Fired on every signed-in snapshot whose `orgs` is known (not `null`). */
+    mergeServerOrgs: (serverOrgs: AccountOrg[]) => void;
+    /** Opt into cloud sync for an org ("Turn on sync"): create it server-side
+     *  and write the returned id onto the local org as `remoteId`. Signed out,
+     *  it starts sign-in instead. */
+    enableSync: (id: string) => Promise<void>;
     /** Invite a member. Stub until auth ships. */
     inviteMember: (orgId: string, email: string, role: string) => void;
   };
@@ -173,13 +181,88 @@ export const useOrgStore = createSelectors(
 
       setActiveOrganisation: (id) => set({ activeOrganisationId: id }),
 
-      enableSync: (id) => {
-        logEvent({
-          source: "project",
-          kind: "org-enable-sync",
-          summary: "Sync requested (auth pending)",
-          payload: { orgId: id, deferred: "auth-branch" },
-        });
+      mergeServerOrgs: (serverOrgs) => {
+        const linked = new Set(
+          get()
+            .organisations.map((o) => o.remoteId)
+            .filter((x): x is string => !!x),
+        );
+        // Build the next list immutably; `next` grows as we go so slug/name
+        // disambiguation accounts for orgs added earlier in the same pass.
+        let next = get().organisations;
+        let changed = false;
+
+        for (const s of serverOrgs) {
+          if (linked.has(s.id)) continue; // add-only: already linked, leave it
+
+          // Adopt a same-named, still-local org rather than duplicating it —
+          // covers an org created offline that later arrives from the server.
+          const adoptIdx = next.findIndex(
+            (o) =>
+              !o.remoteId &&
+              o.name.trim().toLowerCase() === s.name.trim().toLowerCase(),
+          );
+          if (adoptIdx !== -1) {
+            next = next.map((o, i) =>
+              i === adoptIdx ? { ...o, remoteId: s.id, syncEnabled: true } : o,
+            );
+            linked.add(s.id);
+            changed = true;
+            continue;
+          }
+
+          next = [
+            ...next,
+            {
+              id: uuid(),
+              name: s.name,
+              slug: uniqueSlug(slugify(s.name), next),
+              createdAt: new Date().toISOString(),
+              syncEnabled: true,
+              remoteId: s.id,
+            },
+          ];
+          linked.add(s.id);
+          changed = true;
+        }
+
+        if (!changed) return;
+        set({ organisations: next });
+        scheduleAppStateSave();
+      },
+
+      enableSync: async (id) => {
+        const org = get().organisations.find((o) => o.id === id);
+        if (!org) return;
+        if (org.remoteId && org.syncEnabled) return; // already linked
+
+        // No credential → send them through sign-in; syncing needs one, and the
+        // sign-in that follows re-merges the server list anyway.
+        if (useAuthStore.getState().snapshot.status !== "signed-in") {
+          void useAuthStore.getState().actions.beginSignIn();
+          return;
+        }
+
+        try {
+          const { id: remoteId } = await auth.createOrg(org.name, org.slug);
+          // Set `remoteId` from the command's own result, before the follow-up
+          // `atlas:auth-changed` broadcast lands — that is what stops
+          // `mergeServerOrgs` from re-adding this org (it matches on remoteId).
+          set((s) => ({
+            organisations: s.organisations.map((o) =>
+              o.id === id ? { ...o, remoteId, syncEnabled: true } : o,
+            ),
+          }));
+          scheduleAppStateSave();
+          logEvent({
+            source: "project",
+            kind: "org-enable-sync",
+            summary: org.name,
+            payload: { orgId: id, remoteId },
+          });
+        } catch (e) {
+          toast.error(typeof e === "string" ? e : "Couldn't sync organisation.");
+        }
       },
 
       inviteMember: (orgId, email, role) => {

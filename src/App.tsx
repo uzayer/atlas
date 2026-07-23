@@ -54,6 +54,7 @@ import { useNotificationsStore } from "@/features/notifications/stores/notificat
 import { NotificationPanel } from "@/features/notifications/components/notification-panel";
 import { UpdateAvailableModal } from "@/features/updater/components/update-available-modal";
 import { LoadingOrganisationOverlay } from "@/features/organisations/components/loading-organisation-overlay";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
 import { useUpdaterStore } from "@/features/updater/stores/updater-store";
 import {
   updater,
@@ -181,7 +182,15 @@ export function App() {
   useEffect(() => {
     const a = useAuthStore.getState().actions;
     const offs: Array<Promise<() => void>> = [
-      listenAuthChanged((snapshot) => a.setSnapshot(snapshot)),
+      listenAuthChanged((snapshot) => {
+        a.setSnapshot(snapshot);
+        // Add-only merge of the server's org list into the local switcher.
+        // Guarded on `orgs !== null` (three-state): `null` is "not known yet"
+        // (offline), not "no orgs", and must never touch the local list.
+        if (snapshot.status === "signed-in" && snapshot.orgs) {
+          useOrgStore.getState().actions.mergeServerOrgs(snapshot.orgs);
+        }
+      }),
       listenAuthError((e) => a.setError(e.message)),
       // A revoked or expired session arrives with nothing on screen, so the
       // only place it can land is a toast — the title bar quietly reverting to
@@ -241,6 +250,13 @@ export function App() {
           useProjectStore
             .getState()
             .actions.hydrate(payload, { skipActiveSwitch: !!cliPath });
+          // Hydration replaces the org list wholesale, so re-apply any server
+          // orgs from a snapshot that may have already arrived — otherwise a
+          // sign-in that landed before this bootstrap would be overwritten.
+          const snap = useAuthStore.getState().snapshot;
+          if (snap.status === "signed-in" && snap.orgs) {
+            useOrgStore.getState().actions.mergeServerOrgs(snap.orgs);
+          }
         });
       } catch (e) {
         console.warn("bootstrap_app_state failed; starting empty:", e);
