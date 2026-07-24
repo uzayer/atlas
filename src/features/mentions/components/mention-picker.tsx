@@ -29,6 +29,7 @@ import {
   BookOpen,
   Bot,
   FileText,
+  Boxes,
   Folder,
   FolderGit2,
   GitBranch,
@@ -59,6 +60,7 @@ import {
   useRecentFilesStore,
   type RecentFile,
 } from "@/features/chat/stores/recent-files-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
 import { ensureFileIndex } from "@/features/file-picker/lib/file-picker-api";
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -142,6 +144,10 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
     ref
   ) {
     const recentFiles = useRecentFilesStore.use.items();
+    // Workspace mentions are scoped to the active org (see `searchWorkspaces`).
+    // Subscribe so switching orgs re-runs the search and the list reflects the
+    // new org's projects even while the picker stays mounted.
+    const activeOrganisationId = useOrgStore.use.activeOrganisationId();
     const [scope, setScope] = useState<MentionKind | null>(initialScope ?? null);
     /** When scope === "past_message" and no `pastSession` is locked, the
      *  picker shows a sessions list (level 1). Once `pastSession` is set,
@@ -231,7 +237,7 @@ export const MentionPicker = forwardRef<MentionPickerHandle, MentionPickerProps>
       }
 
       return () => controller.abort();
-    }, [open, query, scope, pastSession, projectPath, agentId, excludeIds, indexNonce]);
+    }, [open, query, scope, pastSession, projectPath, agentId, excludeIds, indexNonce, activeOrganisationId]);
 
     // Reset the keyboard cursor to the top ONLY when the user changes what
     // they're looking at (query/scope/session) — NOT when results merely
@@ -824,9 +830,11 @@ function CategoryIcon({ kind }: { kind: MentionKind }) {
     case "skill":        return <Zap size={size} />;
     case "component":    return <Zap size={size} />;
     case "repo":         return <FolderGit2 size={size} />;
+    case "workspace":    return <Boxes size={size} />;
     case "paper":        return <Newspaper size={size} />;
     case "branch":       return <GitBranch size={size} />;
     case "past_message": return <MessageSquare size={size} />;
+    case "past_session": return <MessageSquare size={size} />;
   }
 }
 
@@ -853,9 +861,11 @@ function secondaryLabel(m: MentionData): string {
     case "skill":        return m.scope === "project" ? `${m.description} · project` : m.description;
     case "component":    return `${m.componentKind} · pack: ${m.pack}`;
     case "repo":         return m.hasReadme ? "cloned · README" : "cloned";
+    case "workspace":    return m.orgName ? `${m.orgName} · ${shortPath(m.absPath)}` : shortPath(m.absPath);
     case "paper":        return m.authors[0] ?? "";
     case "branch":       return m.refKind + (m.isCurrent ? " · HEAD" : "");
     case "past_message": return m.sessionTitle;
+    case "past_session": return "session transcript";
   }
 }
 
@@ -906,8 +916,10 @@ function mentionTitle(m: MentionData): string {
     case "skill":        return m.description || m.filePath;
     case "component":    return m.description || m.filePath;
     case "repo":         return m.absPath;
+    case "workspace":    return m.absPath;
     case "paper":        return m.metadataPath;
     case "branch":       return `${m.refKind} ${m.id} (${m.sha.slice(0, 7)})`;
     case "past_message": return m.content;
+    case "past_session": return m.sessionTitle;
   }
 }

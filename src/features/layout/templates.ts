@@ -1,6 +1,6 @@
 import type { TabType } from "@/lib/constants";
 
-type LeftSection = "files" | "knowledge" | "analysis" | "explore";
+type LeftSection = "files" | "knowledge";
 type RightSection = "review-agents" | "changes" | "github" | "git-graph";
 
 /** A predefined panel/split/tab arrangement applied via the layout switcher

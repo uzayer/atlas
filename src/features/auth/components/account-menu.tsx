@@ -15,8 +15,6 @@ import { KbdCombo } from "@/ui/kbd";
 import { openSettingsSection } from "@/features/settings/lib/open-settings";
 import type { SettingsSection } from "@/features/settings/stores/settings-nav-store";
 import {
-  ROLE_LABELS,
-  type AccountOrg,
   type AccountUser,
   type SignedIn,
   type SignedOut,
@@ -69,8 +67,8 @@ const RESIDUAL_SESSION =
 // `cursor-pointer`, not the `cursor-default` a native menu would use: every row
 // carrying this class does something when clicked, and the pointer says so.
 // It is deliberately on the class the *actionable* rows share — the identity
-// header and the Organisation section are `Label`s and keep the arrow, so the
-// cursor distinguishes what you can act on from what is only being reported.
+// header is a `Label` and keeps the arrow, so the cursor distinguishes what you
+// can act on from what is only being reported.
 const ITEM_CLASS =
   "flex items-center gap-2 px-3 h-[26px] text-[11px] cursor-pointer outline-none " +
   "text-[var(--text-secondary)] data-[highlighted]:bg-[var(--bg-hover)] " +
@@ -111,8 +109,6 @@ export function AccountMenu({
   const { signOut, beginSignIn } = useAuthStore.use.actions();
   const signedIn = account.status === "signed-in";
   const user = signedIn ? account.user : null;
-  const orgs = signedIn ? account.orgs : null;
-  const activeOrgId = signedIn ? account.activeOrgId : null;
 
   // Not awaited by anything on screen: the title bar has already flipped by the
   // time this promise settles, off the state event Rust emits before it touches
@@ -147,13 +143,6 @@ export function AccountMenu({
               <DropdownMenu.Separator className={SEPARATOR_CLASS} />
             </>
           )}
-          {/* Omitted entirely while the organisations are unknown — see
-              `SignedIn.orgs`. Same reasoning as the header above it. */}
-          {orgs && (
-            <Organisation
-              active={orgs.find((org) => org.id === activeOrgId) ?? null}
-            />
-          )}
           {ITEMS.map((item) => (
             <DropdownMenu.Item
               key={item.section}
@@ -187,59 +176,6 @@ export function AccountMenu({
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu.Root>
-  );
-}
-
-/**
- * Which organisation this device is acting for, and the role it carries there
- * (ATL-51).
- *
- * A `Label`, not an `Item`: this section is read-only, and rendering it as an
- * item would make it focusable, highlightable, and reachable by type-ahead —
- * every affordance of something you can act on, for something you cannot.
- * Switching organisations is ATL-36's.
- *
- * `active` is `null` for a user who belongs to none. That is a real answer and
- * gets a plain sentence, not a blank row or a spinner: nothing is loading, and
- * nothing is wrong.
- *
- * No plan or tier badge, deliberately. The mockup had one; the server has no
- * billing, subscription, or plan concept anywhere, so a hardcoded "Free" would
- * be untrue from the first commit and would quietly stay untrue after billing
- * ships.
- */
-function Organisation({ active }: { active: AccountOrg | null }) {
-  return (
-    <>
-      <DropdownMenu.Label className="px-3 pt-1 pb-1.5">
-        {/* Same caption shape as the provider picker's section labels, so
-            dropdown sections read alike across the app. */}
-        <div className="text-[9px] uppercase tracking-wider text-[var(--text-tertiary)]">
-          Organisation
-        </div>
-        {active ? (
-          // Name and role on one row, mirroring the shortcut rows below: the
-          // name takes the space and truncates, the role never wraps.
-          <div className="mt-0.5 flex items-baseline gap-2">
-            <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--text-primary)]">
-              {active.name}
-            </span>
-            {/* Absent when the claim named no role, or one this build does not
-                know — the organisation is still real, so it is still shown. */}
-            {active.role && (
-              <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">
-                {ROLE_LABELS[active.role]}
-              </span>
-            )}
-          </div>
-        ) : (
-          <div className="mt-0.5 text-[11px] text-[var(--text-tertiary)]">
-            No organisation
-          </div>
-        )}
-      </DropdownMenu.Label>
-      <DropdownMenu.Separator className={SEPARATOR_CLASS} />
-    </>
   );
 }
 

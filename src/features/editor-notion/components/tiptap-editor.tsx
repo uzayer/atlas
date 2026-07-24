@@ -92,6 +92,12 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
     const editor = useEditor({
       extensions,
       editable,
+      // Defer the first view render out of React's render pass. Otherwise
+      // tiptap mounts our ReactNodeViewRenderer nodes (code-block/toggle/
+      // callout) synchronously during render, and each one calls flushSync
+      // mid-commit → "flushSync was called from inside a lifecycle" warning
+      // storm + jank when a KB tab with those blocks is revealed on switch.
+      immediatelyRender: false,
       // Open notes without focus so the suggestion plugin can't
       // activate from a cursor that landed near an `@` chip. User has
       // to click into the editor to focus + reposition the caret.
@@ -100,14 +106,22 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
       onCreate: ({ editor }) => {
         // Stamp the id so onUpdate knows which entry to cache against.
         loadedIdRef.current = documentId;
-        // First-mount rehydration: tiptap-markdown parsed bare
-        // `@kind:id` text as plain text; re-wrap it back into atomic
-        // Mention nodes so the suggestion plugin doesn't fire on them.
         swappingRef.current = true;
-        rehydrateMentions(editor);
-        cacheCurrentDoc(editor, documentId);
-        queueMicrotask(() => { swappingRef.current = false; });
-        queueMicrotask(() => setViewReady(true));
+        // Defer to a microtask: onCreate runs inside tiptap's mount effect,
+        // so dispatching `rehydrateMentions`'s transaction here would mount
+        // Mention/NodeView nodes mid-commit → flushSync-in-render warning.
+        // The microtask runs before paint, so there's no visible flash of
+        // raw `@kind:id` text.
+        queueMicrotask(() => {
+          if (editor.isDestroyed) return;
+          // Re-wrap bare `@kind:id` text (tiptap-markdown parsed it as plain
+          // text) back into atomic Mention nodes so the suggestion plugin
+          // doesn't fire on them.
+          rehydrateMentions(editor);
+          cacheCurrentDoc(editor, documentId);
+          swappingRef.current = false;
+          setViewReady(true);
+        });
       },
       onUpdate: ({ editor }) => {
         if (swappingRef.current) return;
@@ -143,26 +157,31 @@ export const TiptapEditor = forwardRef<TiptapEditorHandle, TiptapEditorProps>(
         cacheCurrentDoc(editor, loadedIdRef.current);
       }
       swappingRef.current = true;
-      try {
-        const cached = getCachedDoc(documentId);
-        if (cached) {
-          editor.commands.setContent(cached, { emitUpdate: false });
-        } else if (initialMarkdown && initialMarkdown.trim().length > 0) {
-          editor.commands.setContent(initialMarkdown, { emitUpdate: false });
-          rehydrateMentions(editor);
-          cacheCurrentDoc(editor, documentId);
-        } else {
-          editor.commands.setContent("", { emitUpdate: false });
-        }
-        loadedIdRef.current = documentId;
-        dirtyRef.current = false;
-      } finally {
-        // Defer until after any onUpdate microtask we may have
-        // triggered (defensive — emitUpdate:false should prevent it).
-        queueMicrotask(() => {
+      const targetId = documentId;
+      // Defer the `setContent` transaction out of this effect's commit phase.
+      // setContent mounts ReactNodeViewRenderer nodes (code-block/toggle/
+      // callout), whose renderer calls flushSync — dispatching it directly in
+      // the effect warns "flushSync was called from inside a lifecycle". The
+      // microtask runs before paint, so the swap is still visually immediate.
+      queueMicrotask(() => {
+        if (editor.isDestroyed) return;
+        try {
+          const cached = getCachedDoc(targetId);
+          if (cached) {
+            editor.commands.setContent(cached, { emitUpdate: false });
+          } else if (initialMarkdown && initialMarkdown.trim().length > 0) {
+            editor.commands.setContent(initialMarkdown, { emitUpdate: false });
+            rehydrateMentions(editor);
+            cacheCurrentDoc(editor, targetId);
+          } else {
+            editor.commands.setContent("", { emitUpdate: false });
+          }
+          loadedIdRef.current = targetId;
+          dirtyRef.current = false;
+        } finally {
           swappingRef.current = false;
-        });
-      }
+        }
+      });
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [documentId, editor]);
 

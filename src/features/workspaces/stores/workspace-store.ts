@@ -17,10 +17,21 @@ import {
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { useChatStore } from "@/features/chat/stores/chat-store";
 import { useTerminalStore } from "@/features/terminal/stores/terminal-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
 import { isWorkspaceRunning } from "../lib/agent-activity";
 
-/** Default hot-set cap — how many workspaces stay mounted/resident at once. */
-const DEFAULT_MAX_MOUNTED = 6;
+/** The active org id, used to tag newly-created workspaces/groups so they
+ *  belong to the org the user is currently in. Read lazily to avoid an
+ *  import-time dependency cycle with the org store. */
+const activeOrgId = (): string | undefined =>
+  useOrgStore.getState().activeOrganisationId ?? undefined;
+
+/** Default hot-set cap — how many workspaces stay mounted/resident at once.
+ *  Set above a typical open-project count (users commonly keep ~7) so cycling
+ *  through them doesn't LRU-evict one and force an expensive cold reload
+ *  (re-index + re-analyze) on switch-back. Raise cautiously: each resident
+ *  workspace keeps its subtree mounted. */
+const DEFAULT_MAX_MOUNTED = 8;
 
 /**
  * A single open workspace = one project + its UI-state identity. `id` is the
@@ -33,6 +44,13 @@ export interface Workspace {
   name: string;
   path: string;
   groupId: string | null;
+  /** Owning Organisation (mirrors `app_state.rs:Workspace::org_id`). The
+   *  sidebar shows only the active org's workspaces. Legacy/undefined is
+   *  treated as belonging to the active org during the migration window. */
+  orgId?: string;
+  /** Optional git remote — the only field besides id/name that syncs to the
+   *  server (`workspace_refs.git_url`) for one-click clone. */
+  gitUrl?: string;
   color?: string;
   /** Pinned to the top of the sidebar + prioritized to stay in the hot set. */
   pinned?: boolean;
@@ -45,6 +63,8 @@ export interface WorkspaceGroup {
   id: string;
   name: string;
   order: number;
+  /** Owning Organisation (mirrors `Workspace.orgId`). */
+  orgId?: string;
   /** Pinned groups float to the top of the Recent tier. */
   pinned?: boolean;
 }
@@ -64,6 +84,10 @@ interface WorkspaceState {
   maxMounted: number;
   /** Cmd+. sidebar visibility. */
   sidebarOpen: boolean;
+  /** When true the workspace sidebar is DOCKED (in-flow, pushes the layout)
+   *  instead of the default OVERLAY. A user preference, persisted to
+   *  localStorage. `sidebarOpen` still gates visibility in both modes. */
+  sidebarPinned: boolean;
   /** Group whose header is currently in inline-rename mode (transient, not
    *  persisted). Lives in the store so it survives the virtualized row
    *  remounting and so a freshly-created group can open straight into rename. */
@@ -74,6 +98,11 @@ interface WorkspaceState {
   editingWorkspaceId: string | null;
   /** Guards re-entrant switches while a flush/restore is in flight. */
   switching: boolean;
+  /** OPTIMISTIC selection target — set the instant a workspace is clicked so the
+   *  switcher highlight updates immediately, before the (slow) switch completes.
+   *  The sidebar highlights `optimisticActiveId ?? activeWorkspaceId`; cleared
+   *  when the switch settles. */
+  optimisticActiveId: string | null;
   actions: {
     /** Add a workspace for `path`, or focus the existing one if `path` is
      *  already open. Returns the workspace id. Switches to it (mounts it). */
@@ -85,6 +114,15 @@ interface WorkspaceState {
     switchTo: (id: string) => Promise<void>;
     /** Flush + remove a workspace from the registry, tearing down its state. */
     closeWorkspace: (id: string) => Promise<void>;
+    /** Tear down EVERY mounted workspace + clear the active pointer, without
+     *  touching the registry. Used by the org switch: the outgoing org's whole
+     *  hot set is discarded (RAM freed, Rust watchers stopped) before the new
+     *  org's workspaces load. Does NOT flush — the caller flushes the active
+     *  workspace first (its layout mirror is the only unsaved state). */
+    teardownForOrgSwitch: () => void;
+    /** Purge every workspace + group belonging to `orgId` from the registry
+     *  (tearing down any still mounted). Used by org deletion. */
+    removeWorkspacesForOrg: (orgId: string) => void;
     /** Ensure `id` is in the hot set, evicting the LRU evictable workspace if
      *  that pushes the set over `maxMounted`. */
     ensureMounted: (id: string) => void;
@@ -110,6 +148,10 @@ interface WorkspaceState {
     unpinGroup: (id: string) => void;
     toggleSidebar: () => void;
     setSidebarOpen: (open: boolean) => void;
+    /** Toggle docked (pinned) vs overlay. Pinning also opens the sidebar so it
+     *  docks into view immediately. */
+    toggleSidebarPinned: () => void;
+    setSidebarPinned: (pinned: boolean) => void;
     /** One-shot hydration from Rust `AppState` on boot. */
     hydrate: (payload: {
       workspaces: Workspace[];
@@ -125,6 +167,11 @@ const uuid = (): string =>
     : `ws-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const nameOf = (path: string): string => path.split("/").pop() || path;
+
+/** Latest workspace id clicked while a switch was already in flight. The current
+ *  switch drains it in its `finally`, so rapid clicks coalesce to the last one
+ *  (and are never dropped) instead of being ignored by the re-entrancy guard. */
+let pendingSwitchTarget: string | null = null;
 
 /**
  * Tear a workspace OUT of the hot set: free its heavy RAM (chat history,
@@ -151,6 +198,17 @@ function teardownHot(id: string): void {
   void invoke("mention_cache_clear", { workspaceId: id }).catch(() => {});
 }
 
+const SIDEBAR_PINNED_KEY = "atlas.sidebar.pinned";
+/** Read the persisted dock preference (localStorage — a self-contained UI pref,
+ *  not part of the Rust-backed AppState). */
+function readSidebarPinned(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_PINNED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export const useWorkspaceStore = createSelectors(
   create<WorkspaceState>()((set, get) => ({
     workspaces: [],
@@ -159,7 +217,9 @@ export const useWorkspaceStore = createSelectors(
     mountedWorkspaceIds: [],
     maxMounted: DEFAULT_MAX_MOUNTED,
     sidebarOpen: false,
+    sidebarPinned: readSidebarPinned(),
     switching: false,
+    optimisticActiveId: null,
     editingGroupId: null,
     editingWorkspaceId: null,
     actions: {
@@ -174,6 +234,7 @@ export const useWorkspaceStore = createSelectors(
           name: nameOf(path),
           path,
           groupId: null,
+          orgId: activeOrgId(),
         };
         set((s) => ({ workspaces: [...s.workspaces, ws] }));
         scheduleAppStateSave();
@@ -189,6 +250,7 @@ export const useWorkspaceStore = createSelectors(
           name: nameOf(path),
           path,
           groupId: null,
+          orgId: activeOrgId(),
         };
         set((s) => ({ workspaces: [...s.workspaces, ws] }));
         scheduleAppStateSave();
@@ -247,9 +309,27 @@ export const useWorkspaceStore = createSelectors(
 
       switchTo: async (id: string) => {
         const { activeWorkspaceId, switching, workspaces } = get();
-        if (switching) return;
         const target = workspaces.find((w) => w.id === id);
         if (!target) return;
+
+        // INSTANT UI response — before any guard or heavy work:
+        //  • close the OVERLAY switcher (its slide-out animation covers the
+        //    switch's eventual load latency). When DOCKED (pinned) the sidebar
+        //    is a persistent panel, so we leave it open — closing it would make
+        //    the whole layout jump on every switch.
+        //  • optimistically highlight the selection so the clicked item updates
+        //    immediately even though the real `activeWorkspaceId` lags behind.
+        const pinnedNow = get().sidebarPinned;
+        const wasOpen = get().sidebarOpen && !pinnedNow;
+        set({ optimisticActiveId: id, ...(pinnedNow ? {} : { sidebarOpen: false }) });
+
+        // A switch already in flight → don't DROP the click; remember the latest
+        // target and run it when the current one settles (coalesce). The close +
+        // optimistic highlight above already gave instant feedback.
+        if (switching) {
+          pendingSwitchTarget = id;
+          return;
+        }
         if (id === activeWorkspaceId) {
           // Already active — make sure currentProject reflects it (covers
           // the very first switch after boot) but skip the flush dance.
@@ -257,10 +337,20 @@ export const useWorkspaceStore = createSelectors(
             name: target.name,
             path: target.path,
           });
+          set({ optimisticActiveId: null });
           return;
         }
 
         set({ switching: true });
+        // Let the panel-close + optimistic highlight PAINT (and the slide-out
+        // animation start) before the synchronous switch work seizes the main
+        // thread — otherwise React batches the close with the heavy work and the
+        // panel appears to hang. A macrotask (rAF) yields past paint; the
+        // microtask from `await flushAll` would not. Skip when the panel was
+        // already closed (keyboard/programmatic switch) — no animation to protect.
+        if (wasOpen && typeof requestAnimationFrame === "function") {
+          await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        }
         try {
           // 1) Commit the OUTGOING workspace's tab/split VIEW into the layout
           //    store (its tab subtree stays MOUNTED + hidden in CenterPanel),
@@ -333,6 +423,16 @@ export const useWorkspaceStore = createSelectors(
           });
         } finally {
           set({ switching: false });
+          // Drain a coalesced click: jump straight to the LATEST target the user
+          // selected while this switch ran. Keep the optimistic highlight on it
+          // until that switch resolves; otherwise clear it (real active id wins).
+          const next = pendingSwitchTarget;
+          pendingSwitchTarget = null;
+          if (next && next !== get().activeWorkspaceId) {
+            void get().actions.switchTo(next);
+          } else {
+            set({ optimisticActiveId: null });
+          }
         }
       },
 
@@ -372,6 +472,35 @@ export const useWorkspaceStore = createSelectors(
           }
         }
         scheduleAppStateSave();
+      },
+
+      teardownForOrgSwitch: () => {
+        const { mountedWorkspaceIds } = get();
+        for (const id of mountedWorkspaceIds) teardownHot(id);
+        set({
+          mountedWorkspaceIds: [],
+          activeWorkspaceId: null,
+          optimisticActiveId: null,
+        });
+      },
+
+      removeWorkspacesForOrg: (orgId: string) => {
+        const { workspaces, mountedWorkspaceIds } = get();
+        const removedIds = new Set(
+          workspaces.filter((w) => w.orgId === orgId).map((w) => w.id),
+        );
+        // Tear down any that are still mounted (defensive — a deleted org is
+        // normally switched away from first, so its set is already cold).
+        for (const id of mountedWorkspaceIds) {
+          if (removedIds.has(id)) teardownHot(id);
+        }
+        set((s) => ({
+          workspaces: s.workspaces.filter((w) => w.orgId !== orgId),
+          groups: s.groups.filter((g) => g.orgId !== orgId),
+          mountedWorkspaceIds: s.mountedWorkspaceIds.filter(
+            (x) => !removedIds.has(x),
+          ),
+        }));
       },
 
       setColor: (id, color) => {
@@ -419,6 +548,7 @@ export const useWorkspaceStore = createSelectors(
           id: uuid(),
           name,
           order: get().groups.length,
+          orgId: activeOrgId(),
         };
         // Open the new group straight into inline-rename so the user can name it.
         set((s) => ({ groups: [...s.groups, group], editingGroupId: group.id }));
@@ -457,6 +587,22 @@ export const useWorkspaceStore = createSelectors(
       },
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
+      toggleSidebarPinned: () =>
+        set((s) => {
+          const sidebarPinned = !s.sidebarPinned;
+          try {
+            localStorage.setItem(SIDEBAR_PINNED_KEY, sidebarPinned ? "1" : "0");
+          } catch { /* ignore */ }
+          // Pinning docks it into view immediately; unpinning leaves the
+          // (now overlay) sidebar in whatever open state it was.
+          return sidebarPinned ? { sidebarPinned, sidebarOpen: true } : { sidebarPinned };
+        }),
+      setSidebarPinned: (pinned) => {
+        try {
+          localStorage.setItem(SIDEBAR_PINNED_KEY, pinned ? "1" : "0");
+        } catch { /* ignore */ }
+        set({ sidebarPinned: pinned });
+      },
 
       hydrate: (payload) => {
         set({

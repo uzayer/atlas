@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, memo, useCallback, useEffect, useRef, useState } from "react";
 import { useChatStore } from "../stores/chat-store";
 import { appendNextStepsDirective } from "../lib/next-steps";
 import { agents, ensureAgent, CODEX_PLUGIN_ID, CERSEI_PLUGIN_ID, DEFAULT_PLUGIN_ID, codexStatus } from "../lib/agents-api";
@@ -141,6 +141,12 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   const messagesListRef = useRef<MessagesListHandle>(null);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const [jumpCount, setJumpCount] = useState(0);
+  // Stable so MessagesList's `[showJumpToBottom, newCount, onShowJumpChange]`
+  // effect doesn't re-fire on every ChatPanel render (i.e. every stream chunk).
+  const onShowJumpChange = useCallback((visible: boolean, count?: number) => {
+    setShowJumpToBottom(visible);
+    setJumpCount(count ?? 0);
+  }, []);
 
   const acpSessionId = session?.acpSessionId ?? "";
 
@@ -425,6 +431,21 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   const handleSendRef = useRef<
     ((content: string, mentions: MentionData[]) => void) | null
   >(null);
+  const handleStopRef = useRef<(() => void) | null>(null);
+  // STABLE wrappers passed to the memoized <ChatComposer> so it doesn't
+  // re-render on every ChatPanel render (i.e. every streaming chunk). The real
+  // handlers are reassigned to the refs each render, so the wrappers always call
+  // the latest logic while keeping a constant identity. This is the H1 fix:
+  // ChatPanel still re-renders per chunk, but its heavy composer subtree bails.
+  const onSendStable = useCallback(
+    (content: string, mentions: MentionData[]) => handleSendRef.current?.(content, mentions),
+    [],
+  );
+  const onStopStable = useCallback(() => handleStopRef.current?.(), []);
+  const onScrollToBottomStable = useCallback(
+    () => messagesListRef.current?.scrollToBottom(),
+    [],
+  );
   useEffect(() => {
     const cur = session?.status ?? "idle";
     const prev = prevStatusRef.current;
@@ -448,16 +469,21 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
   }, [session?.status, session?.acpSessionId, tabId]);
 
   // Suggestion chips (and other adaptive affordances) send as the next message.
+  // This is a GLOBAL window event and every mounted ChatPanel hears it, so only
+  // act when the event is addressed to THIS tab (the chip stamps its origin
+  // tabId). A tabId-less event (none today) still falls through to all, matching
+  // the prior behaviour.
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ text?: string }>).detail;
+      const detail = (e as CustomEvent<{ text?: string; tabId?: string }>).detail;
+      if (detail?.tabId != null && detail.tabId !== tabId) return;
       if (detail?.text && handleSendRef.current) {
         handleSendRef.current(detail.text, []);
       }
     };
     window.addEventListener("atlas:chat-send", handler);
     return () => window.removeEventListener("atlas:chat-send", handler);
-  }, []);
+  }, [tabId]);
 
   if (!session) return null;
 
@@ -617,6 +643,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
 
   // Keep the queue-drain effect pointing at the latest handleSend closure.
   handleSendRef.current = handleSend;
+  handleStopRef.current = handleStop;
 
   return (
     // `relative` is the positioning context for the bash-history panel, which
@@ -738,10 +765,7 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
               messages={session.messages}
               roleFilter={roleFilter}
               isStreaming={session.status === "running"}
-              onShowJumpChange={(visible, count) => {
-                setShowJumpToBottom(visible);
-                setJumpCount(count ?? 0);
-              }}
+              onShowJumpChange={onShowJumpChange}
             />
           </Suspense>
         )}
@@ -758,13 +782,13 @@ export function ChatPanel({ tabId }: ChatPanelProps) {
               ChatComposer below. */}
           <ChatComposer
             tabId={tabId}
-            onSend={handleSend}
-            onStop={handleStop}
+            onSend={onSendStable}
+            onStop={onStopStable}
             running={isBusyAgentStatus(session.status) || hasInFlightToolCalls(session)}
             stopping={!!session.stopping}
             showJumpToBottom={showJumpToBottom}
             jumpCount={jumpCount}
-            onScrollToBottom={() => messagesListRef.current?.scrollToBottom()}
+            onScrollToBottom={onScrollToBottomStable}
           />
         </div>
       </div>
@@ -856,7 +880,10 @@ function LoadingTranscriptState() {
  * hard-disables the input when Claude isn't installed/authed so we don't
  * surface confusing failures from inside the ACP spawn path.
  */
-function ChatComposer({
+// Memoized: with the parent passing stable callbacks + value props, this heavy
+// subtree (input, mode/agent pickers, attach menu) skips re-render on every
+// streaming chunk. Its own store subscriptions (drafts/modes) still update it.
+const ChatComposer = memo(function ChatComposer({
   tabId,
   onSend,
   onStop,
@@ -1023,7 +1050,7 @@ function ChatComposer({
       {isClaude && <ClaudeLoginDialog />}
     </>
   );
-}
+});
 
 const WELCOME_SUGGESTIONS = [
   { text: "Analyze this codebase", Icon: Search },

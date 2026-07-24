@@ -22,7 +22,9 @@ import {
   Search,
   Trash2,
   Pencil,
+  Copy,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   useWorkspaceStore,
   type Workspace,
@@ -37,6 +39,8 @@ import { AtlasLoader } from "@/components/atlas-loader";
 import { AgentIcons } from "@/components/agent-icons";
 import { useRecentChatsStore, type RecentChat } from "../stores/recent-chats-store";
 import { useProjectStore } from "@/features/project/stores/project-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
+import { OrgSwitcher } from "@/features/organisations/components/org-switcher";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
 import { AtlasIcon } from "@/components/atlas-icon";
 import { useFullscreen } from "@/hooks/use-fullscreen";
@@ -219,6 +223,16 @@ function WorkspaceRow({
               onSelect={() => beginRenameWorkspace(ws.id)}
               className="px-2.5 h-6 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
               <Pencil size={11} /> Rename
+            </DropdownMenu.Item>
+            <DropdownMenu.Item
+              onSelect={() => {
+                void navigator.clipboard
+                  .writeText(ws.path)
+                  .then(() => toast.success("Path copied"))
+                  .catch(() => toast.error("Couldn't copy path"));
+              }}
+              className="px-2.5 h-6 flex items-center gap-1.5 outline-none hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-default">
+              <Copy size={11} /> Copy path
             </DropdownMenu.Item>
             <DropdownMenu.Separator className="my-0.5 h-px bg-[var(--border-default)]" />
             <DropdownMenu.Sub>
@@ -403,15 +417,37 @@ type Row =
   | { kind: "chat"; chat: RecentChat; key: string };
 
 export function WorkspaceSidebar() {
-  const workspaces = useWorkspaceStore.use.workspaces();
-  const groups = useWorkspaceStore.use.groups();
+  const allWorkspaces = useWorkspaceStore.use.workspaces();
+  const allGroups = useWorkspaceStore.use.groups();
+  const activeOrganisationId = useOrgStore.use.activeOrganisationId();
+  // The sidebar shows only the ACTIVE org's workspaces/groups. A null `orgId`
+  // (transient pre-migration state) is treated as belonging to the active org.
+  const workspaces = useMemo(
+    () =>
+      allWorkspaces.filter(
+        (w) => w.orgId === activeOrganisationId || w.orgId == null,
+      ),
+    [allWorkspaces, activeOrganisationId],
+  );
+  const groups = useMemo(
+    () =>
+      allGroups.filter(
+        (g) => g.orgId === activeOrganisationId || g.orgId == null,
+      ),
+    [allGroups, activeOrganisationId],
+  );
   const activeWorkspaceId = useWorkspaceStore.use.activeWorkspaceId();
-  const { addWorkspace } = useWorkspaceStore.use.actions();
+  const optimisticActiveId = useWorkspaceStore.use.optimisticActiveId();
+  // Highlight the clicked workspace INSTANTLY (optimistic), falling back to the
+  // real active id once the switch settles.
+  const displayActiveId = optimisticActiveId ?? activeWorkspaceId;
+  const sidebarPinned = useWorkspaceStore.use.sidebarPinned();
+  const { addWorkspace, toggleSidebarPinned } = useWorkspaceStore.use.actions();
   const { addTab } = useLayoutStore.use.actions();
   const recentProjects = useProjectStore.use.recentProjects();
   const { clearRecents } = useProjectStore.use.actions();
   const recentChats = useRecentChatsStore.use.items();
-  const { clear: clearChats } = useRecentChatsStore.use.actions();
+  const { remove: removeChat } = useRecentChatsStore.use.actions();
   const runningChatKeys = useRunningChatKeys();
   const isChatRunning = useCallback(
     (c: RecentChat) =>
@@ -432,11 +468,26 @@ export function WorkspaceSidebar() {
     [groups],
   );
 
-  // Recent projects = picker recents NOT already in the registry.
-  const openPaths = useMemo(() => new Set(workspaces.map((w) => w.path)), [workspaces]);
+  // Recent projects = picker recents NOT already in the registry. Excludes
+  // projects open in ANY org (recents are global) so nothing double-lists.
+  const openPaths = useMemo(() => new Set(allWorkspaces.map((w) => w.path)), [allWorkspaces]);
   const recents = useMemo(
     () => recentProjects.filter((r) => !openPaths.has(r.path)),
     [recentProjects, openPaths],
+  );
+
+  // Chats are recorded globally (no orgId), so scope the sidebar list to the
+  // active org by keeping only chats whose project belongs to an active-org
+  // workspace. `workspaces` is already org-filtered above; a project path maps
+  // to exactly one workspace (addWorkspace dedupes by path), so this is
+  // unambiguous. Chats for projects not open in this org are hidden.
+  const orgWorkspacePaths = useMemo(
+    () => new Set(workspaces.map((w) => w.path)),
+    [workspaces],
+  );
+  const orgRecentChats = useMemo(
+    () => recentChats.filter((c) => orgWorkspacePaths.has(c.projectPath)),
+    [recentChats, orgWorkspacePaths],
   );
 
   // Section ids that currently exist (for collapse-all + the toggle button).
@@ -445,9 +496,9 @@ export function WorkspaceSidebar() {
     if (pinned.length) ids.push("sec:pinned");
     ids.push("sec:projects");
     if (recents.length) ids.push("sec:recent");
-    if (recentChats.length) ids.push("sec:chats");
+    if (orgRecentChats.length) ids.push("sec:chats");
     return ids;
-  }, [pinned.length, recents.length, recentChats.length]);
+  }, [pinned.length, recents.length, orgRecentChats.length]);
 
   // Flatten everything into one virtualized row list. Sections AND group
   // folders are collapsible; a collapsed section omits all its content rows.
@@ -471,18 +522,18 @@ export function WorkspaceSidebar() {
       out.push({ kind: "section", id: "sec:recent", label: "Recent", key: "s:recent" });
       if (!collapsed["sec:recent"]) for (const r of recents) out.push({ kind: "recent", name: r.name, path: r.path, key: `r:${r.path}` });
     }
-    if (recentChats.length) {
+    if (orgRecentChats.length) {
       out.push({ kind: "section", id: "sec:chats", label: "Chats", key: "s:chats" });
       // Active (live-running) chats float to the top of the stack; the rest keep
       // their most-recent-first order. Capacity (15) is enforced by the store.
       const ordered = [
-        ...recentChats.filter(isChatRunning),
-        ...recentChats.filter((c) => !isChatRunning(c)),
+        ...orgRecentChats.filter(isChatRunning),
+        ...orgRecentChats.filter((c) => !isChatRunning(c)),
       ];
       if (!collapsed["sec:chats"]) for (const c of ordered) out.push({ kind: "chat", chat: c, key: `c:${c.tabId}` });
     }
     return out;
-  }, [pinned, projects, sortedGroups, collapsed, recents, recentChats, isChatRunning]);
+  }, [pinned, projects, sortedGroups, collapsed, recents, orgRecentChats, isChatRunning]);
 
   // Collapse-all / expand-all: collapses every section + group, or expands all.
   const allCollapsibleIds = useMemo(
@@ -544,7 +595,14 @@ export function WorkspaceSidebar() {
     addTab({ id: type === "mission-control" ? "mission-control" : type, type, title, closable: true, dirty: false, data: {} });
 
   return (
-    <aside className="flex flex-col h-screen w-[244px] shrink-0 border-r border-[var(--border-default)] bg-[var(--panel-rail-bg)]/80 backdrop-blur-xl" data-tauri-drag-region>
+    <aside
+      // Transparent — the frosted glass (bg + `backdrop-blur-2xl`) lives on the
+      // animated OVERLAY wrapper in app-layout.tsx, not here. Putting the blur
+      // on this child would break it: the wrapper's opacity/transform isolates
+      // its own layer, leaving a descendant's backdrop-filter nothing to sample.
+      className="flex flex-col h-screen w-[244px] shrink-0 bg-transparent"
+      data-tauri-drag-region
+    >
       {/* Top bar: aligned to the titlebar height (h-[30px] + border-b) so the
        *  line under the traffic lights matches the rest of the title bar.
        *  Buttons sit right to dodge the traffic lights — but in fullscreen the
@@ -557,6 +615,18 @@ export function WorkspaceSidebar() {
         data-tauri-drag-region
       >
         <button
+          onClick={toggleSidebarPinned}
+          className={cn(
+            "p-1 rounded-full outline-none transition-colors hover:bg-[var(--bg-hover)]",
+            sidebarPinned
+              ? "text-[var(--accent-primary)]"
+              : "text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]",
+          )}
+          title={sidebarPinned ? "Unpin sidebar (float as overlay)" : "Pin sidebar (dock into layout)"}
+        >
+          {sidebarPinned ? <PinOff size={13} /> : <Pin size={13} />}
+        </button>
+        <button
           onClick={toggleAll}
           className="p-1 rounded-full text-[var(--text-tertiary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] outline-none"
           title={allCollapsed ? "Expand all" : "Collapse all"}
@@ -565,6 +635,10 @@ export function WorkspaceSidebar() {
         </button>
         <AddProjectMenu />
       </div>
+
+      {/* Organisation switcher — the top-level tenant picker. Sits below the
+       *  titlebar drag zone so it clears the traffic lights. */}
+      <OrgSwitcher />
 
       {/* Header actions. */}
       <div className="px-1.5 pb-1 shrink-0 space-y-0.5">
@@ -598,14 +672,14 @@ export function WorkspaceSidebar() {
                         row.id === "sec:recent"
                           ? { icon: <Trash2 size={11} />, title: "Clear recent projects", onClick: () => clearRecents() }
                           : row.id === "sec:chats"
-                            ? { icon: <Trash2 size={11} />, title: "Clear chats", onClick: () => clearChats() }
+                            ? { icon: <Trash2 size={11} />, title: "Clear chats", onClick: () => orgRecentChats.forEach((c) => removeChat(c.tabId)) }
                             : undefined
                       }
                     />
                   ) : row.kind === "group" ? (
                     <GroupHeaderRow group={row.group} collapsed={!!collapsed[row.group.id]} onToggle={() => toggle(row.group.id)} />
                   ) : row.kind === "ws" ? (
-                    <WorkspaceRow ws={row.ws} active={row.ws.id === activeWorkspaceId} summary={summaries[row.ws.path]} groups={groups} indented={row.indented} />
+                    <WorkspaceRow ws={row.ws} active={row.ws.id === displayActiveId} summary={summaries[row.ws.path]} groups={groups} indented={row.indented} />
                   ) : row.kind === "recent" ? (
                     <RecentProjectRow name={row.name} path={row.path} onOpen={() => void addWorkspace(row.path)} />
                   ) : (

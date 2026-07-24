@@ -10,6 +10,20 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Force the DOM-free build of `decode-named-character-reference`. Its
+      // package `browser` condition points at `index.dom.js`, which calls
+      // `document.createElement` at module scope. That module is a transitive
+      // dep of the remark/micromark markdown stack, which we run inside a Web
+      // Worker (markdown.worker.ts) — where `document` doesn't exist, so it
+      // threw `ReferenceError: Can't find variable: document`, killed the
+      // worker, and forced ALL markdown parsing onto the main thread (the
+      // fallback in markdown-cache.tsx). That congested the main thread during
+      // agent streaming + workspace switches. `index.js` is a table-based,
+      // DOM-free build with identical output.
+      "decode-named-character-reference": path.resolve(
+        __dirname,
+        "node_modules/decode-named-character-reference/index.js",
+      ),
     },
     // CRITICAL: dedupe CodeMirror + Lezer. In production the lang packages
     // (lang-json, lang-rust, …) get lazy-imported as separate chunks and
@@ -145,10 +159,19 @@ export default defineConfig(async () => ({
           if (id.includes("@tauri-apps")) {
             return "vendor-tauri";
           }
+          // Keep the heavy lazy-panel libs OUT of vendor-react. `@xyflow/react`
+          // (Canvas) and `@tiptap/react` (Knowledge) are only reached through
+          // lazy() panels, so they must land in their own lazy chunks — the old
+          // `/react/` substring match pulled them into the EAGER vendor-react
+          // chunk, loading ~500KB+ at startup and defeating those lazy boundaries.
+          if (id.includes("@xyflow")) return "vendor-xyflow";
+          if (id.includes("@tiptap")) return "vendor-tiptap";
+          // Exact package roots only — NOT a `/react/` substring (which matches
+          // @xyflow/react, @tiptap/react, react-markdown, …).
           if (
-            id.includes("/react/") ||
-            id.includes("/react-dom/") ||
-            id.includes("/scheduler/")
+            id.includes("/node_modules/react/") ||
+            id.includes("/node_modules/react-dom/") ||
+            id.includes("/node_modules/scheduler/")
           ) {
             return "vendor-react";
           }

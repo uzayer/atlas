@@ -23,7 +23,7 @@ const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platfo
 /// How credentials are obtained. All non-`Static` kinds resolve to a
 /// self-refreshing `gcp_auth::TokenProvider` built lazily on first use.
 #[derive(Clone)]
-enum VertexAuthSpec {
+pub(crate) enum VertexAuthSpec {
     /// A pre-minted bearer token (no refresh).
     Static(String),
     /// Application Default Credentials — `gcp_auth::provider()` auto-detects
@@ -46,7 +46,10 @@ pub struct AnthropicVertex {
 }
 
 impl AnthropicVertex {
-    pub fn new(
+    // Crate-internal: callers use the public `from_env()` (the only way to obtain
+    // a `VertexAuthSpec`, which is private). `pub(crate)` matches that reality and
+    // silences the `private_interfaces` warning.
+    pub(crate) fn new(
         auth_spec: VertexAuthSpec,
         project_id: impl Into<String>,
         location: impl Into<String>,
@@ -108,7 +111,6 @@ impl AnthropicVertex {
     }
 
     async fn bearer_token(&self) -> Result<String> {
-        use gcp_auth::TokenProvider;
         if let VertexAuthSpec::Static(t) = &self.auth_spec {
             return Ok(t.clone());
         }

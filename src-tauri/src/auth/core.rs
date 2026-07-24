@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::backoff::{self, Backoff};
 use super::store::{self, Role, StoredIdentity, StoredOrg, StoredSession};
@@ -39,6 +39,13 @@ pub struct PendingGrant {
     /// server sends it, but **deliberately never opened** — see the comment in
     /// `commands::auth::auth_sign_in`. A link that carries the code is the
     /// remote-phishing surface the copy-and-paste hand-off exists to close.
+    ///
+    /// Never read outside tests, and that is the point: the test
+    /// `the_browser_is_sent_to_the_plain_url_never_the_pre_filled_one` asserts
+    /// this differs from `approval_url()`, pinning the decision.
+    /// `allow(dead_code)` keeps that guard without the field reading as an
+    /// oversight — do NOT "fix" the warning by deleting it or by opening it.
+    #[allow(dead_code)]
     pub verification_uri_complete: String,
     pub expires_at: SystemTime,
     pub interval: Duration,
@@ -149,6 +156,42 @@ impl AuthFailure {
         AuthFailure::Indeterminate {
             retry_after: None,
             reason: reason.into(),
+        }
+    }
+
+    /// A message safe to show the user for a failed authenticated *action*
+    /// (as opposed to the silent launch-path refresh). Never carries the
+    /// `reason` string — that is for logs, and only the class is user-facing.
+    pub fn user_message(&self) -> String {
+        match self {
+            AuthFailure::NoCredential => "Sign in to sync organisations.".into(),
+            AuthFailure::Rejected => {
+                "Your Atlas session ended. Sign in again to reconnect.".into()
+            }
+            // For create, the realistic Denied is a 400 duplicate slug/name; a
+            // 403 on a caller-scoped create would be a server fault. Either way
+            // retrying is pointless, so the message points at the fixable cause.
+            AuthFailure::Denied => {
+                "Couldn't sync — that organisation name or handle may already be taken.".into()
+            }
+            AuthFailure::Indeterminate { .. } => {
+                "Couldn't reach Atlas. Check your connection and try again.".into()
+            }
+        }
+    }
+
+    /// [`Self::user_message`] with a caller-supplied `Denied` wording.
+    ///
+    /// `Denied` collapses 403 *and* 400, so what it means is entirely
+    /// endpoint-specific: on org create it is a taken handle, on invite-member
+    /// it is "you are not an admin" or "they are already in". The default
+    /// message names the create case, so every other caller must say its own or
+    /// it will tell people their handle is taken when they tried to remove
+    /// someone. The match stays in here so the enum need not leak to commands.
+    pub fn user_message_denied(&self, denied: &str) -> String {
+        match self {
+            AuthFailure::Denied => denied.into(),
+            other => other.user_message(),
         }
     }
 }
@@ -680,6 +723,472 @@ impl AuthCore {
         Ok(res)
     }
 
+    /// [`Self::authed_get`] with a query string, classified by the same rules.
+    ///
+    /// A separate method rather than callers interpolating into `path`, for two
+    /// reasons: an id spliced into a URL by hand is a query-injection waiting to
+    /// happen (reqwest percent-encodes here), and `reason` below logs only the
+    /// bare `path`, so a query value can never reach the log line. Both are the
+    /// same instinct as the body never being logged in `authed_post`.
+    async fn authed_get_query(
+        &self,
+        path: &str,
+        query: &impl Serialize,
+    ) -> Authed<reqwest::Response> {
+        let Some(stored) = self.stored() else {
+            return Err(AuthFailure::NoCredential);
+        };
+
+        let res = match self
+            .http
+            .get(self.url(path))
+            .query(query)
+            .bearer_auth(&stored.session_token)
+            .timeout(AUTHED_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => return Err(AuthFailure::indeterminate(redact(&e.to_string()))),
+        };
+
+        let status = res.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(AuthFailure::Rejected);
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(AuthFailure::Indeterminate {
+                retry_after: retry_after(res.headers()),
+                reason: format!("{path} failed: {status}"),
+            });
+        }
+        if !status.is_success() {
+            return Err(AuthFailure::Denied);
+        }
+        Ok(res)
+    }
+
+    /// The write sibling of [`Self::authed_get`]: a bearer-authenticated POST
+    /// carrying a JSON body, classified by the exact same rules. Split out for
+    /// the same reason — the one place a credential's fate is decided lives once,
+    /// not per endpoint. The body is never logged: it, and any error body coming
+    /// back, are the places a token could plausibly be echoed.
+    async fn authed_post(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> Authed<reqwest::Response> {
+        let Some(stored) = self.stored() else {
+            return Err(AuthFailure::NoCredential);
+        };
+
+        let res = match self
+            .http
+            .post(self.url(path))
+            .bearer_auth(&stored.session_token)
+            .json(body)
+            .timeout(AUTHED_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(res) => res,
+            Err(e) => return Err(AuthFailure::indeterminate(redact(&e.to_string()))),
+        };
+
+        let status = res.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(AuthFailure::Rejected);
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            return Err(AuthFailure::Indeterminate {
+                retry_after: retry_after(res.headers()),
+                reason: format!("{path} failed: {status}"),
+            });
+        }
+        if !status.is_success() {
+            return Err(AuthFailure::Denied);
+        }
+        Ok(res)
+    }
+
+    /// `POST /organization/create` — create an organisation server-side and link
+    /// it to the local one that requested sync.
+    ///
+    /// The org creator becomes `admin` (API doc §6). On success the new org is
+    /// pulled into the stored identity via [`Self::refresh_identity`] so the next
+    /// snapshot carries it, and the new server id is returned — that id is the
+    /// `remoteId` the frontend writes onto the local org.
+    ///
+    /// A `Denied` here is most likely a 400 duplicate slug (the server enforces a
+    /// global unique index); the caller turns that into a user-facing message
+    /// rather than a credential action. Only a 401 (`Rejected`) is ever about the
+    /// credential.
+    pub async fn create_org(&self, name: &str, slug: &str) -> Authed<CreatedOrg> {
+        #[derive(Serialize)]
+        struct CreateBody<'a> {
+            name: &'a str,
+            slug: &'a str,
+        }
+
+        let res = self
+            .authed_post("/organization/create", &CreateBody { name, slug })
+            .await?;
+        let created: CreatedOrg = res
+            .json()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable organisation: {e}")))?;
+
+        // Fold the new org into the stored identity so the snapshot that follows
+        // this call already lists it. Best-effort — its failure never undoes the
+        // create, and the manual refresh / next launch reconciles regardless.
+        self.refresh_identity(self.stored().and_then(|s| s.identity), None)
+            .await;
+
+        Ok(created)
+    }
+
+    /// `POST /organization/check-slug` — is this handle free? (API doc §6.2)
+    ///
+    /// A create-form probe, for typeahead. The auth worker normalises Better
+    /// Auth's taken-slug `400` into a uniform `200 { "available": false }`, so
+    /// any non-ok response here is a *real* failure (401 no session, 429 rate
+    /// limit) and classifies as usual — a taken slug is NOT an error.
+    ///
+    /// **Advisory only.** The unique index on `organization.slug` is the real
+    /// guard, so [`Self::create_org`] can still come back `Denied` on a race;
+    /// callers must handle that rather than trusting a `true` here.
+    pub async fn check_slug(&self, slug: &str) -> Authed<bool> {
+        #[derive(Serialize)]
+        struct SlugBody<'a> {
+            slug: &'a str,
+        }
+        #[derive(Deserialize)]
+        struct SlugResult {
+            #[serde(default)]
+            available: bool,
+        }
+
+        let res = self
+            .authed_post("/organization/check-slug", &SlugBody { slug })
+            .await?;
+        let body: SlugResult = res
+            .json()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable slug check: {e}")))?;
+        Ok(body.available)
+    }
+
+    /// `POST /organization/delete` — delete an organisation server-side.
+    ///
+    /// Deleting is admin-only, so a non-admin member's call comes back `Denied`
+    /// (403); the frontend removes the org locally regardless (the user's
+    /// "delete locally anyway"). On success the stored list is refreshed so it
+    /// drops the org and the next snapshot's add-only merge won't re-add it.
+    ///
+    /// As everywhere in this module, only a 401 (`Rejected`) is about the
+    /// credential — a 403/404/offline delete never signs the user out.
+    pub async fn delete_org(&self, remote_id: &str) -> Authed<()> {
+        #[derive(Serialize)]
+        struct DeleteBody<'a> {
+            #[serde(rename = "organizationId")]
+            organization_id: &'a str,
+        }
+
+        self.authed_post(
+            "/organization/delete",
+            &DeleteBody {
+                organization_id: remote_id,
+            },
+        )
+        .await?;
+
+        // Drop it from the stored list so the follow-up snapshot + merge reflect
+        // the deletion. Best-effort — the local purge happens regardless.
+        self.refresh_identity(self.stored().and_then(|s| s.identity), None)
+            .await;
+
+        Ok(())
+    }
+
+    /// `GET /organization/get-full-organization` — the org's members (API §6).
+    ///
+    /// The server nests the account inside each membership (`{ id, role, user:
+    /// { id, name, email } }`); that is flattened into [`OrgMember`] here rather
+    /// than in the frontend, so the shape the UI renders is the shape it gets.
+    /// The avatar URL is deliberately dropped — see [`OrgMember`].
+    pub async fn list_members(&self, org_id: &str) -> Authed<Vec<OrgMember>> {
+        #[derive(Deserialize)]
+        struct FullOrg {
+            #[serde(default)]
+            members: Vec<RawMember>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawMember {
+            id: String,
+            #[serde(default)]
+            role: Option<String>,
+            #[serde(default)]
+            created_at: Option<String>,
+            #[serde(default)]
+            user: Option<RawUser>,
+        }
+        #[derive(Deserialize)]
+        struct RawUser {
+            #[serde(default)]
+            id: String,
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            email: String,
+            /// The remote photo URL. Never leaves Rust — it is resolved to a
+            /// local cache path below.
+            #[serde(default)]
+            image: Option<String>,
+        }
+
+        let res = self
+            .authed_get_query(
+                "/organization/get-full-organization",
+                &[("organizationId", org_id)],
+            )
+            .await?;
+        let full: FullOrg = res
+            .json()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable members: {e}")))?;
+
+        // Resolve every photo to a local cache path. Bounded concurrency: a
+        // cache hit is four `stat`s, but a cold 200-person org would otherwise
+        // open 200 sockets at once. Failures are `None` and render as initials,
+        // so a slow or dead avatar host costs a face, never the members list.
+        use futures::StreamExt as _;
+        let members = futures::stream::iter(full.members)
+            .map(|m| async move {
+                let user = m.user.unwrap_or(RawUser {
+                    id: String::new(),
+                    name: String::new(),
+                    email: String::new(),
+                    image: None,
+                });
+                let avatar_path =
+                    avatar::resolve_member(&self.http, &self.dir, user.image.as_deref()).await;
+                OrgMember {
+                    id: m.id,
+                    user_id: user.id,
+                    name: user.name,
+                    email: user.email,
+                    // An unknown role string is `None`, never a guess: the row
+                    // renders without a label rather than mislabelling someone's
+                    // permissions. Same rule as `StoredOrg::role`.
+                    role: m.role.as_deref().and_then(Role::from_claim),
+                    created_at: m.created_at,
+                    avatar_path,
+                }
+            })
+            .buffered(8)
+            .collect::<Vec<_>>()
+            .await;
+
+        Ok(members)
+    }
+
+    /// `GET /organization/list-invitations` — pending + past invites (API §6).
+    ///
+    /// Admin-scoped server-side, so a non-admin gets `Denied` and the caller
+    /// shows an empty invitations tab rather than an error.
+    pub async fn list_invitations(&self, org_id: &str) -> Authed<Vec<OrgInvitation>> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawInvite {
+            id: String,
+            #[serde(default)]
+            email: String,
+            #[serde(default)]
+            role: Option<String>,
+            #[serde(default)]
+            status: Option<String>,
+            #[serde(default)]
+            expires_at: Option<String>,
+        }
+
+        let res = self
+            .authed_get_query(
+                "/organization/list-invitations",
+                &[("organizationId", org_id)],
+            )
+            .await?;
+        let raw: Vec<RawInvite> = res
+            .json()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable invitations: {e}")))?;
+
+        Ok(raw
+            .into_iter()
+            .map(|i| OrgInvitation {
+                id: i.id,
+                email: i.email,
+                role: i.role.as_deref().and_then(Role::from_claim),
+                status: i.status.unwrap_or_else(|| "pending".into()),
+                expires_at: i.expires_at,
+                // Only `/invite-member` mints an accept URL; a listed invite
+                // carries none, and inventing one from the id would be a guess
+                // at the web origin.
+                accept_url: None,
+            })
+            .collect())
+    }
+
+    /// `POST /organization/invite-member` (API §6.1).
+    ///
+    /// Email delivery is deferred server-side, so the response's `acceptUrl` is
+    /// the ONLY way the invitee ever learns of the invite — it must reach the
+    /// UI to be shared out of band. Returning it is the point of this call.
+    pub async fn invite_member(
+        &self,
+        org_id: &str,
+        email: &str,
+        role: Role,
+    ) -> Authed<OrgInvitation> {
+        #[derive(Serialize)]
+        struct InviteBody<'a> {
+            email: &'a str,
+            role: Role,
+            #[serde(rename = "organizationId")]
+            organization_id: &'a str,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawInvite {
+            id: String,
+            #[serde(default)]
+            email: String,
+            #[serde(default)]
+            role: Option<String>,
+            #[serde(default)]
+            status: Option<String>,
+            #[serde(default)]
+            expires_at: Option<String>,
+            #[serde(default)]
+            accept_url: Option<String>,
+        }
+
+        let res = self
+            .authed_post(
+                "/organization/invite-member",
+                &InviteBody {
+                    email,
+                    role,
+                    organization_id: org_id,
+                },
+            )
+            .await?;
+        let raw: RawInvite = res
+            .json()
+            .await
+            .map_err(|e| AuthFailure::indeterminate(format!("unreadable invitation: {e}")))?;
+
+        Ok(OrgInvitation {
+            id: raw.id,
+            email: if raw.email.is_empty() {
+                email.to_string()
+            } else {
+                raw.email
+            },
+            role: raw.role.as_deref().and_then(Role::from_claim).or(Some(role)),
+            status: raw.status.unwrap_or_else(|| "pending".into()),
+            expires_at: raw.expires_at,
+            accept_url: raw.accept_url,
+        })
+    }
+
+    /// `POST /organization/cancel-invitation` — revoke a pending invite.
+    pub async fn cancel_invitation(&self, invitation_id: &str) -> Authed<()> {
+        #[derive(Serialize)]
+        struct CancelBody<'a> {
+            #[serde(rename = "invitationId")]
+            invitation_id: &'a str,
+        }
+
+        self.authed_post(
+            "/organization/cancel-invitation",
+            &CancelBody { invitation_id },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `POST /organization/update-member-role` — change one member's role.
+    ///
+    /// Takes effect in the member's **next** minted token; tokens already issued
+    /// stay valid until they expire (the 10-minute TTL bound, API §6.1).
+    pub async fn update_member_role(
+        &self,
+        org_id: &str,
+        member_id: &str,
+        role: Role,
+    ) -> Authed<()> {
+        #[derive(Serialize)]
+        struct RoleBody<'a> {
+            #[serde(rename = "memberId")]
+            member_id: &'a str,
+            role: Role,
+            #[serde(rename = "organizationId")]
+            organization_id: &'a str,
+        }
+
+        self.authed_post(
+            "/organization/update-member-role",
+            &RoleBody {
+                member_id,
+                role,
+                organization_id: org_id,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `POST /organization/remove-member` — remove someone from the org.
+    ///
+    /// The one member op that can change the CALLER's own org set (you may be
+    /// removing yourself), so the stored identity is re-pulled afterwards the
+    /// way `delete_org` does — otherwise the account menu keeps listing an org
+    /// the user is no longer in. Best-effort; the removal already happened.
+    pub async fn remove_member(&self, org_id: &str, member_id_or_email: &str) -> Authed<()> {
+        #[derive(Serialize)]
+        struct RemoveBody<'a> {
+            #[serde(rename = "memberIdOrEmail")]
+            member_id_or_email: &'a str,
+            #[serde(rename = "organizationId")]
+            organization_id: &'a str,
+        }
+
+        self.authed_post(
+            "/organization/remove-member",
+            &RemoveBody {
+                member_id_or_email,
+                organization_id: org_id,
+            },
+        )
+        .await?;
+
+        self.refresh_identity(self.stored().and_then(|s| s.identity), None)
+            .await;
+
+        Ok(())
+    }
+
+    /// Force a server re-pull of profile + organisations onto the stored
+    /// credential, out of band from the launch path. Backs the manual "refresh"
+    /// affordance; the caller broadcasts the resulting snapshot.
+    pub async fn refresh(&self) {
+        if self.stored().is_some() {
+            self.refresh_identity(self.stored().and_then(|s| s.identity), None)
+            .await;
+        }
+    }
+
     /// Mint a short-TTL access JWT from the stored session token.
     pub async fn mint_access_token(&self) -> Authed<String> {
         let res = self.authed_get("/token").await?;
@@ -891,6 +1400,60 @@ struct SessionMeta {
 struct OrgEntry {
     id: String,
     name: String,
+}
+
+/// The result of [`AuthCore::create_org`] — the server-issued id (which becomes
+/// the local org's `remoteId`) and the name it was created under. Public because
+/// it is the one org shape that crosses back out to a command; carries no token
+/// or role, only what the frontend links against.
+#[derive(Serialize, Deserialize)]
+pub struct CreatedOrg {
+    pub id: String,
+    pub name: String,
+}
+
+/// One person in an organisation, as the members table renders them (ATL-36).
+///
+/// `id` is the **membership** id — what `/update-member-role` and
+/// `/remove-member` address — while `user_id` identifies the human. They are
+/// different ids and mixing them up is a 400, so both are carried explicitly.
+///
+/// Notice what is missing, for the same reason as [`AccountUser`](super::AccountUser):
+/// the remote avatar URL. Handing it over would put an `<img src>` per row
+/// requesting Google or GitHub on every open of this modal — exactly what the
+/// avatar cache exists to avoid — so the photo arrives as a **local path** that
+/// the asset protocol can serve, or `None` and the row renders initials.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgMember {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub email: String,
+    /// `None` when the server named a role this build does not know. The row
+    /// renders without a label rather than guessing at someone's permissions.
+    pub role: Option<Role>,
+    pub created_at: Option<String>,
+    /// Absolute path to the cached photo, or `None` — no photo, or the fetch
+    /// failed. Both render as initials; the UI draws no distinction.
+    pub avatar_path: Option<String>,
+}
+
+/// A pending (or past) invitation to an organisation.
+///
+/// `accept_url` is present only on the response to `/invite-member`: email
+/// delivery is deferred server-side, so that URL is the only way the invitee
+/// ever hears about it and the inviter has to be able to copy it. Listing
+/// invitations later does not re-issue one.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrgInvitation {
+    pub id: String,
+    pub email: String,
+    pub role: Option<Role>,
+    pub status: String,
+    pub expires_at: Option<String>,
+    pub accept_url: Option<String>,
 }
 
 /// The `orgs` claim — `{ organisationId: role }` — off an access token.

@@ -17,7 +17,12 @@ use tauri::{AppHandle, Manager};
 /// v2 introduced the multi-workspace model (`workspaces`/`groups`/
 /// `active_workspace_id`); `current_project` is retained only as a
 /// migration source for v1 payloads.
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// v3 introduced the Organisation layer above workspaces
+/// (`organisations`/`active_organisation_id`, plus `org_id` on each
+/// workspace/group). v2 payloads are migrated by wrapping all existing
+/// workspaces in a default local "Personal" org.
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,8 +52,17 @@ pub struct Workspace {
     pub path: String,
     #[serde(default)]
     pub group_id: Option<String>,
+    /// Owning Organisation. `None` on pre-v3 payloads — `migrate()` backfills
+    /// it to the default org. The sidebar filters workspaces by the active org.
+    #[serde(default)]
+    pub org_id: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    /// Optional git remote. The ONLY field (besides id/name) that syncs to the
+    /// server (`workspace_refs.git_url`) for one-click clone; the source tree
+    /// itself never syncs. `None` for local-only projects.
+    #[serde(default)]
+    pub git_url: Option<String>,
     /// ISO-8601 timestamp of the last time this workspace was the active
     /// one; used to order the sidebar / pick a fallback on close.
     #[serde(default)]
@@ -63,6 +77,44 @@ pub struct WorkspaceGroup {
     pub name: String,
     #[serde(default)]
     pub order: u32,
+    /// Owning Organisation (mirrors `Workspace::org_id`). `None` on pre-v3
+    /// payloads — `migrate()` backfills it to the default org.
+    #[serde(default)]
+    pub org_id: Option<String>,
+}
+
+/// A top-level tenant that owns a set of workspaces (the Linear "workspace
+/// picker" model). Exactly one org is active per window. Local-only until the
+/// user opts into sync per org (Chrome-profile model). The shape is a superset
+/// of the server `organization` row so cloud sync is a thin adapter:
+/// `{ id, name, slug, logo, metadata }` map to the server; the rest is local.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Organisation {
+    pub id: String,
+    pub name: String,
+    /// URL-safe unique handle (server enforces a global unique index). Derived
+    /// from `name` at create time; kept stable thereafter.
+    pub slug: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub logo: Option<String>,
+    /// ISO-8601 creation timestamp.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Per-org memory of the last active workspace, so an org switch restores
+    /// the user where they left off. Local-only (the server has no such notion).
+    #[serde(default)]
+    pub active_workspace_id: Option<String>,
+    /// Opt-in cloud sync flag (Chrome-profile model). `false` = local-only.
+    #[serde(default)]
+    pub sync_enabled: bool,
+    /// The server `organization.id` once this org has been linked via
+    /// "Turn on sync". `None` while local-only. Reconciliation seam for the
+    /// auth branch.
+    #[serde(default)]
+    pub remote_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +133,12 @@ pub struct AppState {
     pub groups: Vec<WorkspaceGroup>,
     #[serde(default)]
     pub active_workspace_id: Option<String>,
+    /// The Organisation layer above workspaces (v3). Each workspace/group is
+    /// tagged with an `org_id`; the sidebar shows only the active org's set.
+    #[serde(default)]
+    pub organisations: Vec<Organisation>,
+    #[serde(default)]
+    pub active_organisation_id: Option<String>,
     #[serde(default)]
     pub settings: AppSettings,
     /// Stable anonymous id for opt-in product telemetry (PostHog `distinct_id`).
@@ -104,6 +162,8 @@ impl Default for AppState {
             workspaces: Vec::new(),
             groups: Vec::new(),
             active_workspace_id: None,
+            organisations: Vec::new(),
+            active_organisation_id: None,
             settings: AppSettings::default(),
             telemetry_anon_id: None,
             version: SCHEMA_VERSION,
@@ -111,11 +171,45 @@ impl Default for AppState {
     }
 }
 
+/// A globally-unique handle for the auto-created "Personal" organisation.
+///
+/// Every install creates one, so a fixed `"personal"` would collide for the
+/// second person who ever turns on sync — the server's unique index on
+/// `organization.slug` would reject it, and the failure would land on a user who
+/// never chose the handle in the first place. Suffixing per-install entropy
+/// makes the first sync of a default org always succeed.
+///
+/// The entropy is a **fresh random UUID**, deliberately not the telemetry
+/// anon-id: a slug is public and leaves the machine, and the org's creation
+/// time sits right next to it, so hashing that id with a timestamp would be
+/// recomputable by anyone holding both — quietly linking an anonymous telemetry
+/// profile to a named account. Random bytes give the same uniqueness and cannot
+/// correlate to anything.
+fn default_personal_slug() -> String {
+    use sha2::{Digest, Sha256};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let entropy = uuid::Uuid::new_v4();
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let digest = Sha256::digest(format!("{entropy}:{millis}").as_bytes());
+    // 5 bytes = 10 hex chars (~2^40). The handle stays typeable, and the space
+    // is far beyond anything a birthday collision reaches in practice.
+    let short: String = digest.iter().take(5).map(|b| format!("{b:02x}")).collect();
+    format!("personal-{short}")
+}
+
 impl AppState {
-    /// Migrate a freshly-deserialized v1 payload in place: if no workspaces
-    /// exist yet but a legacy `current_project` is present, synthesize a
-    /// single workspace from it and make it active. Idempotent — once
-    /// `workspaces` is populated this is a no-op.
+    /// Migrate a freshly-deserialized older payload in place. Idempotent —
+    /// re-running on an already-migrated state is a no-op.
+    ///
+    /// v1 → v2: if no workspaces exist yet but a legacy `current_project` is
+    /// present, synthesize a single workspace from it and make it active.
+    ///
+    /// v2 → v3: if no organisations exist yet, wrap every workspace/group in a
+    /// default local "Personal" org and make it active.
     fn migrate(&mut self) {
         if self.workspaces.is_empty() {
             if let Some(project) = self.current_project.take() {
@@ -126,12 +220,60 @@ impl AppState {
                     name: project.name,
                     path: project.path,
                     group_id: None,
+                    org_id: None,
                     color: None,
+                    git_url: None,
                     last_active_at: None,
                 });
             }
         }
         self.current_project = None;
+
+        // v2 → v3: ensure a default Organisation owns all existing workspaces.
+        if self.organisations.is_empty() {
+            let org_id = uuid::Uuid::new_v4().to_string();
+            self.organisations.push(Organisation {
+                id: org_id.clone(),
+                name: "Personal".to_string(),
+                slug: default_personal_slug(),
+                color: None,
+                logo: None,
+                created_at: None,
+                active_workspace_id: self.active_workspace_id.clone(),
+                sync_enabled: false,
+                remote_id: None,
+            });
+            self.active_organisation_id = Some(org_id);
+        }
+
+        // Repair installs created before the handle carried entropy: their
+        // default org still holds the literal `"personal"`, which is exactly
+        // the collision above avoids. Safe to rewrite only while the org is
+        // UNSYNCED — once `remote_id` is set the server owns that handle and
+        // it is not ours to change. Narrowed to the untouched auto-created
+        // default (name AND slug both still the originals) so a handle the
+        // user deliberately typed is never silently swapped underneath them.
+        for org in &mut self.organisations {
+            if org.remote_id.is_none() && org.name == "Personal" && org.slug == "personal" {
+                org.slug = default_personal_slug();
+            }
+        }
+
+        // Backfill org ownership on any untagged workspace/group (covers both
+        // the fresh migration above and stray untagged entries).
+        if let Some(default_org) = self.active_organisation_id.clone() {
+            for ws in &mut self.workspaces {
+                if ws.org_id.is_none() {
+                    ws.org_id = Some(default_org.clone());
+                }
+            }
+            for group in &mut self.groups {
+                if group.org_id.is_none() {
+                    group.org_id = Some(default_org.clone());
+                }
+            }
+        }
+
         self.version = SCHEMA_VERSION;
     }
 }

@@ -482,7 +482,7 @@ function CanvasSurface({
   return (
     <div className="flex h-full min-h-0">
       {pagesOpen && <PagesPanel />}
-      <div ref={wrapperRef} className="relative min-h-0 min-w-0 flex-1 bg-bg-base">
+      <div ref={wrapperRef} className="relative min-h-0 min-w-0 flex-1 bg-bg-base overflow-hidden">
       {!loaded && (
         <div className="absolute inset-0 flex items-center justify-center text-[11px] text-text-tertiary z-30">
           Loading…

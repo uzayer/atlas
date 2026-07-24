@@ -3,8 +3,6 @@
 // getViewportForBounds, then html-to-image the `.react-flow__viewport`. Files are
 // written through the Tauri save dialog + the existing fs write commands.
 
-import { toPng, toJpeg, toSvg } from "html-to-image";
-import { jsPDF } from "jspdf";
 import { save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -41,6 +39,12 @@ function filterChrome(el: HTMLElement): boolean {
 export async function exportCanvas(format: ExportFormat, rf: ReactFlowInstance): Promise<ExportResult> {
   const nodes = rf.getNodes();
   if (nodes.length === 0) return "empty";
+  // Load the heavy export libs (jspdf ~390KB + html-to-image) ONLY when an
+  // export actually runs — not when the Canvas tab opens. (MC does the same.)
+  const [{ toPng, toJpeg, toSvg }, { jsPDF }] = await Promise.all([
+    import("html-to-image"),
+    import("jspdf"),
+  ]);
   const viewportEl = document.querySelector<HTMLElement>(".react-flow__viewport");
   if (!viewportEl) return "empty";
 

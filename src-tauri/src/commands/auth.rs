@@ -22,7 +22,10 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::auth::{auth_base, AuthCore, AuthSnapshot, GrantError, Validation};
+use crate::auth::{
+    auth_base, AuthCore, AuthSnapshot, CreatedOrg, GrantError, OrgInvitation, OrgMember, Role,
+    Validation,
+};
 use crate::telemetry::TelemetryClient;
 
 /// Shown when the server rejects the stored credential. Deliberately says what
@@ -162,6 +165,196 @@ pub async fn auth_sign_out(app: AppHandle, state: State<'_, AuthState>) -> Resul
         // holding — no caveat is owed, and nothing happened worth recording.
         None => true,
     })
+}
+
+/// Create an organisation server-side and hand back its id (ATL-36).
+///
+/// The "Turn on sync" action: the frontend keeps the org local and calls this to
+/// link it, writing the returned `id` onto the local org as its `remoteId`. On
+/// success the refreshed snapshot (now listing the new org) is broadcast to every
+/// window; the returned id is what *this* window links against without waiting
+/// for that event.
+///
+/// Carries no token out — only the server id and name (see [`CreatedOrg`]).
+/// A failure is surfaced as a user-facing string; only a real 401 inside
+/// `create_org` clears the credential, and it does so through the same single
+/// path everything else does — never here.
+#[tauri::command]
+pub async fn auth_create_org(
+    name: String,
+    slug: String,
+    app: AppHandle,
+    state: State<'_, AuthState>,
+) -> Result<CreatedOrg, String> {
+    let core = state.core();
+    let created = core
+        .create_org(&name, &slug)
+        .await
+        .map_err(|e| e.user_message())?;
+    broadcast(&app, core.snapshot());
+    Ok(created)
+}
+
+/// Is an organisation handle free? — the create-form typeahead probe (§6.2).
+///
+/// Advisory only: a `true` here can still lose a race against another create,
+/// so the caller must still handle [`auth_create_org`] failing. A taken slug is
+/// a plain `false`, not an error — only a real failure (no session, rate limit,
+/// unreachable) rejects, carrying the same user-facing string as everything
+/// else. Broadcasts nothing: this reads, it does not change state.
+#[tauri::command]
+pub async fn auth_check_org_slug(
+    slug: String,
+    state: State<'_, AuthState>,
+) -> Result<bool, String> {
+    state
+        .core()
+        .check_slug(&slug)
+        .await
+        .map_err(|e| e.user_message())
+}
+
+/// Force a server re-pull of the account's organisations and broadcast the
+/// refreshed snapshot — the manual "refresh" affordance behind the org list.
+///
+/// Silent about failure like the launch-path refresh it reuses: a flaky pull
+/// leaves the last-known list in place rather than emptying the menu, and never
+/// touches the credential.
+#[tauri::command]
+pub async fn auth_refresh(
+    app: AppHandle,
+    state: State<'_, AuthState>,
+) -> Result<AuthSnapshot, String> {
+    let core = state.core();
+    core.refresh().await;
+    let snapshot = core.snapshot();
+    broadcast(&app, snapshot.clone());
+    Ok(snapshot)
+}
+
+/// Delete a synced organisation server-side (ATL-36).
+///
+/// Best-effort from the frontend's side: the local purge happens whether this
+/// resolves or rejects (deleting is admin-only, so a member gets a 403 here yet
+/// still wants the org gone locally). On success the refreshed snapshot — now
+/// without the org — is broadcast so no window re-merges it.
+#[tauri::command]
+pub async fn auth_delete_org(
+    remote_id: String,
+    app: AppHandle,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    let core = state.core();
+    core.delete_org(&remote_id)
+        .await
+        .map_err(|e| e.user_message())?;
+    broadcast(&app, core.snapshot());
+    Ok(())
+}
+
+// ── Organisation members (ATL-36) ───────────────────────────────────────────
+//
+// `Denied` collapses 403 and 400, and its default message names the org-CREATE
+// case ("that name or handle may already be taken"), which would be nonsense
+// here — so every member command supplies its own wording via
+// `user_message_denied`. As everywhere in this module, only a real 401 inside
+// `AuthCore` clears the credential; nothing below ever touches it.
+
+/// The org's members. Read-only: no `AppHandle`, and it broadcasts nothing.
+#[tauri::command]
+pub async fn auth_list_members(
+    org_id: String,
+    state: State<'_, AuthState>,
+) -> Result<Vec<OrgMember>, String> {
+    state
+        .core()
+        .list_members(&org_id)
+        .await
+        .map_err(|e| e.user_message_denied("You don't have access to this organisation's members."))
+}
+
+/// Pending + past invitations. Admin-scoped server-side, so a non-admin's call
+/// comes back `Denied` and the caller shows an empty tab. Read-only.
+#[tauri::command]
+pub async fn auth_list_invitations(
+    org_id: String,
+    state: State<'_, AuthState>,
+) -> Result<Vec<OrgInvitation>, String> {
+    state
+        .core()
+        .list_invitations(&org_id)
+        .await
+        .map_err(|e| e.user_message_denied("Only an admin can see this organisation's invites."))
+}
+
+/// Invite someone by email. The returned `acceptUrl` is the whole point —
+/// email delivery is deferred, so that link is the only way the invitee hears
+/// about it. Changes server state only; the snapshot holds no members, so
+/// there is nothing to broadcast.
+#[tauri::command]
+pub async fn auth_invite_member(
+    org_id: String,
+    email: String,
+    role: Role,
+    state: State<'_, AuthState>,
+) -> Result<OrgInvitation, String> {
+    state
+        .core()
+        .invite_member(&org_id, &email, role)
+        .await
+        .map_err(|e| {
+            e.user_message_denied(
+                "Couldn't invite them — you may not be an admin, or they're already in.",
+            )
+        })
+}
+
+/// Revoke a pending invitation. Broadcasts nothing (see above).
+#[tauri::command]
+pub async fn auth_cancel_invitation(
+    invitation_id: String,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    state
+        .core()
+        .cancel_invitation(&invitation_id)
+        .await
+        .map_err(|e| e.user_message_denied("Only an admin can cancel an invite."))
+}
+
+/// Change a member's role. Takes effect in their NEXT minted token — tokens
+/// already issued stay valid until they expire. Broadcasts nothing.
+#[tauri::command]
+pub async fn auth_update_member_role(
+    org_id: String,
+    member_id: String,
+    role: Role,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    state
+        .core()
+        .update_member_role(&org_id, &member_id, role)
+        .await
+        .map_err(|e| e.user_message_denied("Only an admin can change a member's role."))
+}
+
+/// Remove a member. **This one does broadcast**: it is the only member op that
+/// can change the caller's own org set (you may be removing yourself), and
+/// `remove_member` re-pulls the identity, so the account menu would otherwise
+/// keep listing an org the user just left.
+#[tauri::command]
+pub async fn auth_remove_member(
+    org_id: String,
+    member_id_or_email: String,
+    app: AppHandle,
+    state: State<'_, AuthState>,
+) -> Result<(), String> {
+    let core = state.core();
+    core.remove_member(&org_id, &member_id_or_email)
+        .await
+        .map_err(|e| e.user_message_denied("Only an admin can remove a member."))?;
+    broadcast(&app, core.snapshot());
+    Ok(())
 }
 
 /// Bring Atlas forward once approval lands, so the human does not have to hunt

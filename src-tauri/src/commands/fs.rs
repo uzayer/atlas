@@ -97,6 +97,77 @@ pub async fn read_file_base64(path: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureResult {
+    /// Absolute path of the saved PNG (kept on disk so it can ride along as an
+    /// `@file` chip when the agent can't take inline images).
+    pub path: String,
+    pub mime_type: String,
+    /// Standard base64 of the PNG bytes (for inline multimodal attachment).
+    pub data_base64: String,
+}
+
+/// Capture a macOS screenshot via the native `screencapture` CLI (the same
+/// approach BetterShot / Snipp use for reliability). `mode`:
+///   - "region" → `-i` interactive selection (drag a region, or Space for a
+///     window); returns `Ok(None)` if the user cancels (Esc → no file written).
+///   - "full"   → the whole desktop.
+/// The PNG is written under `<project>/.atlas/screenshots` (or the temp dir when
+/// no project is open) and also returned as base64. Requires macOS Screen
+/// Recording permission (macOS prompts on first use).
+#[tauri::command]
+pub async fn capture_screenshot(
+    mode: String,
+    project_path: Option<String>,
+) -> Result<Option<CaptureResult>, String> {
+    tokio::task::spawn_blocking(move || {
+        use base64::Engine;
+
+        let interactive = mode == "region";
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
+
+        let dir = match project_path.as_deref() {
+            Some(p) => Path::new(p).join(".atlas").join("screenshots"),
+            None => std::env::temp_dir(),
+        };
+        let _ = fs::create_dir_all(&dir);
+        let out = dir.join(format!("atlas_shot_{ts}.png"));
+
+        // `-x` silences the shutter sound; `-t png` fixes the format.
+        let mut cmd = std::process::Command::new("/usr/sbin/screencapture");
+        if interactive {
+            cmd.arg("-i");
+        }
+        cmd.args(["-x", "-t", "png"]).arg(&out);
+
+        // Blocks until the capture (or interactive selection) finishes.
+        cmd.status()
+            .map_err(|e| format!("Failed to run screencapture: {e}"))?;
+        // No file written → the user cancelled (Esc), or permission isn't granted
+        // yet (macOS shows its own prompt). Either way, treat it as a silent
+        // no-op rather than a spurious error.
+        if !out.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&out).map_err(|e| format!("Failed to read screenshot: {e}"))?;
+        if bytes.is_empty() {
+            let _ = fs::remove_file(&out);
+            return Ok(None);
+        }
+        Ok(Some(CaptureResult {
+            path: out.to_string_lossy().to_string(),
+            mime_type: "image/png".to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Heuristic: does this file look like UTF-8/ASCII text rather than binary?
 /// Reads only a capped prefix (8 KB) and applies the classic "a NUL byte means
 /// binary" rule that `git` uses, plus a UTF-8 validity check on the prefix.

@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { createSelectors } from "@/lib/create-selectors";
 import { useExplorerStore } from "@/features/explorer/stores/explorer-store";
 import { useLayoutStore } from "@/features/layout/stores/layout-store";
-import { useAnalysisStore } from "@/features/analysis/stores/analysis-store";
 import { useGitStore } from "@/features/git/stores/git-store";
 import { useSessionStore } from "./session-store";
 import { useKnowledgeStore } from "@/features/knowledge/stores/knowledge-store";
@@ -14,6 +13,8 @@ import {
   type Workspace,
   type WorkspaceGroup,
 } from "@/features/workspaces/stores/workspace-store";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
+import type { Organisation } from "@/features/organisations/types";
 import { registerFlush } from "@/features/workspaces/lib/flush-registry";
 import { persistHashOf } from "@/features/workspaces/lib/workspace-snapshot";
 import { applyUiScale, DEFAULT_SCALE } from "@/features/settings/lib/ui-scale";
@@ -112,6 +113,9 @@ export interface AppStateWire {
   workspaces?: Workspace[];
   groups?: WorkspaceGroup[];
   activeWorkspaceId?: string | null;
+  /** The Organisation layer above workspaces (v3). */
+  organisations?: Organisation[];
+  activeOrganisationId?: string | null;
   settings?: AppSettings;
   version: number;
 }
@@ -143,22 +147,30 @@ interface ProjectState {
 // `AppState` payload. Both `useProjectStore` (recents/settings) and
 // `useWorkspaceStore` (workspaces/groups/activeWorkspaceId) contribute to it,
 // so the save reads from both stores at flush time. Coalesced to ~500ms.
+/** Build the full `AppState` payload from every contributing store. Shared by
+ *  the debounced + immediate save paths so they never drift. */
+function buildAppStatePayload(): AppStateWire {
+  const project = useProjectStore.getState();
+  const ws = useWorkspaceStore.getState();
+  const org = useOrgStore.getState();
+  return {
+    currentProject: null,
+    recentProjects: project.recentProjects,
+    workspaces: ws.workspaces,
+    groups: ws.groups,
+    activeWorkspaceId: ws.activeWorkspaceId,
+    organisations: org.organisations,
+    activeOrganisationId: org.activeOrganisationId,
+    settings: project.settings,
+    version: 3,
+  };
+}
+
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 export function scheduleAppStateSave(): void {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    const project = useProjectStore.getState();
-    const ws = useWorkspaceStore.getState();
-    const payload: AppStateWire = {
-      currentProject: null,
-      recentProjects: project.recentProjects,
-      workspaces: ws.workspaces,
-      groups: ws.groups,
-      activeWorkspaceId: ws.activeWorkspaceId,
-      settings: project.settings,
-      version: 2,
-    };
-    invoke("save_app_state", { payload }).catch((e) =>
+    invoke("save_app_state", { payload: buildAppStatePayload() }).catch((e) =>
       console.warn("save_app_state failed:", e),
     );
   }, 500);
@@ -171,18 +183,7 @@ export async function flushAppStateSave(): Promise<void> {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  const project = useProjectStore.getState();
-  const ws = useWorkspaceStore.getState();
-  const payload: AppStateWire = {
-    currentProject: null,
-    recentProjects: project.recentProjects,
-    workspaces: ws.workspaces,
-    groups: ws.groups,
-    activeWorkspaceId: ws.activeWorkspaceId,
-    settings: project.settings,
-    version: 2,
-  };
-  await invoke("save_app_state", { payload }).catch((e) =>
+  await invoke("save_app_state", { payload: buildAppStatePayload() }).catch((e) =>
     console.warn("flushAppStateSave failed:", e),
   );
 }
@@ -241,18 +242,30 @@ function maybeEnsureAtlasGitignore(path: string, settings: AppSettings): void {
 export async function loadProjectStores(path: string): Promise<void> {
   await Promise.all([
     useExplorerStore.getState().actions.openFolder(path).catch((e) => console.error("Explorer failed:", e)),
-    useAnalysisStore.getState().actions.analyzeProject(path).catch((e) => console.error("Analysis failed:", e)),
     useGitStore.getState().actions.loadStatus(path).catch((e) => console.error("Git failed:", e)),
     useSessionStore.getState().actions.loadSession(path).catch((e) => console.error("Session load failed:", e)),
-    // Bind the KB meta store BEFORE loading entries so the entries published
-    // to the @-/~ mention cache already carry the page-header titles + emoji
-    // from `_meta.json`.
-    (async () => {
-      await useKnowledgeMetaStore.getState().actions.bind(path);
-      await useKnowledgeStore.getState().actions.loadEntries(path);
-    })().catch((e) => console.error("Knowledge load failed:", e)),
+    // Only the KB META bind is on the critical path — it's cheap and the @-/~
+    // mention picker needs it for page-header titles + emoji from `_meta.json`.
+    useKnowledgeMetaStore.getState().actions.bind(path).catch((e) => console.error("Knowledge bind failed:", e)),
     useLayoutStore.getState().actions.loadEditorState(path).catch((e) => console.error("Editor state load failed:", e)),
   ]);
+
+  // Load the full KB entries OFF the switch critical path. This is the single
+  // biggest post-switch main-thread spike (up to ~1.2s on large vaults) and it
+  // isn't needed for first paint — Knowledge isn't the landing tab, and
+  // `KnowledgePanel` reloads entries on its own mount. Deferring to idle keeps
+  // its setState from colliding with (and congesting) rapid workspace switches,
+  // while still warming the @-/~ mention cache shortly after open. Fire-and-
+  // forget; a stale project is harmless (entries are keyed by path).
+  const warmEntries = () => {
+    void useKnowledgeStore.getState().actions.loadEntries(path)
+      .catch((e) => console.error("Knowledge entries load failed:", e));
+  };
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(warmEntries, { timeout: 2000 });
+  } else {
+    setTimeout(warmEntries, 0);
+  }
 }
 
 export const useProjectStore = createSelectors(
@@ -355,6 +368,15 @@ export const useProjectStore = createSelectors(
         // Re-apply the persisted Atlas interface theme (writes the palette CSS
         // custom properties that re-skin the whole dark UI).
         applyAtlasTheme(settings.atlasTheme);
+
+        // Hand the Organisation layer to the org store FIRST — the workspace
+        // sidebar filters by the active org, and new workspaces tag themselves
+        // with it. (Rust `migrate()` guarantees a default "Personal" org + an
+        // `activeOrganisationId` on any pre-v3 state, so this is always set.)
+        useOrgStore.getState().actions.hydrate({
+          organisations: payload.organisations ?? [],
+          activeOrganisationId: payload.activeOrganisationId ?? null,
+        });
 
         // Hand the multi-workspace fields to the workspace store. We hydrate
         // with `activeWorkspaceId: null` and then `switchTo` the persisted id

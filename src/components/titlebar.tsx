@@ -11,6 +11,7 @@ import type { Window as TauriWindow } from "@tauri-apps/api/window";
 import { useUpdaterStore } from "@/features/updater/stores/updater-store";
 import { updater } from "@/features/updater/lib/updater-api";
 import { AccountButton } from "@/features/auth/components/account-button";
+import { useOrgStore } from "@/features/organisations/stores/org-store";
 
 function useTauriWindow() {
   const windowRef = useRef<TauriWindow | null>(null);
@@ -46,6 +47,12 @@ export function Titlebar() {
   // AppState round-trip, so a workspace rename took ~3-4s to show here; the
   // workspace store mutates synchronously on rename, so this updates instantly.
   const workspaces = useWorkspaceStore.use.workspaces();
+  // Owning organisation, for the `org / project` pill. Read live so an org
+  // switch or rename re-labels immediately.
+  const organisations = useOrgStore.use.organisations();
+  const activeOrganisationId = useOrgStore.use.activeOrganisationId();
+  const orgName =
+    organisations.find((o) => o.id === activeOrganisationId)?.name ?? null;
   const displayName =
     (currentProject
       ? workspaces.find((w) => w.path === currentProject.path)?.name
@@ -53,11 +60,14 @@ export function Titlebar() {
     currentProject?.name ??
     "Atlas";
   const { windowRef, isFullscreen } = useTauriWindow();
-  // When the workspace sidebar is open it owns the top-left corner (its own
-  // traffic-light spacer), so the titlebar must NOT also reserve 72px for the
-  // window controls — that double-reservation is the empty gap before the
-  // workspace toggle. Fullscreen hides the controls entirely, same effect.
+  // The titlebar reserves 72px for the OS window controls (traffic lights),
+  // EXCEPT when the sidebar is DOCKED (pinned + open): the docked column then
+  // sits under the lights and carries that gap itself, so the titlebar reclaims
+  // the space. Fullscreen hides the lights entirely. (Unpinned overlay mode
+  // doesn't occupy flow width, so it never affects this.)
+  const sidebarPinned = useWorkspaceStore.use.sidebarPinned();
   const sidebarOpen = useWorkspaceStore.use.sidebarOpen();
+  const dockedSidebar = sidebarPinned && sidebarOpen;
 
   const isTitlebarSurface = (target: EventTarget | null) => {
     const el = target as HTMLElement | null;
@@ -99,13 +109,17 @@ export function Titlebar() {
     <div
       onMouseDown={handleDrag}
       onDoubleClick={handleDoubleClick}
-      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[var(--bg-base)] border-b border-border-default ${isFullscreen || sidebarOpen ? "pl-3" : "pl-[72px]"}`}
+      className={`relative z-50 flex h-[30px] select-none items-center pr-3 bg-[var(--bg-base)] border-b border-border-default ${isFullscreen || dockedSidebar ? "pl-3" : "pl-[72px]"}`}
     >
       <div className="flex h-[30px] min-w-0 flex-1 items-center gap-1.5">
         <WorkspaceToggle />
         {currentProject && <LeftPanelToggle />}
-        {/* Project label — click to copy the workspace path. */}
-        <ProjectLabel name={displayName} path={currentProject?.path} />
+        {/* `org / project` pill — click to copy the workspace path. */}
+        <ProjectLabel
+          name={displayName}
+          orgName={orgName}
+          path={currentProject?.path}
+        />
       </div>
 
       {/* The account button sits OUTSIDE the `currentProject` guard on purpose:
@@ -117,6 +131,10 @@ export function Titlebar() {
             <UpdateButton />
             <NotificationButton />
             <RightPanelToggle />
+            {/* Separates the app-level actions from the account. Lives inside
+                the same guard so it never floats alone with no icons beside
+                it (empty state = account button only). */}
+            <div className="mx-0.5 h-4 w-px bg-border-default" aria-hidden />
           </>
         )}
         <AccountButton />
@@ -132,7 +150,15 @@ export function Titlebar() {
  * It's a <button> (not a span) so the titlebar's drag/double-click-zoom
  * handlers skip it — see `isTitlebarSurface`.
  */
-function ProjectLabel({ name, path }: { name: string; path?: string }) {
+function ProjectLabel({
+  name,
+  orgName,
+  path,
+}: {
+  name: string;
+  orgName?: string | null;
+  path?: string;
+}) {
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | null>(null);
@@ -159,11 +185,23 @@ function ProjectLabel({ name, path }: { name: string; path?: string }) {
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
+      {/* Pill: `org / project`. The org segment is de-emphasised so the project
+          — the thing that changes most — still reads as the primary label. */}
       <button
         onClick={copy}
-        className="block max-w-[260px] cursor-pointer truncate px-1 text-[12px] font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+        className="group flex h-[19px] max-w-[320px] min-w-0 cursor-pointer items-center gap-1 rounded-full border border-[#303030] bg-[#0C0C0C] px-2 text-[11px] font-medium transition-colors hover:bg-[#1f1f1f]"
       >
-        {name}
+        {orgName && (
+          <>
+            <span className="min-w-0 shrink truncate text-[var(--text-tertiary)]">
+              {orgName}
+            </span>
+            <span className="shrink-0 text-[var(--text-tertiary)] opacity-50">/</span>
+          </>
+        )}
+        <span className="min-w-0 truncate text-[var(--text-secondary)] transition-colors group-hover:text-[var(--text-primary)]">
+          {name}
+        </span>
       </button>
       {showTip && (
         <div className="pointer-events-none absolute left-1 top-full z-[var(--z-max)] mt-1.5 origin-top-left animate-scale-in">

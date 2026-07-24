@@ -181,6 +181,43 @@ async fn fetch(http: &reqwest::Client, dir: &Path, url: &str) -> Option<String> 
     Some(path.to_string_lossy().into_owned())
 }
 
+/// Every extension [`extension_for`] can produce. Used to find an already-cached
+/// file for a URL without a directory scan: the name is a pure function of the
+/// URL plus one of these four.
+const EXTENSIONS: [&str; 4] = ["png", "jpg", "webp", "gif"];
+
+/// The cached file for `url` if we already hold it — four `stat`s, no request.
+fn cached_for(dir: &Path, url: &str) -> Option<String> {
+    EXTENSIONS.iter().find_map(|ext| {
+        let path = cache_path(dir, url, ext);
+        path.exists().then(|| path.to_string_lossy().into_owned())
+    })
+}
+
+/// A photo for someone who is **not** the signed-in user — an organisation
+/// member — as a local path.
+///
+/// Separate from [`resolve`] because the bookkeeping is different: there is no
+/// per-member `CachedAvatar` persisted anywhere, so the cache key is the file's
+/// own existence. The URL hash makes that sound — a changed photo is a changed
+/// URL is a different filename — and it means a members list that is opened
+/// twice costs four `stat`s per person the second time, not a request.
+///
+/// Nothing is ever pruned here. A member's old file is not ours to reason
+/// about: the same photo may back a row in another org, and the signed-in
+/// user's own avatar lives in this directory under the same scheme.
+pub(crate) async fn resolve_member(
+    http: &reqwest::Client,
+    dir: &Path,
+    url: Option<&str>,
+) -> Option<String> {
+    let url = url?;
+    if let Some(path) = cached_for(dir, url) {
+        return Some(path);
+    }
+    fetch(http, dir, url).await
+}
+
 /// Drop a cached photo we are done with — sign-out, where the face on disk
 /// outlives the credential unless something deletes it.
 pub(crate) fn discard(path: Option<&str>) {
